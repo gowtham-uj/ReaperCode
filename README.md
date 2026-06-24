@@ -1,3 +1,2 @@
-# Reaper Agent
-
-A minimal Python coding agent.
+#Reaper Code
+Coding agent inspired from codex, pi, claude code.
