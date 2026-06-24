@@ -63,7 +63,7 @@ test("executeSubagentTool wraps valid JSON as advisory output without parsing to
 
   const result = await executeSubagentTool(
     { type: "planner", task: "Plan safely", mode: "blocking" },
-    { modelGateway: gateway, toolCallId: "call-1" },
+    { modelGateway: gateway, toolCallId: "call-1", pool: undefined },
   );
 
   assert.equal(result.ok, true);
@@ -84,7 +84,7 @@ test("executeSubagentTool fails invalid JSON", async () => {
 
   const result = await executeSubagentTool(
     { type: "tester", task: "Suggest tests" },
-    { modelGateway: gateway, toolCallId: "call-2" },
+    { modelGateway: gateway, toolCallId: "call-2", pool: undefined },
   );
 
   assert.equal(result.ok, false);

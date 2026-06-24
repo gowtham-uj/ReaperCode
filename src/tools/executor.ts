@@ -54,8 +54,9 @@ import { classifyServiceLifecycle, type ServiceLifecycleState } from "./service-
 import { BackgroundProcessManager } from "./background-process-manager.js";
 import { createCheckpoint, restoreCheckpoint } from "../runtime/checkpoints.js";
 import { getGitDiffState, getGitStatusState, summarizeGitDiffState } from "../runtime/diff-state.js";
-import type { ModelGateway } from "../model/types.js";
-import { executeSubagentTool } from "./subagent-tools.js";
+import type {ModelGateway} from "../model/types.js";
+import {executeCancelSubagentTool, executePollSubagentTool, executeSubagentTool} from "./subagent-tools.js";
+import type {SubagentPool} from "../runtime/subagent-pool.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -72,7 +73,10 @@ export interface ToolExecutorOptions {
   recoverySession?: RecoverySession;
   mcpRegistry?: MergedToolRegistry;
   config?: ReaperConfig;
+  /** Model gateway for call_subagent tool. */
   modelGateway?: ModelGateway;
+  /** Subagent pool for background subagent jobs. */
+  subagentPool?: SubagentPool | undefined;
   runDir?: string;
   artifactsDir?: string;
   shellRunner?: ShellRunner;
@@ -1279,10 +1283,31 @@ export class ToolExecutor {
         const result = await executeSubagentTool(args, {
           modelGateway: this.options.modelGateway,
           toolCallId: call.id,
+          pool: this.options.subagentPool,
         });
         if (!result.ok) {
           const error = new Error(result.error?.message ?? "call_subagent failed") as Error & { code?: string };
           error.code = result.error?.code ?? "subagent_failed";
+          throw error;
+        }
+        return result.output;
+      }
+      case "poll_subagent": {
+        const args = toolRegistry.poll_subagent.argsSchema.parse(call.args);
+        const result = executePollSubagentTool(args, call.id);
+        if (!result.ok) {
+          const error = new Error(result.error?.message ?? "poll_subagent failed") as Error & { code?: string };
+          error.code = result.error?.code ?? "poll_subagent_failed";
+          throw error;
+        }
+        return result.output;
+      }
+      case "cancel_subagent": {
+        const args = toolRegistry.cancel_subagent.argsSchema.parse(call.args);
+        const result = executeCancelSubagentTool(args, {toolCallId: call.id, pool: this.options.subagentPool});
+        if (!result.ok) {
+          const error = new Error(result.error?.message ?? "cancel_subagent failed") as Error & { code?: string };
+          error.code = result.error?.code ?? "cancel_subagent_failed";
           throw error;
         }
         return result.output;

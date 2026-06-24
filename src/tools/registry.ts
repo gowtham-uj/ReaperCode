@@ -45,6 +45,8 @@ import {
   UpdatePlanArgsSchema,
   UpdateTodoArgsSchema,
   CallSubagentArgsSchema,
+  PollSubagentArgsSchema,
+  CancelSubagentArgsSchema,
   SearchToolsArgsSchema,
 } from "./types.js";
 import { AgentArgsSchema } from "./agent.types.js";
@@ -280,8 +282,18 @@ export const toolRegistry = {
   },
   call_subagent: {
     description:
-      "Call a blocking advisory subagent (planner, reviewer, repair, tester, or researcher) and return its JSON result as an observation. Subagents cannot execute tools, mutate files, alter routing, or call subagents.",
+      "Call a blocking or background advisory subagent (planner, reviewer, repair, tester, or researcher) and return its JSON result as an observation. Subagents cannot execute tools, mutate files, alter routing, or call subagents.",
     argsSchema: CallSubagentArgsSchema,
+  },
+  poll_subagent: {
+    description:
+      "Check the status of a background subagent job by its jobId. Returns running, completed, failed, or cancelled along with the result/error when completed.",
+    argsSchema: PollSubagentArgsSchema,
+  },
+  cancel_subagent: {
+    description:
+      "Cancel a background subagent job by its jobId. Returns the updated status.",
+    argsSchema: CancelSubagentArgsSchema,
   },
   search_tools: {
     description:
