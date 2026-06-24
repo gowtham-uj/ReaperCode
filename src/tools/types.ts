@@ -70,6 +70,29 @@ export const SkimFileArgsSchema = z
 
 export const InspectEnvironmentArgsSchema = z.object({}).strict();
 
+export const CreateCheckpointArgsSchema = z
+  .object({
+    reason: z.string().min(1),
+    toolCallIds: z.array(z.string().min(1)).optional(),
+  })
+  .strict();
+
+export const RestoreCheckpointArgsSchema = z
+  .object({
+    checkpointId: z.string().regex(/^cp-[A-Za-z0-9_-]+$/),
+  })
+  .strict();
+
+export const GitStatusArgsSchema = z.object({}).strict();
+
+export const GitDiffArgsSchema = z
+  .object({
+    staged: z.boolean().optional(),
+    path: z.string().min(1).optional(),
+    maxBytes: z.number().int().positive().max(1_000_000).optional(),
+  })
+  .strict();
+
 export const WebSearchArgsSchema = z
   .object({
     query: z.string().min(1),
@@ -474,6 +497,10 @@ export const ToolCallSchema = z.discriminatedUnion("name", [
   z.object({ id: z.string().min(1), name: z.literal("grep_search"), args: GrepSearchArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("skim_file"), args: SkimFileArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("inspect_environment"), args: InspectEnvironmentArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("create_checkpoint"), args: CreateCheckpointArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("restore_checkpoint"), args: RestoreCheckpointArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("git_status"), args: GitStatusArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("git_diff"), args: GitDiffArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("web_search"), args: WebSearchArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("write_file"), args: WriteFileArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("replace_in_file"), args: ReplaceInFileArgsSchema }).strict(),

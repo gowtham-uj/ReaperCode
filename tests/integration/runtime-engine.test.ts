@@ -19,6 +19,14 @@ import { createValidConfig, createValidRequestEnvelope } from "../fixtures/phase
 import { createLiveDeepSeekGateway } from "../fixtures/live-gateway.js";
 import { createTempWorkspace } from "../fixtures/workspace.js";
 
+const AUTO_APPENDED_TOOL_NAMES = new Set(["create_checkpoint", "git_status", "git_diff"]);
+
+type ToolResultLike = { name?: string; ok?: boolean };
+
+function requestedToolResults<T extends ToolResultLike>(results: T[]): T[] {
+  return results.filter((result) => !result.name || !AUTO_APPENDED_TOOL_NAMES.has(result.name));
+}
+
 test("runtime engine executes real tool calls and writes trajectory logs", async () => {
   const workspaceRoot = await createTempWorkspace();
   const request = createValidRequestEnvelope();
@@ -39,15 +47,16 @@ test("runtime engine executes real tool calls and writes trajectory logs", async
 
   const result = await engine.run();
 
-  assert.equal(result.toolResults.length, 3);
-  assert.equal(result.toolResults.every((item) => item.ok), true);
+  const requestedResults = requestedToolResults(result.toolResults);
+  assert.equal(requestedResults.length, 3);
+  assert.equal(requestedResults.every((item) => item.ok), true);
   const app = await readFile(path.join(workspaceRoot, "src", "app.ts"), "utf8");
   assert.match(app, /42/);
   const trajectory = await readFile(result.trajectoryPath, "utf8");
   assert.match(trajectory, /session_start/);
   assert.match(trajectory, /tool_call/);
   assert.match(trajectory, /session_metrics/);
-  assert.match(result.assistantMessage, /Executed 3 tool call/);
+  assert.match(result.assistantMessage, /Executed \d+ tool call/);
   assert.equal(result.events.some((event) => event.message_type === "task_completed"), true);
 });
 
@@ -76,7 +85,7 @@ test("runtime engine creates isolated run-local artifacts for placeholder trace 
     toolResultCount: number;
   };
   assert.equal(runResult.status, "completed");
-  assert.equal(runResult.toolResultCount, 1);
+  assert.equal(requestedToolResults(result.toolResults).length, 1);
 
   const latest = JSON.parse(await readFile(path.join(workspaceRoot, ".reaper", "latest-run.json"), "utf8")) as { runId: string };
   assert.equal(latest.runId, result.state.runId);
@@ -102,7 +111,7 @@ test("runtime engine surfaces failed tools cleanly", async () => {
 
   assert.equal(result.toolResults[0]?.ok, false);
   assert.equal(result.events.some((event) => event.message_type === "tool_call_completed"), true);
-  assert.match(result.assistantMessage, /0 succeeded and 1 failed/);
+  assert.match(result.assistantMessage, /1 failed/);
 });
 
 test("runtime engine waits for complete_task before explicit verification", async () => {
@@ -181,8 +190,8 @@ test("autonomous runtime executes simple tasks directly without planner subagent
   const result = await engine.run();
 
   assert.equal(gateway.generateCount, 1);
-  assert.equal(result.toolResults.length, 2);
-  assert.equal(result.toolResults.every((item) => item.ok), true);
+  assert.equal(requestedToolResults(result.toolResults).length, 2);
+  assert.equal(requestedToolResults(result.toolResults).every((item) => item.ok), true);
   assert.equal(result.verification?.ok, true);
   assert.equal(await readFile(path.join(workspaceRoot, "simple.txt"), "utf8"), "simple-ok\n");
 });
@@ -222,10 +231,11 @@ test("autonomous runtime allows completion after python verification fixes earli
 
   const result = await engine.run();
 
+  const requested = requestedToolResults(result.toolResults);
   assert.equal(gateway.generateCount, 2);
-  assert.equal(result.toolResults.length, 2);
-  assert.equal(result.toolResults[0]?.ok, false);
-  assert.equal(result.toolResults[1]?.ok, true);
+  assert.equal(requested.length, 2);
+  assert.equal(requested[0]?.ok, false);
+  assert.equal(requested[1]?.ok, true);
   assert.equal(result.events.some((event) => event.message_type === "task_completed"), true);
   assert.equal(result.assistantMessage, "pip was repaired and verified");
 });
@@ -498,8 +508,9 @@ test("autonomous runtime plans once and drains durable execution steps", async (
   const result = await engine.run();
 
   assert.equal(gateway.generateCount, 1);
-  assert.equal(result.toolResults.length, 2);
-  assert.equal(result.toolResults.every((item) => item.ok), true);
+  const durableRequested = requestedToolResults(result.toolResults);
+  assert.equal(durableRequested.length, 2);
+  assert.equal(durableRequested.every((item) => item.ok), true);
   assert.equal(result.verification?.ok, true);
   assert.equal(await readFile(path.join(workspaceRoot, "answer.txt"), "utf8"), "ok\n");
 });
@@ -549,8 +560,9 @@ test("autonomous runtime can generate tool calls for a durable step without init
   const result = await engine.run();
 
   assert.equal(gateway.generateCount, 2);
-  assert.equal(result.toolResults.length, 2);
-  assert.equal(result.toolResults.every((item) => item.ok), true);
+  const deferredRequested = requestedToolResults(result.toolResults);
+  assert.equal(deferredRequested.length, 2);
+  assert.equal(deferredRequested.every((item) => item.ok), true);
   assert.equal(result.verification?.ok, true);
   assert.equal(await readFile(path.join(workspaceRoot, "deferred.txt"), "utf8"), "deferred-ok\n");
 });
@@ -694,8 +706,9 @@ test("autonomous runtime normalizes common tool aliases from model output", asyn
 
   const result = await engine.run();
 
-  assert.equal(result.toolResults.length, 8);
-  assert.equal(result.toolResults.every((item) => item.ok), true);
+  assert.equal(result.toolResults.length, 11);
+  assert.equal(requestedToolResults(result.toolResults).length, 8);
+  assert.equal(requestedToolResults(result.toolResults).every((item) => item.ok), true);
   assert.equal(await readFile(path.join(workspaceRoot, "alias.txt"), "utf8"), "alias-replaced\n");
   assert.equal(await readFile(path.join(workspaceRoot, "alias-2.txt"), "utf8"), "alias-2-ok\n");
 });
@@ -733,9 +746,10 @@ test("autonomous runtime ignores tool calls after complete_task in a model batch
 
   const result = await engine.run();
 
-	  assert.equal(result.toolResults.length, 2);
-	  assert.equal(result.toolResults[0]?.toolCallId, "write-before");
-	  assert.equal(result.toolResults[1]?.toolCallId, "verify-before");
+	  const boundaryRequested = requestedToolResults(result.toolResults);
+	  assert.equal(boundaryRequested.length, 2);
+	  assert.equal(boundaryRequested[0]?.toolCallId, "write-before");
+	  assert.equal(boundaryRequested[1]?.toolCallId, "verify-before");
   assert.equal(await readFile(path.join(workspaceRoot, "before.txt"), "utf8"), "before\n");
   await assert.rejects(() => readFile(path.join(workspaceRoot, "after.txt"), "utf8"));
 });
@@ -776,8 +790,9 @@ test("autonomous runtime stops when repair repeats the same failed tool pattern"
   const result = await engine.run();
 
   assert.equal(gateway.generateCount, 2);
-  assert.equal(result.toolResults.length, 2);
-  assert.equal(result.toolResults.every((item) => !item.ok), true);
+  const stuckRequested = requestedToolResults(result.toolResults);
+  assert.equal(stuckRequested.length, 2);
+  assert.equal(stuckRequested.every((item) => !item.ok), true);
   assert.match(result.assistantMessage, /appears stuck/i);
   assert.equal(result.events.some((event) => event.message_type === "task_completed"), false);
 });
@@ -802,7 +817,7 @@ test("runtime allows same-batch file inspection through the WAL view after state
   const result = await engine.run();
   const writeResult = result.toolResults.find((item) => item.toolCallId === "write-output");
   const inspectResult = result.toolResults.find((item) => item.toolCallId === "inspect-output");
-  assert.equal(result.toolResults.length, 2);
+  assert.equal(requestedToolResults(result.toolResults).length, 2);
   assert.equal(writeResult?.ok, true);
   assert.equal(inspectResult?.ok, true);
   assert.match(String((inspectResult?.output as { stdout?: string } | undefined)?.stdout ?? ""), /ready/);
@@ -873,8 +888,8 @@ test("autonomous runtime auto-completes final step after task output acceptance 
 
   const result = await engine.run();
 
-  assert.equal(result.toolResults.length, 1);
-  assert.equal(result.toolResults.every((item) => item.ok), true);
+  assert.equal(requestedToolResults(result.toolResults).length, 1);
+  assert.equal(requestedToolResults(result.toolResults).every((item) => item.ok), true);
   assert.equal(result.events.some((event) => event.message_type === "task_completed"), true);
   assert.match(result.assistantMessage, /Final step 'finalize' passed its acceptance check/);
 });
