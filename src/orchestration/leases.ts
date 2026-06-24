@@ -1,4 +1,4 @@
-import type { SubTaskContract } from "./contracts.js";
+import type { SubTaskContract } from "./scheduler.js";
 
 export interface FileLeaseMap {
   [subTaskId: string]: Set<string>;

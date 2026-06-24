@@ -4,15 +4,18 @@ import path from "node:path";
 import { RuntimeEngine, type RuntimeEngineResult } from "../runtime/engine.js";
 import type { ToolCall } from "../tools/types.js";
 import { selectVerificationCommand, runVerificationCommand } from "../verify/runner.js";
-import type { SubTaskContract } from "./contracts.js";
 import { enforceDelegationDepth } from "./depth.js";
 import { assertLeaseAllowsFile, type FileLeaseMap } from "./leases.js";
 import { buildRepoMapSnapshot } from "./return.js";
 import { cleanupSandboxWorkspace, createSandboxWorkspace } from "./sandbox.js";
-import { detectPlanCycle, nextSchedulableTasks } from "./scheduler.js";
+import { detectPlanCycle, nextSchedulableTasks, type SubTaskContract } from "./scheduler.js";
 import { runIntegratorMerge } from "./integrator.js";
 import { commitAll } from "../workspace/git.js";
 
+interface ExecutableSubTask extends SubTaskContract {
+  prompt: string;
+  verificationCommand?: string;
+}
 export interface OrchestrationResult {
   ok: boolean;
   completedSubtasks: string[];
@@ -53,7 +56,7 @@ export async function runDelegatedPlan(input: {
   const maxConcurrency = input.maxConcurrency ?? 3;
 
   while (completed.size + failed.length < input.plan.length) {
-    const next = nextSchedulableTasks(input.plan, completed, running, maxConcurrency);
+    const next = nextSchedulableTasks(input.plan, completed, running, maxConcurrency) as ExecutableSubTask[];
     if (next.length === 0) {
       break;
     }
@@ -75,7 +78,7 @@ export async function runDelegatedPlan(input: {
             toolCalls: input.toolCallsBySubtask[task.id] ?? [],
           });
 
-          const verification = await selectVerificationCommand(sandbox.worktreePath, { command: task.verificationCommand });
+          const verification = await selectVerificationCommand(sandbox.worktreePath, { command: task.verificationCommand ?? "" } as { command: string });
           const verificationResult = verification ? await runVerificationCommand(sandbox.worktreePath, verification) : undefined;
           if (!verificationResult?.ok) {
             throw new Error(verificationResult?.output ?? "Subtask verification failed");

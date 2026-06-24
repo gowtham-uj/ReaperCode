@@ -1,4 +1,8 @@
-import type { SubTaskContract } from "./contracts.js";
+export interface SubTaskContract {
+  id: string;
+  files: string[];
+  dependsOn: string[];
+}
 
 export function detectPlanCycle(plan: SubTaskContract[]): void {
   const byId = new Map(plan.map((task) => [task.id, task]));
