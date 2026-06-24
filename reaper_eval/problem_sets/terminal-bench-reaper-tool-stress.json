@@ -1,0 +1,18 @@
+{
+  "version": "1",
+  "name": "terminal-bench-reaper-tool-stress",
+  "tasks": [
+    {
+      "id": "reaper-stress-001",
+      "title": "Fix and harden case-insensitive palindrome checker",
+      "description": "The target repository has a broken `isPalindrome` function and a failing test. Diagnose the bug, edit the implementation and tests, run the test suite, and ensure it passes.",
+      "targetRepo": "file:///tmp/reaper-stress-target",
+      "targetRepoRef": "main",
+      "verification": {
+        "command": "npm test",
+        "maxIterations": 3,
+        "allowJudgeRetry": true
+      }
+    }
+  ]
+}

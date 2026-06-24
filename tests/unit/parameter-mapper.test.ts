@@ -88,6 +88,47 @@ test("model role alias helper resolves strong/fast profile names", () => {
   assert.equal(resolveModelRoleAlias("unknown_profile"), undefined);
 });
 
+test("OpenAI-compatible mapper converts internal tool schemas and omits JSON mode when tools are present", () => {
+  const payload = mapGenerateRequestToLiteLLM(
+    {
+      role: "main_reasoner",
+      messages: [{ role: "user", content: "read a file" }],
+      responseFormat: "json",
+      tools: [
+        {
+          name: "read_file",
+          description: "Read a file",
+          inputSchema: {
+            type: "object",
+            properties: { path: { type: "string" } },
+            required: ["path"],
+            additionalProperties: false,
+          },
+        },
+      ],
+    },
+    profile("minimax"),
+  );
+
+  assert.deepEqual(payload.tools, [
+    {
+      type: "function",
+      function: {
+        name: "read_file",
+        description: "Read a file",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"],
+          additionalProperties: false,
+        },
+      },
+    },
+  ]);
+  assert.equal("response_format" in payload, true);
+  assert.equal(payload.response_format, undefined);
+});
+
 function profile(provider: string, promptCache?: { enabled: boolean; minContentChars?: number }): ResolvedModelProfile {
   return {
     provider,

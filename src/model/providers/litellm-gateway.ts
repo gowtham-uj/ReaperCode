@@ -417,8 +417,9 @@ export class LiteLLMProviderClient implements ProviderModelClient {
         }
       }
     }
+    const detail = formatProviderError(lastError);
     throw new Error(
-      `LiteLLM ${operationName} request failed after ${maxRetries + 1} attempt(s): ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+      `LiteLLM ${operationName} request failed after ${maxRetries + 1} attempt(s): ${detail}`,
     );
   }
 
@@ -506,6 +507,13 @@ function resolveAzureDeploymentBase(base: string, deployment: string): string {
   if (/\/openai\/deployments\/[^/]+$/i.test(base)) return base;
   const resourceBase = base.replace(/\/openai(?:\/v1)?$/i, "");
   return `${resourceBase}/openai/deployments/${encodeURIComponent(deployment)}`;
+}
+
+function formatProviderError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const cause = (error as Error & { cause?: unknown }).cause;
+  const causeText = cause instanceof Error ? `${cause.name}: ${cause.message}` : cause !== undefined ? String(cause) : "";
+  return causeText ? `${error.name}: ${error.message}; cause=${causeText}` : `${error.name}: ${error.message}`;
 }
 
 function isRetryableStatus(status: number): boolean {

@@ -28,7 +28,7 @@ export async function callMainAgent(input: MainAgentCallInput): Promise<MainAgen
     system: input.system,
     messages: [{ role: "user", content: input.cockpit }],
     ...(input.tools ? { tools: input.tools } : {}),
-    responseFormat: "json",
+    ...(input.tools ? {} : { responseFormat: "json" }),
     ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
     ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
   });
@@ -131,9 +131,9 @@ function parseJsonObject(content: string): Record<string, unknown> | undefined {
 function normalizeToolCallInput(value: unknown): unknown {
   const record = asRecord(value);
   if (!record) return value;
-  const args = record.args ?? record.arguments ?? {};
+  const args = record.args ?? record.arguments ?? record.input ?? record.parameters ?? {};
   const id = typeof record.id === "string" && record.id.trim() ? record.id : stableToolCallId(record.name, args);
-  const { arguments: _arguments, ...withoutLegacyArguments } = record;
+  const { arguments: _arguments, input: _input, parameters: _parameters, ...withoutLegacyArguments } = record;
   return {
     ...withoutLegacyArguments,
     id,

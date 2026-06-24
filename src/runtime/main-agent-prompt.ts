@@ -32,6 +32,8 @@ export function buildMainAgentSystemPrompt(_state: unknown, _options: MainAgentC
     "PLAN.md and TODO.md cockpit memory are advisory. Candidate plans do not control routing until you accept or edit them with update_plan.",
     "Never rely on PLAN/TODO memory to drive graph control flow; use concrete tool calls and complete_task evidence.",
     "Do not complete without complete_task and strict evidence.",
+    "When code changes are made and a relevant verification command passes, immediately call complete_task with the passing command/output summary instead of re-reading files.",
+    "After a passing verification, further read_file/list_directory calls are no-progress unless needed to resolve a new blocker.",
     "",
     "Return exactly one JSON object with assistant_message and tool_calls.",
     "Use assistant_message only for blockers or final user-visible status; otherwise keep it empty.",
