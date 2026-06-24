@@ -1,9 +1,12 @@
+import { compactToolHistory, renderToolResultForModel } from "../context/history-compaction.js";
 import { toolRegistry } from "../tools/registry.js";
+import type { ToolResult } from "../tools/types.js";
 import { renderPlanForCockpit, renderTodoForCockpit, type PlanState, type TodoState } from "./plan-state.js";
 
 export interface MainAgentCockpitOptions {
   availableTools?: Array<{ name: string; description?: string }>;
   maxSectionChars?: number;
+  workspaceRoot?: string;
 }
 
 const COCKPIT_SECTIONS = [
@@ -61,7 +64,7 @@ export function buildMainAgentCockpit(
       changedFiles: pickFirst(stateRecord, ["changedFiles", "recentlyTouchedFiles"]),
       currentDiff: pickFirst(stateRecord, ["currentDiff", "diff", "gitDiff"]),
     },
-    "Recent Tool Results": pickFirst(stateRecord, ["recentToolResults", "toolResults"]),
+    "Recent Tool Results": renderRecentToolResultsSection(pickFirst(stateRecord, ["recentToolResults", "toolResults"]), options),
     "Runtime Blockers": pickFirst(stateRecord, ["runtimeBlockers", "blockers", "feedback"]),
     "Running Subagents": pickFirst(stateRecord, ["runningSubagents", "activeSubagents"]),
     "Completed Subagent Results": pickFirst(stateRecord, ["completedSubagentResults", "backgroundSubagentResults", "subagentResults"]),
@@ -89,8 +92,50 @@ function renderRequest(request: unknown): unknown {
 function renderAvailableTools(tools?: Array<{ name: string; description?: string }>): string {
   const entries = tools ?? Object.entries(toolRegistry).map(([name, spec]) => ({ name, description: spec.description }));
   return entries
-    .map((tool) => `- ${tool.name}${tool.description ? `: ${tool.description}` : ""}`)
+    .map((tool) => {
+      const description = tool.description ? truncateOneLine(tool.description, 220) : "";
+      return `- ${tool.name}${description ? `: ${description}` : ""}`;
+    })
     .join("\n");
+}
+
+function renderRecentToolResultsSection(value: unknown, options: MainAgentCockpitOptions): unknown {
+  if (!Array.isArray(value) || !value.every(isToolResultLike)) return value;
+
+  const history = compactToolHistory({
+    maxEntries: Math.min(8, value.length),
+    toolResults: value,
+  });
+
+  return {
+    totalResults: value.length,
+    retainedResults: history.retained.map((result) =>
+      renderToolResultForModel(result, {
+        compact: true,
+        maxOutputChars: 1200,
+        ...(options.workspaceRoot ? { workspaceRoot: options.workspaceRoot } : {}),
+      }),
+    ),
+    ...(history.compacted.length ? { compactedContext: history.compacted } : {}),
+    ...(history.pinnedVerificationFailure ? { pinnedVerificationFailure: history.pinnedVerificationFailure } : {}),
+  };
+}
+
+function isToolResultLike(value: unknown): value is ToolResult {
+  const record = asRecord(value);
+  return Boolean(
+    record &&
+      typeof record.toolCallId === "string" &&
+      typeof record.name === "string" &&
+      typeof record.ok === "boolean" &&
+      typeof record.durationMs === "number",
+  );
+}
+
+function truncateOneLine(text: string, maxChars: number): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  if (oneLine.length <= maxChars) return oneLine;
+  return `${oneLine.slice(0, Math.max(0, maxChars - 15))}...[truncated]`;
 }
 
 function renderPlanSection(value: unknown): string {

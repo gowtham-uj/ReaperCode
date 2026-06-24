@@ -913,7 +913,7 @@ export class RuntimeEngine {
           todo: renderTodoForCockpit(state.todoState),
           verificationState: state.verificationState,
           runtimeBlockers: state.runtimeBlockers,
-          recentToolResults: state.toolResults.slice(-16).map((result) => renderToolResultForModel(result)),
+          recentToolResults: state.toolResults,
           feedback: state.feedback,
           negativeConstraints: state.negativeConstraints,
         },
@@ -926,6 +926,9 @@ export class RuntimeEngine {
           tokenBudget: getBoot().state.tokenBudget,
           completionGateAttempts: state.completionGateAttempts,
           runtimeDeadline: getRuntimeDeadlinePressure(startedAt),
+        },
+        {
+          workspaceRoot: this.input.workspaceRoot,
         },
       );
 
@@ -6534,7 +6537,7 @@ function buildSimpleExecutorPrompt(input: {
   blockingFacts?: RuntimeBlockingFacts;
   runId: string;
 }): string {
-  const recentResults = input.toolResults.slice(-10).map((result) => renderToolResultForModel(result));
+  const recentResults = renderRecentToolResultsForPromptCompact(input.toolResults, input.feedback, 10);
   const fileTree = input.contentPrep.preparedContext.fileTree.slice(0, 160).join("\n");
   const context = input.contentPrep.preparedContext.chunks
     .slice(0, 6)
@@ -7998,7 +8001,7 @@ async function generateFinalSummary(input: {
   stuckReason?: string;
 }): Promise<string> {
   if (!input.modelGateway) return "Task ended before Reaper could request a model-authored final summary.";
-  const recentResults = input.toolResults.slice(-12).map((result) => renderToolResultForModel(result));
+  const recentResults = renderRecentToolResultsForPromptCompact(input.toolResults, [], 12);
   	  const result = await generateStructuredJson({
   	    modelGateway: input.modelGateway,
   	    role: input.role,
@@ -8019,7 +8022,7 @@ async function generateFinalSummary(input: {
           input.completionSignalSummary ? `\nMODEL COMPLETION SIGNAL SUMMARY:\n${input.completionSignalSummary}` : "",
           input.stuckReason ? `\nSTUCK REASON:\n${input.stuckReason}` : "",
           "",
-          `RECENT TOOL RESULTS:\n${recentResults.join("\n\n")}`,
+          `RECENT TOOL RESULTS:\n${JSON.stringify(recentResults)}`,
         ].join("\n"),
       },
     ],
@@ -8046,7 +8049,7 @@ function buildModelCompletionPrompt(input: {
   completionGateAttempts: number;
   runId: string;
 }): string {
-  const recentResults = input.toolResults.slice(-16).map((result) => renderToolResultForModel(result));
+  const recentResults = renderRecentToolResultsForPromptCompact(input.toolResults, input.feedback, 16);
   const completionBlocker = getCompletionBlocker(input.toolResults, input.runId, input.prompt);
   return [
     "# Reaper Model Completion Gate",
