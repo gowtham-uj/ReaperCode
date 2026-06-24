@@ -1,0 +1,20 @@
+{
+  "name": "documentation-writing",
+  "version": "1.0.0",
+  "description": "Write clear, accurate docs and READMEs with compilable code samples.",
+  "category": "documentation-writing",
+  "whenToUse": "Use when writing or rewriting documentation, READMEs, or doc comments.",
+  "triggers": ["write docs", "readme", "documentation", "explain", "guide", "tutorial"],
+  "pathPatterns": ["**/*.md", "**/*.mdx", "**/*.txt"],
+  "allowedTools": ["read_file", "view_file", "list_directory", "grep_search", "skim_file", "write_file", "edit_file", "replace_in_file", "run_shell_command"],
+  "validation": { "commands": [{ "id": "smoke", "command": "node -e \"process.exit(0)\"" }] },
+  "memoryPolicy": {
+    "mayReadProjectMemory": true,
+    "mayWriteProjectMemory": true,
+    "mayReadUserMemory": false,
+    "mayWriteUserMemory": false
+  },
+  "trust": "builtin",
+  "author": "Reaper",
+  "license": "MIT"
+}

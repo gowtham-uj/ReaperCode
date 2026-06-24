@@ -1,0 +1,20 @@
+{
+  "name": "api-backend-debugging",
+  "version": "1.0.0",
+  "description": "Trace API failures across server, DB, and network layers.",
+  "category": "api-backend-debugging",
+  "whenToUse": "Use when an HTTP/RPC API returns errors, timeouts, or wrong data and you need a structured trace.",
+  "triggers": ["api error", "500", "502", "503", "504", "timeout", "endpoint broken", "rpc error"],
+  "pathPatterns": ["**/api/**", "**/routes/**", "**/controllers/**", "**/server/**", "**/*.go", "**/*.py", "**/*.ts", "**/*.js", "**/*.java", "**/*.rs"],
+  "allowedTools": ["read_file", "view_file", "list_directory", "grep_search", "skim_file", "run_shell_command", "web_fetch", "web_search", "write_file", "edit_file", "replace_in_file"],
+  "validation": { "commands": [{ "id": "smoke", "command": "node -e \"process.exit(0)\"" }] },
+  "memoryPolicy": {
+    "mayReadProjectMemory": true,
+    "mayWriteProjectMemory": true,
+    "mayReadUserMemory": false,
+    "mayWriteUserMemory": false
+  },
+  "trust": "builtin",
+  "author": "Reaper",
+  "license": "MIT"
+}

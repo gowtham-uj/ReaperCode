@@ -1,0 +1,20 @@
+{
+  "name": "agent-runtime-debugging",
+  "version": "1.0.0",
+  "description": "Debug agent / runtime / orchestrator issues (stuck loops, lost context, bad tool calls).",
+  "category": "agent-runtime-debugging",
+  "whenToUse": "Use when an agent run is stuck, looping, or producing bad tool calls and you need to diagnose the runtime layer.",
+  "triggers": ["agent stuck", "agent loop", "runtime bug", "orchestrator", "lost context", "bad tool call"],
+  "pathPatterns": ["**/*"],
+  "allowedTools": ["read_file", "view_file", "list_directory", "grep_search", "skim_file", "run_shell_command"],
+  "validation": { "commands": [{ "id": "smoke", "command": "node -e \"process.exit(0)\"" }] },
+  "memoryPolicy": {
+    "mayReadProjectMemory": true,
+    "mayWriteProjectMemory": true,
+    "mayReadUserMemory": false,
+    "mayWriteUserMemory": false
+  },
+  "trust": "builtin",
+  "author": "Reaper",
+  "license": "MIT"
+}

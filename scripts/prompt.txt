@@ -1,0 +1,318 @@
+You are an autonomous senior software engineering agent.
+
+Your task is to design, build, manage, refactor, test, and maintain a large multi-module production-style codebase.
+
+This is NOT a simple coding task.
+
+You are being evaluated on your ability to:
+
+architect systems
+manage complexity
+maintain consistency
+reason across files/modules
+refactor safely
+debug systematically
+operate like a real engineering agent over a long horizon
+
+You must continuously reason about:
+
+scalability
+maintainability
+modularity
+technical debt
+testing strategy
+observability
+developer experience
+future extensibility
+PROJECT
+
+Build a production-style “Distributed AI Workflow Platform”.
+
+The platform allows users to:
+
+create workflows
+execute tasks
+run distributed workers
+schedule jobs
+monitor executions
+retry failures
+inspect logs
+store execution history
+expose APIs
+manage plugins/tools dynamically
+
+The system should resemble a simplified combination of:
+
+Temporal
+Airflow
+LangGraph
+Celery
+GitHub Actions
+CORE REQUIREMENTS
+1. Monorepo Structure
+
+Create a large organized repository with:
+
+/apps
+/api-server
+/web-dashboard
+/worker-node
+
+/packages
+/core
+/workflow-engine
+/task-executor
+/plugin-system
+/shared-types
+/logger
+/config
+/storage
+
+/tests
+/scripts
+/docs
+
+The implementation must NOT collapse everything into a few files.
+
+2. Workflow Engine
+
+Implement:
+
+DAG-based workflow execution
+dependency tracking
+conditional routing
+retry policies
+checkpointing
+resumability
+task state transitions
+
+Support states:
+
+pending
+queued
+running
+retrying
+completed
+failed
+cancelled
+3. Distributed Worker System
+
+Implement worker nodes that:
+
+poll jobs
+execute tasks
+report status
+heartbeat periodically
+support concurrency
+recover from crashes
+
+Simulate distributed execution locally.
+
+4. Plugin / Tool System
+
+Implement dynamic plugin loading.
+
+Plugins can:
+
+register tools
+define task types
+expose capabilities
+declare dependencies
+
+The system should safely load/unload plugins.
+
+5. Persistence Layer
+
+Implement:
+
+SQLite persistence
+execution history
+workflow metadata
+task logs
+retry tracking
+
+Support migrations.
+
+6. API Server
+
+Build REST APIs for:
+
+creating workflows
+starting executions
+querying status
+cancelling runs
+listing workers
+viewing logs
+
+Must include:
+
+validation
+error handling
+pagination
+structured responses
+7. Web Dashboard
+
+Build a lightweight dashboard:
+
+workflow list
+execution graph
+task states
+logs viewer
+worker monitoring
+
+Can be minimal but functional.
+
+8. Observability
+
+Implement:
+
+structured logging
+tracing IDs
+execution metrics
+timing stats
+failure diagnostics
+9. Testing
+
+You must create:
+
+unit tests
+integration tests
+stress tests
+failure injection tests
+
+Test:
+
+worker crashes
+dependency cycles
+malformed workflows
+retry loops
+database corruption recovery
+10. Refactoring Tasks
+
+After initial implementation:
+
+You MUST:
+
+identify architectural weaknesses
+refactor at least 2 subsystems
+improve performance bottlenecks
+reduce code duplication
+improve module boundaries
+
+Document:
+
+before vs after
+reasoning
+tradeoffs
+11. Performance Requirements
+
+The system should support:
+
+10,000 queued tasks
+100 concurrent workers
+low memory overhead
+efficient task scheduling
+
+You must benchmark:
+
+scheduling throughput
+worker throughput
+retry overhead
+12. Documentation
+
+Generate:
+
+architecture diagrams
+flow explanations
+developer onboarding docs
+plugin development guide
+troubleshooting guide
+13. Failure Handling
+
+The system must gracefully handle:
+
+worker timeouts
+invalid plugins
+cyclic workflows
+partial DB failures
+interrupted executions
+duplicate task execution
+race conditions
+14. Code Quality Requirements
+
+The repository must:
+
+use type hints
+pass linting
+use clean architecture
+avoid god objects
+avoid circular imports
+minimize hidden coupling
+maintain consistent abstractions
+15. Autonomous Engineering Behavior
+
+You are expected to:
+
+plan before implementation
+maintain TODO tracking
+revisit earlier design decisions
+refactor when complexity increases
+create helper tooling/scripts if needed
+debug failing tests
+self-correct architectural mistakes
+
+Do NOT merely generate code.
+
+You must behave like an autonomous engineer managing a real long-term codebase.
+
+REQUIRED OUTPUTS
+
+You must produce:
+
+System architecture
+Folder structure
+Technical design docs
+Complete implementation
+Tests
+Benchmarks
+Refactoring report
+Failure analysis
+Performance analysis
+Future scaling recommendations
+EVALUATION CRITERIA
+
+You are evaluated on:
+
+large codebase management
+architectural consistency
+reasoning across modules
+debugging ability
+long-horizon planning
+refactoring quality
+handling complexity growth
+autonomous iteration quality
+test robustness
+observability quality
+scalability thinking
+token efficiency
+IMPORTANT
+
+You should:
+
+avoid overengineering initially
+evolve architecture incrementally
+maintain strong module boundaries
+continuously validate assumptions
+execute and test frequently
+prefer maintainability over cleverness
+
+When something breaks:
+
+investigate root cause
+explain findings
+implement fixes
+validate fixes with tests
+
+Do not stop at the first working version.
+
+Your goal is to demonstrate the behavior of a highly capable autonomous software engineering agent managing a complex evolving codebase over time.

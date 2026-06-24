@@ -1,0 +1,20 @@
+{
+  "name": "typescript-refactor",
+  "version": "1.0.0",
+  "description": "Refactor TypeScript code while preserving types and behavior.",
+  "category": "typescript-refactor",
+  "whenToUse": "Use when refactoring TS/TSX while preserving the public API and type contracts.",
+  "triggers": ["refactor typescript", "ts refactor", "extract class", "rename symbol", "split module", "tighten types"],
+  "pathPatterns": ["**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"],
+  "allowedTools": ["read_file", "view_file", "list_directory", "grep_search", "skim_file", "run_shell_command", "write_file", "edit_file", "replace_in_file"],
+  "validation": { "commands": [{ "id": "smoke", "command": "node -e \"process.exit(0)\"" }] },
+  "memoryPolicy": {
+    "mayReadProjectMemory": true,
+    "mayWriteProjectMemory": true,
+    "mayReadUserMemory": false,
+    "mayWriteUserMemory": false
+  },
+  "trust": "builtin",
+  "author": "Reaper",
+  "license": "MIT"
+}

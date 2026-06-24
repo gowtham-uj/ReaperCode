@@ -1,0 +1,23 @@
+{
+  "name": "bug-fixing",
+  "version": "1.0.0",
+  "description": "Diagnose, reproduce, and fix a reported bug.",
+  "category": "bug-fixing",
+  "whenToUse": "Use when the user reports a bug and wants a structured triage and fix.",
+  "triggers": ["fix bug", "bug", "broken", "regression", "doesn't work", "failing", "crash"],
+  "pathPatterns": ["**/*"],
+  "allowedTools": ["read_file", "view_file", "list_directory", "grep_search", "skim_file", "run_shell_command", "write_file", "edit_file", "replace_in_file"],
+  "arguments": [
+    { "name": "symptom", "description": "What the user observed.", "required": true }
+  ],
+  "validation": { "commands": [{ "id": "smoke", "command": "node -e \"process.exit(0)\"" }] },
+  "memoryPolicy": {
+    "mayReadProjectMemory": true,
+    "mayWriteProjectMemory": true,
+    "mayReadUserMemory": false,
+    "mayWriteUserMemory": false
+  },
+  "trust": "builtin",
+  "author": "Reaper",
+  "license": "MIT"
+}

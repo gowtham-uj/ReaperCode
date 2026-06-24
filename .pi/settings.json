@@ -1,0 +1,36 @@
+{
+  "defaultProvider": "hyperagent",
+  "defaultModel": "claude-opus-4-8",
+  "defaultThinkingLevel": "xhigh",
+  "hideThinkingBlock": false,
+  "quietStartup": false,
+  "enableInstallTelemetry": false,
+  "sessionDir": ".pi/sessions",
+  "enabledModels": [
+    "hyperagent/claude-opus-4-8"
+  ],
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 16384,
+    "keepRecentTokens": 24000
+  },
+  "branchSummary": {
+    "reserveTokens": 16384,
+    "skipPrompt": true
+  },
+  "retry": {
+    "enabled": true,
+    "maxRetries": 2,
+    "baseDelayMs": 1000,
+    "provider": {
+      "timeoutMs": 300000,
+      "maxRetries": 1,
+      "maxRetryDelayMs": 30000
+    }
+  },
+  "steeringMode": "all",
+  "followUpMode": "all",
+  "transport": "auto",
+  "treeFilterMode": "no-tools",
+  "enableSkillCommands": true
+}

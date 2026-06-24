@@ -1,0 +1,20 @@
+{
+  "name": "terminal-bench-solving",
+  "version": "1.0.0",
+  "description": "Approach terminal-bench tasks systematically — read the task, find the truth, verify the result.",
+  "category": "terminal-bench-solving",
+  "whenToUse": "Use when solving a terminal-bench task — CLI-driven environment, binary answer or scripted reproduction.",
+  "triggers": ["terminal-bench", "terminal bench", "tbench", "t-bench"],
+  "pathPatterns": ["**/*"],
+  "allowedTools": ["read_file", "view_file", "list_directory", "grep_search", "skim_file", "run_shell_command", "write_file", "edit_file", "replace_in_file", "inspect_environment"],
+  "validation": { "commands": [{ "id": "smoke", "command": "node -e \"process.exit(0)\"" }] },
+  "memoryPolicy": {
+    "mayReadProjectMemory": true,
+    "mayWriteProjectMemory": true,
+    "mayReadUserMemory": false,
+    "mayWriteUserMemory": false
+  },
+  "trust": "builtin",
+  "author": "Reaper",
+  "license": "MIT"
+}

@@ -1,0 +1,20 @@
+{
+  "name": "frontend-react-debugging",
+  "version": "1.0.0",
+  "description": "Diagnose React component, hook, and state bugs.",
+  "category": "frontend-react-debugging",
+  "whenToUse": "Use when debugging a React app — wrong render, hook bug, state desync, infinite loop, or stale UI.",
+  "triggers": ["react bug", "component broken", "render loop", "stale state", "useEffect", "infinite render"],
+  "pathPatterns": ["**/*.tsx", "**/*.jsx", "**/*.ts", "**/*.js"],
+  "allowedTools": ["read_file", "view_file", "list_directory", "grep_search", "skim_file", "run_shell_command", "screenshot", "browser_control", "write_file", "edit_file", "replace_in_file"],
+  "validation": { "commands": [{ "id": "smoke", "command": "node -e \"process.exit(0)\"" }] },
+  "memoryPolicy": {
+    "mayReadProjectMemory": true,
+    "mayWriteProjectMemory": true,
+    "mayReadUserMemory": false,
+    "mayWriteUserMemory": false
+  },
+  "trust": "builtin",
+  "author": "Reaper",
+  "license": "MIT"
+}

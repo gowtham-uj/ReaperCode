@@ -1,0 +1,20 @@
+{
+  "name": "python-debugging",
+  "version": "1.0.0",
+  "description": "Diagnose Python errors, tracebacks, and runtime issues.",
+  "category": "python-debugging",
+  "whenToUse": "Use when a Python script raises an error or behaves unexpectedly.",
+  "triggers": ["python error", "python traceback", "python crash", "python bug", "pdb"],
+  "pathPatterns": ["**/*.py"],
+  "allowedTools": ["read_file", "view_file", "list_directory", "grep_search", "skim_file", "run_shell_command", "write_file", "edit_file", "replace_in_file"],
+  "validation": { "commands": [{ "id": "smoke", "command": "node -e \"process.exit(0)\"" }] },
+  "memoryPolicy": {
+    "mayReadProjectMemory": true,
+    "mayWriteProjectMemory": true,
+    "mayReadUserMemory": false,
+    "mayWriteUserMemory": false
+  },
+  "trust": "builtin",
+  "author": "Reaper",
+  "license": "MIT"
+}

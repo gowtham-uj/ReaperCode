@@ -1,0 +1,20 @@
+{
+  "name": "performance-review",
+  "version": "1.0.0",
+  "description": "Profile hot paths and propose optimizations backed by a benchmark.",
+  "category": "performance-review",
+  "whenToUse": "Use when code is slow and you need to profile it and propose changes with measurements.",
+  "triggers": ["slow", "perf", "performance", "benchmark", "optimize", "hot path", "profile"],
+  "pathPatterns": ["**/*"],
+  "allowedTools": ["read_file", "view_file", "list_directory", "grep_search", "skim_file", "run_shell_command", "write_file", "edit_file", "replace_in_file"],
+  "validation": { "commands": [{ "id": "smoke", "command": "node -e \"process.exit(0)\"" }] },
+  "memoryPolicy": {
+    "mayReadProjectMemory": true,
+    "mayWriteProjectMemory": true,
+    "mayReadUserMemory": false,
+    "mayWriteUserMemory": false
+  },
+  "trust": "builtin",
+  "author": "Reaper",
+  "license": "MIT"
+}

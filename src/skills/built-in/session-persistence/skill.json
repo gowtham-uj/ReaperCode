@@ -1,0 +1,20 @@
+{
+  "name": "session-persistence",
+  "version": "1.0.0",
+  "description": "Diagnose and repair session restore, replay, and persistence issues.",
+  "category": "session-persistence",
+  "whenToUse": "Use when session state is lost on restart, replay diverges, or checkpoints are not loading.",
+  "triggers": ["session lost", "restore failed", "replay", "checkpoint", "persistence broken"],
+  "pathPatterns": ["**/*"],
+  "allowedTools": ["read_file", "view_file", "list_directory", "grep_search", "skim_file", "run_shell_command", "write_file", "edit_file", "replace_in_file"],
+  "validation": { "commands": [{ "id": "smoke", "command": "node -e \"process.exit(0)\"" }] },
+  "memoryPolicy": {
+    "mayReadProjectMemory": true,
+    "mayWriteProjectMemory": true,
+    "mayReadUserMemory": false,
+    "mayWriteUserMemory": false
+  },
+  "trust": "builtin",
+  "author": "Reaper",
+  "license": "MIT"
+}

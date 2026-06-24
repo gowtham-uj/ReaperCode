@@ -1,0 +1,20 @@
+{
+  "name": "security-review",
+  "version": "1.0.0",
+  "description": "Audit code for common security regressions (auth, input validation, secret handling).",
+  "category": "security-review",
+  "whenToUse": "Use when reviewing a diff or PR for security issues — auth, injection, secret leakage, SSRF, deserialization.",
+  "triggers": ["security review", "audit", "cve", "vulnerability", "secret leak", "auth bypass", "injection"],
+  "pathPatterns": ["**/*"],
+  "allowedTools": ["read_file", "view_file", "list_directory", "grep_search", "skim_file", "run_shell_command", "web_search"],
+  "validation": { "commands": [{ "id": "smoke", "command": "node -e \"process.exit(0)\"" }] },
+  "memoryPolicy": {
+    "mayReadProjectMemory": true,
+    "mayWriteProjectMemory": true,
+    "mayReadUserMemory": false,
+    "mayWriteUserMemory": false
+  },
+  "trust": "builtin",
+  "author": "Reaper",
+  "license": "MIT"
+}

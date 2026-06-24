@@ -1,0 +1,92 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import { mapGenerateRequestToLiteLLM } from "../../src/model/providers/parameter-mapper.js";
+import type { ResolvedModelProfile } from "../../src/model/types.js";
+
+test("prompt cache can be enabled explicitly for stable prompt prefixes", () => {
+  const payload = mapGenerateRequestToLiteLLM(
+    {
+      role: "main_reasoner",
+      system: "x".repeat(300),
+      messages: [{ role: "user", content: "dynamic user request" }],
+    },
+    profile("deepseek", { enabled: true }),
+  );
+
+  assert.deepEqual(payload.messages[0], {
+    role: "system",
+    content: [{ type: "text", text: "x".repeat(300), cache_control: { type: "ephemeral" } }],
+  });
+});
+
+test("prompt cache can be disabled per profile", () => {
+  const payload = mapGenerateRequestToLiteLLM(
+    {
+      role: "main_reasoner",
+      system: "x".repeat(300),
+      messages: [{ role: "user", content: "dynamic user request" }],
+    },
+    profile("deepseek", { enabled: false }),
+  );
+
+  assert.equal(payload.messages[0]?.content, "x".repeat(300));
+});
+
+test("Azure OpenAI payload omits model because deployment is in the URL", () => {
+  const previousApiVersion = process.env.AZURE_OPENAI_API_VERSION;
+  delete process.env.AZURE_OPENAI_API_VERSION;
+  const payload = mapGenerateRequestToLiteLLM(
+    {
+      role: "main_reasoner",
+      messages: [{ role: "user", content: "hello" }],
+    },
+    { ...profile("azure"), apiBase: "https://example.openai.azure.com" },
+  );
+  restoreEnv("AZURE_OPENAI_API_VERSION", previousApiVersion);
+
+  assert.equal("model" in payload, false);
+  assert.equal(payload.messages[0]?.content, "hello");
+});
+
+test("Azure OpenAI v1 payload keeps model because endpoint is OpenAI-compatible", () => {
+  const previousApiVersion = process.env.AZURE_OPENAI_API_VERSION;
+  process.env.AZURE_OPENAI_API_VERSION = "v1";
+  const payload = mapGenerateRequestToLiteLLM(
+    {
+      role: "main_reasoner",
+      messages: [{ role: "user", content: "hello" }],
+    },
+    { ...profile("azure"), apiBase: "https://example.openai.azure.com/openai" },
+  );
+  restoreEnv("AZURE_OPENAI_API_VERSION", previousApiVersion);
+
+  assert.equal("model" in payload, true);
+  assert.equal((payload as { model?: string }).model, "model");
+  assert.equal(payload.messages[0]?.content, "hello");
+});
+
+function profile(provider: string, promptCache?: { enabled: boolean; minContentChars?: number }): ResolvedModelProfile {
+  return {
+    provider,
+    model: "model",
+    profileName: "default_model",
+    role: "main_reasoner",
+    capabilities: {
+      streaming: true,
+      toolCalling: true,
+      jsonMode: true,
+      structuredOutput: true,
+      embeddings: false,
+    },
+    ...(promptCache ? { defaultParams: { promptCache } } : {}),
+  };
+}
+
+function restoreEnv(key: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
+}

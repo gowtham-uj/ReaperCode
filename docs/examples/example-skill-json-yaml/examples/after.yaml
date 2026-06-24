@@ -1,0 +1,6 @@
+name: json-yaml
+version: 1.0.0
+category: documentation-writing
+allowedTools:
+  - read_file
+  - write_file
