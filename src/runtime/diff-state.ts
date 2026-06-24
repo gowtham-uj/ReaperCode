@@ -101,7 +101,7 @@ async function gitOutput(workspaceRoot: string, args: string[]): Promise<string>
       GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME ?? "Reaper Tests",
       GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL ?? "reaper-tests@example.com",
     },
-    maxBuffer: 10 * 1024 * 1024,
+    maxBuffer: 1024 * 1024 * 1024,
   });
   return String(stdout).trimEnd();
 }

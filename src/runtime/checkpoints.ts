@@ -59,8 +59,20 @@ export async function createCheckpoint(input: CreateCheckpointInput): Promise<Ch
   await mkdir(checkpointDir, { recursive: true });
 
   if (checkpoint.restoreAvailable) {
-    await writeGitPatch(input.workspaceRoot, checkpointDir, "staged.patch", ["diff", "--cached", "--binary"]);
-    await writeGitPatch(input.workspaceRoot, checkpointDir, "worktree.patch", ["diff", "--binary"]);
+    try {
+      await writeGitPatch(input.workspaceRoot, checkpointDir, "staged.patch", ["diff", "--cached", "--binary"]);
+      await writeGitPatch(input.workspaceRoot, checkpointDir, "worktree.patch", ["diff", "--binary"]);
+    } catch (error) {
+      // Oversized parent repo or pathological diffs: keep a metadata-only checkpoint
+      // so the engine can continue, but do not advertise it as restorable.
+      checkpoint.restoreAvailable = false;
+      const message = error instanceof Error ? error.message : String(error);
+      await writeFile(
+        path.join(checkpointDir, "restore-skipped.txt"),
+        `Checkpoint patch capture failed: ${message}\n`,
+        "utf8",
+      );
+    }
   }
 
   await writeFile(path.join(checkpointDir, "metadata.json"), JSON.stringify(checkpoint, null, 2), "utf8");
@@ -146,7 +158,7 @@ async function runGit(workspaceRoot: string, args: string[]): Promise<string> {
       GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME ?? "Reaper Tests",
       GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL ?? "reaper-tests@example.com",
     },
-    maxBuffer: 10 * 1024 * 1024,
+    maxBuffer: 1024 * 1024 * 1024,
   });
   return String(stdout).trimEnd();
 }
