@@ -41,6 +41,7 @@ import {
   buildRescueHypothesisLedger,
   renderRescueHypothesisLedger,
 } from "./hypothesis-ledger.js";
+import { renderRepoInspectionForCockpit, type RepoInspection } from "./repo-inspection.js";
 import { isVerificationLikeCommand } from "./relevance-gate.js";
 import { getReaperScratchpadPaths } from "../workspace/scratchpad.js";
 
@@ -218,6 +219,7 @@ export function ensureExplicitDeliverableCoverage(prompt: string, steps: Executi
 export function buildPlannerSubagentPrompt(input: {
   prompt: string;
   contentPrep: ContentPrepResult;
+  repoInspection?: RepoInspection;
   toolResults: ToolResult[];
   iteration: number;
   feedback: string[];
@@ -311,6 +313,7 @@ export function buildPlannerSubagentPrompt(input: {
     "# Runtime State",
     `Planning pass: ${input.iteration + 1}/20`,
     `Workspace: ${input.contentPrep.index.workspaceRoot}`,
+    input.repoInspection ? renderRepoInspectionForCockpit(input.repoInspection) : "Repository inspection: unavailable.",
     `Environment:\n${environment}`,
     `Task:\n${input.prompt}`,
     `Compact file tree:\n${fileTree || "(empty)"}`,

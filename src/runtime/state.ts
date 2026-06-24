@@ -1,5 +1,21 @@
 import { z } from "zod";
 
+export const RepoInspectionSchema = z
+  .object({
+    packageManagers: z.array(z.string()),
+    languages: z.array(z.string()),
+    frameworks: z.array(z.string()),
+    testCommands: z.array(z.string()),
+    buildCommands: z.array(z.string()),
+    lintCommands: z.array(z.string()),
+    entrypoints: z.array(z.string()),
+    configFiles: z.array(z.string()),
+    importantDirectories: z.array(z.string()),
+    gitStatus: z.string(),
+    risks: z.array(z.string()),
+  })
+  .strict();
+
 export const RuntimeStateSchema = z
   .object({
     sessionId: z.string().min(1),
@@ -24,10 +40,12 @@ export const RuntimeStateSchema = z
       .strict(),
     feedback: z.array(z.string()),
     negativeConstraints: z.array(z.string()),
+    repoInspection: RepoInspectionSchema.optional(),
   })
   .strict();
 
 export type RuntimeState = z.infer<typeof RuntimeStateSchema>;
+export type RuntimeRepoInspection = z.infer<typeof RepoInspectionSchema>;
 
 export function parseRuntimeState(input: unknown): RuntimeState {
   return RuntimeStateSchema.parse(input);
