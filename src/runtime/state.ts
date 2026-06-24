@@ -1,5 +1,8 @@
 import { z } from "zod";
 
+import { BudgetStateSchema } from "./budget-state.js";
+import { VerificationStateSchema } from "./verification-state.js";
+
 export const RepoInspectionSchema = z
   .object({
     packageManagers: z.array(z.string()),
@@ -41,11 +44,15 @@ export const RuntimeStateSchema = z
     feedback: z.array(z.string()),
     negativeConstraints: z.array(z.string()),
     repoInspection: RepoInspectionSchema.optional(),
+    verificationState: VerificationStateSchema.optional(),
+    budgetState: BudgetStateSchema.optional(),
   })
   .strict();
 
 export type RuntimeState = z.infer<typeof RuntimeStateSchema>;
 export type RuntimeRepoInspection = z.infer<typeof RepoInspectionSchema>;
+export type RuntimeVerificationState = z.infer<typeof VerificationStateSchema>;
+export type RuntimeBudgetState = z.infer<typeof BudgetStateSchema>;
 
 export function parseRuntimeState(input: unknown): RuntimeState {
   return RuntimeStateSchema.parse(input);
