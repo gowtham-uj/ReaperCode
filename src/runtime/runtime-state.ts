@@ -124,11 +124,16 @@ export async function logModelResponseTrace(input: {
 
 export function splitControlToolCalls(toolCalls: ToolCall[]): SplitToolCalls {
   const executableToolCalls: ToolCall[] = [];
+  const advisoryToolCalls: Array<Extract<ToolCall, { name: "update_plan" | "update_todo" }>> = [];
   let completionSignal: Extract<ToolCall, { name: "complete_task" }> | undefined;
   let advancementSignal: Extract<ToolCall, { name: "advance_step" }> | undefined;
   let patchRequestSignal: Extract<ToolCall, { name: "request_patch" }> | undefined;
 
   for (const call of toolCalls) {
+    if (call.name === "update_plan" || call.name === "update_todo") {
+      advisoryToolCalls.push(call);
+      continue;
+    }
     if (call.name === "complete_task") {
       completionSignal = call;
       break;
@@ -146,6 +151,7 @@ export function splitControlToolCalls(toolCalls: ToolCall[]): SplitToolCalls {
 
   return {
     executableToolCalls,
+    ...(advisoryToolCalls.length ? { advisoryToolCalls } : {}),
     ...(completionSignal ? { completionSignal } : {}),
     ...(advancementSignal ? { advancementSignal } : {}),
     ...(patchRequestSignal ? { patchRequestSignal } : {}),

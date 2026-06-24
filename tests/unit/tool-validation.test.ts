@@ -37,6 +37,16 @@ test("complete_task can be batched with non-mutating inspection tools", () => {
   assert.equal(result.ok, true);
 });
 
+test("complete_task can be batched with advisory memory tools", () => {
+  const result = validateToolCallBatch([
+    { name: "update_plan", arguments: { markdown: "## Plan\n- done" } },
+    { name: "update_todo", arguments: { items: [{ id: "done", content: "Finish task", done: true }] } },
+    { name: "complete_task", arguments: { summary: "finished" } },
+  ]);
+
+  assert.equal(result.ok, true);
+});
+
 test("main-agent execute_tools rejects an empty tool call list", () => {
   const result = validateToolCallBatch([], { agentRole: "main" });
 

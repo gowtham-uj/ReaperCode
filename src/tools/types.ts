@@ -70,6 +70,30 @@ export const SkimFileArgsSchema = z
 
 export const InspectEnvironmentArgsSchema = z.object({}).strict();
 
+export const UpdatePlanArgsSchema = z
+  .object({
+    markdown: z.string().min(1),
+    activePlanMarkdown: z.string().min(1).optional(),
+    candidate: z.boolean().optional(),
+  })
+  .strict();
+
+export const UpdateTodoArgsSchema = z
+  .object({
+    items: z
+      .array(
+        z
+          .object({
+            id: z.string().min(1),
+            content: z.string().min(1),
+            done: z.boolean(),
+          })
+          .strict(),
+      ),
+    append: z.boolean().optional(),
+  })
+  .strict();
+
 export const CreateCheckpointArgsSchema = z
   .object({
     reason: z.string().min(1),
@@ -537,6 +561,8 @@ export const ToolCallSchema = z.discriminatedUnion("name", [
   z.object({ id: z.string().min(1), name: z.literal("task_create"), args: TaskCreateArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("task_update"), args: TaskUpdateArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("task_list"), args: TaskListArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("update_plan"), args: UpdatePlanArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("update_todo"), args: UpdateTodoArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("search_tools"), args: SearchToolsArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("agent"), args: AgentArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("agent_swarm"), args: AgentSwarmArgsSchema }).strict(),
