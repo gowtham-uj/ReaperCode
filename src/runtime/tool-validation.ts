@@ -6,6 +6,7 @@ import {
 } from "./tool-taxonomy.js";
 
 export type ToolCallLike = {
+  id?: string;
   name: string;
   args?: unknown;
   arguments?: unknown;
