@@ -1,9 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { logLangfuseEvent } from "../logging/langfuse.js";
+import { displayModelProfile, getLegacyModelRole, resolveModelRoleAlias } from "./types.js";
 
 export interface ModelCallRecord {
   role: string;
   source?: string;
+  profile?: string;
+  legacyRole?: string;
   provider: string;
   model: string;
   maxTokens: number | undefined;
@@ -14,9 +17,12 @@ export interface ModelCallRecord {
   promptChars: number;
   responseChars: number;
   responseFinishReason: string | undefined;
+  finishReason?: string;
   responseContentChars: number;
   truncated: boolean;
   attempt: number;
+  systemChars?: number;
+  toolCallCount?: number;
   usage: { inputTokens: number; outputTokens: number } | null;
 }
 
@@ -45,9 +51,17 @@ export function getActiveModelCallContext(): ModelCallContext | undefined {
   return activeStack.length ? activeStack[activeStack.length - 1] : undefined;
 }
 
-export async function recordModelCall(record: ModelCallRecord, messages: Array<{ role: string; content: string }>, response: { content: string; finishReason?: string }): Promise<void> {
+export async function recordModelCall(record: ModelCallRecord, messages: Array<{ role: string; content: string }>, response: { content: string; finishReason?: string; toolCalls?: unknown[] }): Promise<void> {
   const ctx = getActiveModelCallContext();
   if (!ctx) return;
+  const source = record.source ?? ctx.source;
+  const canonicalRole = resolveModelRoleAlias(record.role);
+  const profile = record.profile ?? displayModelProfile(record.role);
+  const legacyRole = record.legacyRole ?? (canonicalRole ? getLegacyModelRole(canonicalRole) : undefined);
+  const systemChars = record.systemChars ?? ctx.system?.length;
+  const responseFinishReason = record.responseFinishReason ?? response.finishReason;
+  const finishReason = record.finishReason ?? responseFinishReason;
+  const toolCallCount = record.toolCallCount ?? response.toolCalls?.length;
   const promptText = messages
     .map((message) => `[${message.role}] ${message.content}`)
     .join("\n\n---\n\n");
@@ -62,9 +76,11 @@ export async function recordModelCall(record: ModelCallRecord, messages: Array<{
         ...(ctx.traceId ? { traceId: ctx.traceId } : {}),
       },
       metadata: {
-        source: ctx.source,
+        source,
+        profile,
+        legacyRole: legacyRole ?? null,
+        role: legacyRole ?? record.role,
         callId: ctx.callId,
-        role: record.role,
         provider: record.provider,
         model: record.model,
         maxTokens: record.maxTokens ?? null,
@@ -73,13 +89,16 @@ export async function recordModelCall(record: ModelCallRecord, messages: Array<{
         endedAt: record.endedAt,
         durationMs: record.durationMs,
         promptChars: record.promptChars,
+        systemChars: systemChars ?? null,
         responseChars: record.responseChars,
         responseContentChars: record.responseContentChars,
-        responseFinishReason: record.responseFinishReason ?? null,
+        finishReason: finishReason ?? null,
+        responseFinishReason: responseFinishReason ?? null,
         truncated: record.truncated,
         attempt: record.attempt,
+        toolCallCount: toolCallCount ?? null,
         usage: record.usage,
-        callSiteSource: record.source ?? null,
+        callSiteSource: ctx.source ?? null,
       },
       input: {
         prompt: promptText,

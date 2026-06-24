@@ -2,7 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { mapGenerateRequestToLiteLLM } from "../../src/model/providers/parameter-mapper.js";
-import type { ResolvedModelProfile } from "../../src/model/types.js";
+import {
+  displayModelProfile,
+  getModelProfileName,
+  profileFromLegacyRole,
+  resolveModelRoleAlias,
+  type ResolvedModelProfile,
+} from "../../src/model/types.js";
 
 test("prompt cache can be enabled explicitly for stable prompt prefixes", () => {
   const payload = mapGenerateRequestToLiteLLM(
@@ -64,6 +70,22 @@ test("Azure OpenAI v1 payload keeps model because endpoint is OpenAI-compatible"
   assert.equal("model" in payload, true);
   assert.equal((payload as { model?: string }).model, "model");
   assert.equal(payload.messages[0]?.content, "hello");
+});
+
+test("model profile naming aliases map legacy roles to tier labels", () => {
+  assert.equal(getModelProfileName("main_reasoner"), "strong_model");
+  assert.equal(getModelProfileName("fast_reasoner"), "fast_model");
+  assert.equal(getModelProfileName("judge"), "judge");
+  assert.equal(profileFromLegacyRole("main_reasoner"), "strong_model");
+  assert.equal(displayModelProfile("strong_model"), "strong_model");
+  assert.equal(displayModelProfile("custom_profile"), "custom_profile");
+});
+
+test("model role alias helper resolves strong/fast profile names", () => {
+  assert.equal(resolveModelRoleAlias("strong_model"), "main_reasoner");
+  assert.equal(resolveModelRoleAlias("fast_model"), "fast_reasoner");
+  assert.equal(resolveModelRoleAlias("main_reasoner"), "main_reasoner");
+  assert.equal(resolveModelRoleAlias("unknown_profile"), undefined);
 });
 
 function profile(provider: string, promptCache?: { enabled: boolean; minContentChars?: number }): ResolvedModelProfile {

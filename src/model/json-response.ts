@@ -1,4 +1,4 @@
-import type { GenerateResult, ModelGateway, ModelRole, StreamEvent, TokenUsage } from "./types.js";
+import { getLegacyModelRole, getModelProfileName, type GenerateResult, type ModelGateway, type ModelRole, type StreamEvent, type TokenUsage } from "./types.js";
 import { jsonrepair } from "jsonrepair";
 import {
   classifyStructuredResponseShape,
@@ -81,6 +81,7 @@ async function streamStructuredJsonInQueue<T>(input: {
   modelGateway: ModelGateway;
   hooks?: Hooks;
   role: ModelRole;
+  source?: string;
   system?: string;
   messages: Array<{ role: string; content: string }>;
   parse: (value: unknown) => T;
@@ -243,6 +244,7 @@ async function streamStructuredJsonInQueue<T>(input: {
   return generateStructuredJsonInQueue({
     modelGateway: input.modelGateway,
     role: input.role,
+    ...(input.source !== undefined ? { source: input.source } : {}),
     ...(input.system !== undefined ? { system: input.system } : {}),
     messages: input.messages,
     parse: input.parse,
@@ -391,10 +393,13 @@ async function generateStructuredJsonInQueue<T>(input: {
     const callEndedAt = new Date().toISOString();
     const callDurationMs = Date.now() - callStartedHr;
     const promptChars = input.messages.reduce((acc, m) => acc + (m.content?.length ?? 0), 0);
+    const legacyRole = getLegacyModelRole(input.role);
     await recordModelCall(
       {
         role: input.role,
         ...(input.source !== undefined ? { source: input.source } : {}),
+        profile: getModelProfileName(input.role),
+        ...(legacyRole !== undefined ? { legacyRole } : {}),
         provider: profile.provider,
         model: profile.model,
         maxTokens: input.maxTokens,
@@ -405,9 +410,12 @@ async function generateStructuredJsonInQueue<T>(input: {
         promptChars,
         responseChars: response.content.length,
         responseContentChars: response.content.length,
+        ...(response.finishReason !== undefined ? { finishReason: response.finishReason } : {}),
         responseFinishReason: response.finishReason,
         truncated: response.finishReason === "length",
         attempt: attemptIndex,
+        ...(input.system !== undefined ? { systemChars: input.system.length } : {}),
+        ...(response.toolCalls !== undefined ? { toolCallCount: response.toolCalls.length } : {}),
         usage: response.usage
           ? {
               inputTokens: response.usage.inputTokens,
@@ -416,7 +424,11 @@ async function generateStructuredJsonInQueue<T>(input: {
           : null,
       },
       withJsonOnlyInstruction(input.messages, mode),
-      { content: response.content, ...(response.finishReason !== undefined ? { finishReason: response.finishReason } : {}) },
+      {
+        content: response.content,
+        ...(response.finishReason !== undefined ? { finishReason: response.finishReason } : {}),
+        ...(response.toolCalls !== undefined ? { toolCalls: response.toolCalls } : {}),
+      },
     );
     // Phase T2.7: report per-call usage to the engine's tracker (if
     // wired). Best-effort — providers that don't surface usage get a
