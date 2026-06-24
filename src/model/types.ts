@@ -13,6 +13,49 @@ export const modelRoleValues = [
 
 export const ModelRoleSchema = z.enum(modelRoleValues);
 export type ModelRole = z.infer<typeof ModelRoleSchema>;
+export const modelProfileAliases = {
+  main_reasoner: "strong_model",
+  fast_reasoner: "fast_model",
+} as const satisfies Partial<Record<ModelRole, string>>;
+
+const modelProfileAliasToRole = Object.fromEntries(
+  Object.entries(modelProfileAliases).map(([role, alias]) => [alias, role]),
+) as Record<(typeof modelProfileAliases)[keyof typeof modelProfileAliases], keyof typeof modelProfileAliases>;
+
+export function getModelProfileName(role: ModelRole): string {
+  return (modelProfileAliases as Partial<Record<ModelRole, string>>)[role] ?? role;
+}
+
+export function displayModelProfile(roleOrProfile: string): string {
+  const role = resolveModelRoleAlias(roleOrProfile);
+  return role ? getModelProfileName(role) : roleOrProfile;
+}
+
+export function profileFromLegacyRole(roleOrProfile: string): string {
+  return displayModelProfile(roleOrProfile);
+}
+
+export function getLegacyModelRole(roleOrAlias: string): ModelRole | undefined {
+  if (Object.prototype.hasOwnProperty.call(modelProfileAliases, roleOrAlias)) {
+    return roleOrAlias as ModelRole;
+  }
+  if (Object.prototype.hasOwnProperty.call(modelProfileAliasToRole, roleOrAlias)) {
+    return modelProfileAliasToRole[roleOrAlias as keyof typeof modelProfileAliasToRole];
+  }
+  return undefined;
+}
+
+export function resolveModelRoleAlias(roleOrAlias: string): ModelRole | undefined {
+  if ((modelRoleValues as readonly string[]).includes(roleOrAlias)) {
+    return roleOrAlias as ModelRole;
+  }
+  return getLegacyModelRole(roleOrAlias);
+}
+
+export const ModelRoleInputSchema = z.preprocess(
+  (value) => (typeof value === "string" ? resolveModelRoleAlias(value) ?? value : value),
+  ModelRoleSchema,
+);
 
 export const ModelCapabilitiesSchema = z
   .object({
@@ -36,7 +79,7 @@ export const ModelProfileSchema = z
     apiKeyEnv: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).optional(),
     timeoutMs: z.number().int().nonnegative().optional(),
     maxRetries: z.number().int().min(0).optional(),
-    fallbackProfile: ModelRoleSchema.optional(),
+    fallbackProfile: ModelRoleInputSchema.optional(),
     capabilities: ModelCapabilitiesSchema,
     defaultParams: z
       .object({

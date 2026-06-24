@@ -3,9 +3,11 @@ import { z } from "zod";
 import { ConnectionPoliciesSchema } from "../connection/policies.js";
 import {
   ModelCapabilitiesSchema,
+  ModelRoleInputSchema,
   ModelProfileSchema,
   ModelRoleSchema,
   modelRoleValues,
+  resolveModelRoleAlias,
   type ModelProfile,
   type ModelRole,
   type ResolvedModelProfile,
@@ -184,13 +186,13 @@ export const VerificationGateConfigSchema = z
 
 export const ModelRoutingConfigSchema = z
   .object({
-    planner: ModelRoleSchema.default("main_reasoner"),
-    executor: ModelRoleSchema.default("fast_reasoner"),
-    repair: ModelRoleSchema.default("main_reasoner"),
-    patcher: ModelRoleSchema.default("fast_reasoner"),
-    completionGate: ModelRoleSchema.default("fast_reasoner"),
-    summarizer: ModelRoleSchema.default("fast_reasoner"),
-    judge: ModelRoleSchema.default("judge"),
+    planner: ModelRoleInputSchema.default("main_reasoner"),
+    executor: ModelRoleInputSchema.default("fast_reasoner"),
+    repair: ModelRoleInputSchema.default("main_reasoner"),
+    patcher: ModelRoleInputSchema.default("fast_reasoner"),
+    completionGate: ModelRoleInputSchema.default("fast_reasoner"),
+    summarizer: ModelRoleInputSchema.default("fast_reasoner"),
+    judge: ModelRoleInputSchema.default("judge"),
   })
   .strict()
   .optional()
@@ -268,5 +270,9 @@ export function parseModelCapabilities(input: unknown) {
 }
 
 export function parseModelRole(input: unknown) {
+  if (typeof input === "string") {
+    const resolved = resolveModelRoleAlias(input);
+    if (resolved) return resolved;
+  }
   return ModelRoleSchema.parse(input);
 }
