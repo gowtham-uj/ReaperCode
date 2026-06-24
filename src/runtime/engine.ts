@@ -770,17 +770,8 @@ export class RuntimeEngine {
         source: "simple_executor",
         content: rawAssistantMessage,
       });
-      const textualCompletion = result.tool_calls.length === 0 && isClearTextualCompletion(rawAssistantMessage) && !getCompletionBlocker(state.toolResults, getBoot().state.runId, state.prompt, this.config);
-      const assistantMessage = getCompletionSummary(result.tool_calls) || textualCompletion ? rawAssistantMessage : "";
-      const plannedToolCalls = textualCompletion
-        ? [
-            {
-              id: `complete-${randomUUID()}`,
-              name: "complete_task",
-              args: { summary: rawAssistantMessage || "Task complete." },
-            } satisfies ToolCall,
-          ]
-        : result.tool_calls;
+      const assistantMessage = getCompletionSummary(result.tool_calls) ? rawAssistantMessage : "";
+      const plannedToolCalls = result.tool_calls;
       const messageEvent = assistantMessage ? [makeEvent(getRequest(), "assistant_message", { content: assistantMessage })] : [];
       return {
         plannedToolCalls,
@@ -3579,13 +3570,6 @@ function isActionableDiagnosticPath(filePath: string): boolean {
   if (/\.(?:mdf|bin|dat|csv|tsv|png|jpe?g|gif|webp|pdf|zip|gz|tar|7z|mp[34]|wav|ogg)$/i.test(normalized)) return false;
   if (!normalized.includes("/") && !isSourceLikePath(normalized) && !isProjectConfigPath(normalized)) return false;
   return isSourceLikePath(normalized) || isProjectConfigPath(normalized) || /\.(?:json|ya?ml|toml|ini|cfg|conf|txt|md)$/i.test(normalized);
-}
-
-function isClearTextualCompletion(message: string): boolean {
-  const text = message.trim();
-  if (!text) return false;
-  if (/(?:need to|should|must|will|next|todo|remaining|failed|error|blocked|not complete)/i.test(text)) return false;
-  return /(?:task is complete|task complete|completed successfully|successfully completed|done\.?$|verified .* correct|verified .* contain|verified .* result|has been .* saved|saved .* verified|calculated .* saved)/i.test(text);
 }
 
 function renderCompilerDiagnosticGuidance(toolResults: ToolResult[]): string {
