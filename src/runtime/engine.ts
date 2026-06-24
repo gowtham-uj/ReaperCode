@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { cp, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -55,9 +55,10 @@ import { pushModelCallContext } from "../model/observability.js";
 import { appendFailureMemory, loadRecentFailureMemory } from "../recovery/failure-memory.js";
 import { commitVerifiedRunKnowledge, loadVerifiedLessons } from "../recovery/verified-memory.js";
 import { RecoverySession } from "../recovery/session.js";
-import { ToolExecutor } from "../tools/executor.js";
-import type { AuthoringToolDeps, ShellRunner } from "../tools/executor.js";
-import type { Hooks } from "../adaptive/hooks.js";
+import {ToolExecutor} from "../tools/executor.js";
+import type {AuthoringToolDeps, ShellRunner} from "../tools/executor.js";
+import type {Hooks} from "../adaptive/hooks.js";
+import {SubagentPool} from "./subagent-pool.js";
 import {
   extractFilePathsFromFailure,
   inferFilesHintFromResults,
@@ -329,6 +330,8 @@ type GraphState = {
   readOnlyBatchSignatures: string[];
   needsReplan: boolean;
   done: boolean;
+  /** Structured advisory results from background subagents that have completed since the last turn. */
+  backgroundSubagentResults?: BackgroundSubagentResult[];
 };
 
 const ReaperGraphState = Annotation.Root({
@@ -407,9 +410,84 @@ const ReaperGraphState = Annotation.Root({
   }),
   needsReplan: Annotation<boolean>(),
   done: Annotation<boolean>(),
+  backgroundSubagentResults: Annotation<BackgroundSubagentResult[] | undefined>(),
 });
 
 type ModelRouteName = keyof ReaperConfig["modelRouting"];
+
+type BackgroundSubagentResult = {
+  jobId: string;
+  type: string;
+  status: string;
+  result?: unknown;
+  error?: string;
+  stale: boolean;
+  staleReason?: string;
+};
+
+async function injectBackgroundSubagentResults(
+  _state: GraphState,
+  pool: SubagentPool,
+): Promise<{ results: BackgroundSubagentResult[]; blockers: RuntimeBlocker[] }> {
+  const completed = pool.flushCompleted();
+  const results: BackgroundSubagentResult[] = [];
+  const blockers: RuntimeBlocker[] = [];
+
+  for (const job of completed) {
+    if (job.injected) continue;
+    job.injected = true;
+
+    let stale = false;
+    let staleReason: string | undefined;
+    try {
+      const snapshot = await computeFileSnapshot(job.observedFiles ?? []);
+      if (job.baseFilesSnapshot && snapshot !== job.baseFilesSnapshot) {
+        stale = true;
+        staleReason = `Observed files changed since subagent '${job.id}' started; result may be stale.`;
+      }
+    } catch {
+      // If we cannot read the files, treat as stale as a conservative default.
+      stale = true;
+      staleReason = `Unable to verify observed files for subagent '${job.id}'; result treated as stale.`;
+    }
+    results.push({
+      jobId: job.id,
+      type: job.type,
+      status: job.status,
+      stale,
+      ...(job.result !== undefined ? { result: job.result } : {}),
+      ...(job.error !== undefined ? { error: job.error } : {}),
+      ...(staleReason !== undefined ? { staleReason } : {}),
+    });
+    if (stale) {
+      blockers.push({
+        source: "runtime",
+        code: "subagent_result_stale",
+        message: staleReason ?? "Subagent result is stale.",
+        ...(staleReason !== undefined ? { details: [staleReason] } : {}),
+      });
+    }
+  }
+
+  return { results, blockers };
+}
+
+async function computeFileSnapshot(filePaths: string[]): Promise<string> {
+  const hash = createHash("sha256");
+  const sorted = [...filePaths].sort();
+  for (const filePath of sorted) {
+    try {
+      const content = await readFile(filePath);
+      hash.update(content);
+    } catch {
+      hash.update(`__missing__${filePath}`);
+    }
+  }
+  if (sorted.length === 0) {
+    hash.update("__empty__");
+  }
+  return hash.digest("hex");
+}
 
 function modelRoute(config: ReaperConfig, route: ModelRouteName): ModelRole {
   return config.modelRouting[route];
@@ -546,6 +624,7 @@ export class RuntimeEngine {
     let executor: ToolExecutor | undefined;
     let auditLogger: AuditLogger | undefined;
     let mcpRegistry: MergedToolRegistry | undefined;
+    let subagentPool: SubagentPool | undefined;
 
     const getRequest = () => {
       if (!request) throw new Error("LangGraph runtime request was not bootstrapped");
@@ -605,6 +684,13 @@ export class RuntimeEngine {
           });
         }
       }
+      if (this.input.modelGateway) {
+        subagentPool = await SubagentPool.create({
+          config: this.config,
+          workspaceRoot: this.input.workspaceRoot,
+          runDir: runContext.runDir,
+        });
+      }
       executor = new ToolExecutor({
         workspaceRoot: this.input.workspaceRoot,
         runId: boot.state.runId,
@@ -616,6 +702,7 @@ export class RuntimeEngine {
         recoverySession,
         config: this.config,
         ...(this.input.modelGateway ? { modelGateway: this.input.modelGateway } : {}),
+        subagentPool,
         trajectoryLogger: this.trajectoryLogger,
         auditLogger,
         runDir: runContext.runDir,
@@ -778,6 +865,16 @@ export class RuntimeEngine {
     };
 
     const mainAgentNode = async (state: GraphState) => {
+      if (subagentPool) {
+        const injection = await injectBackgroundSubagentResults(state, subagentPool);
+        if (injection.results.length) {
+          state.backgroundSubagentResults = injection.results;
+        }
+        if (injection.blockers.length) {
+          state.runtimeBlockers = [...state.runtimeBlockers, ...injection.blockers];
+        }
+      }
+
       if (!this.input.modelGateway || !state.contentPrep) return {};
       const system = buildMainAgentSystemPrompt(state);
       const cockpit = buildMainAgentCockpit(
@@ -2820,9 +2917,15 @@ export class RuntimeEngine {
     // Register scoped cleanup for this run
     const executorInstance = executor;
     const mcpRegistryInstance = mcpRegistry;
+    const subagentPoolInstance = subagentPool;
     const unregisterExecutorCleanup = executorInstance
       ? registerCleanup(async () => {
           await executorInstance.cleanupBackgroundProcesses("runtime_finished");
+        })
+      : undefined;
+    const unregisterSubagentCleanup = subagentPoolInstance
+      ? registerCleanup(async () => {
+          await subagentPoolInstance.close();
         })
       : undefined;
     const unregisterMcpCleanup = mcpRegistryInstance
@@ -2884,6 +2987,7 @@ export class RuntimeEngine {
       throw error;
     } finally {
       unregisterExecutorCleanup?.();
+      unregisterSubagentCleanup?.();
       unregisterMcpCleanup?.();
       await runCleanupFunctions();
       await writeLatestRunPointer(this.input.workspaceRoot, runContext);

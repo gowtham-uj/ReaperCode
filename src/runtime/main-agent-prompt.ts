@@ -62,7 +62,7 @@ export function buildMainAgentCockpit(
     "Recent Tool Results": pickFirst(stateRecord, ["recentToolResults", "toolResults"]),
     "Runtime Blockers": pickFirst(stateRecord, ["runtimeBlockers", "blockers", "feedback"]),
     "Running Subagents": pickFirst(stateRecord, ["runningSubagents", "activeSubagents"]),
-    "Completed Subagent Results": pickFirst(stateRecord, ["completedSubagentResults", "subagentResults"]),
+    "Completed Subagent Results": pickFirst(stateRecord, ["completedSubagentResults", "backgroundSubagentResults", "subagentResults"]),
     "Verification State": verificationState,
     Budget: budgetState,
     "Available Tools": renderAvailableTools(options.availableTools),
