@@ -62,6 +62,12 @@ const providerDefaults: Record<string, ProviderDefaults> = {
     pathStyle: "openai",
     modelTransform: (model) => model,
   },
+  minimax: {
+    apiBase: "https://api.minimax.io/v1",
+    authHeader: "authorization",
+    pathStyle: "openai",
+    modelTransform: (model) => model,
+  },
   azure: {
     apiBase: process.env.AZURE_OPENAI_BASE_URL ?? "",
     authHeader: "api-key",

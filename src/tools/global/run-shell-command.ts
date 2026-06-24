@@ -994,6 +994,8 @@ function targetedNpmTestWithoutForwarding(
   const parsed = parseLeadingCdAndRest(workspaceRoot, workingDirectory, cmd);
   const match = parsed.rest.match(/^npm\s+(?:test|t)(?:\s+)(?!--)(\S+)/i);
   if (!match) return undefined;
+  const firstExtra = match[1] ?? "";
+  if (/^(?:\d?>|\d?>&\d+|&>|>)/.test(firstExtra)) return undefined;
   if (!existsSync(path.join(parsed.cwd, "package.json"))) return undefined;
   return parsed;
 }

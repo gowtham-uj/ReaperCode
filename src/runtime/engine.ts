@@ -168,6 +168,7 @@ export interface RuntimeEngineInput {
   abortSignal?: AbortSignal;
   middlewares?: Array<MiddlewareDefinition<unknown>>;
   shellRunner?: ShellRunner;
+  hooks?: Hooks;
 }
 
 export interface RuntimeEngineResult {
@@ -204,6 +205,69 @@ export interface SplitToolCalls {
   completionSignal?: Extract<ToolCall, { name: "complete_task" }>;
   advancementSignal?: Extract<ToolCall, { name: "advance_step" }>;
   patchRequestSignal?: Extract<ToolCall, { name: "request_patch" }>;
+}
+
+function buildMainAgentModelTools(): Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> {
+  return [
+    {
+      name: "read_file",
+      description: "Read a text file from the workspace by relative path.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          startLine: { type: "number" },
+          endLine: { type: "number" },
+        },
+        required: ["path"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "replace_in_file",
+      description: "Replace an exact string in a workspace file.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          oldString: { type: "string" },
+          newString: { type: "string" },
+        },
+        required: ["path", "oldString", "newString"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "run_shell_command",
+      description: "Run a shell command in the workspace, usually for tests or verification.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          cmd: { type: "string" },
+          timeoutMs: { type: "number" },
+        },
+        required: ["cmd"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "git_status",
+      description: "Inspect current git status.",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    },
+    {
+      name: "complete_task",
+      description: "Mark the task complete after implementation and verification evidence. Use this immediately after relevant tests/verification pass.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          summary: { type: "string" },
+        },
+        required: ["summary"],
+        additionalProperties: false,
+      },
+    },
+  ];
 }
 
 export interface ExecutionPlanStep {
@@ -884,6 +948,7 @@ export class RuntimeEngine {
           role: modelRoute(this.config, "mainAgent"),
           system,
           cockpit,
+          tools: buildMainAgentModelTools(),
           maxTokens: 8192,
         });
         await logModelResponseTrace({
@@ -919,6 +984,17 @@ export class RuntimeEngine {
         } satisfies Partial<GraphState>;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        await this.trajectoryLogger.write({
+          event_id: randomUUID(),
+          run_id: getBoot().state.runId,
+          session_id: getBoot().state.sessionId,
+          trace_id: getBoot().state.runId,
+          timestamp: new Date().toISOString(),
+          log_schema_version: 1,
+          kind: "assistant_message",
+          level: getBoot().state.logLevel,
+          content: `[main_agent_schema_error] ${message}`,
+        });
         const blocker: RuntimeBlocker = {
           source: "schema",
           code: "main_agent_schema_error",

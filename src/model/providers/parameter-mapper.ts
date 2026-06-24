@@ -15,9 +15,9 @@ export function mapGenerateRequestToLiteLLM(request: GenerateRequest, profile: R
     max_tokens: request.maxTokens ?? profile.defaultParams?.maxTokens ?? 8192,
     top_p: profile.defaultParams?.topP,
     stop: profile.defaultParams?.stop,
-    tools: request.tools,
+    tools: normalizeOpenAiTools(request.tools),
     stream: false,
-    response_format: request.responseFormat === "json" ? { type: "json_object" } : undefined,
+    response_format: request.responseFormat === "json" && !request.tools?.length ? { type: "json_object" } : undefined,
   };
 
   if (resolveProviderDefaults(profile).pathStyle === "azure-openai" && !usesAzureOpenAiV1(profile)) {
@@ -33,6 +33,29 @@ export function mapStreamRequestToLiteLLM(request: GenerateRequest, profile: Res
     ...mapGenerateRequestToLiteLLM(request, profile),
     stream: true,
   };
+}
+
+function normalizeOpenAiTools(tools: unknown[] | undefined): unknown[] | undefined {
+  if (!tools?.length) return undefined;
+  return tools.map((tool) => {
+    if (!tool || typeof tool !== "object") return tool;
+    const record = tool as Record<string, unknown>;
+    if (record.type === "function" && record.function && typeof record.function === "object") {
+      return tool;
+    }
+    const name = typeof record.name === "string" ? record.name : undefined;
+    if (!name) return tool;
+    const description = typeof record.description === "string" ? record.description : undefined;
+    const parameters = record.parameters ?? record.inputSchema ?? record.input_schema ?? { type: "object", properties: {} };
+    return {
+      type: "function",
+      function: {
+        name,
+        ...(description ? { description } : {}),
+        parameters,
+      },
+    };
+  });
 }
 
 function applyPromptCacheControls(
