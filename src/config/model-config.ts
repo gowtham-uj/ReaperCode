@@ -186,6 +186,7 @@ export const VerificationGateConfigSchema = z
 
 export const ModelRoutingConfigSchema = z
   .object({
+    mainAgent: ModelRoleInputSchema.default("strong_model"),
     planner: ModelRoleInputSchema.default("main_reasoner"),
     executor: ModelRoleInputSchema.default("fast_reasoner"),
     repair: ModelRoleInputSchema.default("main_reasoner"),
@@ -197,6 +198,7 @@ export const ModelRoutingConfigSchema = z
   .strict()
   .optional()
   .default({
+    mainAgent: "strong_model",
     planner: "main_reasoner",
     executor: "fast_reasoner",
     repair: "main_reasoner",

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   assertRoleCapabilities,
+  parseModelRole,
   parseReaperConfig,
   resolveModelRole,
 } from "../../src/config/model-config.js";
@@ -139,6 +140,7 @@ test("defaults phase 6 model routing roles", () => {
     models: createValidConfig().models,
   });
 
+  assert.equal(parsed.modelRouting.mainAgent, "main_reasoner");
   assert.equal(parsed.modelRouting.planner, "main_reasoner");
   assert.equal(parsed.modelRouting.executor, "fast_reasoner");
   assert.equal(parsed.modelRouting.repair, "main_reasoner");
@@ -146,6 +148,18 @@ test("defaults phase 6 model routing roles", () => {
   assert.equal(parsed.modelRouting.completionGate, "fast_reasoner");
   assert.equal(parsed.modelRouting.summarizer, "fast_reasoner");
   assert.equal(parsed.modelRouting.judge, "judge");
+});
+
+test("accepts main-agent model routing aliases", () => {
+  const parsed = parseReaperConfig({
+    models: createValidConfig().models,
+    modelRouting: {
+      mainAgent: "main_agent",
+    },
+  });
+
+  assert.equal(parsed.modelRouting.mainAgent, "main_reasoner");
+  assert.equal(parseModelRole("main_agent"), "main_reasoner");
 });
 
 test("rejects unknown phase 6 model routing roles", () => {

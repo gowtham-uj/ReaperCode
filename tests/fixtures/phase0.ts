@@ -79,6 +79,7 @@ export function createValidConfig(): ReaperConfig {
       executionConsensusRanking: true,
     },
     modelRouting: {
+      mainAgent: "main_reasoner",
       planner: "main_reasoner",
       executor: "fast_reasoner",
       repair: "main_reasoner",
