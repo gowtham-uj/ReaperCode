@@ -121,6 +121,17 @@ import { collectWorkspaceDiff, runFreshContextDiffReview } from "../verify/diff-
 import { getContractCoverageBlocker, renderContractCoverageMatrix } from "../verify/contract-coverage.js";
 import { getArtifactObligationBlocker, renderArtifactObligationLedger } from "./artifact-obligations.js";
 import { buildRescueHypothesisLedger, renderRescueHypothesisLedger } from "./hypothesis-ledger.js";
+import { callMainAgent } from "./main-agent-node.js";
+import { buildMainAgentCockpit, buildMainAgentSystemPrompt } from "./main-agent-prompt.js";
+import { validateToolCallBatch, type ToolValidationBlocker } from "./tool-validation.js";
+import { validateStrictCompletion, type CompletionValidationBlocker } from "./completion-validation.js";
+import { extractTaskContract, renderTaskContractForCockpit, type TaskContract } from "./task-contract.js";
+import {
+  createVerificationState,
+  recordVerificationCheck,
+  renderVerificationStateForCockpit,
+  type VerificationState,
+} from "./verification-state.js";
 import {
   buildSyntheticPatchRequestSignal,
   createRescueWatchdogState,
@@ -260,12 +271,23 @@ interface RuntimeDeadlinePressure {
 type GraphMode = "explicit_tools" | "needs_model" | "autonomous";
 type OrchestrationMode = "simple_executor" | "complex_orchestrator";
 
+type RuntimeBlocker = {
+  source: "progress_guard" | "verification" | "schema" | "tool_validation" | "completion_validation" | "runtime";
+  code: string;
+  message: string;
+  details?: string[];
+};
+
 type GraphState = {
   request?: AgentRequestEnvelope;
   boot?: Phase0BootstrapResult;
   prompt: string;
   mode?: GraphMode;
   orchestrationMode?: OrchestrationMode;
+  repoInspection?: RepoInspection;
+  taskContract?: TaskContract;
+  verificationState?: VerificationState;
+  runtimeBlockers: RuntimeBlocker[];
   shouldCompact: boolean;
   contentPrep?: ContentPrepResult;
   executionPlan?: ExecutionPlanStep[];
@@ -302,6 +324,13 @@ const ReaperGraphState = Annotation.Root({
   prompt: Annotation<string>(),
   mode: Annotation<GraphMode | undefined>(),
   orchestrationMode: Annotation<OrchestrationMode | undefined>(),
+  repoInspection: Annotation<RepoInspection | undefined>(),
+  taskContract: Annotation<TaskContract | undefined>(),
+  verificationState: Annotation<VerificationState | undefined>(),
+  runtimeBlockers: Annotation<RuntimeBlocker[]>({
+    reducer: (_left, right) => right,
+    default: () => [],
+  }),
   shouldCompact: Annotation<boolean>(),
   contentPrep: Annotation<ContentPrepResult | undefined>(),
   executionPlan: Annotation<ExecutionPlanStep[] | undefined>(),
@@ -363,6 +392,24 @@ type ModelRouteName = keyof ReaperConfig["modelRouting"];
 
 function modelRoute(config: ReaperConfig, route: ModelRouteName): ModelRole {
   return config.modelRouting[route];
+}
+
+function runtimeBlockerFromToolValidation(blocker: ToolValidationBlocker): RuntimeBlocker {
+  return {
+    source: blocker.code === "tool_schema_error" ? "schema" : "tool_validation",
+    code: blocker.code,
+    message: blocker.message,
+    ...(blocker.details?.length ? { details: blocker.details } : {}),
+  };
+}
+
+function runtimeBlockerFromCompletionValidation(blocker: CompletionValidationBlocker): RuntimeBlocker {
+  return {
+    source: "completion_validation",
+    code: blocker.code,
+    message: blocker.message,
+    ...(blocker.details?.length ? { details: blocker.details } : {}),
+  };
 }
 
 export class RuntimeEngine {
@@ -601,9 +648,11 @@ export class RuntimeEngine {
         boot,
         prompt,
         mode,
+        ...(repoInspection ? { repoInspection } : {}),
         toolResults: [],
         events: [],
         assistantMessage: "",
+        runtimeBlockers: [],
         feedback: initialFeedback,
         negativeConstraints: [],
         iteration: 0,
@@ -624,6 +673,41 @@ export class RuntimeEngine {
         needsReplan: false,
         done: false,
       } satisfies Partial<GraphState>;
+    };
+
+    const inspectProjectNode = async (state: GraphState) => {
+      const repoInspection = state.repoInspection ?? getBoot().state.repoInspection;
+      await this.trajectoryLogger.write({
+        event_id: randomUUID(),
+        run_id: getBoot().state.runId,
+        session_id: getBoot().state.sessionId,
+        trace_id: getBoot().state.runId,
+        timestamp: new Date().toISOString(),
+        log_schema_version: 1,
+        kind: "state_transition",
+        level: getBoot().state.logLevel,
+        from_step: "Bootstrap",
+        to_step: "Inspect Project",
+      });
+      return repoInspection ? { repoInspection } satisfies Partial<GraphState> : {};
+    };
+
+    const extractTaskContractNode = async (state: GraphState) => {
+      const taskContract = extractTaskContract(state.prompt, state.repoInspection);
+      const verificationState = createVerificationState(taskContract.likelyValidation);
+      await this.trajectoryLogger.write({
+        event_id: randomUUID(),
+        run_id: getBoot().state.runId,
+        session_id: getBoot().state.sessionId,
+        trace_id: getBoot().state.runId,
+        timestamp: new Date().toISOString(),
+        log_schema_version: 1,
+        kind: "state_transition",
+        level: getBoot().state.logLevel,
+        from_step: "Inspect Project",
+        to_step: "Extract Task Contract",
+      });
+      return { taskContract, verificationState } satisfies Partial<GraphState>;
     };
 
     const contentPrepNode = async (state: GraphState) => {
@@ -668,6 +752,193 @@ export class RuntimeEngine {
         orchestrationMode: classifyOrchestrationMode(state.prompt, prepared),
         shouldCompact,
       };
+    };
+
+    const mainAgentNode = async (state: GraphState) => {
+      if (!this.input.modelGateway || !state.contentPrep) return {};
+      const system = buildMainAgentSystemPrompt(state);
+      const cockpit = buildMainAgentCockpit(
+        {
+          ...state,
+          repoInspection: state.repoInspection,
+          taskContract: state.taskContract,
+          verificationState: state.verificationState,
+          runtimeBlockers: state.runtimeBlockers,
+          recentToolResults: state.toolResults.slice(-16).map((result) => renderToolResultForModel(result)),
+          feedback: state.feedback,
+          negativeConstraints: state.negativeConstraints,
+        },
+        getRequest(),
+        state.taskContract ? renderTaskContractForCockpit(state.taskContract) : undefined,
+        state.repoInspection ? renderRepoInspectionForCockpit(state.repoInspection) : undefined,
+        state.verificationState ? renderVerificationStateForCockpit(state.verificationState) : undefined,
+        {
+          iteration: state.iteration,
+          tokenBudget: getBoot().state.tokenBudget,
+          completionGateAttempts: state.completionGateAttempts,
+          runtimeDeadline: getRuntimeDeadlinePressure(startedAt),
+        },
+      );
+
+      await this.trajectoryLogger.write({
+        event_id: randomUUID(),
+        run_id: getBoot().state.runId,
+        session_id: getBoot().state.sessionId,
+        trace_id: getBoot().state.runId,
+        timestamp: new Date().toISOString(),
+        log_schema_version: 1,
+        kind: "state_transition",
+        level: getBoot().state.logLevel,
+        from_step: state.iteration === 0 ? "Content Prep" : "Runtime Blockers",
+        to_step: "Main Agent",
+      });
+
+      try {
+        const result = await callMainAgent({
+          modelGateway: this.input.modelGateway,
+          role: modelRoute(this.config, "mainAgent"),
+          system,
+          cockpit,
+          maxTokens: 8192,
+        });
+        await logModelResponseTrace({
+          trajectoryLogger: this.trajectoryLogger,
+          runId: getBoot().state.runId,
+          sessionId: getBoot().state.sessionId,
+          traceId: getBoot().state.runId,
+          level: getBoot().state.logLevel,
+          source: "main_agent",
+          assistantMessage: result.assistantMessage,
+          toolCalls: result.toolCalls,
+        });
+        await logAssistantMessageTrace({
+          trajectoryLogger: this.trajectoryLogger,
+          runId: getBoot().state.runId,
+          sessionId: getBoot().state.sessionId,
+          traceId: getBoot().state.runId,
+          level: getBoot().state.logLevel,
+          source: "main_agent",
+          content: result.assistantMessage,
+        });
+        return {
+          plannedToolCalls: result.toolCalls,
+          assistantMessage: result.assistantMessage,
+          feedback: result.feedback.length ? [...state.feedback, ...result.feedback] : state.feedback,
+          runtimeBlockers: result.validationBlockers.length
+            ? [
+                ...state.runtimeBlockers,
+                ...result.validationBlockers.map((blocker) => runtimeBlockerFromToolValidation(blocker)),
+              ]
+            : state.runtimeBlockers,
+          iteration: state.iteration + 1,
+        } satisfies Partial<GraphState>;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const blocker: RuntimeBlocker = {
+          source: "schema",
+          code: "main_agent_schema_error",
+          message,
+        };
+        return {
+          plannedToolCalls: [],
+          assistantMessage: message,
+          feedback: [...state.feedback, message],
+          runtimeBlockers: [...state.runtimeBlockers, blocker],
+          completionGateAttempts: state.completionGateAttempts + 1,
+          completionGateExhausted: state.completionGateAttempts + 1 >= this.config.runtime.completionGateMax,
+          iteration: state.iteration + 1,
+        } satisfies Partial<GraphState>;
+      }
+    };
+
+    const validateToolCallsNode = async (state: GraphState) => {
+      const toolCalls = state.plannedToolCalls ?? [];
+      const validation = validateToolCallBatch(toolCalls, {
+        agentRole: "main",
+        validateSchema: (call) => {
+          const spec = toolRegistry[call.name as keyof typeof toolRegistry];
+          if (!spec) return { ok: true };
+          const parsed = spec.argsSchema.safeParse(call.args ?? call.arguments ?? {});
+          return parsed.success ? { ok: true } : { ok: false, details: parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`) };
+        },
+      });
+      if (!validation.ok) {
+        const blockers = validation.blockers.map((blocker) => runtimeBlockerFromToolValidation(blocker));
+        const attempts = state.completionGateAttempts + 1;
+        return {
+          split: { executableToolCalls: [] },
+          plannedToolCalls: [],
+          runtimeBlockers: [...state.runtimeBlockers, ...blockers],
+          feedback: [...state.feedback, ...blockers.map((blocker) => blocker.message)],
+          completionGateAttempts: attempts,
+          completionGateExhausted: attempts >= this.config.runtime.completionGateMax,
+        } satisfies Partial<GraphState>;
+      }
+
+      const split = splitControlToolCalls(toolCalls);
+      const categorized = split.executableToolCalls.map((call) => ({ id: call.id, name: call.name, kind: classifyToolCall(call) }));
+      return {
+        split,
+        runtimeBlockers: [],
+        events: [...state.events, makeEvent(getRequest(), "assistant_delta", { event: "tool_calls_categorized", categorized })],
+      } satisfies Partial<GraphState>;
+    };
+
+    const verifyCompletionNode = async (state: GraphState) => {
+      const completion = state.split?.completionSignal;
+      const validation = validateStrictCompletion({
+        toolCalls: state.plannedToolCalls ?? [],
+        ...(completion ? { completionSignal: completion } : {}),
+        ...(state.taskContract ? { taskContract: state.taskContract } : {}),
+        ...(state.verificationState ? { verificationState: state.verificationState } : {}),
+        toolResults: state.toolResults,
+        requireVerificationLadder: this.config.verification.requireGroundedCompletion || Boolean(completion?.args.verificationContract?.commands?.length),
+      });
+
+      if (validation.ok) {
+        const runtimeCompletionBlocker = getCompletionBlocker(state.toolResults, getBoot().state.runId, state.prompt, this.config);
+        if (runtimeCompletionBlocker) {
+          const blocker: RuntimeBlocker = {
+            source: "completion_validation",
+            code: "runtime_completion_blocker",
+            message: runtimeCompletionBlocker,
+          };
+          const attempts = state.completionGateAttempts + 1;
+          const { completionSignal: _completionSignal, ...splitWithoutCompletion } = state.split ?? { executableToolCalls: [] };
+          return {
+            split: splitWithoutCompletion,
+            plannedToolCalls: [],
+            runtimeBlockers: [...state.runtimeBlockers, blocker],
+            feedback: [
+              ...state.feedback,
+              runtimeCompletionBlocker,
+              "The complete_task signal was rejected because runtime evidence still contains unresolved blockers. Continue with concrete tools, then emit complete_task after new successful evidence.",
+            ],
+            completionGateAttempts: attempts,
+            completionGateExhausted: attempts >= this.config.runtime.completionGateMax,
+          } satisfies Partial<GraphState>;
+        }
+        return {
+          runtimeBlockers: [],
+          completionGateAttempts: 0,
+        } satisfies Partial<GraphState>;
+      }
+
+      const blockers = validation.blockers.map((blocker) => runtimeBlockerFromCompletionValidation(blocker));
+      const attempts = state.completionGateAttempts + 1;
+      const { completionSignal: _completionSignal, ...splitWithoutCompletion } = state.split ?? { executableToolCalls: [] };
+      return {
+        split: splitWithoutCompletion,
+        plannedToolCalls: [],
+        runtimeBlockers: [...state.runtimeBlockers, ...blockers],
+        feedback: [...state.feedback, ...blockers.map((blocker) => blocker.message)],
+        negativeConstraints: [
+          ...state.negativeConstraints,
+          "Do not emit complete_task again until there is new successful evidence for the task contract and verification ladder.",
+        ],
+        completionGateAttempts: attempts,
+        completionGateExhausted: attempts >= this.config.runtime.completionGateMax,
+      } satisfies Partial<GraphState>;
     };
 
     const compactionNode = async (state: GraphState) => {
@@ -2015,6 +2286,38 @@ export class RuntimeEngine {
       if (stepBudgetDecision.tripped && !canAdvancePlanStep && !split?.completionSignal) {
         for (const constraint of stepBudgetDecision.negativeConstraints) addQueuedNegativeConstraint(constraint);
       }
+      const queuedRuntimeBlockers: RuntimeBlocker[] = [];
+      if (completionBlocker) {
+        queuedRuntimeBlockers.push({
+          source: "completion_validation",
+          code: "runtime_completion_blocker",
+          message: completionBlocker,
+        });
+      }
+      if (stuckDetection.tripped) {
+        queuedRuntimeBlockers.push({
+          source: "progress_guard",
+          code: "progress_guard_blocked",
+          message: stuckDetection.reason ?? "Progress guard blocked repeated ineffective tool execution.",
+        });
+      }
+      if (noActionBatch) {
+        queuedRuntimeBlockers.push({
+          source: "runtime",
+          code: "empty_main_agent_batch",
+          message: "The main_agent response produced no executable tool calls and no completion signal.",
+        });
+      }
+      const nextCompletionGateAttempts = queuedRuntimeBlockers.length > 0
+        ? state.completionGateAttempts + 1
+        : canAdvancePlanStep
+          ? 0
+          : Number.isFinite(state.completionGateAttempts)
+            ? state.completionGateAttempts
+            : 0;
+      const blockerAttemptLimit = stuckDetection.tripped
+        ? Math.max(1, this.config.runtime.progressGuard.stallSteps)
+        : this.config.runtime.completionGateMax;
       const forcedAdvanceForBudget =
         stepBudgetDecision.tripped &&
         state.mode === "autonomous" &&
@@ -2059,11 +2362,12 @@ export class RuntimeEngine {
         ...(advancementBlockerResult ? { toolResults: [...state.toolResults, advancementBlockerResult] } : {}),
         lastBatchFailed,
         stuckDetection,
+        runtimeBlockers: queuedRuntimeBlockers.length > 0 ? [...state.runtimeBlockers, ...queuedRuntimeBlockers] : state.runtimeBlockers,
         readOnlyBatchSignatures,
         ...(boundaryPivot || (stepBudgetDecision.tripped && !canAdvancePlanStep && !split?.completionSignal) ? { needsReplan: true } : {}),
         patchAttemptsByStep: nextPatchAttemptsByStep,
-        completionGateAttempts: canAdvancePlanStep ? 0 : Number.isFinite(state.completionGateAttempts) ? state.completionGateAttempts : 0,
-        ...(bestOfNCandidateRejected ? { completionGateExhausted: true } : {}),
+        completionGateAttempts: nextCompletionGateAttempts,
+        ...(bestOfNCandidateRejected || (queuedRuntimeBlockers.length > 0 && nextCompletionGateAttempts >= blockerAttemptLimit) ? { completionGateExhausted: true } : {}),
         ...(queuedNegativeConstraints.length !== state.negativeConstraints.length
           ? { negativeConstraints: queuedNegativeConstraints }
           : {}),
@@ -2214,9 +2518,35 @@ export class RuntimeEngine {
             negativeConstraints: explicitVerification.negativeConstraints ?? [],
           }).catch(() => undefined);
         }
+        const verificationState = explicitVerification.command
+          ? recordVerificationCheck(state.verificationState ?? createVerificationState(), {
+              command: explicitVerification.command,
+              status: explicitVerification.ok ? "passed" : "failed",
+              evidence: [
+                explicitVerification.groundedSignal?.kind ?? "",
+                explicitVerification.groundedSignal?.command ?? "",
+                explicitVerification.selfDebugExplanation ?? "",
+                explicitVerification.diffReviewExplanation ?? "",
+                ...(explicitVerification.feedback ?? []),
+              ].filter(Boolean).join("\n"),
+              verifiedAt: new Date().toISOString(),
+            })
+          : state.verificationState;
+        const verificationBlockers: RuntimeBlocker[] = explicitVerification.ok
+          ? []
+          : [
+              {
+                source: "verification",
+                code: "verification_failed",
+                message: (explicitVerification.feedback ?? []).join("\n") || "Completion verification failed.",
+                ...(explicitVerification.failureClasses ? { details: explicitVerification.failureClasses } : {}),
+              },
+            ];
         return {
           explicitVerification,
+          ...(verificationState ? { verificationState } : {}),
           stuckDetection,
+          runtimeBlockers: explicitVerification.ok ? [] : [...state.runtimeBlockers, ...verificationBlockers],
           feedback: explicitVerification.ok
             ? state.feedback
             : [
@@ -2378,159 +2708,54 @@ export class RuntimeEngine {
     const routeAfterBootstrap = (state: GraphState) => {
       if (state.mode === "needs_model") return "no_model";
       if (state.mode === "explicit_tools") return "categorize_tools";
-      return "content_prep";
+      return "inspect_project";
     };
+    const routeAfterInspectProject = () => "extract_task_contract";
+    const routeAfterExtractTaskContract = () => "content_prep";
     const routeAfterContentPrep = (state: GraphState) => {
-      return state.shouldCompact ? "compaction" : routeAfterCompaction(state);
-    };
-    const routeAfterCompaction = (state: GraphState) => {
       if (state.mode !== "autonomous") return "categorize_tools";
-      if (state.orchestrationMode === "simple_executor" && !state.executionPlan?.length) return "simple_executor";
-      return state.executionPlan?.length ? "dispatch_step" : "plan_autonomous";
+      return "main_agent";
+    };
+    const routeAfterMainAgent = (state: GraphState) => {
+      if (state.completionGateExhausted) return "summarize";
+      const latestBlocker = state.runtimeBlockers.at(-1);
+      if (latestBlocker?.source === "schema" && !(state.plannedToolCalls?.length)) return "main_agent";
+      return "validate_tool_calls";
+    };
+    const routeAfterToolValidation = (state: GraphState) => {
+      if (state.completionGateExhausted) return "summarize";
+      if (state.runtimeBlockers.length > 0 && !(state.plannedToolCalls?.length)) return "main_agent";
+      if (state.split?.completionSignal) return "verify_completion";
+      if ((state.split?.executableToolCalls.length ?? 0) > 0) return "permission_check";
+      return "main_agent";
     };
     const routeAfterQueue = (state: GraphState) => {
       if (state.mode !== "autonomous") return "verify";
       if (state.completionGateExhausted) return "summarize";
       const currentBatchFailed = state.split ? state.lastBatchFailed && hasFailedCurrentBatch(state.split.executableToolCalls, state.toolResults) : state.lastBatchFailed;
-      if (state.split?.completionSignal && !currentBatchFailed) {
-        return shouldRunVerificationForCompletion(getRequest(), state.split.completionSignal, this.config) ? "verify" : "summarize";
-      }
-      const progressGuardStalled =
-        state.stuckDetection.tripped && /progress guard blocked|no-progress loop|no_progress_loop/i.test(state.stuckDetection.reason ?? "");
-      if (state.needsReplan && progressGuardStalled) {
-        const stallSteps = this.config.runtime.progressGuard.stallSteps;
-        return (state.stuckReplanCount ?? 0) + 1 >= stallSteps ? "summarize" : "plan_autonomous";
-      }
-      if (state.needsReplan) {
-        if (state.orchestrationMode === "simple_executor") return "simple_executor";
-        if (hasRepeatedStructuredResponseFallbackFeedback(state.feedback)) return "plan_autonomous";
-        if (state.feedback.slice(-4).some((item) => /Rescue watchdog tripped:/i.test(item))) return "plan_autonomous";
-        return shouldRepairBeforeReplan(state) ? "repair_autonomous" : "plan_autonomous";
-      }
-      const latestFailure = findLatestUnresolvedControlFlowBlockingFailure(state.toolResults);
-      const planLength = state.executionPlan?.length ?? 0;
-      const planRemaining = planLength > 0 && state.currentStepIndex < planLength;
-      if (
-        state.split?.advancementSignal &&
-        !state.split?.completionSignal &&
-        !currentBatchFailed &&
-        latestFailure?.error?.code !== "advance_step_blocked"
-      ) {
-        return "dispatch_step";
-      }
-      if (latestFailure) {
-        if (latestFailure.error?.code === "implementation_read_only_drift_blocked") return "dispatch_step";
-        return state.orchestrationMode === "simple_executor" ? "simple_executor" : "repair_autonomous";
-      }
-      if (state.patchingStepIndex !== null) {
-        const patchStepId = state.executionPlan?.[state.patchingStepIndex]?.id;
-        if (patchStepId && (state.patchAttemptsByStep[patchStepId] ?? 0) >= getMaxPatchAttemptsPerStep()) {
-          return shouldUseSimplifyRecovery(state.toolResults) ? "repair_autonomous" : "plan_autonomous";
-        }
-        if (state.split?.advancementSignal && !currentBatchFailed) return "dispatch_step";
-        if (!state.split?.completionSignal) return "repair_autonomous";
-      }
-      if (!planRemaining && state.split?.advancementSignal && !state.split?.completionSignal && !currentBatchFailed) {
-        return "dispatch_step";
-      }
-	      if (state.stuckDetection.tripped) {
-        if (progressGuardStalled) {
-          const stallSteps = this.config.runtime.progressGuard.stallSteps;
-          return (state.stuckReplanCount ?? 0) + 1 >= stallSteps ? "summarize" : "plan_autonomous";
-        }
-	        if (state.orchestrationMode === "simple_executor") return "simple_executor";
-	        if (shouldRepairBeforeReplan(state)) {
-	          if (/same command already failed|repeated failed action|repeated failed tool pattern|same_state_failed_action_retry_blocked|repeated_failed_action_blocked/i.test(state.stuckDetection.reason ?? "")) {
-	            return "summarize";
-	          }
-	          return "repair_autonomous";
-	        }
-        const reason = state.stuckDetection.reason ?? "";
-        if (/low-information tool pattern/i.test(reason)) {
-	          return (state.stuckReplanCount ?? 0) < 5 ? "plan_autonomous" : "repair_autonomous";
-        }
-        return (state.stuckReplanCount ?? 0) < 5 ? "plan_autonomous" : "repair_autonomous";
-      }
-      if (!planRemaining && currentBatchFailed && state.iteration >= finalStageCompletionGateIteration()) {
-        return "dispatch_step";
-      }
-      if (currentBatchFailed && state.patchingStepIndex !== null) {
-        const patchStepId = state.executionPlan?.[state.patchingStepIndex]?.id;
-        if (patchStepId && (state.patchAttemptsByStep[patchStepId] ?? 0) >= getMaxPatchAttemptsPerStep()) {
-          return shouldRepairBeforeReplan(state) || shouldUseSimplifyRecovery(state.toolResults) ? "repair_autonomous" : "plan_autonomous";
-        }
-        return "repair_autonomous";
-      }
-      if (state.split?.patchRequestSignal) {
-        const stepId = state.split.patchRequestSignal.args.resumeFromStepId ?? state.executionPlan?.[state.currentStepIndex]?.id ?? "current-step";
-        if ((state.patchAttemptsByStep[stepId] ?? 0) >= getMaxPatchAttemptsPerStep() || state.patcherInvocationCount >= getMaxPatchAttemptsPerRun()) {
-          return shouldRepairBeforeReplan(state) || shouldUseSimplifyRecovery(state.toolResults) ? "repair_autonomous" : "plan_autonomous";
-        }
-        return "repair_autonomous";
-      }
-      if (currentBatchFailed) return state.orchestrationMode === "simple_executor" ? "simple_executor" : "repair_autonomous";
-      if (state.split?.advancementSignal) return "dispatch_step";
-      const currentBatchHasSuccessfulVerification =
-        state.split ? hasSuccessfulCurrentBatchVerification(state.split.executableToolCalls, state.toolResults) : false;
-      if (!currentBatchHasSuccessfulVerification && (getPendingStaleWriteReadRepair(state.toolResults) || getPendingFailedExactEditReadRepair(state.toolResults))) {
-        return state.orchestrationMode === "simple_executor" ? "simple_executor" : "repair_autonomous";
-      }
-      if (state.split?.completionSignal) return shouldRunVerificationForCompletion(getRequest(), state.split.completionSignal, this.config) ? "verify" : "summarize";
-      if (getRuntimeDeadlinePressure(startedAt).critical && !state.split?.completionSignal) {
-        return state.orchestrationMode === "simple_executor" ? "simple_executor" : "repair_autonomous";
-      }
-      if (
-        state.split &&
-        state.split.executableToolCalls.length === 0 &&
-        !state.split.advancementSignal &&
-        !state.split.patchRequestSignal &&
-        !state.split.completionSignal
-      ) {
-        const currentStep = state.executionPlan?.[state.currentStepIndex];
-        const completionGateActive = currentStep?.type === "finalize" && currentStep.tool_calls.length === 0 && state.completionGateAttempts > 0;
-        if (!planRemaining || completionGateActive) {
-          return "dispatch_step";
-        }
-        return state.orchestrationMode === "simple_executor" ? "simple_executor" : "repair_autonomous";
-      }
-      if (state.feedback.length > 0 && hasRecentVerificationOrRuntimeFailure(state.toolResults)) {
-        return state.orchestrationMode === "simple_executor" ? "simple_executor" : "repair_autonomous";
-      }
-      if (planRemaining && state.readOnlyBatchSignatures.length >= 3) {
-        return "dispatch_step";
-      }
-      if (state.orchestrationMode === "simple_executor" && !state.split?.completionSignal && state.iteration < 20) {
-        return "simple_executor";
-      }
-      if (state.iteration >= 20 && !planRemaining) return state.orchestrationMode === "simple_executor" ? "simple_executor" : "repair_autonomous";
-      if ((state.executionPlan?.length ?? 0) > state.currentStepIndex) return "dispatch_step";
-      if ((state.executionPlan?.length ?? 0) > 0 && state.currentStepIndex >= (state.executionPlan?.length ?? 0)) return "dispatch_step";
-      return "summarize";
+      if (state.split?.completionSignal && !currentBatchFailed) return "verify_completion";
+      return "main_agent";
+    };
+    const routeAfterCompletionValidation = (state: GraphState) => {
+      if (state.completionGateExhausted) return "summarize";
+      if (state.runtimeBlockers.length > 0 && !state.split?.completionSignal) return "main_agent";
+      return shouldRunVerificationForCompletion(getRequest(), state.split?.completionSignal, this.config) ? "verify" : "summarize";
     };
     const routeAfterVerify = (state: GraphState) => {
       if (state.mode !== "autonomous") return "summarize";
       if (state.explicitVerification?.ok) return "summarize";
-      const verificationRepairLimit = hasExplicitVerificationRequest(getRequest()) ? 300 : 100;
-      if (hasVerificationFailureClass(state.explicitVerification, "no_verification_command") && state.iteration < verificationRepairLimit) {
-        return state.orchestrationMode === "simple_executor" ? "simple_executor" : "repair_autonomous";
-      }
-      if (state.explicitVerification?.ok === false && state.iteration < verificationRepairLimit) {
-        return state.orchestrationMode === "simple_executor" ? "simple_executor" : "repair_autonomous";
-      }
-      if (state.stuckDetection.tripped) return "summarize";
-      if (state.iteration >= 20) return "summarize";
-      if (state.orchestrationMode === "simple_executor") return "simple_executor";
-      return "repair_autonomous";
+      if (state.completionGateExhausted) return "summarize";
+      return "main_agent";
     };
 
     const graph = new StateGraph(ReaperGraphState)
       .addNode("bootstrap", bootstrapNode)
+      .addNode("inspect_project", inspectProjectNode)
+      .addNode("extract_task_contract", extractTaskContractNode)
       .addNode("content_prep", contentPrepNode)
-      .addNode("compaction", compactionNode)
-      .addNode("simple_executor", simpleExecutorNode)
-      .addNode("plan_autonomous", planAutonomousNode)
-      .addNode("dispatch_step", dispatchStepNode)
-      .addNode("repair_autonomous", repairAutonomousNode)
+      .addNode("main_agent", mainAgentNode)
+      .addNode("validate_tool_calls", validateToolCallsNode)
+      .addNode("verify_completion", verifyCompletionNode)
       .addNode("categorize_tools", categorizeToolsNode)
       .addNode("permission_check", permissionCheckNode)
       .addNode("execute_tools", executeToolsNode)
@@ -2540,18 +2765,18 @@ export class RuntimeEngine {
       .addNode("no_model", noModelNode)
       .addNode("metrics", metricsNode)
       .addEdge(START, "bootstrap")
-      .addConditionalEdges("bootstrap", routeAfterBootstrap as any, ["content_prep", "categorize_tools", "no_model"])
-      .addConditionalEdges("content_prep", routeAfterContentPrep as any, ["compaction", "simple_executor", "plan_autonomous", "dispatch_step", "categorize_tools"])
-      .addConditionalEdges("compaction", routeAfterCompaction as any, ["simple_executor", "plan_autonomous", "dispatch_step", "categorize_tools"])
-      .addEdge("simple_executor", "categorize_tools")
-      .addEdge("plan_autonomous", "dispatch_step")
-      .addEdge("dispatch_step", "categorize_tools")
-      .addEdge("repair_autonomous", "categorize_tools")
+      .addConditionalEdges("bootstrap", routeAfterBootstrap as any, ["inspect_project", "categorize_tools", "no_model"])
+      .addConditionalEdges("inspect_project", routeAfterInspectProject as any, ["extract_task_contract"])
+      .addConditionalEdges("extract_task_contract", routeAfterExtractTaskContract as any, ["content_prep"])
+      .addConditionalEdges("content_prep", routeAfterContentPrep as any, ["main_agent", "categorize_tools"])
+      .addConditionalEdges("main_agent", routeAfterMainAgent as any, ["validate_tool_calls", "main_agent", "summarize"])
+      .addConditionalEdges("validate_tool_calls", routeAfterToolValidation as any, ["verify_completion", "permission_check", "main_agent", "summarize"])
       .addEdge("categorize_tools", "permission_check")
       .addEdge("permission_check", "execute_tools")
       .addEdge("execute_tools", "queue_results")
-      .addConditionalEdges("queue_results", routeAfterQueue as any, ["verify", "dispatch_step", "repair_autonomous", "simple_executor", "plan_autonomous", "summarize"])
-      .addConditionalEdges("verify", routeAfterVerify as any, ["summarize", "plan_autonomous", "repair_autonomous", "simple_executor"])
+      .addConditionalEdges("queue_results", routeAfterQueue as any, ["verify_completion", "main_agent", "verify", "summarize"])
+      .addConditionalEdges("verify_completion", routeAfterCompletionValidation as any, ["verify", "main_agent", "summarize"])
+      .addConditionalEdges("verify", routeAfterVerify as any, ["summarize", "main_agent"])
       .addEdge("summarize", "metrics")
       .addEdge("no_model", "metrics")
       .addEdge("metrics", END)
@@ -2578,6 +2803,7 @@ export class RuntimeEngine {
           toolResults: [],
           events: [],
           assistantMessage: "",
+          runtimeBlockers: [],
           feedback: [],
           negativeConstraints: [],
           iteration: 0,
