@@ -6,7 +6,6 @@ export const CONTROL_TOOLS: ReadonlySet<string> = new Set([
   "update_task_contract",
   "update_plan",
   "update_todo",
-  "call_subagent",
   "poll_subagent",
   "cancel_subagent",
   "complete_task",
@@ -34,11 +33,11 @@ export const REQUIRED_EXECUTABLE_TOOLS: ReadonlySet<string> = new Set([
   "run_shell_command",
   "run_test_command",
   "read_test_failure_summary",
+  "call_subagent",
 ]);
 
 export const MUTATING_TOOLS: ReadonlySet<string> = new Set([
   "update_task_contract",
-  "call_subagent",
   "cancel_subagent",
   "create_checkpoint",
   "restore_checkpoint",

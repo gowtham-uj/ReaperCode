@@ -44,6 +44,7 @@ import {
   TaskListArgsSchema,
   UpdatePlanArgsSchema,
   UpdateTodoArgsSchema,
+  CallSubagentArgsSchema,
   SearchToolsArgsSchema,
 } from "./types.js";
 import { AgentArgsSchema } from "./agent.types.js";
@@ -276,6 +277,11 @@ export const toolRegistry = {
     description:
       "Update advisory cockpit TODO memory for this run only. By default replaces the list; append:true upserts the provided items into the current list.",
     argsSchema: UpdateTodoArgsSchema,
+  },
+  call_subagent: {
+    description:
+      "Call a blocking advisory subagent (planner, reviewer, repair, tester, or researcher) and return its JSON result as an observation. Subagents cannot execute tools, mutate files, alter routing, or call subagents.",
+    argsSchema: CallSubagentArgsSchema,
   },
   search_tools: {
     description:

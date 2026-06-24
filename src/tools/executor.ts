@@ -54,6 +54,8 @@ import { classifyServiceLifecycle, type ServiceLifecycleState } from "./service-
 import { BackgroundProcessManager } from "./background-process-manager.js";
 import { createCheckpoint, restoreCheckpoint } from "../runtime/checkpoints.js";
 import { getGitDiffState, getGitStatusState, summarizeGitDiffState } from "../runtime/diff-state.js";
+import type { ModelGateway } from "../model/types.js";
+import { executeSubagentTool } from "./subagent-tools.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -70,6 +72,7 @@ export interface ToolExecutorOptions {
   recoverySession?: RecoverySession;
   mcpRegistry?: MergedToolRegistry;
   config?: ReaperConfig;
+  modelGateway?: ModelGateway;
   runDir?: string;
   artifactsDir?: string;
   shellRunner?: ShellRunner;
@@ -1267,6 +1270,22 @@ export class ToolExecutor {
       case "search_tools": {
         const searchArgs = toolRegistry.search_tools.argsSchema.parse(call.args);
         return executeSearchTools(searchArgs.query, this.options.runId);
+      }
+      case "call_subagent": {
+        if (!this.options.modelGateway) {
+          throw new Error("call_subagent is not configured for this run because no modelGateway was provided.");
+        }
+        const args = toolRegistry.call_subagent.argsSchema.parse(call.args);
+        const result = await executeSubagentTool(args, {
+          modelGateway: this.options.modelGateway,
+          toolCallId: call.id,
+        });
+        if (!result.ok) {
+          const error = new Error(result.error?.message ?? "call_subagent failed") as Error & { code?: string };
+          error.code = result.error?.code ?? "subagent_failed";
+          throw error;
+        }
+        return result.output;
       }
       case "agent": {
         // Model-driven subagent delegation.

@@ -615,6 +615,7 @@ export class RuntimeEngine {
         permissionMode: (process.env.REAPER_PERMISSION_MODE as any) ?? "yolo",
         recoverySession,
         config: this.config,
+        ...(this.input.modelGateway ? { modelGateway: this.input.modelGateway } : {}),
         trajectoryLogger: this.trajectoryLogger,
         auditLogger,
         runDir: runContext.runDir,
@@ -9609,6 +9610,7 @@ function stripUnknownToolArgs(name: string, args: Record<string, unknown>): void
     task_create: ["subject", "description", "status"],
     task_update: ["taskId", "status", "subject", "description"],
     task_list: ["status"],
+    call_subagent: ["type", "task", "context", "mode", "allowedFiles", "forbiddenFiles", "timeoutMs", "outputSchema"],
   };
   const allowed = allowedByTool[name];
   if (!allowed) return;

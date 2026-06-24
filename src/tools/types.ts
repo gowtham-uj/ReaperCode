@@ -94,6 +94,19 @@ export const UpdateTodoArgsSchema = z
   })
   .strict();
 
+export const CallSubagentArgsSchema = z
+  .object({
+    type: z.enum(["planner", "reviewer", "repair", "tester", "researcher"]),
+    task: z.string().min(1),
+    context: z.string().min(1).optional(),
+    mode: z.enum(["blocking", "background"]).optional(),
+    allowedFiles: z.array(z.string().min(1)).optional(),
+    forbiddenFiles: z.array(z.string().min(1)).optional(),
+    timeoutMs: z.number().int().positive().optional(),
+    outputSchema: z.enum(["plan", "review", "repair", "test_strategy", "freeform"]).optional(),
+  })
+  .strict();
+
 export const CreateCheckpointArgsSchema = z
   .object({
     reason: z.string().min(1),
@@ -563,6 +576,7 @@ export const ToolCallSchema = z.discriminatedUnion("name", [
   z.object({ id: z.string().min(1), name: z.literal("task_list"), args: TaskListArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("update_plan"), args: UpdatePlanArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("update_todo"), args: UpdateTodoArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("call_subagent"), args: CallSubagentArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("search_tools"), args: SearchToolsArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("agent"), args: AgentArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("agent_swarm"), args: AgentSwarmArgsSchema }).strict(),
@@ -605,5 +619,6 @@ export const ToolResultSchema = z
 
 export type ToolCall = z.infer<typeof ToolCallSchema>;
 export type ToolResult = z.infer<typeof ToolResultSchema>;
+export type CallSubagentArgs = z.infer<typeof CallSubagentArgsSchema>;
 export type BrowserControlArgs = z.infer<typeof BrowserControlArgsSchema>;
 export type ComputerControlArgs = z.infer<typeof ComputerControlArgsSchema>;
