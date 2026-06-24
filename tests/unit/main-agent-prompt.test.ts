@@ -63,6 +63,55 @@ test("main-agent system prompt includes required requirements text", () => {
   }
 });
 
+test("main-agent cockpit compacts long tool history instead of replaying full file contents", () => {
+  const longContent = "0123456789".repeat(500);
+  const toolResults = Array.from({ length: 12 }, (_, index) => ({
+    toolCallId: `call-${index}`,
+    name: "read_file",
+    ok: true,
+    durationMs: 1,
+    args: { path: `src/file-${index}.ts` },
+    output: {
+      path: `src/file-${index}.ts`,
+      startLine: 1,
+      endLine: 20,
+      totalLines: 20,
+      content: `${longContent}-${index}`,
+    },
+  }));
+
+  const cockpit = buildMainAgentCockpit(
+    { recentToolResults: toolResults },
+    { payload: { prompt: "Improve context handling" } },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+  );
+
+  assert.match(cockpit, /totalResults/);
+  assert.match(cockpit, /retainedResults/);
+  assert.match(cockpit, /outputCompactedForModel/);
+  assert.doesNotMatch(cockpit, new RegExp(escapeRegExp(longContent)));
+});
+
+test("main-agent cockpit caps long tool descriptions", () => {
+  const longDescription = "word ".repeat(120);
+  const cockpit = buildMainAgentCockpit(
+    {},
+    { payload: { prompt: "Use tools" } },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { availableTools: [{ name: "very_verbose_tool", description: longDescription }] },
+  );
+
+  assert.match(cockpit, /very_verbose_tool/);
+  assert.match(cockpit, /\[truncated\]/);
+  assert.ok(cockpit.length < longDescription.length + 1200);
+});
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
