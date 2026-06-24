@@ -139,6 +139,8 @@ import {
 } from "./plan-state.js";
 import {
   createVerificationState,
+  ingestReviewerVerdicts,
+  isReviewerBlocking,
   recordVerificationCheck,
   renderVerificationStateForCockpit,
   type VerificationState,
@@ -876,6 +878,16 @@ export class RuntimeEngine {
       }
 
       if (!this.input.modelGateway || !state.contentPrep) return {};
+
+      let mutableState: GraphState = state;
+      if (mutableState.verificationState) {
+        const nextVerificationState = ingestReviewerVerdicts(mutableState.verificationState, mutableState.toolResults);
+        if (nextVerificationState !== mutableState.verificationState) {
+          mutableState = { ...mutableState, verificationState: nextVerificationState };
+        }
+      }
+      state = mutableState;
+
       const system = buildMainAgentSystemPrompt(state);
       const cockpit = buildMainAgentCockpit(
         {
@@ -1012,15 +1024,33 @@ export class RuntimeEngine {
     };
 
     const verifyCompletionNode = async (state: GraphState) => {
+      const verificationState = state.verificationState
+        ? ingestReviewerVerdicts(state.verificationState, state.toolResults)
+        : state.verificationState;
       const completion = state.split?.completionSignal;
       const validation = validateStrictCompletion({
         toolCalls: state.plannedToolCalls ?? [],
         ...(completion ? { completionSignal: completion } : {}),
         ...(state.taskContract ? { taskContract: state.taskContract } : {}),
-        ...(state.verificationState ? { verificationState: state.verificationState } : {}),
+        ...(verificationState ? { verificationState } : {}),
         toolResults: state.toolResults,
         requireVerificationLadder: this.config.verification.requireGroundedCompletion || Boolean(completion?.args.verificationContract?.commands?.length),
       });
+
+      if (validation.ok && verificationState && isReviewerBlocking(verificationState)) {
+        const blocker: RuntimeBlocker = {
+          source: "completion_validation",
+          code: "reviewer_blocked_completion",
+          message: "Completion is blocked because a reviewer subagent issued a 'block' verdict. Address the review evidence before calling complete_task.",
+        };
+        return {
+          plannedToolCalls: [],
+          runtimeBlockers: [...state.runtimeBlockers, blocker],
+          feedback: [...state.feedback, blocker.message],
+          completionGateAttempts: state.completionGateAttempts + 1,
+          completionGateExhausted: state.completionGateAttempts + 1 >= this.config.runtime.completionGateMax,
+        } satisfies Partial<GraphState>;
+      }
 
       if (validation.ok) {
         const runtimeCompletionBlocker = getCompletionBlocker(state.toolResults, getBoot().state.runId, state.prompt, this.config);

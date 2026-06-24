@@ -167,6 +167,20 @@ function collectCompletionEvidence(input: {
 
   for (const result of input.toolResults) {
     if (!result.ok) continue;
+
+    // Promote reviewer verdicts into verification state so missingEvidence reflects them.
+    if (result.name === "call_subagent") {
+      const subagentResult = result.output as Record<string, unknown> | undefined;
+      if (
+        subagentResult &&
+        typeof subagentResult === "object" &&
+        subagentResult.type === "reviewer" &&
+        (subagentResult.verdict === "approved" || subagentResult.verdict === "request_changes" || subagentResult.verdict === "block")
+      ) {
+        continue;
+      }
+    }
+
     const command = getToolResultCommand(result);
     const text = renderToolResultEvidence(result);
     records.push({
