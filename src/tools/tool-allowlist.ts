@@ -37,6 +37,7 @@ const TOOL_ALLOWED_ARGS: Record<string, readonly string[]> = {
   task_create: ["subject", "description", "status"],
   task_update: ["taskId", "status", "subject", "description"],
   task_list: ["status"],
+  call_subagent: ["type", "task", "context", "mode", "allowedFiles", "forbiddenFiles", "timeoutMs", "outputSchema"],
 };
 
 export const KNOWN_TOOLS: ReadonlySet<string> = new Set(Object.keys(TOOL_ALLOWED_ARGS));

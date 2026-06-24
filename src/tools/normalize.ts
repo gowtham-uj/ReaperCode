@@ -476,6 +476,18 @@ export function normalizeToolCall(input: unknown): unknown {
           ...(typeof record.query === "string" ? { query: record.query } : {}),
         };
         break;
+      case "call_subagent":
+        args = {
+          ...(typeof record.type === "string" ? { type: record.type } : {}),
+          ...(typeof record.task === "string" ? { task: record.task } : {}),
+          ...(typeof record.context === "string" ? { context: record.context } : {}),
+          ...(typeof record.mode === "string" ? { mode: record.mode } : {}),
+          ...(Array.isArray(record.allowedFiles) ? { allowedFiles: record.allowedFiles } : {}),
+          ...(Array.isArray(record.forbiddenFiles) ? { forbiddenFiles: record.forbiddenFiles } : {}),
+          ...(typeof record.timeoutMs === "number" ? { timeoutMs: record.timeoutMs } : {}),
+          ...(typeof record.outputSchema === "string" ? { outputSchema: record.outputSchema } : {}),
+        };
+        break;
       default:
         args = {
           ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
