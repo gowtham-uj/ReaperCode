@@ -58,8 +58,6 @@ test("classifies every required executable inspection or mutation tool", () => {
 test("detects mutating tools consistently across executable and control tools", () => {
   const mutatingTools = [
     "update_task_contract",
-    "update_plan",
-    "update_todo",
     "call_subagent",
     "cancel_subagent",
     "create_checkpoint",
@@ -72,6 +70,8 @@ test("detects mutating tools consistently across executable and control tools", 
   ];
   const inspectionTools = [
     "poll_subagent",
+    "update_plan",
+    "update_todo",
     "complete_task",
     "inspect_project",
     "git_status",

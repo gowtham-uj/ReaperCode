@@ -127,6 +127,16 @@ import { validateToolCallBatch, type ToolValidationBlocker } from "./tool-valida
 import { validateStrictCompletion, type CompletionValidationBlocker } from "./completion-validation.js";
 import { extractTaskContract, renderTaskContractForCockpit, type TaskContract } from "./task-contract.js";
 import {
+  addTodoItem,
+  applyCandidatePlan,
+  createPlanState,
+  createTodoState,
+  renderPlanForCockpit,
+  renderTodoForCockpit,
+  type PlanState,
+  type TodoState,
+} from "./plan-state.js";
+import {
   createVerificationState,
   recordVerificationCheck,
   renderVerificationStateForCockpit,
@@ -204,6 +214,7 @@ export interface RuntimeEngineResult {
 
 export interface SplitToolCalls {
   executableToolCalls: ToolCall[];
+  advisoryToolCalls?: Array<Extract<ToolCall, { name: "update_plan" | "update_todo" }>>;
   completionSignal?: Extract<ToolCall, { name: "complete_task" }>;
   advancementSignal?: Extract<ToolCall, { name: "advance_step" }>;
   patchRequestSignal?: Extract<ToolCall, { name: "request_patch" }>;
@@ -286,6 +297,8 @@ type GraphState = {
   orchestrationMode?: OrchestrationMode;
   repoInspection?: RepoInspection;
   taskContract?: TaskContract;
+  planState: PlanState;
+  todoState: TodoState;
   verificationState?: VerificationState;
   runtimeBlockers: RuntimeBlocker[];
   shouldCompact: boolean;
@@ -326,6 +339,14 @@ const ReaperGraphState = Annotation.Root({
   orchestrationMode: Annotation<OrchestrationMode | undefined>(),
   repoInspection: Annotation<RepoInspection | undefined>(),
   taskContract: Annotation<TaskContract | undefined>(),
+  planState: Annotation<PlanState>({
+    reducer: (_left, right) => right,
+    default: () => createPlanState(),
+  }),
+  todoState: Annotation<TodoState>({
+    reducer: (_left, right) => right,
+    default: () => createTodoState(),
+  }),
   verificationState: Annotation<VerificationState | undefined>(),
   runtimeBlockers: Annotation<RuntimeBlocker[]>({
     reducer: (_left, right) => right,
@@ -584,7 +605,6 @@ export class RuntimeEngine {
           });
         }
       }
-
       executor = new ToolExecutor({
         workspaceRoot: this.input.workspaceRoot,
         runId: boot.state.runId,
@@ -649,6 +669,8 @@ export class RuntimeEngine {
         prompt,
         mode,
         ...(repoInspection ? { repoInspection } : {}),
+        planState: createPlanState(),
+        todoState: createTodoState(),
         toolResults: [],
         events: [],
         assistantMessage: "",
@@ -762,6 +784,8 @@ export class RuntimeEngine {
           ...state,
           repoInspection: state.repoInspection,
           taskContract: state.taskContract,
+          currentPlan: renderPlanForCockpit(state.planState),
+          todo: renderTodoForCockpit(state.todoState),
           verificationState: state.verificationState,
           runtimeBlockers: state.runtimeBlockers,
           recentToolResults: state.toolResults.slice(-16).map((result) => renderToolResultForModel(result)),
@@ -876,9 +900,14 @@ export class RuntimeEngine {
       }
 
       const split = splitControlToolCalls(toolCalls);
+      const advisoryUpdate = applyAdvisoryToolCalls(state, split.advisoryToolCalls ?? []);
       const categorized = split.executableToolCalls.map((call) => ({ id: call.id, name: call.name, kind: classifyToolCall(call) }));
       return {
         split,
+        ...advisoryUpdate,
+        ...(advisoryUpdate.toolResults?.length
+          ? { toolResults: [...state.toolResults, ...advisoryUpdate.toolResults] }
+          : {}),
         runtimeBlockers: [],
         events: [...state.events, makeEvent(getRequest(), "assistant_delta", { event: "tool_calls_categorized", categorized })],
       } satisfies Partial<GraphState>;
@@ -1839,8 +1868,13 @@ export class RuntimeEngine {
         to_step: "Tool Categorization",
       });
       const categorized = split.executableToolCalls.map((call) => ({ id: call.id, name: call.name, kind: classifyToolCall(call) }));
+      const advisoryUpdate = applyAdvisoryToolCalls(state, split.advisoryToolCalls ?? []);
       return {
         split,
+        ...advisoryUpdate,
+        ...(advisoryUpdate.toolResults?.length
+          ? { toolResults: [...state.toolResults, ...advisoryUpdate.toolResults] }
+          : {}),
         events: [...state.events, makeEvent(activeRequest, "assistant_delta", { event: "tool_calls_categorized", categorized })],
       };
     };
@@ -2950,8 +2984,64 @@ function renderToolResultSnippet(result: ToolResult): string {
   return JSON.stringify(renderToolResultForModel(result)).slice(0, 9000);
 }
 
+function applyAdvisoryToolCalls(
+  state: Pick<GraphState, "planState" | "todoState">,
+  calls: Array<Extract<ToolCall, { name: "update_plan" | "update_todo" }>>,
+): Partial<Pick<GraphState, "planState" | "todoState" | "toolResults">> {
+  if (calls.length === 0) return {};
+  let planState = state.planState;
+  let todoState = state.todoState;
+  const toolResults: ToolResult[] = [];
+
+  for (const call of calls) {
+    if (call.name === "update_plan") {
+      const args = call.args;
+      if (args.candidate) {
+        planState = {
+          ...planState,
+          candidates: [args.markdown, ...planState.candidates.filter((item) => item !== args.markdown)],
+        };
+      } else {
+        planState = applyCandidatePlan(planState, args.activePlanMarkdown ?? args.markdown);
+      }
+      if (args.activePlanMarkdown) {
+        planState = { ...planState, activeMarkdown: args.activePlanMarkdown };
+      }
+      toolResults.push(makeAdvisoryToolResult(call, {
+        adopted: !args.candidate || Boolean(args.activePlanMarkdown),
+        candidate: Boolean(args.candidate),
+        candidateCount: planState.candidates.length,
+      }));
+      continue;
+    }
+
+    const args = call.args;
+    todoState = args.append ? todoState : createTodoState();
+    for (const item of args.items) {
+      todoState = addTodoItem(todoState, item);
+    }
+    toolResults.push(makeAdvisoryToolResult(call, {
+      itemCount: todoState.items.length,
+      append: Boolean(args.append),
+    }));
+  }
+
+  return { planState, todoState, toolResults };
+}
+
+function makeAdvisoryToolResult(call: Extract<ToolCall, { name: "update_plan" | "update_todo" }>, output: unknown): ToolResult {
+  return {
+    toolCallId: call.id,
+    name: call.name,
+    ok: true,
+    durationMs: 0,
+    args: call.args,
+    output,
+  };
+}
+
 function normalizeExecutableToolCalls(toolCalls: ToolCall[]): ToolCall[] {
-  return toolCalls.filter((call) => call.name !== "complete_task" && call.name !== "advance_step" && call.name !== "request_patch" && call.name !== "delegate_to_plan");
+  return toolCalls.filter((call) => !["complete_task", "advance_step", "request_patch", "delegate_to_plan", "update_plan", "update_todo"].includes(call.name));
 }
 
 function isAllocatedScratchWorkspace(workspaceRoot: string): boolean {

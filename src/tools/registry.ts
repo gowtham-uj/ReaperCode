@@ -42,6 +42,8 @@ import {
   TaskCreateArgsSchema,
   TaskUpdateArgsSchema,
   TaskListArgsSchema,
+  UpdatePlanArgsSchema,
+  UpdateTodoArgsSchema,
   SearchToolsArgsSchema,
 } from "./types.js";
 import { AgentArgsSchema } from "./agent.types.js";
@@ -265,6 +267,16 @@ export const toolRegistry = {
       "List current todos with their statuses. Call this when uncertain what to work on next, or to confirm the task list is up to date before completion.",
     argsSchema: TaskListArgsSchema,
   },
+  update_plan: {
+    description:
+      "Update advisory cockpit plan memory for this run only. Use candidate:true to store a candidate plan without replacing the current active plan.",
+    argsSchema: UpdatePlanArgsSchema,
+  },
+  update_todo: {
+    description:
+      "Update advisory cockpit TODO memory for this run only. By default replaces the list; append:true upserts the provided items into the current list.",
+    argsSchema: UpdateTodoArgsSchema,
+  },
   search_tools: {
     description:
       "Search available tools by keyword or direct select:<tool_name>. Call this when you need a capability not shown in the current tool list (e.g. background processes, web fetching, symbol rename). Returns matching tool names and descriptions, and promotes them to full-schema rendering on subsequent turns.",
@@ -386,6 +398,8 @@ export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   "task_create",
   "task_update",
   "task_list",
+  "update_plan",
+  "update_todo",
   "search_tools",
   "agent",
   "agent_swarm",

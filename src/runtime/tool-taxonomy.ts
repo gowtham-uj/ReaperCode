@@ -38,8 +38,6 @@ export const REQUIRED_EXECUTABLE_TOOLS: ReadonlySet<string> = new Set([
 
 export const MUTATING_TOOLS: ReadonlySet<string> = new Set([
   "update_task_contract",
-  "update_plan",
-  "update_todo",
   "call_subagent",
   "cancel_subagent",
   "create_checkpoint",
