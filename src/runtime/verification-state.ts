@@ -2,6 +2,16 @@ import { z } from "zod";
 
 export const VerificationCheckStatusSchema = z.enum(["passed", "failed", "skipped"]);
 
+export const ReviewerVerdictSchema = z.enum(["approved", "request_changes", "block"]);
+export type ReviewerVerdict = z.infer<typeof ReviewerVerdictSchema>;
+
+export const ReviewerResultSchema = z
+  .object({
+    verdict: ReviewerVerdictSchema,
+    evidence: z.string(),
+  })
+  .strict();
+
 export const VerificationCompletedCheckSchema = z
   .object({
     command: z.string(),
@@ -17,6 +27,8 @@ export const VerificationStateSchema = z
     lastVerificationAt: z.string().optional(),
     completionEvidence: z.array(z.string()),
     missingEvidence: z.array(z.string()),
+    reviewerVerdict: ReviewerVerdictSchema.optional(),
+    reviewerEvidence: z.string().optional(),
   })
   .strict();
 
@@ -66,6 +78,40 @@ export function recordVerificationCheck(state: VerificationState, check: Verific
   };
 }
 
+export function applyReviewerVerdict(state: VerificationState, verdict: ReviewerVerdict, evidence: string): VerificationState {
+  const nextState: VerificationState = {
+    ...state,
+    reviewerVerdict: verdict,
+    reviewerEvidence: evidence.trim(),
+  };
+
+  return {
+    ...nextState,
+    missingEvidence: deriveMissingEvidence(nextState),
+  };
+}
+
+export function ingestReviewerVerdicts(state: VerificationState, toolResults: unknown[]): VerificationState {
+  if (!toolResults.length) return state;
+  let nextState = state;
+  for (const result of toolResults) {
+    const record = result as { ok?: boolean; name?: string; output?: unknown } | undefined;
+    if (!record || record.ok === false || record.name !== "call_subagent") continue;
+    const output = record.output as Record<string, unknown> | undefined;
+    if (!output || output.type !== "reviewer" || output.status !== "completed") continue;
+    const verdictResult = output.result as Record<string, unknown> | undefined;
+    if (!verdictResult) continue;
+    const parse = ReviewerResultSchema.safeParse({ verdict: verdictResult.verdict, evidence: verdictResult.evidence });
+    if (!parse.success) continue;
+    nextState = applyReviewerVerdict(nextState, parse.data.verdict, parse.data.evidence);
+  }
+  return nextState;
+}
+
+export function isReviewerBlocking(state: VerificationState): boolean {
+  return state.reviewerVerdict === "block";
+}
+
 export function addCompletionEvidence(state: VerificationState, evidence: string): VerificationState {
   const nextState: VerificationState = {
     ...state,
@@ -84,7 +130,13 @@ export function deriveMissingEvidence(state: VerificationState): string[] {
   );
   const explicitEvidence = new Set(state.completionEvidence.map((evidence) => evidence.trim()).filter(Boolean));
 
-  return uniqueNonEmpty(state.requiredChecks).filter((check) => !completedPassedCommands.has(check) && !explicitEvidence.has(check));
+  const missing = uniqueNonEmpty(state.requiredChecks).filter((check) => !completedPassedCommands.has(check) && !explicitEvidence.has(check));
+
+  if (state.reviewerVerdict && state.reviewerVerdict !== "approved") {
+    return [...missing, `reviewer_${state.reviewerVerdict}`];
+  }
+
+  return missing;
 }
 
 export function renderVerificationStateForCockpit(state: VerificationState): string {
@@ -95,6 +147,9 @@ export function renderVerificationStateForCockpit(state: VerificationState): str
     `Last verification: ${state.lastVerificationAt ?? "never"}`,
     `Completion evidence: ${renderList(state.completionEvidence)}`,
     `Missing evidence: ${renderList(state.missingEvidence.length ? state.missingEvidence : deriveMissingEvidence(state))}`,
+    state.reviewerVerdict
+      ? `Reviewer verdict: ${state.reviewerVerdict}${state.reviewerEvidence ? ` - ${state.reviewerEvidence}` : ""}`
+      : "Reviewer verdict: none",
   ].join("\n");
 }
 
