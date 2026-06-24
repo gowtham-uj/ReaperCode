@@ -52,6 +52,8 @@ import { ensureReaperScratchpad, getReaperScratchpadPaths } from "../workspace/s
 import { normalizeWorkspacePath, relativeWorkspacePath } from "../policy/paths.js";
 import { classifyServiceLifecycle, type ServiceLifecycleState } from "./service-lifecycle.js";
 import { BackgroundProcessManager } from "./background-process-manager.js";
+import { createCheckpoint, restoreCheckpoint } from "../runtime/checkpoints.js";
+import { getGitDiffState, getGitStatusState, summarizeGitDiffState } from "../runtime/diff-state.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -839,6 +841,33 @@ export class ToolExecutor {
       case "inspect_environment":
         toolRegistry.inspect_environment.argsSchema.parse(call.args);
         return inspectEnvironmentTool(this.options.workspaceRoot);
+      case "create_checkpoint": {
+        const args = toolRegistry.create_checkpoint.argsSchema.parse(call.args);
+        return createCheckpoint({
+          workspaceRoot: this.options.workspaceRoot,
+          reason: args.reason,
+          ...(args.toolCallIds !== undefined ? { toolCallIds: args.toolCallIds } : {}),
+        });
+      }
+      case "restore_checkpoint": {
+        const args = toolRegistry.restore_checkpoint.argsSchema.parse(call.args);
+        return restoreCheckpoint(this.options.workspaceRoot, args.checkpointId);
+      }
+      case "git_status":
+        toolRegistry.git_status.argsSchema.parse(call.args);
+        return getGitStatusState(this.options.workspaceRoot);
+      case "git_diff": {
+        const args = toolRegistry.git_diff.argsSchema.parse(call.args);
+        const diffState = await getGitDiffState(this.options.workspaceRoot, {
+          ...(args.staged !== undefined ? { staged: args.staged } : {}),
+          ...(args.path !== undefined ? { path: args.path } : {}),
+          ...(args.maxBytes !== undefined ? { maxBytes: args.maxBytes } : {}),
+        });
+        return {
+          ...diffState,
+          summary: summarizeGitDiffState(diffState),
+        };
+      }
       case "web_search":
         return webSearchTool(toolRegistry.web_search.argsSchema.parse(call.args) as WebSearchArgs);
       case "activate_skill": {

@@ -39,11 +39,18 @@ export function classifyToolCall(call: ToolCall): ExecutionKind {
   if (call.name === "get_tool_output") {
     return "read";
   }
-  if (call.name === "read_file" || call.name === "list_directory" || call.name === "grep_search") {
+  if (call.name === "read_file" || call.name === "list_directory" || call.name === "grep_search" || call.name === "git_status" || call.name === "git_diff") {
     return "read";
   }
 
-  if (call.name === "write_file" || call.name === "replace_in_file" || call.name === "replace_symbol" || call.name === "delete_file") {
+  if (
+    call.name === "write_file" ||
+    call.name === "replace_in_file" ||
+    call.name === "replace_symbol" ||
+    call.name === "delete_file" ||
+    call.name === "create_checkpoint" ||
+    call.name === "restore_checkpoint"
+  ) {
     return "write";
   }
 

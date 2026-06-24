@@ -78,6 +78,8 @@ import { classifyShellCommandSemantics } from "../tools/command-semantics.js";
 import { loadMcpServersFromFile } from "../tools/mcp/config.js";
 import { MergedToolRegistry } from "../tools/mcp/registry.js";
 import { ToolCallSchema, type ToolCall, type ToolResult } from "../tools/types.js";
+import { batchNeedsMutationCheckpoint, createCheckpoint } from "./checkpoints.js";
+import { getGitDiffState, getGitStatusState, summarizeGitDiffState } from "./diff-state.js";
 import {
   classifyVerificationFailure,
   shouldPromoteNonDeterministicFailure,
@@ -1710,16 +1712,31 @@ export class RuntimeEngine {
         });
       }
       const startedEvents = split.executableToolCalls.map((toolCall) => makeEvent(activeRequest, "tool_call_started", { toolCall }));
-      const scheduled = await executeToolCalls(
-        relevanceGuard.allowed,
-        getExecutor(),
-        getRecoverySession(),
-        this.input.abortSignal,
-      );
+      const mutationCheckpointResult = batchNeedsMutationCheckpoint(relevanceGuard.allowed)
+        ? await createMutationCheckpointResult({
+            workspaceRoot: this.input.workspaceRoot,
+            runId: getBoot().state.runId,
+            toolCalls: relevanceGuard.allowed,
+          })
+        : undefined;
+      const scheduled = mutationCheckpointResult?.ok === false
+        ? { results: [], aborted: false }
+        : await executeToolCalls(
+            relevanceGuard.allowed,
+            getExecutor(),
+            getRecoverySession(),
+            this.input.abortSignal,
+          );
+      const postMutationResults =
+        mutationCheckpointResult?.ok === true
+          ? await createPostMutationGitResults(this.input.workspaceRoot, getBoot().state.runId)
+          : [];
       const batchResults = [
         ...cachedSuccess.cachedResults,
         ...blockedBeforeScheduling,
         ...scheduled.results,
+        ...(mutationCheckpointResult ? [mutationCheckpointResult] : []),
+        ...postMutationResults,
       ];
       const toolResults = [...state.toolResults, ...batchResults];
       const completedEvents = batchResults.map((result) => makeEvent(activeRequest, "tool_call_completed", { result }));
@@ -6948,6 +6965,107 @@ function shouldRunVerificationForCompletion(
   config: ReaperConfig,
 ): boolean {
   return config.verification.requireGroundedCompletion || hasExplicitVerificationRequest(request) || Boolean(completionSignal?.args.verificationContract?.commands?.length);
+}
+
+async function createMutationCheckpointResult(input: {
+  workspaceRoot: string;
+  runId: string;
+  toolCalls: ToolCall[];
+}): Promise<ToolResult> {
+  const startedAt = Date.now();
+  const toolCallId = `auto-checkpoint-${randomUUID()}`;
+  const args = {
+    reason: "Automatic checkpoint before mutating tool batch",
+    toolCallIds: input.toolCalls.map((call) => call.id),
+  };
+  try {
+    const checkpoint = await createCheckpoint({
+      workspaceRoot: input.workspaceRoot,
+      reason: args.reason,
+      toolCallIds: args.toolCallIds,
+    });
+    return {
+      toolCallId,
+      name: "create_checkpoint",
+      ok: true,
+      durationMs: Date.now() - startedAt,
+      args,
+      output: checkpoint,
+    };
+  } catch (error) {
+    return {
+      toolCallId,
+      name: "create_checkpoint",
+      ok: false,
+      durationMs: Date.now() - startedAt,
+      args,
+      error: {
+        code: "checkpoint_create_failed",
+        message: error instanceof Error ? error.message : String(error),
+      },
+    };
+  }
+}
+
+async function createPostMutationGitResults(workspaceRoot: string, runId: string): Promise<ToolResult[]> {
+  const statusStartedAt = Date.now();
+  const statusCallId = `auto-git-status-${randomUUID()}`;
+  let statusResult: ToolResult;
+  try {
+    const status = await getGitStatusState(workspaceRoot);
+    statusResult = {
+      toolCallId: statusCallId,
+      name: "git_status",
+      ok: true,
+      durationMs: Date.now() - statusStartedAt,
+      args: {},
+      output: status,
+    };
+  } catch (error) {
+    statusResult = {
+      toolCallId: statusCallId,
+      name: "git_status",
+      ok: false,
+      durationMs: Date.now() - statusStartedAt,
+      args: {},
+      error: {
+        code: "git_status_failed",
+        message: error instanceof Error ? error.message : String(error),
+      },
+    };
+  }
+
+  const diffStartedAt = Date.now();
+  const diffCallId = `auto-git-diff-${randomUUID()}`;
+  let diffResult: ToolResult;
+  try {
+    const diff = await getGitDiffState(workspaceRoot);
+    diffResult = {
+      toolCallId: diffCallId,
+      name: "git_diff",
+      ok: true,
+      durationMs: Date.now() - diffStartedAt,
+      args: {},
+      output: {
+        ...diff,
+        summary: summarizeGitDiffState(diff),
+      },
+    };
+  } catch (error) {
+    diffResult = {
+      toolCallId: diffCallId,
+      name: "git_diff",
+      ok: false,
+      durationMs: Date.now() - diffStartedAt,
+      args: {},
+      error: {
+        code: "git_diff_failed",
+        message: error instanceof Error ? error.message : String(error),
+      },
+    };
+  }
+
+  return [statusResult, diffResult];
 }
 
 function hasRepeatedSuccessfulVerification(results: ToolResult[]): boolean {

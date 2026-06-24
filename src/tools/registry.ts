@@ -14,6 +14,10 @@ import {
   ViewFileArgsSchema,
   SkimFileArgsSchema,
   InspectEnvironmentArgsSchema,
+  CreateCheckpointArgsSchema,
+  RestoreCheckpointArgsSchema,
+  GitStatusArgsSchema,
+  GitDiffArgsSchema,
   WebSearchArgsSchema,
   ReplaceInFileArgsSchema,
   EditFileArgsSchema,
@@ -92,6 +96,24 @@ export const toolRegistry = {
   inspect_environment: {
     description: "Inspect available runtimes/package managers, manifests, dependency state, and Reaper scratchpad/cache paths before deciding whether installs or tool setup are required.",
     argsSchema: InspectEnvironmentArgsSchema,
+  },
+  create_checkpoint: {
+    description:
+      "Create a recoverable git-backed checkpoint under .reaper/checkpoints before a risky mutation batch. Stores metadata plus tracked staged/worktree patches; ignored files are not included.",
+    argsSchema: CreateCheckpointArgsSchema,
+  },
+  restore_checkpoint: {
+    description:
+      "Explicitly restore a named Reaper checkpoint in the current git workspace. This resets tracked files to the checkpoint base, removes new untracked files, and reapplies the checkpoint's saved pre-existing patches.",
+    argsSchema: RestoreCheckpointArgsSchema,
+  },
+  git_status: {
+    description: "Read-only git status summary for the current workspace.",
+    argsSchema: GitStatusArgsSchema,
+  },
+  git_diff: {
+    description: "Read-only git diff summary and bounded patch text for the current workspace.",
+    argsSchema: GitDiffArgsSchema,
   },
   web_search: {
     description: "NATIVE RESEARCH: Search the web to solve complex problems, verify package versions before installation, or get clarity on unfamiliar frameworks. You MUST use this tool before 'npm install' for non-standard packages to avoid version hell. Synthesize results into actionable implementation or repair candidates.",
