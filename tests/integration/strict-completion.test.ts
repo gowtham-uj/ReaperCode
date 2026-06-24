@@ -71,14 +71,19 @@ test("complete_task with verification evidence completes", async () => {
   request.payload = {
     prompt: "Check verified.txt and finish.",
   };
-  const gateway = new StaticJsonGateway({
-    assistant_message: "verified.txt was checked",
-    tool_calls: [
-      { id: "write-verified", name: "write_file", args: { path: "verified.txt", content: "ok\n" } },
-      { id: "check-verified", name: "run_shell_command", args: { cmd: "test \"$(cat verified.txt)\" = ok" } },
-      { id: "complete-with-evidence", name: "complete_task", args: { summary: "verified.txt was checked" } },
-    ],
-  });
+  const gateway = new StaticJsonGateway([
+    {
+      assistant_message: "",
+      tool_calls: [
+        { id: "write-verified", name: "write_file", args: { path: "verified.txt", content: "ok\n" } },
+        { id: "check-verified", name: "run_shell_command", args: { cmd: "test \"$(cat verified.txt)\" = ok" } },
+      ],
+    },
+    {
+      assistant_message: "verified.txt was checked",
+      tool_calls: [{ id: "complete-with-evidence", name: "complete_task", args: { summary: "verified.txt was checked" } }],
+    },
+  ]);
 
   const result = await new RuntimeEngine({
     config: createValidConfig(),
