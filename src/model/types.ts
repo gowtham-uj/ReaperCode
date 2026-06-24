@@ -18,9 +18,12 @@ export const modelProfileAliases = {
   fast_reasoner: "fast_model",
 } as const satisfies Partial<Record<ModelRole, string>>;
 
-const modelProfileAliasToRole = Object.fromEntries(
+const modelProfileAliasToRole = {
+  ...Object.fromEntries(
   Object.entries(modelProfileAliases).map(([role, alias]) => [alias, role]),
-) as Record<(typeof modelProfileAliases)[keyof typeof modelProfileAliases], keyof typeof modelProfileAliases>;
+  ),
+  main_agent: "main_reasoner",
+} as Record<string, ModelRole>;
 
 export function getModelProfileName(role: ModelRole): string {
   return (modelProfileAliases as Partial<Record<ModelRole, string>>)[role] ?? role;
@@ -116,6 +119,7 @@ export interface ResolvedModelProfile extends ModelProfile {
 
 export interface GenerateRequest {
   role: ModelRole;
+  source?: string;
   system?: string;
   messages: Array<{ role: string; content: string }>;
   tools?: unknown[];
