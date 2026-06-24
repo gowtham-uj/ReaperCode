@@ -1,6 +1,6 @@
 import { parseAgentRequestEnvelope, type TransportKind } from "../connection/schemas.js";
 import { parseReaperConfig, type ReaperConfig } from "../config/model-config.js";
-import { RuntimeStateSchema, type RuntimeState } from "./state.js";
+import { RuntimeStateSchema, type RuntimeRepoInspection, type RuntimeState } from "./state.js";
 
 export interface Phase0BootstrapInput {
   config: unknown;
@@ -10,6 +10,7 @@ export interface Phase0BootstrapInput {
   runId?: string;
   sessionId?: string;
   traceId?: string;
+  repoInspection?: RuntimeRepoInspection;
 }
 
 export interface Phase0BootstrapResult {
@@ -41,6 +42,7 @@ export function bootPhase0Runtime(input: Phase0BootstrapInput): Phase0BootstrapR
     },
     feedback: [],
     negativeConstraints: [],
+    ...(input.repoInspection ? { repoInspection: input.repoInspection } : {}),
   });
 
   return {

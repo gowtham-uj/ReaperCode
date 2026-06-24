@@ -97,6 +97,7 @@ import { detectSemanticFailureText, type SemanticFailureSignal } from "../verify
 import { createVerificationSummary } from "../verify/summary.js";
 import { bootPhase0Runtime, type Phase0BootstrapResult } from "./bootstrap.js";
 import { prepareRuntimeContent, type ContentPrepResult } from "./content-prep.js";
+import { inspectProject, renderRepoInspectionForCockpit, type RepoInspection } from "./repo-inspection.js";
 import type { MiddlewareDefinition } from "./middleware.js";
 import { getReaperScratchpadPaths } from "../workspace/scratchpad.js";
 import { createReaperRunContext, ensureReaperRunContext, writeLatestRunPointer, type ReaperRunContext } from "./run-manager.js";
@@ -501,6 +502,7 @@ export class RuntimeEngine {
       request = { ...initialRequest, session_id: runContext.sessionId, trace_id: runContext.traceId };
       const prompt = typeof request.payload.prompt === "string" ? request.payload.prompt : "Execute requested coding task";
       const hasExplicitToolCalls = Array.isArray(request.payload.tool_calls) && request.payload.tool_calls.length > 0;
+      const repoInspection = await inspectProject(this.input.workspaceRoot).catch(() => undefined);
 
       boot = bootPhase0Runtime({
         config: this.config,
@@ -510,6 +512,7 @@ export class RuntimeEngine {
         runId: runContext.runId,
         sessionId: runContext.sessionId,
         traceId: runContext.traceId,
+        ...(repoInspection ? { repoInspection } : {}),
       });
       const mode: GraphMode = hasExplicitToolCalls ? "explicit_tools" : this.input.modelGateway ? "autonomous" : "needs_model";
 
@@ -720,6 +723,7 @@ export class RuntimeEngine {
 
     const simpleExecutorNode = async (state: GraphState) => {
       if (!this.input.modelGateway || !state.contentPrep) return {};
+      const activeRuntimeState = getBoot().state;
       const result = await generateStructuredJson({
         modelGateway: this.input.modelGateway,
         source: "executor_subagent",
@@ -733,11 +737,12 @@ export class RuntimeEngine {
               content: buildSimpleExecutorPrompt({
                 prompt: state.prompt,
                 contentPrep: state.contentPrep,
+                ...(activeRuntimeState.repoInspection ? { repoInspection: activeRuntimeState.repoInspection } : {}),
                 toolResults: state.toolResults,
                 feedback: state.feedback,
                 negativeConstraints: state.negativeConstraints,
                 blockingFacts: deriveRuntimeBlockingFacts(state.toolResults),
-                runId: getBoot().state.runId,
+                runId: activeRuntimeState.runId,
               }),
           },
         ],
@@ -798,18 +803,20 @@ export class RuntimeEngine {
       if (!contentPrep) {
         throw new Error("Autonomous planning requires prepared content");
       }
+      const activeRuntimeState = getBoot().state;
 
       const result = await callPlannerSubagentTool({
         modelGateway: this.input.modelGateway,
         source: "planner_subagent",
         role: modelRoute(this.config, "planner"),
 	        workspaceRoot: this.input.workspaceRoot,
-        runId: getBoot().state.runId,
-        sessionId: getBoot().state.sessionId,
-        traceId: getBoot().state.runId,
+        runId: activeRuntimeState.runId,
+        sessionId: activeRuntimeState.sessionId,
+        traceId: activeRuntimeState.runId,
         trajectoryLogger: this.trajectoryLogger,
         prompt: state.prompt,
         contentPrep,
+        ...(activeRuntimeState.repoInspection ? { repoInspection: activeRuntimeState.repoInspection } : {}),
         toolResults: state.toolResults,
         iteration: state.iteration,
         feedback: state.feedback,
@@ -6312,6 +6319,7 @@ async function callPlannerSubagentTool(input: {
   trajectoryLogger: TrajectoryLogger;
   prompt: string;
   contentPrep: ContentPrepResult;
+  repoInspection?: RepoInspection;
   toolResults: ToolResult[];
   iteration: number;
   feedback: string[];
@@ -7282,6 +7290,7 @@ function isFailedExactEditResult(result: ToolResult): boolean {
 function buildSimpleExecutorPrompt(input: {
   prompt: string;
   contentPrep: ContentPrepResult;
+  repoInspection?: RepoInspection;
   toolResults: ToolResult[];
   feedback: string[];
   negativeConstraints: string[];
@@ -7350,6 +7359,8 @@ function buildSimpleExecutorPrompt(input: {
     "",
     "# Workspace",
     fileTree || "(empty)",
+    "",
+    input.repoInspection ? renderRepoInspectionForCockpit(input.repoInspection) : "Repository inspection: unavailable.",
     "",
     `# Environment\n${environment}`,
     "",
