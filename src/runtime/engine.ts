@@ -419,12 +419,16 @@ function buildGeneralAgentTools(): Array<{ name: string; description: string; in
     },
     {
       name: "get_tool_output",
-      description: "Retrieve a previously spillovered tool result by artifact id. Use after run_shell_command returns a spillover handle.",
+      description: "Retrieve a previously spillovered tool result by artifact id. Use after run_shell_command returns a spillover handle. Supports startLine/endLine, regex pattern, jsonPath, and maxBytes to inspect large outputs without re-pasting.",
       inputSchema: {
         type: "object",
         properties: {
           artifactId: { type: "string" },
-          maxLines: { type: "number" },
+          startLine: { type: "number" },
+          endLine: { type: "number" },
+          pattern: { type: "string" },
+          jsonPath: { type: "string" },
+          maxBytes: { type: "number" },
         },
         required: ["artifactId"],
         additionalProperties: false,

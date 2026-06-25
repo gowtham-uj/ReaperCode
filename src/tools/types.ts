@@ -522,6 +522,21 @@ export const RequestPatchArgsSchema = z
 export const GetToolOutputArgsSchema = z
   .object({
     artifactId: z.string().min(1),
+    /** Optional 1-indexed inclusive line range, e.g. { startLine: 100, endLine: 200 }. */
+    startLine: z.number().int().positive().optional(),
+    endLine: z.number().int().positive().optional(),
+    /**
+     * Optional regex to search across the artifact. When set, the returned
+     * content is the list of matching lines (no body), plus totalMatches.
+     */
+    pattern: z.string().min(1).optional(),
+    /**
+     * Optional dot/bracket JSON path. When set, the artifact content is parsed
+     * as JSON and only the selected node is returned.
+     */
+    jsonPath: z.string().min(1).optional(),
+    /** Cap the number of bytes returned; default 50KB to keep prompts bounded. */
+    maxBytes: z.number().int().positive().optional(),
   })
   .strict();
 
