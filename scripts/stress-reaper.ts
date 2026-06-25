@@ -17,6 +17,15 @@ async function main() {
     console.log(`  agent tests:    ${summary.details?.agentTestsPassed}`);
     console.log(`  original tests: ${summary.details?.originalTestPassed}`);
     console.log(`  modified tests: ${JSON.stringify(summary.details?.testFilesModified)}`);
+    for (const change of summary.details?.testFileChanges ?? []) {
+      console.log(
+        `    ${change.path}: ${change.kind}` +
+          (change.addedNames.length ? ` (added: ${change.addedNames.join(", ")})` : "") +
+          (change.removedNames.length ? ` (removed: ${change.removedNames.join(", ")})` : "") +
+          (change.loosenedNames.length ? ` (loosened: ${change.loosenedNames.join(", ")})` : "") +
+          (change.changedNames.length && !change.loosenedNames.length ? ` (changed: ${change.changedNames.join(", ")})` : ""),
+      );
+    }
     console.log(`  verification:   ${summary.details?.verificationOk}`);
     if (summary.status !== "passed") failed += 1;
   }

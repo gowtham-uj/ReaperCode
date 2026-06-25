@@ -3,6 +3,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { RuntimeEngine } from "../../src/runtime/engine.js";
+import { classifyTestFileDiff } from "./test-diff.js";
 import { ConfiguredModelGateway } from "../../src/model/gateway.js";
 import { ProviderMultiplexerClient } from "../../src/model/providers/provider-client.js";
 import { createValidConfig, createValidRequestEnvelope } from "../../tests/fixtures/phase0.js";
@@ -31,9 +32,22 @@ export interface EvalSummary {
     agentTestsPassed: boolean;
     originalTestPassed: boolean;
     testFilesModified: string[];
+    /** Per-task test-file modification summary. */
+    testFileChanges: TestFileChange[];
     verificationCommand: string;
     verificationOk: boolean;
   };
+}
+
+export interface TestFileChange {
+  /** Path relative to workspace root. */
+  path: string;
+  /** "identical" | "extended" | "weakened" | "mutated" */
+  kind: "identical" | "extended" | "weakened" | "mutated";
+  addedNames: string[];
+  removedNames: string[];
+  changedNames: string[];
+  loosenedNames: string[];
 }
 
 export interface EvalManifest {
@@ -335,7 +349,9 @@ export async function runEvalTask(task: EvalTask): Promise<EvalSummary> {
   const agentRun = await runShell(workspaceRoot, verificationCommand);
   const agentTestsPassed = agentRun.exitCode === 0;
 
-  const testFilesModified = await detectModifiedOriginalTestFiles(workspaceRoot, originalTestSnapshots);
+  const testFileChanges = await detectTestFileChanges(workspaceRoot, originalTestSnapshots);
+  const testFilesModified = testFileChanges.filter((c) => c.kind !== "identical").map((c) => c.path);
+  const testsWeakened = testFileChanges.some((c) => c.kind === "weakened");
 
   // Restore the original test files and re-run them.
   const originalRun = await runOriginalTests(workspaceRoot, originalTestSnapshots, verificationCommand, testFileRel);
@@ -348,7 +364,11 @@ export async function runEvalTask(task: EvalTask): Promise<EvalSummary> {
   // evidence the fix is real.
   const engineVerificationOk = result.verification?.ok === true;
   const harnessVerificationOk = agentTestsPassed && originalTestPassed;
-  const passed = engineVerificationOk || (result.verification === undefined && harnessVerificationOk);
+  // Weakened tests (assertions relaxed, tests removed) invalidate the
+  // fix even if the agent's tests pass — the run is rejected.
+  const passed =
+    !testsWeakened &&
+    (engineVerificationOk || (result.verification === undefined && harnessVerificationOk));
   const verificationOk = engineVerificationOk || (result.verification === undefined && harnessVerificationOk);
 
   return {
@@ -360,26 +380,46 @@ export async function runEvalTask(task: EvalTask): Promise<EvalSummary> {
       agentTestsPassed,
       originalTestPassed,
       testFilesModified,
+      testFileChanges,
       verificationCommand,
       verificationOk,
     },
   };
 }
 
-async function detectModifiedOriginalTestFiles(
+async function detectTestFileChanges(
   workspaceRoot: string,
   snapshots: Map<string, string>,
-): Promise<string[]> {
-  const modified: string[] = [];
+): Promise<TestFileChange[]> {
+  const changes: TestFileChange[] = [];
   for (const [name, originalContent] of snapshots) {
+    let currentContent = originalContent;
     try {
-      const current = await readFile(path.join(workspaceRoot, name), "utf8");
-      if (current !== originalContent) modified.push(name);
+      currentContent = await readFile(path.join(workspaceRoot, name), "utf8");
     } catch {
-      modified.push(name);
+      // File missing — treat as fully removed; classify as weakened.
+      changes.push({
+        path: name,
+        kind: "weakened",
+        addedNames: [],
+        removedNames: [],
+        changedNames: [],
+        loosenedNames: [],
+      });
+      continue;
     }
+    const diff = classifyTestFileDiff(originalContent, currentContent);
+    if (diff.kind === "identical") continue;
+    changes.push({
+      path: name,
+      kind: diff.kind,
+      addedNames: diff.addedNames,
+      removedNames: diff.removedNames,
+      changedNames: diff.changedNames,
+      loosenedNames: diff.loosenedNames,
+    });
   }
-  return modified;
+  return changes;
 }
 
 async function runOriginalTests(
