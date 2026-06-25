@@ -2190,6 +2190,10 @@ export class RuntimeEngine {
 	      const lastShellIsVerification = lastShellCommand
 	        ? isTestCommand(lastShellCommand) || isBuildCommand(lastShellCommand) || isVerificationLikeCommand(lastShellCommand)
 	        : false;
+	      const transportRetryExhausted = countConsecutiveModelTransportBlockers(state.runtimeBlockers) >= mainAgentTransportRetryLimit();
+	      const latestTransportBlocker = [...state.runtimeBlockers]
+	        .reverse()
+	        .find((blocker) => blocker.code === "main_agent_transport_error");
 	      const recoveryMessage =
 	        state.completionGateExhausted && lastShellOk && lastShellIsVerification
 	          ? "Task verified by the last passing test/build/check; the model did not emit complete_task, but the engine accepted the final passing verification."
@@ -2198,11 +2202,13 @@ export class RuntimeEngine {
 	        state.split?.completionSignal?.args.summary?.trim() ||
 	        recoveryMessage ||
 	        (state.mode === "autonomous" && !state.split?.completionSignal
-	          ? state.completionGateExhausted
-	              ? `Task stopped after the completion gate exhausted ${state.completionGateAttempts} attempt(s) without a valid complete_task or concrete remaining work signal.`
-	              : state.stuckDetection.tripped
-	            ? `Task appears stuck: ${state.stuckDetection.reason ?? "repeated ineffective tool execution detected."}`
-	            : "Task ended without the required model complete_task signal."
+	          ? transportRetryExhausted
+	              ? `${latestTransportBlocker?.message ?? "Main-agent provider/API request failed."}\nMain-agent transport retry budget exhausted after ${mainAgentTransportRetryLimit()} attempt(s); stopping as infrastructure/provider failure instead of a completion-gate failure.`
+	              : state.completionGateExhausted
+	                ? `Task stopped after the completion gate exhausted ${state.completionGateAttempts} attempt(s) without a valid complete_task or concrete remaining work signal.`
+	                : state.stuckDetection.tripped
+	              ? `Task appears stuck: ${state.stuckDetection.reason ?? "repeated ineffective tool execution detected."}`
+	              : "Task ended without the required model complete_task signal."
 	          : this.input.modelGateway
 	          ? await generateFinalSummary({
 	              prompt: state.prompt,
@@ -2280,6 +2286,7 @@ export class RuntimeEngine {
 	    const metricsNode = async (state: GraphState) => {
 	      const activeBoot = getBoot();
 	      const taskCompleted = state.events.some((event) => event.message_type === "task_completed");
+	      const transportRetryExhausted = countConsecutiveModelTransportBlockers(state.runtimeBlockers) >= mainAgentTransportRetryLimit();
 	      const sessionMetrics = buildSessionMetricsSummary({
 	        toolResults: state.toolResults,
 	        completionGateAttempts: state.completionGateAttempts,
@@ -2287,6 +2294,7 @@ export class RuntimeEngine {
 	        verifiedCompletion: taskCompleted && state.explicitVerification?.ok !== false,
 	        stuckTripped: state.stuckDetection.tripped,
 	        gateExhausted: state.completionGateExhausted,
+	        ...(transportRetryExhausted ? { stopReasonOverride: "infra_failed" as const } : {}),
 	      });
 	      const metrics = buildTrajectoryEfficiencyMetrics({
 	        startedAt,

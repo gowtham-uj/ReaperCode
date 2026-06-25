@@ -10,7 +10,7 @@ test("CompleteTaskArgsSchema accepts high confidence with verification contract"
     verificationContract: { commands: [{ command: "npm test", required: true }] },
   });
   assert.equal(result.confidence, "high");
-  assert.equal(result.verificationContract?.commands.length, 1);
+  assert.equal(result.verificationContract?.commands?.length, 1);
 });
 
 test("CompleteTaskArgsSchema accepts low confidence with clarification and known issues", () => {
