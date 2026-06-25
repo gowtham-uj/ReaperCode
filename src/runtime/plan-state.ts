@@ -12,8 +12,149 @@
  */
 
 export interface PlanState {
+  /** Optional free-form markdown plan (used as fallback rendering). */
   activeMarkdown?: string;
   candidates: string[];
+  /**
+   * Optional typed plan steps. When populated, this is the canonical
+   * source of truth for the agent's plan and the cockpit renders it
+   * in preference to `activeMarkdown`. The Codex/Claude-style plan
+   * protocol:
+   *
+   * - The agent issues `update_plan` with `steps: PlanStepInput[]`
+   * - Each step carries a status, an evidence field, and an optional
+   *   acceptance criteria. Steps advance through pending -> in_progress
+   *   -> completed (or blocked).
+   * - The runtime can derive a deterministic plan status from the
+   *   step statuses (e.g. "3/5 steps completed").
+   */
+  steps?: PlanStep[];
+}
+
+/**
+ * Status of a single plan step. Mirrors the TodoStatus taxonomy so the
+ * agent can use a single mental model for both plans and todos.
+ */
+export type PlanStepStatus = "pending" | "in_progress" | "completed" | "blocked";
+
+/**
+ * One typed plan step. The `id` is supplied by the agent and used to
+ * advance/regress the step across turns. `acceptanceCriteria` is the
+ * test/verification that proves the step is done.
+ */
+export interface PlanStep {
+  id: string;
+  title: string;
+  status: PlanStepStatus;
+  /** Optional one-line detail (e.g. file path, test name, scope). */
+  detail?: string;
+  /** Optional evidence the agent attached when marking the step completed. */
+  evidence?: string;
+  /** Optional acceptance test/command. */
+  acceptanceCriteria?: string;
+  /** Last update time (epoch ms); set automatically. */
+  updatedAt?: number;
+}
+
+export interface PlanStepInput {
+  id: string;
+  title: string;
+  status?: PlanStepStatus | undefined;
+  detail?: string | undefined;
+  evidence?: string | undefined;
+  acceptanceCriteria?: string | undefined;
+}
+
+export function createPlanSteps(steps: PlanStepInput[] = []): PlanStep[] {
+  const byId = new Map<string, PlanStep>();
+  for (const step of steps) {
+    const id = step.id.trim();
+    const title = step.title.trim();
+    if (!id || !title) continue;
+    const status: PlanStepStatus = step.status ?? "pending";
+    byId.set(id, {
+      id,
+      title,
+      status,
+      ...(step.detail ? { detail: step.detail } : {}),
+      ...(step.evidence ? { evidence: step.evidence } : {}),
+      ...(step.acceptanceCriteria ? { acceptanceCriteria: step.acceptanceCriteria } : {}),
+      updatedAt: Date.now(),
+    });
+  }
+  return [...byId.values()];
+}
+
+export function setPlanSteps(state: PlanState, steps: PlanStepInput[]): PlanState {
+  return { ...state, steps: createPlanSteps(steps) };
+}
+
+export function advancePlanStep(
+  state: PlanState,
+  stepId: string,
+  patch: { status?: PlanStepStatus; evidence?: string },
+): PlanState {
+  if (!state.steps) return state;
+  let changed = false;
+  const next: PlanStep[] = state.steps.map((step) => {
+    if (step.id !== stepId) return step;
+    changed = true;
+    const nextStatus = patch.status ?? step.status;
+    return {
+      ...step,
+      status: nextStatus,
+      ...(patch.evidence !== undefined || step.evidence !== undefined
+        ? { evidence: patch.evidence ?? step.evidence }
+        : {}),
+      updatedAt: Date.now(),
+    };
+  });
+  if (!changed) return state;
+  return { ...state, steps: next };
+}
+
+export interface PlanProgress {
+  total: number;
+  completed: number;
+  inProgress: number;
+  blocked: number;
+  pending: number;
+  ratio: number;
+  isComplete: boolean;
+}
+
+export function planProgress(state: PlanState | undefined): PlanProgress | undefined {
+  if (!state?.steps?.length) return undefined;
+  let completed = 0;
+  let inProgress = 0;
+  let blocked = 0;
+  let pending = 0;
+  for (const step of state.steps) {
+    switch (step.status) {
+      case "completed":
+        completed += 1;
+        break;
+      case "in_progress":
+        inProgress += 1;
+        break;
+      case "blocked":
+        blocked += 1;
+        break;
+      default:
+        pending += 1;
+        break;
+    }
+  }
+  const total = state.steps.length;
+  return {
+    total,
+    completed,
+    inProgress,
+    blocked,
+    pending,
+    ratio: total === 0 ? 0 : completed / total,
+    isComplete: total > 0 && completed === total,
+  };
 }
 
 /**
@@ -56,7 +197,28 @@ export function applyCandidatePlan(state: PlanState, candidate: string): PlanSta
 
 export function renderPlanForCockpit(state: PlanState | undefined): string {
   if (!state) return "None.";
-  const sections: string[] = ["### Active Plan", state.activeMarkdown?.trim() || "None."];
+  const sections: string[] = [];
+  // Typed steps render first when present so the agent sees the
+  // canonical plan structure.
+  if (state.steps && state.steps.length > 0) {
+    const progress = planProgress(state);
+    sections.push("### Plan Steps");
+    for (const step of state.steps) {
+      const status = step.status;
+      const detail = step.detail ? ` — ${step.detail}` : "";
+      const evidence = step.evidence ? ` ✓ ${step.evidence}` : "";
+      const acceptance = step.acceptanceCriteria ? ` (acceptance: ${step.acceptanceCriteria})` : "";
+      sections.push(`- [${statusGlyph(status)}] ${step.id}: ${step.title}${detail}${evidence}${acceptance}`);
+    }
+    if (progress) {
+      sections.push(
+        "",
+        `### Progress: ${progress.completed}/${progress.total} (${Math.round(progress.ratio * 100)}%)`,
+        progress.blocked > 0 ? `${progress.blocked} blocked, ${progress.inProgress} in_progress, ${progress.pending} pending` : `${progress.inProgress} in_progress, ${progress.pending} pending`,
+      );
+    }
+  }
+  sections.push("### Active Plan", state.activeMarkdown?.trim() || "None.");
   if (state.candidates.length > 0) {
     sections.push("", "### Candidate Plans");
     for (const [index, candidate] of state.candidates.entries()) {
@@ -64,6 +226,20 @@ export function renderPlanForCockpit(state: PlanState | undefined): string {
     }
   }
   return sections.join("\n");
+}
+
+function statusGlyph(status: PlanStepStatus | TodoStatus): string {
+  switch (status) {
+    case "completed":
+      return "x";
+    case "in_progress":
+      return ">";
+    case "blocked":
+      return "!";
+    case "pending":
+    default:
+      return " ";
+  }
 }
 
 export function createTodoState(items: TodoItem[] = []): TodoState {
@@ -138,20 +314,6 @@ function resolveStatus(item: TodoItem): TodoStatus {
   if (item.status) return item.status;
   if (item.done) return "completed";
   return "pending";
-}
-
-function statusGlyph(status: TodoStatus): string {
-  switch (status) {
-    case "completed":
-      return "x";
-    case "in_progress":
-      return ">";
-    case "blocked":
-      return "!";
-    case "pending":
-    default:
-      return " ";
-  }
 }
 
 function normalizeTodoItems(items: TodoItem[]): TodoItem[] {

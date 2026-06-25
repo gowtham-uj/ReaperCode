@@ -115,8 +115,10 @@ import {
   applyCandidatePlan,
   createPlanState,
   createTodoState,
+  planProgress,
   renderPlanForCockpit,
   renderTodoForCockpit,
+  setPlanSteps,
   updateTodoItem,
   type PlanState,
   type TodoState,
@@ -2533,21 +2535,29 @@ function applyAdvisoryToolCalls(
   for (const call of calls) {
     if (call.name === "update_plan") {
       const args = call.args;
-      if (args.candidate) {
+      if (args.candidate && typeof args.markdown === "string") {
         planState = {
           ...planState,
           candidates: [args.markdown, ...planState.candidates.filter((item) => item !== args.markdown)],
         };
-      } else {
-        planState = applyCandidatePlan(planState, args.activePlanMarkdown ?? args.markdown);
+      } else if (typeof args.activePlanMarkdown === "string") {
+        planState = applyCandidatePlan(planState, args.activePlanMarkdown);
+      } else if (typeof args.markdown === "string") {
+        planState = applyCandidatePlan(planState, args.markdown);
       }
-      if (args.activePlanMarkdown) {
+      if (typeof args.activePlanMarkdown === "string") {
         planState = { ...planState, activeMarkdown: args.activePlanMarkdown };
+      }
+      if (Array.isArray(args.steps)) {
+        // Typed steps become the canonical plan; merge with any existing
+        // activeMarkdown so the cockpit renders both.
+        planState = setPlanSteps(planState, args.steps);
       }
       toolResults.push(makeAdvisoryToolResult(call, {
         adopted: !args.candidate || Boolean(args.activePlanMarkdown),
         candidate: Boolean(args.candidate),
         candidateCount: planState.candidates.length,
+        ...(planProgress(planState) ? { stepProgress: planProgress(planState) } : {}),
       }));
       continue;
     }
