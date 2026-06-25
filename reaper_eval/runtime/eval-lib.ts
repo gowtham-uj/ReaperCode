@@ -27,10 +27,17 @@ export interface EvalSummary {
   status: "passed" | "failed" | "timeout" | "error";
   logRoot: string;
   trajectoryPath: string;
+  details?: {
+    agentTestsPassed: boolean;
+    originalTestPassed: boolean;
+    testFilesModified: string[];
+    verificationCommand: string;
+    verificationOk: boolean;
+  };
 }
 
 export interface EvalManifest {
-  version: string;
+  version: "1";
   name: string;
   tasks: EvalTask[];
 }
@@ -39,6 +46,16 @@ export async function loadEvalInput(filePath: string): Promise<EvalManifest> {
   const raw = await readFile(filePath, "utf8");
   return JSON.parse(raw) as EvalManifest;
 }
+
+/**
+ * The initial failing test we ship with the target repo. We snapshot it
+ * before the agent starts so we can re-run it after the agent is done.
+ * If the agent modifies the test file to match its buggy implementation,
+ * this snapshot lets us catch it: the agent's tests may pass while the
+ * ORIGINAL tests still fail. This is the canonical Codex/Claude-style
+ * safeguard against "writing tests that match the bug".
+ */
+const ORIGINAL_TEST_FILES = ["isPalindrome.test.js"];
 
 async function setupTargetRepo(workspaceRoot: string): Promise<void> {
   await rm(workspaceRoot, { recursive: true, force: true });
@@ -84,12 +101,36 @@ async function setupTargetRepo(workspaceRoot: string): Promise<void> {
   await execFileAsync("git", ["commit", "-m", "initial broken state"], { cwd: workspaceRoot });
 }
 
+async function runShell(
+  cwd: string,
+  command: string,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  try {
+    const { stdout, stderr } = await execFileAsync("bash", ["-lc", command], { cwd, maxBuffer: 16 * 1024 * 1024 });
+    return { stdout, stderr, exitCode: 0 };
+  } catch (error) {
+    const record = error as { stdout?: string; stderr?: string; code?: number };
+    return {
+      stdout: record.stdout ?? "",
+      stderr: record.stderr ?? "",
+      exitCode: typeof record.code === "number" ? record.code : 1,
+    };
+  }
+}
+
 export async function runEvalTask(task: EvalTask): Promise<EvalSummary> {
   const workspaceRoot = task.targetRepo.replace("file://", "");
   await setupTargetRepo(workspaceRoot);
 
   const logRoot = path.join("/tmp/reaper-stress-logs", task.id);
   await mkdir(logRoot, { recursive: true });
+
+  // Snapshot the original test files BEFORE the agent runs.
+  const originalTestSnapshots = new Map<string, string>();
+  for (const testFile of ORIGINAL_TEST_FILES) {
+    const testPath = path.join(workspaceRoot, testFile);
+    originalTestSnapshots.set(testFile, await readFile(testPath, "utf8"));
+  }
 
   const config = createValidConfig();
   config.models.default_model = {
@@ -132,12 +173,119 @@ export async function runEvalTask(task: EvalTask): Promise<EvalSummary> {
   });
 
   const result = await engine.run();
-  const passed = result.verification?.ok ?? false;
+
+  // ---- Scaffold-level verification gate (Codex/Claude pattern) ----
+  // The engine's verifier already re-runs the verification command
+  // declared by the request. We additionally run:
+  //   1. The agent's tests as-is (npm test) — already covered by
+  //      result.verification?.ok when the agent's command matches.
+  //   2. The ORIGINAL test files from setup, restored and re-run.
+  //      If the agent modified the tests to match its buggy
+  //      implementation, this run will still fail and reject the
+  //      task even though the agent's tests pass.
+  const verificationCommand = task.verification?.command ?? "npm test";
+
+  // Run the agent's current test suite.
+  const agentRun = await runShell(workspaceRoot, verificationCommand);
+  const agentTestsPassed = agentRun.exitCode === 0;
+
+  const testFilesModified = await detectModifiedOriginalTestFiles(workspaceRoot, originalTestSnapshots);
+
+  // Restore the original test files and re-run them.
+  const originalRun = await runOriginalTests(workspaceRoot, originalTestSnapshots, verificationCommand);
+  const originalTestPassed = originalRun.exitCode === 0;
+
+  const passed = (result.verification?.ok ?? false) && agentTestsPassed && originalTestPassed;
 
   return {
     task,
     status: passed ? "passed" : "failed",
     logRoot,
-    trajectoryPath: result.trajectoryPath,
+    trajectoryPath: await findTrajectoryPath(workspaceRoot),
+    details: {
+      agentTestsPassed,
+      originalTestPassed,
+      testFilesModified,
+      verificationCommand,
+      verificationOk: result.verification?.ok ?? false,
+    },
   };
+}
+
+async function detectModifiedOriginalTestFiles(
+  workspaceRoot: string,
+  snapshots: Map<string, string>,
+): Promise<string[]> {
+  const modified: string[] = [];
+  for (const [name, originalContent] of snapshots) {
+    try {
+      const current = await readFile(path.join(workspaceRoot, name), "utf8");
+      if (current !== originalContent) modified.push(name);
+    } catch {
+      modified.push(name);
+    }
+  }
+  return modified;
+}
+
+async function runOriginalTests(
+  workspaceRoot: string,
+  snapshots: Map<string, string>,
+  command: string,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  // Restore the original test files in a temp directory, point the
+  // runner at them, and run the verification command.
+  const tempDir = await mkdtemp("reaper-original-tests-");
+  try {
+    for (const [name, content] of snapshots) {
+      await writeFile(path.join(tempDir, name), content, "utf8");
+    }
+    // Run with a custom NODE_OPTIONS that includes the temp dir on the
+    // require path; simplest is to just symlink package.json + the
+    // current implementation files into the temp dir.
+    await writeFile(
+      path.join(tempDir, "package.json"),
+      JSON.stringify(
+        {
+          name: "reaper-original-tests",
+          version: "1.0.0",
+          type: "module",
+          scripts: { test: "node --test isPalindrome.test.js" },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+    // Copy the current implementation files into the temp dir.
+    for (const file of ORIGINAL_TEST_FILES) {
+      const impl = file.replace(/\.test\./, ".");
+      try {
+        const content = await readFile(path.join(workspaceRoot, impl), "utf8");
+        await writeFile(path.join(tempDir, impl), content, "utf8");
+      } catch {
+        // If the implementation file no longer exists, the test will
+        // fail naturally; that's fine.
+      }
+    }
+    return await runShell(tempDir, command);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+async function mkdtemp(prefix: string): Promise<string> {
+  const dir = path.join("/tmp", `${prefix}${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  await mkdir(dir, { recursive: true });
+  return dir;
+}
+
+async function findTrajectoryPath(workspaceRoot: string): Promise<string> {
+  try {
+    const entries = await readFile(path.join(workspaceRoot, ".reaper", "LATEST_RUN"), "utf8");
+    const runId = entries.trim();
+    return path.join(workspaceRoot, ".reaper", "runs", runId, "logs", "reaper-trajectory.jsonl");
+  } catch {
+    return path.join(workspaceRoot, ".reaper", "logs", "reaper-trajectory.jsonl");
+  }
 }
