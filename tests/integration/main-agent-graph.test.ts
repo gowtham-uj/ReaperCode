@@ -80,7 +80,7 @@ test("main-agent graph completes after shell evidence and explicit completion", 
   assert.match(trajectory, /"to_step":"Extract Task Contract"/);
   assert.match(trajectory, /"to_step":"Content Prep"/);
   assert.match(trajectory, /"to_step":"Main Agent"/);
-  assert.doesNotMatch(trajectory, /"source":"(?:simple_executor|plan_autonomous|dispatch_step|step_executor_subagent|repair_autonomous|patcher_subagent|completion_gate)"/);
+  assert.doesNotMatch(trajectory, /"source":"(?:simple_executor|complex_orchestrator|plan_autonomous|dispatch_step|step_executor_subagent|repair_autonomous|patcher_subagent|completion_gate)"/);
 });
 
 class StaticJsonGateway implements ModelGateway {

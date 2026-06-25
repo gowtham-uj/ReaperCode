@@ -266,6 +266,13 @@ export function classifyMutationRelevance(
   if (basename && combined.includes(basename)) {
     return { relevance: "DIRECTLY_RELEVANT", reason: `target file '${normalizedPath}' appears in task/step/diagnostics` };
   }
+  // Shared basename root with a cited test file: foo.test.js is failing,
+  // therefore foo.js is the implementation under test and is a directly
+  // relevant fix target.
+  const baseNoExt = basename.replace(/\.[^.]+$/, "");
+  if (baseNoExt && combined.includes(`${baseNoExt}.test.`)) {
+    return { relevance: "DIRECTLY_RELEVANT", reason: `target file '${normalizedPath}' is the implementation under the failing test '${baseNoExt}.test.*'` };
+  }
   if (normalizedPathLower && (combined.includes(normalizedPathLower) || combined.includes(normalizedPathLower.replace(/\//g, path.sep)))) {
     return { relevance: "DIRECTLY_RELEVANT", reason: `target path '${normalizedPath}' appears in recent tool evidence` };
   }
