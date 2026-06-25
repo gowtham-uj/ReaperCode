@@ -83,6 +83,46 @@ test("main-agent graph completes after shell evidence and explicit completion", 
   assert.doesNotMatch(trajectory, /"source":"(?:simple_executor|complex_orchestrator|plan_autonomous|dispatch_step|step_executor_subagent|repair_autonomous|patcher_subagent|completion_gate)"/);
 });
 
+test("main-agent graph synthesizes complete_task from empty-tool final summary", async () => {
+  const workspaceRoot = await createTempWorkspace();
+  const request = createValidRequestEnvelope();
+  request.payload = {
+    prompt: "Create .reaper-synth-marker, verify it, and finish.",
+  };
+  const gateway = new StaticJsonGateway([
+    {
+      assistant_message: "Creating and checking the synth marker.",
+      tool_calls: [
+        {
+          id: "create-synth-marker",
+          name: "run_shell_command",
+          args: {
+            cmd: "printf 'synth-ok\\n' > .reaper-synth-marker && test \"$(cat .reaper-synth-marker)\" = synth-ok",
+            summary: "create and verify synth marker",
+          },
+        },
+      ],
+    },
+    {
+      assistant_message:
+        "Done: the synth marker was created and verified successfully; the passing shell check confirms the requested task is complete.",
+      tool_calls: [],
+    },
+  ]);
+
+  const result = await new RuntimeEngine({
+    config: createValidConfig(),
+    workspaceRoot,
+    requestEnvelope: request,
+    modelGateway: gateway,
+  }).run();
+
+  assert.equal(result.events.some((event) => event.message_type === "task_completed"), true);
+  assert.equal(result.verification?.ok, true);
+  assert.match(result.assistantMessage, /synth marker was created and verified successfully/);
+  assert.equal(await readFile(path.join(workspaceRoot, ".reaper-synth-marker"), "utf8"), "synth-ok\n");
+});
+
 class StaticJsonGateway implements ModelGateway {
   readonly requests: GenerateRequest[] = [];
   private readonly responses: unknown[];

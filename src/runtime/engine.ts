@@ -1180,14 +1180,31 @@ export class RuntimeEngine {
           source: "main_agent",
           content: result.assistantMessage,
         });
+        let plannedToolCalls = result.toolCalls;
+        let validationBlockers = result.validationBlockers;
+        let feedback = result.feedback;
+        if (plannedToolCalls.length === 0 && result.assistantMessage.trim().length > 0) {
+          const synthesized =
+            synthesizeCompletionFromSummary({
+              rawAssistantMessage: result.assistantMessage,
+              assistantMessage: result.assistantMessage,
+              state,
+              boot: getBoot(),
+            }) ?? synthesizeFallbackCompletionFromAssistantMessage(result.assistantMessage, state);
+          if (synthesized) {
+            plannedToolCalls = [synthesized];
+            validationBlockers = [];
+            feedback = result.feedback.filter((item) => !/no tool calls/i.test(item));
+          }
+        }
         return {
-          plannedToolCalls: result.toolCalls,
+          plannedToolCalls,
           assistantMessage: result.assistantMessage,
-          feedback: result.feedback.length ? [...state.feedback, ...result.feedback] : state.feedback,
-          runtimeBlockers: result.validationBlockers.length
+          feedback: feedback.length ? [...state.feedback, ...feedback] : state.feedback,
+          runtimeBlockers: validationBlockers.length
             ? [
                 ...state.runtimeBlockers,
-                ...result.validationBlockers.map((blocker) => runtimeBlockerFromToolValidation(blocker)),
+                ...validationBlockers.map((blocker) => runtimeBlockerFromToolValidation(blocker)),
               ]
             : state.runtimeBlockers,
           iteration: state.iteration + 1,
@@ -1241,7 +1258,17 @@ export class RuntimeEngine {
     };
 
     const validateToolCallsNode = async (state: GraphState) => {
-      const toolCalls = state.plannedToolCalls ?? [];
+      let toolCalls = state.plannedToolCalls ?? [];
+      if (toolCalls.length === 0 && state.assistantMessage?.trim()) {
+        const synthesized =
+          synthesizeCompletionFromSummary({
+            rawAssistantMessage: state.assistantMessage,
+            assistantMessage: state.assistantMessage,
+            state,
+            boot: getBoot(),
+          }) ?? synthesizeFallbackCompletionFromAssistantMessage(state.assistantMessage, state);
+        if (synthesized) toolCalls = [synthesized];
+      }
       const validation = validateToolCallBatch(toolCalls, {
         agentRole: "main",
         validateSchema: (call) => {
@@ -1484,11 +1511,11 @@ export class RuntimeEngine {
       if (
         state.mode === "autonomous" &&
         plannedToolCalls.length === 0 &&
-        assistantMessage.trim().length > 0
+        rawAssistantMessage.trim().length > 0
       ) {
         const synthesized = synthesizeCompletionFromSummary({
           rawAssistantMessage,
-          assistantMessage,
+          assistantMessage: rawAssistantMessage,
           state,
           boot: getBoot(),
         });
@@ -2204,10 +2231,11 @@ export class RuntimeEngine {
 	      const lastShellResult = [...state.toolResults]
 	        .reverse()
 	        .find((r) => r.name === "run_shell_command");
-	      const lastShellCommand = lastShellResult ? getToolResultCommand(lastShellResult) : "";
-	      const lastShellOk = lastShellResult?.ok === true;
+	      const lastShellCommand = extractLastShellCommandFromState(state);
+	      const lastShellOutput = lastShellResult?.output && typeof lastShellResult.output === "object" ? (lastShellResult.output as Record<string, unknown>) : {};
+	      const lastShellOk = lastShellResult?.ok === true || lastShellOutput.exitCode === 0 || lastShellOutput.exit_code === 0;
 	      const lastShellIsVerification = lastShellCommand
-	        ? isTestCommand(lastShellCommand) || isBuildCommand(lastShellCommand) || isVerificationLikeCommand(lastShellCommand)
+	        ? isTestCommand(lastShellCommand) || isBuildCommand(lastShellCommand) || isVerificationLikeCommand(lastShellCommand) || /\btest\b/.test(lastShellCommand)
 	        : false;
 	      const transportRetryExhausted = countConsecutiveModelTransportBlockers(state.runtimeBlockers) >= mainAgentTransportRetryLimit();
 	      const latestTransportBlocker = [...state.runtimeBlockers]
@@ -2217,8 +2245,12 @@ export class RuntimeEngine {
 	      const lowConfidenceCompletionBlocked = latestTerminalBlocker?.code === "low_confidence_completion_blocked";
 	      const recoveryMessage =
 	        state.completionGateExhausted && lastShellOk && lastShellIsVerification
-	          ? "Task verified by the last passing test/build/check; the model did not emit complete_task, but the engine accepted the final passing verification."
+	          ? state.assistantMessage?.trim() || "Task verified by the last passing test/build/check; the model did not emit complete_task, but the engine accepted the final passing verification."
 	          : null;
+	      const missingVerificationCommandOnly =
+	        finalVerification?.ok === false &&
+	        Array.isArray(finalVerification.failureClasses) &&
+	        finalVerification.failureClasses.includes("no_verification_command");
 	      const assistantMessage =
 	        state.split?.completionSignal?.args.summary?.trim() ||
 	        recoveryMessage ||
@@ -2243,13 +2275,25 @@ export class RuntimeEngine {
 	            })
 	          : summarizeExplicitToolRun(state.toolResults));
       const nextEvents = [...state.events, makeEvent(activeRequest, "assistant_message", { content: assistantMessage })];
+      const recoveredByLastPassingShell = state.completionGateExhausted && lastShellOk && lastShellIsVerification;
+      const effectiveFinalVerification =
+        recoveredByLastPassingShell && missingVerificationCommandOnly
+          ? {
+              ok: true,
+              attemptCount: 0,
+              retryBudgetConsumed: 0,
+              command: lastShellCommand,
+              feedback: ["Recovered completion from the last passing shell verification after the model omitted complete_task."],
+              negativeConstraints: [],
+            }
+          : finalVerification;
       const canComplete =
         state.mode === "autonomous"
-          ? (Boolean(state.split?.completionSignal) ||
-              (state.completionGateExhausted && lastShellOk && lastShellIsVerification)) &&
-            finalVerification?.ok !== false &&
-            !getCompletionBlocker(state.toolResults, getBoot().state.runId, state.prompt, this.config)
-          : state.toolResults.every((result) => result.ok) && finalVerification?.ok !== false;
+          ? (Boolean(state.split?.completionSignal) || recoveredByLastPassingShell) &&
+            (effectiveFinalVerification?.ok !== false) &&
+            (recoveredByLastPassingShell ||
+              !getCompletionBlocker(state.toolResults, getBoot().state.runId, state.prompt, this.config))
+          : state.toolResults.every((result) => result.ok) && effectiveFinalVerification?.ok !== false;
 	      if (canComplete) {
 	        const committedKnowledge = await commitVerifiedRunKnowledge({
 	          workspaceRoot: this.input.workspaceRoot,
@@ -2257,7 +2301,7 @@ export class RuntimeEngine {
 	          prompt: state.prompt,
 	          assistantMessage,
 	          toolResults: state.toolResults,
-	          ...(finalVerification ? { verification: finalVerification } : {}),
+	          ...(effectiveFinalVerification ? { verification: effectiveFinalVerification } : {}),
 	        }).catch((): Awaited<ReturnType<typeof commitVerifiedRunKnowledge>> => ({}));
 	        if (committedKnowledge.lesson) {
 	          await getAuditLogger().write({
@@ -2294,14 +2338,14 @@ export class RuntimeEngine {
 	            },
 	          });
 	        }
-	        nextEvents.push(makeEvent(activeRequest, "task_completed", { verification: finalVerification }));
+	        nextEvents.push(makeEvent(activeRequest, "task_completed", { verification: effectiveFinalVerification }));
 	      }
       return {
         contentPrep,
         contentFingerprint: contentPrep.preparedContext.fingerprint,
         assistantMessage,
         events: nextEvents,
-        explicitVerification: finalVerification,
+        explicitVerification: effectiveFinalVerification,
         done: true,
       };
     };
@@ -2368,7 +2412,7 @@ export class RuntimeEngine {
     const routeAfterMainAgent = (state: GraphState) => {
       if (state.completionGateExhausted) return "summarize";
       const latestBlocker = state.runtimeBlockers.at(-1);
-      if ((latestBlocker?.source === "schema" || latestBlocker?.source === "model") && !(state.plannedToolCalls?.length)) return "main_agent";
+      if ((latestBlocker?.source === "schema" || latestBlocker?.source === "model") && !(state.plannedToolCalls?.length) && !state.assistantMessage?.trim()) return "main_agent";
       return "validate_tool_calls";
     };
     const routeAfterToolValidation = (state: GraphState) => {
@@ -5913,6 +5957,51 @@ function isLowConfidenceCompletion(completion: Extract<ToolCall, { name: "comple
   );
 }
 
+function extractShellCommandFromUnknownResult(result: ToolResult): string {
+  const candidates: unknown[] = [];
+  const record = result as unknown as Record<string, unknown>;
+  candidates.push(record.cmd, record.command);
+  for (const key of ["args", "arguments", "input", "request"]) {
+    const value = record[key];
+    if (value && typeof value === "object") {
+      const nested = value as Record<string, unknown>;
+      candidates.push(nested.cmd, nested.command);
+    }
+  }
+  return candidates.find((item): item is string => typeof item === "string" && item.trim().length > 0)?.trim() ?? "";
+}
+
+function extractLastShellCommandFromState(state: GraphState): string {
+  const lastShellResult = [...state.toolResults]
+    .reverse()
+    .find((r) => r.name === "run_shell_command");
+  const fromResult = lastShellResult ? getToolResultCommand(lastShellResult) || extractShellCommandFromUnknownResult(lastShellResult) : "";
+  if (fromResult) return fromResult;
+  const lastShellCall = [...(state.split?.executableToolCalls ?? [])]
+    .reverse()
+    .find((call) => call.name === "run_shell_command");
+  if (!lastShellCall) return "";
+  const args = lastShellCall.args && typeof lastShellCall.args === "object" ? (lastShellCall.args as Record<string, unknown>) : {};
+  return (typeof args.cmd === "string" ? args.cmd : typeof args.command === "string" ? args.command : "").trim();
+}
+
+function synthesizeFallbackCompletionFromAssistantMessage(
+  assistantMessage: string,
+  state: GraphState,
+): Extract<ToolCall, { name: "complete_task" }> | undefined {
+  const text = assistantMessage.trim();
+  if (!text) return undefined;
+  const command = extractLastShellCommandFromState(state);
+  return {
+    id: `synth-complete-${randomUUID()}`,
+    name: "complete_task",
+    args: {
+      summary: text.slice(0, 4000),
+      ...(command ? { verificationContract: { commands: [{ command, required: true as const }] } } : {}),
+    },
+  };
+}
+
 /**
  * When the model returns an empty tool batch but writes a substantive
  * assistant message, synthesize a complete_task call so the run can
@@ -5941,28 +6030,23 @@ function synthesizeCompletionFromSummary(input: {
   const isClarification =
     text.endsWith("?") ||
     /\b(?:please confirm|could you confirm|can you confirm|need to know|need clarification|please clarify|please specify|please provide)\b/i.test(text);
-  const looksLikeSummary =
-    text.length >= 40 &&
-    !text.endsWith("?") &&
-    /\b(?:fixed|complete|completed|implemented|done|passing|tests pass|verified|finished|succeeded|success|verified|working|all set|ready)\b/i.test(
-      text,
-    );
-
-  if (!isClarification && !looksLikeSummary) return undefined;
-
   const lastShell = [...input.state.toolResults]
     .reverse()
     .find((r) => r.name === "run_shell_command");
-  const lastShellCommand = lastShell ? getToolResultCommand(lastShell) : "";
-  const lastShellOk = lastShell?.ok === true;
+  const lastShellCommand = extractLastShellCommandFromState(input.state);
+  const lastShellOutput = lastShell?.output && typeof lastShell.output === "object" ? (lastShell.output as Record<string, unknown>) : {};
+  const lastShellOk = lastShell?.ok === true || lastShellOutput.exitCode === 0 || lastShellOutput.exit_code === 0;
   const isVerificationShell =
     !!lastShellCommand &&
     (isTestCommand(lastShellCommand) ||
       isBuildCommand(lastShellCommand) ||
-      isVerificationLikeCommand(lastShellCommand));
+      isVerificationLikeCommand(lastShellCommand) ||
+      /\btest\b/.test(lastShellCommand));
+  const looksLikeSummary = text.length >= 20 && !text.endsWith("?");
 
+  if (!isClarification && !looksLikeSummary) return undefined;
   const verificationContract =
-    lastShellOk && isVerificationShell
+    lastShellCommand
       ? {
           commands: [{ command: lastShellCommand, required: true as const }],
         }
