@@ -72,9 +72,28 @@ export const InspectEnvironmentArgsSchema = z.object({}).strict();
 
 export const UpdatePlanArgsSchema = z
   .object({
-    markdown: z.string().min(1),
+    markdown: z.string().min(1).optional(),
     activePlanMarkdown: z.string().min(1).optional(),
     candidate: z.boolean().optional(),
+    /**
+     * Optional typed plan steps. When supplied, these replace the
+     * existing `state.steps` and become the canonical plan. The
+     * markdown field is still rendered as the human-readable fallback.
+     */
+    steps: z
+      .array(
+        z
+          .object({
+            id: z.string().min(1),
+            title: z.string().min(1),
+            status: z.enum(["pending", "in_progress", "completed", "blocked"]).optional(),
+            detail: z.string().optional(),
+            evidence: z.string().optional(),
+            acceptanceCriteria: z.string().optional(),
+          })
+          .strict(),
+      )
+      .optional(),
   })
   .strict();
 
