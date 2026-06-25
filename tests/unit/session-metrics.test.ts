@@ -27,3 +27,15 @@ test("buildSessionMetricsSummary still reports gate_exhausted for normal complet
   });
   assert.equal(summary.stop_reason, "gate_exhausted");
 });
+
+test("buildSessionMetricsSummary reports error for low-confidence clarification terminal state", () => {
+  const summary = buildSessionMetricsSummary({
+    toolResults: [],
+    completionGateAttempts: 0,
+    taskCompleted: false,
+    verifiedCompletion: false,
+    gateExhausted: true,
+    stopReasonOverride: "error",
+  });
+  assert.equal(summary.stop_reason, "error");
+});
