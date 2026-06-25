@@ -499,6 +499,12 @@ export const CompleteTaskArgsSchema = z
           .strict(),
       )
       .optional(),
+    // Optional engine-only fields used by the synthesizer and the
+    // self-repair prompt: model can report low confidence and capture
+    // unresolved known issues for the user.
+    confidence: z.enum(["high", "low"]).optional(),
+    known_issues: z.array(z.string().min(1)).optional(),
+    clarification: z.string().optional(),
   })
   .strict();
 

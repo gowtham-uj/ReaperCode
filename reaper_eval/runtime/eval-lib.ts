@@ -59,10 +59,20 @@ const ORIGINAL_TEST_FILES = ["isPalindrome.test.js", "chunk.test.js", "parseJson
 
 type TargetSetup = (workspaceRoot: string) => Promise<void>;
 
+const testFileRepoMap: Record<string, string> = {
+  "file:///tmp/reaper-stress-target": "isPalindrome.test.js",
+  "file:///tmp/reaper-stress-target-chunk": "chunk.test.js",
+  "file:///tmp/reaper-stress-target-json": "parseJson.test.js",
+  "file:///tmp/reaper-stress-target-debounce": "utils.test.js",
+  "file:///tmp/reaper-stress-target-truncate": "truncate.test.js",
+};
+
 const TARGET_SETUPS: Record<string, TargetSetup> = {
   "file:///tmp/reaper-stress-target": setupPalindromeRepo,
   "file:///tmp/reaper-stress-target-chunk": setupChunkRepo,
   "file:///tmp/reaper-stress-target-json": setupJsonRepo,
+  "file:///tmp/reaper-stress-target-debounce": setupDebounceRepo,
+  "file:///tmp/reaper-stress-target-truncate": setupTruncateRepo,
 };
 
 async function setupPalindromeRepo(workspaceRoot: string): Promise<void> {
@@ -158,6 +168,68 @@ async function setupJsonRepo(workspaceRoot: string): Promise<void> {
   await commitInitialState(workspaceRoot);
 }
 
+async function setupDebounceRepo(workspaceRoot: string): Promise<void> {
+  await rm(workspaceRoot, { recursive: true, force: true });
+  await mkdir(workspaceRoot, { recursive: true });
+  await writeFile(
+    path.join(workspaceRoot, "package.json"),
+    JSON.stringify(
+      {
+        name: "reaper-stress-target-debounce",
+        version: "1.0.0",
+        type: "module",
+        scripts: { test: "node --test utils.test.js" },
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  // No debounce exported yet — agent must add it.
+  await writeFile(
+    path.join(workspaceRoot, "utils.js"),
+    `export function identity(x) {\n  return x;\n}\n`,
+    "utf8",
+  );
+  await writeFile(
+    path.join(workspaceRoot, "utils.test.js"),
+    `import { test } from "node:test";\nimport assert from "node:assert/strict";\nimport { identity, debounce } from "./utils.js";\n\ntest("identity returns the input unchanged", () => {\n  assert.equal(identity(42), 42);\n  assert.equal(identity("hello"), "hello");\n});\n\ntest("debounce delays invocation by the wait time", async () => {\n  let calls = 0;\n  const fn = () => {\n    calls += 1;\n    return calls;\n  };\n  const debounced = debounce(fn, 30);\n  debounced();\n  debounced();\n  assert.equal(calls, 0);\n  await new Promise((resolve) => setTimeout(resolve, 80));\n  assert.equal(calls, 1);\n});\n`,
+    "utf8",
+  );
+  await commitInitialState(workspaceRoot);
+}
+
+async function setupTruncateRepo(workspaceRoot: string): Promise<void> {
+  await rm(workspaceRoot, { recursive: true, force: true });
+  await mkdir(workspaceRoot, { recursive: true });
+  await writeFile(
+    path.join(workspaceRoot, "package.json"),
+    JSON.stringify(
+      {
+        name: "reaper-stress-target-truncate",
+        version: "1.0.0",
+        type: "module",
+        scripts: { test: "node --test truncate.test.js" },
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  // Buggy truncate: ellipsis always appended even when not needed; off-by-one.
+  await writeFile(
+    path.join(workspaceRoot, "truncate.js"),
+    `export function truncate(text, maxLength) {\n  if (text.length <= maxLength) return text + "...";\n  return text.slice(0, maxLength) + "...";\n}\n`,
+    "utf8",
+  );
+  await writeFile(
+    path.join(workspaceRoot, "truncate.test.js"),
+    `import { test } from "node:test";\nimport assert from "node:assert/strict";\nimport { truncate } from "./truncate.js";\n\ntest("returns text unchanged when shorter than maxLength", () => {\n  assert.equal(truncate("hi", 10), "hi");\n});\n\ntest("truncates and appends an ellipsis when longer than maxLength", () => {\n  assert.equal(truncate("hello world", 5), "hello...");\n});\n\ntest("truncating exactly at the boundary", () => {\n  assert.equal(truncate("abcdef", 6), "abcdef");\n});\n`,
+    "utf8",
+  );
+  await commitInitialState(workspaceRoot);
+}
+
 async function commitInitialState(workspaceRoot: string): Promise<void> {
   await execFileAsync("git", ["init"], { cwd: workspaceRoot });
   await execFileAsync("git", ["config", "user.email", "stress@reaper.local"], { cwd: workspaceRoot });
@@ -190,12 +262,7 @@ export async function runEvalTask(task: EvalTask): Promise<EvalSummary> {
   await setup(workspaceRoot);
 
   const testFile = path.basename(workspaceRoot).replace(/^reaper-stress-target/, "") + ".test.js";
-  const testFileRel =
-    task.targetRepo === "file:///tmp/reaper-stress-target"
-      ? "isPalindrome.test.js"
-      : task.targetRepo === "file:///tmp/reaper-stress-target-chunk"
-        ? "chunk.test.js"
-        : "parseJson.test.js";
+  const testFileRel = testFileRepoMap[task.targetRepo] ?? "parseJson.test.js";
 
   const logRoot = path.join("/tmp/reaper-stress-logs", task.id);
   await mkdir(logRoot, { recursive: true });

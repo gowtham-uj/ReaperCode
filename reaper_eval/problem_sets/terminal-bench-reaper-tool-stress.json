@@ -37,6 +37,30 @@
         "maxIterations": 3,
         "allowJudgeRetry": true
       }
+    },
+    {
+      "id": "reaper-stress-004",
+      "title": "Add debounce function to a multi-file library",
+      "description": "The target repository has a small utils library that needs a debounce function added to it. The function should delay calling the wrapped function by the given wait time, with the most recent call arguments. Add the implementation to utils.js, add a corresponding test to utils.test.js, and ensure all tests pass.",
+      "targetRepo": "file:///tmp/reaper-stress-target-debounce",
+      "targetRepoRef": "main",
+      "verification": {
+        "command": "npm test",
+        "maxIterations": 3,
+        "allowJudgeRetry": true
+      }
+    },
+    {
+      "id": "reaper-stress-005",
+      "title": "Fix string truncation bug in truncate helper",
+      "description": "The target repository has a `truncate` function that should shorten a string to a max length and add an ellipsis suffix, but the current implementation has a boundary bug with multi-byte characters and the max length is off by one. Diagnose the bug, fix the implementation, and ensure tests pass.",
+      "targetRepo": "file:///tmp/reaper-stress-target-truncate",
+      "targetRepoRef": "main",
+      "verification": {
+        "command": "npm test",
+        "maxIterations": 3,
+        "allowJudgeRetry": true
+      }
     }
   ]
 }
