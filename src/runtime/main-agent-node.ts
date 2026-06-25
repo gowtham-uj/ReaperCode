@@ -49,14 +49,17 @@ export async function callMainAgent(input: MainAgentCallInput): Promise<MainAgen
     };
   }
   const { calls, parseErrors } = parseMainAgentToolCallsDetailed(response);
-  const validation = validateToolCallBatch(calls, { agentRole: "main" });
+  const assistantMessage = parseAssistantMessage(response);
+  const validation = calls.length === 0 && assistantMessage.trim().length > 0
+    ? { ok: true as const, blockers: [] }
+    : validateToolCallBatch(calls, { agentRole: "main" });
   const behaviorFeedback = buildMainAgentBehaviorFeedback(validation.blockers);
   const parseFeedback = buildToolCallParseErrorsFeedback(parseErrors);
 
   return {
     source: "main_agent",
     response,
-    assistantMessage: parseAssistantMessage(response),
+    assistantMessage,
     toolCalls: calls,
     feedback: [...behaviorFeedback, ...parseFeedback],
     validationBlockers: validation.blockers,
