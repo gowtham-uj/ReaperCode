@@ -111,7 +111,7 @@ export function buildMainAgentBehaviorFeedback(blockers: ToolValidationBlocker[]
   if (blockers.length === 0) return [];
   return blockers.map((blocker) => {
     if (blocker.code === "empty_tool_call_batch") {
-      return "The main_agent response did not include tool calls. Continue with concrete tools, or call complete_task only with strict completion evidence.";
+      return "The main_agent response did not include tool calls or a final assistant summary. If the task is done, provide a concise final assistant_message with no tool_calls; otherwise continue with concrete tools.";
     }
     return blocker.message;
   });

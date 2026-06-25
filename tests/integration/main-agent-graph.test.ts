@@ -123,6 +123,78 @@ test("main-agent graph synthesizes complete_task from empty-tool final summary",
   assert.equal(await readFile(path.join(workspaceRoot, ".reaper-synth-marker"), "utf8"), "synth-ok\n");
 });
 
+test("main-agent transport retry exhaustion reports infra failure without completion-gate attempts", async () => {
+  const workspaceRoot = await createTempWorkspace();
+  const request = createValidRequestEnvelope();
+  request.payload = {
+    prompt: "Trigger provider 429 handling.",
+  };
+  const gateway = new ThrowingGateway(429);
+
+  const result = await new RuntimeEngine({
+    config: createValidConfig(),
+    workspaceRoot,
+    requestEnvelope: request,
+    modelGateway: gateway,
+  }).run();
+
+  assert.equal(gateway.requests.length, 3);
+  assert.equal(result.events.some((event) => event.message_type === "task_completed"), false);
+  assert.match(result.assistantMessage, /transport retry budget exhausted|infrastructure\/provider failure/i);
+  const trajectory = await readFile(result.trajectoryPath, "utf8");
+  assert.match(trajectory, /"stop_reason":"infra_failed"/);
+  assert.match(trajectory, /"completion_gate_attempts":0/);
+  assert.doesNotMatch(trajectory, /"stop_reason":"gate_exhausted"/);
+});
+
+class ThrowingGateway implements ModelGateway {
+  readonly requests: GenerateRequest[] = [];
+
+  constructor(private readonly status: number) {}
+
+  async resolveRole(role: ModelRole): Promise<ResolvedModelProfile> {
+    return {
+      role,
+      profileName: role,
+      provider: "test",
+      model: "throwing",
+      capabilities: {
+        streaming: false,
+        toolCalling: true,
+        jsonMode: true,
+        structuredOutput: true,
+        embeddings: false,
+      },
+    };
+  }
+
+  async generate(request: GenerateRequest): Promise<GenerateResult> {
+    this.requests.push(request);
+    const error = new Error(
+      `LiteLLM generate request failed with status ${this.status} provider=minimax model=MiniMax-M3 body={"type":"error","error":{"type":"rate_limit_error","message":"Token Plan usage limit reached","http_code":"${this.status}"}}`,
+    ) as Error & { status?: number };
+    error.status = this.status;
+    throw error;
+  }
+
+  async *stream(_request: GenerateRequest): AsyncIterable<StreamEvent> {}
+
+  async embed(request: EmbeddingRequest): Promise<EmbeddingResult> {
+    return {
+      role: "embedder",
+      profileName: "embedder",
+      provider: "test",
+      model: "throwing",
+      vectors: (Array.isArray(request.input) ? request.input : [request.input]).map(() => [0]),
+      raw: {},
+    };
+  }
+
+  async countTokens(request: TokenCountRequest): Promise<number> {
+    return request.text.length;
+  }
+}
+
 class StaticJsonGateway implements ModelGateway {
   readonly requests: GenerateRequest[] = [];
   private readonly responses: unknown[];

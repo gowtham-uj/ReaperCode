@@ -36,6 +36,9 @@ export interface EvalSummary {
     testFileChanges: TestFileChange[];
     verificationCommand: string;
     verificationOk: boolean;
+    stopReason?: string;
+    completionGateAttempts?: number;
+    assistantMessage?: string;
   };
 }
 
@@ -371,11 +374,14 @@ export async function runEvalTask(task: EvalTask): Promise<EvalSummary> {
     (engineVerificationOk || (result.verification === undefined && harnessVerificationOk));
   const verificationOk = engineVerificationOk || (result.verification === undefined && harnessVerificationOk);
 
+  const trajectoryPath = await findTrajectoryPath(workspaceRoot);
+  const sessionMetrics = await readLatestSessionMetrics(trajectoryPath);
+
   return {
     task,
     status: passed ? "passed" : "failed",
     logRoot,
-    trajectoryPath: await findTrajectoryPath(workspaceRoot),
+    trajectoryPath,
     details: {
       agentTestsPassed,
       originalTestPassed,
@@ -383,6 +389,9 @@ export async function runEvalTask(task: EvalTask): Promise<EvalSummary> {
       testFileChanges,
       verificationCommand,
       verificationOk,
+      ...(typeof sessionMetrics.stop_reason === "string" ? { stopReason: sessionMetrics.stop_reason } : {}),
+      ...(typeof sessionMetrics.completion_gate_attempts === "number" ? { completionGateAttempts: sessionMetrics.completion_gate_attempts } : {}),
+      ...(result.assistantMessage ? { assistantMessage: result.assistantMessage } : {}),
     },
   };
 }
@@ -473,6 +482,26 @@ async function mkdtemp(prefix: string): Promise<string> {
   const dir = path.join("/tmp", `${prefix}${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   await mkdir(dir, { recursive: true });
   return dir;
+}
+
+async function readLatestSessionMetrics(trajectoryPath: string): Promise<Record<string, unknown>> {
+  try {
+    const raw = await readFile(trajectoryPath, "utf8");
+    let latest: Record<string, unknown> = {};
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const parsed = JSON.parse(line) as Record<string, unknown>;
+        if (parsed.kind === "session_metrics") latest = parsed;
+      } catch {
+        // Trajectory files are append-only operational logs; tolerate
+        // partial/non-JSON lines and keep scanning for the metrics event.
+      }
+    }
+    return latest;
+  } catch {
+    return {};
+  }
 }
 
 async function findTrajectoryPath(workspaceRoot: string): Promise<string> {
