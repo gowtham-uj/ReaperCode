@@ -29,9 +29,15 @@ test("todo state appends, completes, and renders checklist items", () => {
   state = addTodoItem(state, { id: "test", content: "Add coverage", done: false });
   state = completeTodoItem(state, "inspect");
 
-  assert.deepEqual(state.items, [
-    { id: "inspect", content: "Inspect runtime graph", done: true },
-    { id: "test", content: "Add coverage", done: false },
-  ]);
+  // Status is the canonical field; `done` is kept as a legacy alias for
+  // backward compatibility. The updatedAt timestamp is set automatically
+  // and excluded from the equality check because it varies per run.
+  assert.deepEqual(
+    state.items.map((item) => ({ id: item.id, content: item.content, status: item.status, done: item.done })),
+    [
+      { id: "inspect", content: "Inspect runtime graph", status: "completed", done: true },
+      { id: "test", content: "Add coverage", status: "pending", done: false },
+    ],
+  );
   assert.equal(renderTodoForCockpit(state), "- [x] inspect: Inspect runtime graph\n- [ ] test: Add coverage");
 });

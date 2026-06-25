@@ -117,6 +117,7 @@ import {
   createTodoState,
   renderPlanForCockpit,
   renderTodoForCockpit,
+  updateTodoItem,
   type PlanState,
   type TodoState,
 } from "./plan-state.js";
@@ -382,10 +383,12 @@ function buildGeneralAgentTools(): Array<{ name: string; description: string; in
                 content: { type: "string" },
                 status: { type: "string", enum: ["pending", "in_progress", "completed", "blocked"] },
                 priority: { type: "string", enum: ["low", "medium", "high"] },
+                evidence: { type: "string" },
               },
               required: ["id", "content", "status"],
             },
           },
+          append: { type: "boolean" },
         },
         required: ["items"],
         additionalProperties: false,
@@ -2548,7 +2551,17 @@ function applyAdvisoryToolCalls(
     const args = call.args;
     todoState = args.append ? todoState : createTodoState();
     for (const item of args.items) {
-      todoState = addTodoItem(todoState, item);
+      // `updateTodoItem` accepts the new status/priority/evidence fields and
+      // also de-duplicates by id, so successive `update_todo` calls merge
+      // cleanly into a single working memory.
+      todoState = updateTodoItem(todoState, {
+        id: item.id,
+        content: item.content,
+        ...(item.status ? { status: item.status } : {}),
+        ...(item.priority ? { priority: item.priority } : {}),
+        ...(item.evidence ? { evidence: item.evidence } : {}),
+        ...(item.done !== undefined ? { status: item.done ? "completed" : "pending" } : {}),
+      });
     }
     toolResults.push(makeAdvisoryToolResult(call, {
       itemCount: todoState.items.length,

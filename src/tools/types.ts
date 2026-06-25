@@ -86,7 +86,11 @@ export const UpdateTodoArgsSchema = z
           .object({
             id: z.string().min(1),
             content: z.string().min(1),
-            done: z.boolean(),
+            /** @deprecated use `status` instead. */
+            done: z.boolean().optional(),
+            status: z.enum(["pending", "in_progress", "completed", "blocked"]).optional(),
+            priority: z.enum(["low", "medium", "high"]).optional(),
+            evidence: z.string().optional(),
           })
           .strict(),
       ),
