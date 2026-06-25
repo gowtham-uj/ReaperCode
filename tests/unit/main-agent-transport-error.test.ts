@@ -45,6 +45,6 @@ test("countConsecutiveModelTransportBlockers stops at non-model blockers", () =>
   );
 });
 
-test("mainAgentTransportRetryLimit has a positive default", () => {
-  assert.ok(mainAgentTransportRetryLimit() > 0);
+test("mainAgentTransportRetryLimit defaults to three provider attempts", () => {
+  assert.equal(mainAgentTransportRetryLimit(), 3);
 });

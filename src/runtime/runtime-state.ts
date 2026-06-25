@@ -2,7 +2,9 @@
  * Phase T3.11 Wave 3 — runtime-state helpers.
  *
  * Pure helpers for runtime event-factory + control-flow-splitting logic.
- * Extracted from engine.ts (Wave 3). Behavior must be identical.
+ * Extracted from engine.ts (Wave 3). Behavior must be identical except
+ * the legacy hidden repair control-plane has been removed from the new
+ * general-agent runtime.
  */
 
 import { randomUUID } from "node:crypto";
@@ -10,7 +12,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { AgentEventEnvelope, AgentRequestEnvelope, TransportKind } from "../connection/schemas.js";
-import type { ToolCall, ToolResult } from "../tools/types.js";
+import type { ToolCall } from "../tools/types.js";
 import { TrajectoryLogger } from "../logging/trajectory.js";
 import type { ReaperRunContext } from "./run-manager.js";
 import type { RuntimeEngineResult, SplitToolCalls } from "./engine.js";
@@ -45,14 +47,10 @@ export async function persistRunResult(runContext: ReaperRunContext, result: Run
   );
 }
 
-
-
 export function extractIntentSummary(request: AgentRequestEnvelope): string {
   const prompt = typeof request.payload.prompt === "string" ? request.payload.prompt.trim() : "";
   return prompt ? prompt.slice(0, 200) : "Execute requested coding task";
 }
-
-
 
 export function makeEvent(request: AgentRequestEnvelope, messageType: AgentEventEnvelope["message_type"], payload: Record<string, unknown>): AgentEventEnvelope {
   return {
@@ -120,14 +118,11 @@ export async function logModelResponseTrace(input: {
   });
 }
 
-
-
 export function splitControlToolCalls(toolCalls: ToolCall[]): SplitToolCalls {
   const executableToolCalls: ToolCall[] = [];
   const advisoryToolCalls: Array<Extract<ToolCall, { name: "update_plan" | "update_todo" }>> = [];
   let completionSignal: Extract<ToolCall, { name: "complete_task" }> | undefined;
   let advancementSignal: Extract<ToolCall, { name: "advance_step" }> | undefined;
-  let patchRequestSignal: Extract<ToolCall, { name: "request_patch" }> | undefined;
 
   for (const call of toolCalls) {
     if (call.name === "update_plan" || call.name === "update_todo") {
@@ -136,10 +131,6 @@ export function splitControlToolCalls(toolCalls: ToolCall[]): SplitToolCalls {
     }
     if (call.name === "complete_task") {
       completionSignal = call;
-      break;
-    }
-    if (call.name === "request_patch") {
-      patchRequestSignal = call;
       break;
     }
     if (call.name === "advance_step") {
@@ -154,52 +145,7 @@ export function splitControlToolCalls(toolCalls: ToolCall[]): SplitToolCalls {
     ...(advisoryToolCalls.length ? { advisoryToolCalls } : {}),
     ...(completionSignal ? { completionSignal } : {}),
     ...(advancementSignal ? { advancementSignal } : {}),
-    ...(patchRequestSignal ? { patchRequestSignal } : {}),
   };
 }
 
-
-
-export function renderPatchRequestFeedback(call: Extract<ToolCall, { name: "request_patch" }>): string {
-  const args = call.args;
-  const blockedStepId = args.blockedStep?.id ?? args.resumeFromStepId ?? "current-step";
-  const blockedStepTitle = args.blockedStep?.title ?? "Current step";
-  const reason = args.reasonPatchNeeded ?? "The executor requested a focused patch for the latest failing check or implementation gap.";
-  const acceptanceCriteria = args.acceptanceCriteria?.length
-    ? args.acceptanceCriteria
-    : [
-        "Patch the latest cited failure with the smallest safe change.",
-        "Run a real build/test/runtime check that exercises the changed behavior.",
-        "Return to the parent only after concrete verification evidence is available.",
-      ];
-  return [
-    "Executor requested patcher.",
-    `Blocked step: ${blockedStepId} - ${blockedStepTitle}.`,
-    `Reason: ${reason}`,
-    args.evidence?.failingCommand ? `Failing command: ${args.evidence.failingCommand}` : "",
-    args.evidence?.failingTest ? `Failing test: ${args.evidence.failingTest}` : "",
-    args.evidence?.errorLogs ? `Error logs: ${args.evidence.errorLogs.slice(0, 3000)}` : "",
-    args.filesHint?.length ? `Files hint: ${args.filesHint.join(", ")}` : "",
-    `Acceptance criteria: ${acceptanceCriteria.join("; ")}`,
-    `Resume from step: ${args.resumeFromStepId ?? blockedStepId}`,
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// Phase T3.11: moved to ./file-hints.ts
-
+// Phase T3.11: file-hint helpers moved to ./file-hints.ts

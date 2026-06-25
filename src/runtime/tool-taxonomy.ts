@@ -14,7 +14,6 @@ export const CONTROL_TOOLS: ReadonlySet<string> = new Set([
 
   // Existing runtime control signals.
   "advance_step",
-  "request_patch",
   "delegate_to_plan",
 ]);
 

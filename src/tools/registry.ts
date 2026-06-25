@@ -1,7 +1,6 @@
 import {
   CompleteTaskArgsSchema,
   AdvanceStepArgsSchema,
-  RequestPatchArgsSchema,
   DelegateToPlanArgsSchema,
   DeleteFileArgsSchema,
   GetToolOutputArgsSchema,
@@ -242,10 +241,6 @@ export const toolRegistry = {
   advance_step: {
     description: "Signal that the current plan step is complete and Reaper should move to the next step. This is a control-plane signal, not a filesystem operation.",
     argsSchema: AdvanceStepArgsSchema,
-  },
-  request_patch: {
-    description: "Executor control-plane signal: stop execution and ask the parent to call the patcher sub-agent for a scoped code/test fix, then resume the same blocked step.",
-    argsSchema: RequestPatchArgsSchema,
   },
   delegate_to_plan: {
     description: "Delegate work to orchestrated sub-agents",

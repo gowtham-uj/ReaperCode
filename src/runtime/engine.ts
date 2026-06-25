@@ -18,7 +18,7 @@ import {
 } from "./relevance-gate.js";
 
 import {
-  inferTransport, extractIntentSummary, makeEvent, splitControlToolCalls, renderPatchRequestFeedback,
+  inferTransport, extractIntentSummary, makeEvent, splitControlToolCalls,
   persistRunResult, logAssistantMessageTrace, logModelResponseTrace,
 } from "./runtime-state.js";
 import { renderToolResultForModel, summarizeToolResult } from "../context/history-compaction.js";
@@ -132,7 +132,6 @@ import {
   type VerificationState,
 } from "./verification-state.js";
 import {
-  buildSyntheticPatchRequestSignal,
   createRescueWatchdogState,
   evaluateRescueWatchdog,
   isNoDiagnosticShellExitFailure,
@@ -207,7 +206,6 @@ export interface SplitToolCalls {
   advisoryToolCalls?: Array<Extract<ToolCall, { name: "update_plan" | "update_todo" }>>;
   completionSignal?: Extract<ToolCall, { name: "complete_task" }>;
   advancementSignal?: Extract<ToolCall, { name: "advance_step" }>;
-  patchRequestSignal?: Extract<ToolCall, { name: "request_patch" }>;
 }
 
 function buildGeneralAgentTools(): Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> {
@@ -462,8 +460,8 @@ export interface ExecutionPlanStep {
   commands?: string[];
   advancementEvidence?: string[];
   type?: "inspect" | "command" | "test" | "verify" | "review" | "finalize";
-  onFailure?: "request_patch" | "needs_replan" | "abort";
-  agent?: "executor" | "patcher";
+  onFailure?: "direct_repair" | "needs_replan" | "abort";
+  agent?: "executor" | "reviewer" | "tester" | "researcher";
   tool_calls: ToolCall[];
 }
 
@@ -1736,7 +1734,6 @@ export class RuntimeEngine {
         state.patchingStepIndex === null &&
         Boolean(split) &&
         !split!.completionSignal &&
-        !split!.patchRequestSignal &&
         !split!.advancementSignal &&
         !lastBatchFailed &&
         state.currentStepIndex + 1 >= (state.executionPlan?.length ?? 0) &&
@@ -1772,7 +1769,6 @@ export class RuntimeEngine {
         Boolean(split) &&
         split!.executableToolCalls.length === 0 &&
         !split!.completionSignal &&
-        !split!.patchRequestSignal &&
         !split!.advancementSignal;
       if (split && shouldCleanupBackgroundAfterBatch(split.executableToolCalls, state.toolResults, getExecutor().getBackgroundProcesses())) {
         await getExecutor().cleanupBackgroundProcesses("post_foreground_check");
@@ -1786,24 +1782,14 @@ export class RuntimeEngine {
         ignoreNoAction: step?.type === "finalize" || state.completionGateAttempts > 0,
         ...(split ? { split } : {}),
       });
-      const syntheticPatchRequest =
-        state.mode === "autonomous" && split && step && !split.patchRequestSignal && !shouldSkipOptionalExploratoryStep
-          ? buildSyntheticPatchRequestSignal({
-              step,
-              toolResults: state.toolResults,
-              currentBatchFailed: lastBatchFailed,
-            })
-          : undefined;
-      if (split && syntheticPatchRequest) {
-        split = { ...split, patchRequestSignal: syntheticPatchRequest };
-      }
+      // Legacy hidden patcher routing is removed. Failed steps stay
+      // with the main coding agent and advisory subagents only.
       const readOnlyBatchFeedback =
         state.mode === "autonomous" &&
         Boolean(step) &&
         split &&
         split.executableToolCalls.length > 0 &&
         !split.advancementSignal &&
-        !split.patchRequestSignal &&
         !split.completionSignal &&
         !lastBatchFailed
           ? [
@@ -1846,7 +1832,6 @@ export class RuntimeEngine {
         Boolean(step) &&
         state.patchingStepIndex === null &&
         !split?.completionSignal &&
-        !split?.patchRequestSignal &&
         !split?.advancementSignal &&
         !lastBatchFailed &&
         !stuckDetection.tripped &&
@@ -1856,7 +1841,6 @@ export class RuntimeEngine {
 	        Boolean(step) &&
 	        state.patchingStepIndex === null &&
         !split?.completionSignal &&
-        !split?.patchRequestSignal &&
         !split?.advancementSignal &&
         !lastBatchFailed &&
         !stuckDetection.tripped &&
@@ -1869,8 +1853,7 @@ export class RuntimeEngine {
 	        step!.tool_calls.length > 0 &&
 	        state.patchingStepIndex === null &&
 	        !split?.completionSignal &&
-	        !split?.patchRequestSignal &&
-	        !split?.advancementSignal &&
+		        !split?.advancementSignal &&
 	        !lastBatchFailed &&
 	        !stuckDetection.tripped &&
 	        state.currentStepIndex + 1 < (state.executionPlan?.length ?? 0);
@@ -1879,7 +1862,6 @@ export class RuntimeEngine {
 	        Boolean(step) &&
         state.patchingStepIndex === null &&
         !split?.completionSignal &&
-        !split?.patchRequestSignal &&
         !lastBatchFailed &&
         (Boolean(split?.advancementSignal) ||
 	          autoAdvanceReadOnlyInspection ||
@@ -1892,19 +1874,9 @@ export class RuntimeEngine {
         Boolean(step) &&
         Boolean(split?.advancementSignal) &&
         !split?.completionSignal &&
-        !split?.patchRequestSignal &&
         !lastBatchFailed &&
         isReadOnlyPlanStep(step);
-      const patcherCompletedForBlockedStep =
-        state.mode === "autonomous" &&
-        state.patchingStepIndex !== null &&
-        state.currentStepIndex === state.patchingStepIndex &&
-        !lastBatchFailed &&
-        Boolean(split?.advancementSignal);
-      const patchedStep = state.patchingStepIndex === null ? undefined : state.executionPlan?.[state.patchingStepIndex];
-      const patchedStepAttempts = patchedStep ? state.patchAttemptsByStep[patchedStep.id] ?? 0 : 0;
-      const shouldAdvanceVerifiedPatch = patcherCompletedForBlockedStep && Boolean(patchedStep);
-      const patchAttemptStepId = split?.patchRequestSignal?.args.resumeFromStepId ?? step?.id;
+      const patchAttemptStepId = step?.id;
       const nextPatchAttemptsByStep = state.patchAttemptsByStep;
       const patchAttemptCount = patchAttemptStepId ? nextPatchAttemptsByStep[patchAttemptStepId] ?? 0 : 0;
       const shouldAdvanceCurrentStep = shouldAdvancePlanStep || explicitReadOnlyStepAdvance;
@@ -1996,8 +1968,7 @@ export class RuntimeEngine {
         Boolean(step) &&
         Boolean(split) &&
         !split?.advancementSignal &&
-        !split?.completionSignal &&
-        !split?.patchRequestSignal;
+        !split?.completionSignal;
       if (forcedAdvanceForBudget && split && step) {
         split = {
           ...split,
@@ -2043,26 +2014,7 @@ export class RuntimeEngine {
         ...(queuedNegativeConstraints.length !== state.negativeConstraints.length
           ? { negativeConstraints: queuedNegativeConstraints }
           : {}),
-        ...(split?.patchRequestSignal && step
-          ? {
-              patchingStepIndex:
-                patchAttemptCount >= getMaxPatchAttemptsPerStep() || state.patcherInvocationCount >= getMaxPatchAttemptsPerRun()
-                  ? null
-                  : state.currentStepIndex,
-              feedback: [
-                ...state.feedback,
-                renderPatchRequestFeedback(split.patchRequestSignal),
-                syntheticPatchRequest
-                  ? "Reaper synthesized this rescue request because the current step hit a concrete blocker, repeated failure, or unresolved runtime/verification fact. Use the patcher/rescuer to pinpoint the problem, change strategy, repair, verify, and then resume this same step."
-                  : "",
-                patchAttemptCount >= getMaxPatchAttemptsPerStep() || state.patcherInvocationCount >= getMaxPatchAttemptsPerRun()
-                  ? `Patcher attempt limit reached for step '${step.id}' (${patchAttemptCount}/${getMaxPatchAttemptsPerStep()}, run ${state.patcherInvocationCount}/${getMaxPatchAttemptsPerRun()}). Continue with direct executor repair or return to planner with the failure evidence instead of repeating the same patch loop.`
-                  : `Parent accepted executor patch request for step '${step.id}' (${patchAttemptCount}/${getMaxPatchAttemptsPerStep()}). Call patcher now. After patching, resume executor from the same blocked step; do not advance to the next step until the blocked step passes.`,
-              ].filter(Boolean),
-            }
-          : {}),
-        ...(!split?.patchRequestSignal
-          ? { feedback: advancementBlocker
+        feedback: advancementBlocker
             ? [
                 ...completionBlockerFeedback,
                 `Reaper rejected advance_step for '${step!.id}' because step completion evidence is insufficient: ${advancementBlocker}`,
@@ -2097,8 +2049,7 @@ export class RuntimeEngine {
                   stuckDetection.reason ?? "Repeated ineffective tool execution detected.",
                   "Stop repeating the same failed action. Choose a materially different implementation path, inspect relevant files, or replan the current step around the failure evidence.",
                 ]
-              : completionBlockerFeedback }
-          : {}),
+              : completionBlockerFeedback,
         ...(boundaryPivot
           ? {
               feedback: [
@@ -2114,26 +2065,6 @@ export class RuntimeEngine {
           completedStepIds: [...state.completedStepIds, step!.id],
           patchingStepIndex: null,
         }
-          : {}),
-        ...(patcherCompletedForBlockedStep
-          ? {
-              split: { executableToolCalls: [] },
-              currentStepIndex: shouldAdvanceVerifiedPatch ? state.patchingStepIndex! + 1 : state.patchingStepIndex,
-              currentStepToolStartIndex: state.toolResults.length,
-              patchingStepIndex: null,
-              ...(shouldAdvanceVerifiedPatch && patchedStep
-                ? { completedStepIds: [...state.completedStepIds, patchedStep.id] }
-                : {}),
-              stuckDetection: createStuckDetectionState(),
-              readOnlyBatchSignatures: [],
-              feedback: [
-                shouldAdvanceVerifiedPatch && patchedStep
-                  ? `Patcher verified blocked step '${patchedStep.id}' with concrete evidence. Marking that step complete to avoid cycling on the same verified patch; continue with the next planned step.`
-                  : `Patcher completed for blocked step '${
-                      state.patchingStepIndex === null ? "unknown" : state.executionPlan?.[state.patchingStepIndex]?.id ?? "unknown"
-                    }'. Resume executor from the same step and verify its success criteria before advancing.`,
-              ],
-            }
           : {}),
       };
       // Best-effort: keep .reaper/PLAN.md in sync with step completion
@@ -2650,7 +2581,7 @@ function makeAdvisoryToolResult(call: Extract<ToolCall, { name: "update_plan" | 
 }
 
 function normalizeExecutableToolCalls(toolCalls: ToolCall[]): ToolCall[] {
-  return toolCalls.filter((call) => !["complete_task", "advance_step", "request_patch", "delegate_to_plan", "update_plan", "update_todo"].includes(call.name));
+  return toolCalls.filter((call) => !["complete_task", "advance_step", "delegate_to_plan", "update_plan", "update_todo"].includes(call.name));
 }
 
 function isAllocatedScratchWorkspace(workspaceRoot: string): boolean {
@@ -4078,7 +4009,7 @@ function guardRepeatedReadOnlyBatch(
   previousBatchSignatures: string[],
   previousResults: ToolResult[],
 ): { allowed: ToolCall[]; blockedResults: ToolResult[] } {
-  if (toolCalls.length === 0 || split.advancementSignal || split.patchRequestSignal || split.completionSignal) {
+  if (toolCalls.length === 0 || split.advancementSignal || split.completionSignal) {
     return { allowed: toolCalls, blockedResults: [] };
   }
   const signature = makeReadOnlyBatchSignature(toolCalls);
@@ -4100,7 +4031,7 @@ function guardRepeatedReadOnlyBatch(
         code: "repeated_read_only_batch_blocked",
         message:
           `Reaper blocked repeated read-only batch '${signature}' after ${repeatedCount} prior identical batches without progress. ` +
-          "Do not reread the same files/directories. Use the already observed context to make a concrete edit/check, inspect different evidence, emit advance_step with evidence, request_patch for a scoped bug, or replan.",
+          "Do not reread the same files/directories. Use the already observed context to make a concrete edit/check, inspect different evidence, emit advance_step with evidence, call an advisory subagent, or replan.",
       },
     })),
   };
@@ -4114,7 +4045,7 @@ function guardImplementationReadOnlyDrift(
   previousResults: ToolResult[],
 ): { allowed: ToolCall[]; blockedResults: ToolResult[] } {
   if (!step || !isImplementationLikeStep(step)) return { allowed: toolCalls, blockedResults: [] };
-  if (toolCalls.length === 0 || split.advancementSignal || split.patchRequestSignal || split.completionSignal) {
+  if (toolCalls.length === 0 || split.advancementSignal || split.completionSignal) {
     return { allowed: toolCalls, blockedResults: [] };
   }
   const signature = makeReadOnlyBatchSignature(toolCalls);
@@ -4212,7 +4143,7 @@ function updateReadOnlyBatchSignatures(input: {
   lastBatchFailed: boolean;
 }): string[] {
   const split = input.split;
-  if (!split || split.advancementSignal || split.patchRequestSignal || split.completionSignal) return [];
+  if (!split || split.advancementSignal || split.completionSignal) return [];
   if (input.lastBatchFailed) return input.previous;
   const signature = makeReadOnlyBatchSignature(split.executableToolCalls);
   if (!signature) return [];
@@ -6036,8 +5967,7 @@ async function updateStuckDetectionAfterTools(input: {
       Boolean(input.split) &&
       (input.split?.executableToolCalls.length ?? 0) === 0 &&
       !input.split?.completionSignal &&
-      !input.split?.advancementSignal &&
-      !input.split?.patchRequestSignal;
+      !input.split?.advancementSignal;
     if (input.expanded?.enabled !== false && noActionBatch) {
       const noActionTurns = input.previous.noActionTurns + 1;
       const tripped = noActionTurns >= (input.expanded?.noActionTurnLimit ?? 3);
@@ -6375,8 +6305,8 @@ export function countConsecutiveModelTransportBlockers(blockers: Array<{ source:
 }
 
 export function mainAgentTransportRetryLimit(): number {
-  const parsed = Number(process.env.REAPER_MAIN_AGENT_TRANSPORT_RETRY_LIMIT ?? 6);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 6;
+  const parsed = Number(process.env.REAPER_MAIN_AGENT_TRANSPORT_RETRY_LIMIT ?? 3);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 3;
 }
 
 export function selectRecentStrictVerificationEvidence(results: ToolResult[]): { command: string } | undefined {
@@ -7656,8 +7586,8 @@ function buildStepExecutionPrompt(input: {
 	      negativeConstraints: input.negativeConstraints,
 	    }),
 	    "Executor authority: you may edit files, create files, run commands, and perform normal planned implementation work for the current planner step.",
-    "Patch delegation rule: if execution reveals a bug, failing test, regression, compatibility problem, or medium/large fix that should be isolated and tested by the patcher, stop and emit request_patch. The parent will call the patcher and then resume this same step.",
-    "Do not use request_patch for every edit. Use it for bug/repair situations, not straightforward planned implementation.",
+    "Repair rule: if execution reveals a bug, failing test, regression, or compatibility problem, keep ownership in the main coding agent. Make the smallest safe repair directly, or call an advisory subagent for review/research while the main agent remains responsible for edits and verification.",
+    "Do not delegate repair control flow to a hidden patcher. Keep edits and verification in the main coding agent path.",
     "",
     renderAgentSourceReliabilityPatterns("executor"),
     "",
@@ -7694,9 +7624,9 @@ function buildStepExecutionPrompt(input: {
     "Run test/check commands at subsystem boundaries when this step creates testable code, then emit advance_step only if the check passed or the step has concrete evidence.",
     "Test setup is not complete until the task-local test/check command is runnable and discovers at least one real test/smoke file. Placeholder scripts and test files without a matching command are not progress.",
     "For complex application tasks, build-only checks are not enough before complete_task. Add a behavioral test/smoke check for the requested workflow before completion.",
-    "When a compile/build/test/runtime command reports diagnostics, inspect the exact referenced file/config/log. For small obvious fixes in the current planned implementation, you may edit and rerun. For bug, regression, compatibility, failing-test, or medium/large repair work, emit request_patch with evidence.",
+    "When a compile/build/test/runtime command reports diagnostics, inspect the exact referenced file/config/log, edit the real cause, and rerun the smallest relevant check. For larger uncertainty, call an advisory subagent but keep main-agent ownership.",
     "For case-sensitive include/source path failures, if the referenced path differs only by filename casing from an existing file, either update the include with a precise line-range edit or create a tiny compatibility wrapper file at the exact referenced path that includes the existing file.",
-    "If build/test/runtime is currently failing because of a bug or compatibility issue, prefer request_patch with failing command, error logs, filesHint, acceptanceCriteria, and resumeFromStepId.",
+    "If build/test/runtime is currently failing because of a bug or compatibility issue, preserve the failing command/error logs as evidence, repair directly, and rerun the check until it passes.",
     "If a test command times out or reports open handles, do not rerun the full suite unchanged. First inspect the failing hook/test file and app/database startup code, then run a narrow single-file diagnostic with single-worker/open-handle flags when available. For database-backed tests, prefer an isolated in-process/mocked/file-backed test service or a short connection/server-selection timeout over assuming an external daemon is running.",
     "For targeted npm tests, inspect package.json and run the actual test runner directly or use 'npm test -- <path>' only when the script forwards arguments. Do not use 'npm test <path>' blindly.",
     "Test imports must not start long-running servers as side effects. Export app/module construction separately from process startup and guard listen/start code behind the language's main-entry check.",
@@ -7938,7 +7868,7 @@ function buildSimplifyRecoveryPrompt(input: {
     "- Produce 1 to 6 concrete tool calls. Do not return an empty tool_calls array. Include a narrow real build/test/runtime check when possible.",
     "- If generated source/config/data was rejected as incomplete/truncated, do not retry a large full-file write. Create the smallest complete artifact that can run or be checked, then grow it through small targeted edits.",
     "- If recent tool output was compacted for context budget, use grep_search or bounded read_file ranges around cited symbols/lines instead of reading whole files again.",
-    "- Do not emit request_patch in simplify recovery. This mode is already the parent-level recovery path; complete the smallest boundary fix directly or gather one missing piece of evidence.",
+    "- Do not use hidden repair routing. Complete the smallest boundary fix directly or gather one missing piece of evidence.",
     "- Use advance_step only when the current step criteria are satisfied with evidence.",
     "- Use complete_task only when the whole user task is done and a real check has passed or unavailable testing is documented by evidence.",
     "- If a server/background process was started only for testing, stop it with signal_process after the check.",
@@ -8156,9 +8086,6 @@ export function renderToolCallContract(runId?: string): string {
   if (fullSchemaTools.has("signal_process")) {
     lines.push("- signal_process: {\"id\":\"stop-1\",\"name\":\"signal_process\",\"args\":{\"pid\":123,\"signal\":\"SIGTERM\"}}");
   }
-  if (fullSchemaTools.has("request_patch")) {
-    lines.push("- request_patch: {\"id\":\"patch-1\",\"name\":\"request_patch\",\"args\":{\"reasonPatchNeeded\":\"why focused repair/rescue is required\",\"blockedStep\":{\"id\":\"step-id\",\"title\":\"step title\",\"instruction\":\"step instruction\"},\"evidence\":{\"failingCommand\":\"pytest tests\",\"errorLogs\":\"short error\",\"observedBehavior\":\"what failed\",\"expectedBehavior\":\"what should happen\"},\"filesHint\":[\"src/file.ext\"],\"acceptanceCriteria\":[\"criterion\"],\"resumeFromStepId\":\"step-id\"}}");
-  }
   if (fullSchemaTools.has("web_search")) {
     lines.push("- web_search: {\"id\":\"web-1\",\"name\":\"web_search\",\"args\":{\"query\":\"current package documentation\",\"engine\":\"auto\",\"maxResults\":10}}");
   }
@@ -8172,7 +8099,7 @@ export function renderToolCallContract(runId?: string): string {
     "- search_tools keyword: {\"id\":\"search-1\",\"name\":\"search_tools\",\"args\":{\"query\":\"background process\"}}",
     "- search_tools direct select: {\"id\":\"search-2\",\"name\":\"search_tools\",\"args\":{\"query\":\"select:read_background_output,signal_process\"}}",
     "To finish the run, emit complete_task exactly once with the final summary in args.summary, then no more tool calls are needed.",
-    "Executor rule: normal planned implementation may edit files directly. Use request_patch only for bug fixes, regressions, compatibility failures, failing-test repairs, or medium/large repair work that should be isolated and tested by the patcher.",
+    "Executor rule: normal planned implementation and repair both stay on the main coding agent path. Use advisory subagents only for extra analysis; they do not own routing or edits.",
   );
 
   // Deferred tools section
@@ -9238,15 +9165,10 @@ function hasLaterProgressEvidenceForFailure(failure: ToolResult, laterResults: T
 function shouldRepairBeforeReplan(state: GraphState): boolean {
   const planLength = state.executionPlan?.length ?? 0;
   const planRemaining = planLength > 0 && state.currentStepIndex < planLength;
-  if (!planRemaining && !state.split?.patchRequestSignal && !state.lastBatchFailed) return false;
+  if (!planRemaining && !state.lastBatchFailed) return false;
   if (state.patchingStepIndex !== null) {
     const stepId = state.executionPlan?.[state.patchingStepIndex]?.id;
     const attempts = stepId ? state.patchAttemptsByStep[stepId] ?? 0 : 0;
-    return attempts < getMaxPatchAttemptsPerStep() && state.patcherInvocationCount < getMaxPatchAttemptsPerRun();
-  }
-  if (state.split?.patchRequestSignal) {
-    const stepId = state.split.patchRequestSignal.args.resumeFromStepId ?? state.executionPlan?.[state.currentStepIndex]?.id ?? "current-step";
-    const attempts = state.patchAttemptsByStep[stepId] ?? 0;
     return attempts < getMaxPatchAttemptsPerStep() && state.patcherInvocationCount < getMaxPatchAttemptsPerRun();
   }
   if (hasRecentVerificationOrRuntimeFailure(state.toolResults)) return true;

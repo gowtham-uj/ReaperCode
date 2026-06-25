@@ -510,34 +510,6 @@ export const AdvanceStepArgsSchema = z
   })
   .strict();
 
-export const RequestPatchArgsSchema = z
-  .object({
-    reasonPatchNeeded: z.string().min(1).optional(),
-    blockedStep: z
-      .object({
-        id: z.string().min(1),
-        title: z.string().min(1),
-        instruction: z.string().min(1),
-      })
-      .strict()
-      .optional(),
-    evidence: z
-      .object({
-        failingCommand: z.string().min(1).optional(),
-        failingTest: z.string().min(1).optional(),
-        errorLogs: z.string().min(1).optional(),
-        stackTrace: z.string().min(1).optional(),
-        observedBehavior: z.string().min(1).optional(),
-        expectedBehavior: z.string().min(1).optional(),
-      })
-      .strict()
-      .optional(),
-    filesHint: z.array(z.string().min(1)).optional(),
-    acceptanceCriteria: z.array(z.string().min(1)).min(1).optional(),
-    resumeFromStepId: z.string().min(1).optional(),
-  })
-  .strict();
-
 export const GetToolOutputArgsSchema = z
   .object({
     artifactId: z.string().min(1),
@@ -618,7 +590,6 @@ export const ToolCallSchema = z.discriminatedUnion("name", [
   z.object({ id: z.string().min(1), name: z.literal("activate_skill"), args: ActivateSkillArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("get_tool_output"), args: GetToolOutputArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("advance_step"), args: AdvanceStepArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("request_patch"), args: RequestPatchArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("complete_task"), args: CompleteTaskArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("delegate_to_plan"), args: DelegateToPlanArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("web_fetch"), args: WebFetchArgsSchema }).strict(),
