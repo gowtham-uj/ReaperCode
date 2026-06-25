@@ -55,13 +55,19 @@ export async function loadEvalInput(filePath: string): Promise<EvalManifest> {
  * ORIGINAL tests still fail. This is the canonical Codex/Claude-style
  * safeguard against "writing tests that match the bug".
  */
-const ORIGINAL_TEST_FILES = ["isPalindrome.test.js"];
+const ORIGINAL_TEST_FILES = ["isPalindrome.test.js", "chunk.test.js", "parseJson.test.js"];
 
-async function setupTargetRepo(workspaceRoot: string): Promise<void> {
+type TargetSetup = (workspaceRoot: string) => Promise<void>;
+
+const TARGET_SETUPS: Record<string, TargetSetup> = {
+  "file:///tmp/reaper-stress-target": setupPalindromeRepo,
+  "file:///tmp/reaper-stress-target-chunk": setupChunkRepo,
+  "file:///tmp/reaper-stress-target-json": setupJsonRepo,
+};
+
+async function setupPalindromeRepo(workspaceRoot: string): Promise<void> {
   await rm(workspaceRoot, { recursive: true, force: true });
   await mkdir(workspaceRoot, { recursive: true });
-
-  // package.json
   await writeFile(
     path.join(workspaceRoot, "package.json"),
     JSON.stringify(
@@ -69,31 +75,90 @@ async function setupTargetRepo(workspaceRoot: string): Promise<void> {
         name: "reaper-stress-target",
         version: "1.0.0",
         type: "module",
-        scripts: {
-          test: "node --test isPalindrome.test.js",
-        },
+        scripts: { test: "node --test isPalindrome.test.js" },
       },
       null,
       2,
     ),
     "utf8",
   );
-
-  // buggy implementation: does not ignore case, includes spaces, returns string
   await writeFile(
     path.join(workspaceRoot, "isPalindrome.js"),
     `export function isPalindrome(text) {\n  const reversed = text.split('').reverse().join('');\n  return text + reversed;\n}\n`,
     "utf8",
   );
-
-  // failing test
   await writeFile(
     path.join(workspaceRoot, "isPalindrome.test.js"),
     `import { test } from "node:test";\nimport assert from "node:assert/strict";\nimport { isPalindrome } from "./isPalindrome.js";\n\ntest("palindrome detection", () => {\n  assert.equal(isPalindrome("A man a plan a canal Panama"), true);\n  assert.equal(isPalindrome("hello"), false);\n});\n`,
     "utf8",
   );
+  await commitInitialState(workspaceRoot);
+}
 
-  // init git so checkpoint/diff tools work
+async function setupChunkRepo(workspaceRoot: string): Promise<void> {
+  await rm(workspaceRoot, { recursive: true, force: true });
+  await mkdir(workspaceRoot, { recursive: true });
+  await writeFile(
+    path.join(workspaceRoot, "package.json"),
+    JSON.stringify(
+      {
+        name: "reaper-stress-target-chunk",
+        version: "1.0.0",
+        type: "module",
+        scripts: { test: "node --test chunk.test.js" },
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  // Buggy chunk: off-by-one boundary produces extra empty chunk when length
+  // is an exact multiple of size.
+  await writeFile(
+    path.join(workspaceRoot, "chunk.js"),
+    `export function chunk(input, size) {\n  if (size <= 0) return input.slice();\n  const out = [];\n  for (let i = 0; i < input.length; i += size) {\n    out.push(input.slice(i, i + size));\n  }\n  // BUG: appends an empty chunk whenever the last slice was full.\n  if (input.length > 0 && input.length % size === 0) out.push([]);\n  return out;\n}\n`,
+    "utf8",
+  );
+  await writeFile(
+    path.join(workspaceRoot, "chunk.test.js"),
+    `import { test } from "node:test";\nimport assert from "node:assert/strict";\nimport { chunk } from "./chunk.js";\n\ntest("chunks arrays of length 1", () => {\n  assert.deepEqual(chunk([1, 2, 3, 4, 5], 1), [[1], [2], [3], [4], [5]]);\n});\n\ntest("chunks arrays of length 2", () => {\n  assert.deepEqual(chunk([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]]);\n});\n\ntest("chunks empty arrays", () => {\n  assert.deepEqual(chunk([], 3), []);\n});\n`,
+    "utf8",
+  );
+  await commitInitialState(workspaceRoot);
+}
+
+async function setupJsonRepo(workspaceRoot: string): Promise<void> {
+  await rm(workspaceRoot, { recursive: true, force: true });
+  await mkdir(workspaceRoot, { recursive: true });
+  await writeFile(
+    path.join(workspaceRoot, "package.json"),
+    JSON.stringify(
+      {
+        name: "reaper-stress-target-json",
+        version: "1.0.0",
+        type: "module",
+        scripts: { test: "node --test parseJson.test.js" },
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  // Buggy: throws on invalid input.
+  await writeFile(
+    path.join(workspaceRoot, "parseJson.js"),
+    `export function parseJson(text) {\n  return JSON.parse(text);\n}\n`,
+    "utf8",
+  );
+  await writeFile(
+    path.join(workspaceRoot, "parseJson.test.js"),
+    `import { test } from "node:test";\nimport assert from "node:assert/strict";\nimport { parseJson } from "./parseJson.js";\n\ntest("parses valid JSON", () => {\n  assert.deepEqual(parseJson('{"a":1}'), { a: 1 });\n});\n\ntest("returns null for invalid JSON", () => {\n  assert.equal(parseJson("{not valid}"), null);\n});\n`,
+    "utf8",
+  );
+  await commitInitialState(workspaceRoot);
+}
+
+async function commitInitialState(workspaceRoot: string): Promise<void> {
   await execFileAsync("git", ["init"], { cwd: workspaceRoot });
   await execFileAsync("git", ["config", "user.email", "stress@reaper.local"], { cwd: workspaceRoot });
   await execFileAsync("git", ["config", "user.name", "Reaper Stress Test"], { cwd: workspaceRoot });
@@ -120,16 +185,30 @@ async function runShell(
 
 export async function runEvalTask(task: EvalTask): Promise<EvalSummary> {
   const workspaceRoot = task.targetRepo.replace("file://", "");
-  await setupTargetRepo(workspaceRoot);
+  const setup = TARGET_SETUPS[task.targetRepo];
+  if (!setup) throw new Error(`No setup defined for ${task.targetRepo}`);
+  await setup(workspaceRoot);
+
+  const testFile = path.basename(workspaceRoot).replace(/^reaper-stress-target/, "") + ".test.js";
+  const testFileRel =
+    task.targetRepo === "file:///tmp/reaper-stress-target"
+      ? "isPalindrome.test.js"
+      : task.targetRepo === "file:///tmp/reaper-stress-target-chunk"
+        ? "chunk.test.js"
+        : "parseJson.test.js";
 
   const logRoot = path.join("/tmp/reaper-stress-logs", task.id);
   await mkdir(logRoot, { recursive: true });
 
   // Snapshot the original test files BEFORE the agent runs.
   const originalTestSnapshots = new Map<string, string>();
-  for (const testFile of ORIGINAL_TEST_FILES) {
-    const testPath = path.join(workspaceRoot, testFile);
-    originalTestSnapshots.set(testFile, await readFile(testPath, "utf8"));
+  for (const testFileName of [testFileRel]) {
+    const testPath = path.join(workspaceRoot, testFileName);
+    try {
+      originalTestSnapshots.set(testFileName, await readFile(testPath, "utf8"));
+    } catch {
+      // Test file might not exist for this task; skip snapshot.
+    }
   }
 
   const config = createValidConfig();
@@ -192,7 +271,7 @@ export async function runEvalTask(task: EvalTask): Promise<EvalSummary> {
   const testFilesModified = await detectModifiedOriginalTestFiles(workspaceRoot, originalTestSnapshots);
 
   // Restore the original test files and re-run them.
-  const originalRun = await runOriginalTests(workspaceRoot, originalTestSnapshots, verificationCommand);
+  const originalRun = await runOriginalTests(workspaceRoot, originalTestSnapshots, verificationCommand, testFileRel);
   const originalTestPassed = originalRun.exitCode === 0;
 
   const passed = (result.verification?.ok ?? false) && agentTestsPassed && originalTestPassed;
@@ -232,6 +311,7 @@ async function runOriginalTests(
   workspaceRoot: string,
   snapshots: Map<string, string>,
   command: string,
+  testFileRel: string,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   // Restore the original test files in a temp directory, point the
   // runner at them, and run the verification command.
@@ -250,7 +330,7 @@ async function runOriginalTests(
           name: "reaper-original-tests",
           version: "1.0.0",
           type: "module",
-          scripts: { test: "node --test isPalindrome.test.js" },
+          scripts: { test: `node --test ${testFileRel}` },
         },
         null,
         2,
@@ -258,7 +338,7 @@ async function runOriginalTests(
       "utf8",
     );
     // Copy the current implementation files into the temp dir.
-    for (const file of ORIGINAL_TEST_FILES) {
+    for (const file of [testFileRel]) {
       const impl = file.replace(/\.test\./, ".");
       try {
         const content = await readFile(path.join(workspaceRoot, impl), "utf8");
