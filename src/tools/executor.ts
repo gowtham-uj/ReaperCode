@@ -232,8 +232,8 @@ type EditFileCandidateArgs = { path: string; edits: Array<{ oldString: string; n
  * the next model call's prompt stays small, and the model can grep the file
  * instead of re-running the command.
  */
-const TOOL_RESULT_STDOUT_SPILLOVER_THRESHOLD = 65_536; // 64KB
-const TOOL_RESULT_STDOUT_INLINE_PREVIEW_CHARS = 8_000;
+const TOOL_RESULT_STDOUT_SPILLOVER_THRESHOLD = 8_192; // 8KB
+const TOOL_RESULT_STDOUT_INLINE_PREVIEW_CHARS = 1_200;
 
 export async function spillLargeToolResult(
   result: ForegroundShellResult | undefined,
