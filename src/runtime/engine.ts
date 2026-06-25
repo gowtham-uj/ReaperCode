@@ -1454,7 +1454,29 @@ export class RuntimeEngine {
         content: rawAssistantMessage,
       });
       const assistantMessage = getCompletionSummary(result.tool_calls) ? rawAssistantMessage : "";
-      const plannedToolCalls = result.tool_calls;
+      let plannedToolCalls = result.tool_calls;
+      // Synthesize completion when the model signals "done" via an empty
+      // tool batch but a substantive summary. This covers:
+      //   - the model thinks the task is finished and writes a final summary
+      //   - the model wants to clarify something from the user (we still
+      //     surface the clarification via complete_task with low confidence)
+      //   - transport failures earlier left the model unable to emit
+      //     tool calls even though the verification has already passed
+      if (
+        state.mode === "autonomous" &&
+        plannedToolCalls.length === 0 &&
+        assistantMessage.trim().length > 0
+      ) {
+        const synthesized = synthesizeCompletionFromSummary({
+          rawAssistantMessage,
+          assistantMessage,
+          state,
+          boot: getBoot(),
+        });
+        if (synthesized) {
+          plannedToolCalls = [synthesized];
+        }
+      }
       const messageEvent = assistantMessage ? [makeEvent(getRequest(), "assistant_message", { content: assistantMessage })] : [];
       return {
         plannedToolCalls,
@@ -5848,6 +5870,82 @@ function getCompletionSummary(toolCalls: ToolCall[]): string | undefined {
     (call): call is Extract<ToolCall, { name: "complete_task" }> => call.name === "complete_task",
   );
   return completion?.args.summary;
+}
+
+/**
+ * When the model returns an empty tool batch but writes a substantive
+ * assistant message, synthesize a complete_task call so the run can
+ * finish instead of looping on the completion gate.
+ *
+ * Three cases are handled:
+ *   1. Final summary: long, declarative, no question mark, mentions
+ *      completion keywords. Inject the message as the completion
+ *      summary and inherit the last passing verification contract
+ *      from the tool stream.
+ *   2. Clarification question: the message ends with '?' or contains
+ *      ask-the-user language. Inject a low-confidence complete_task
+ *      with the clarification preserved.
+ *   3. Otherwise: leave the empty batch alone so the completion gate
+ *      can deal with it (genuine failure, rate-limit black-out, etc.).
+ */
+function synthesizeCompletionFromSummary(input: {
+  rawAssistantMessage: string;
+  assistantMessage: string;
+  state: GraphState;
+  boot: { state: { runId: string } };
+}): Extract<ToolCall, { name: "complete_task" }> | undefined {
+  const text = input.assistantMessage.trim();
+  if (text.length === 0) return undefined;
+
+  const isClarification =
+    text.endsWith("?") ||
+    /\b(?:please confirm|could you confirm|can you confirm|need to know|need clarification|please clarify|please specify|please provide)\b/i.test(text);
+  const looksLikeSummary =
+    text.length >= 40 &&
+    !text.endsWith("?") &&
+    /\b(?:fixed|complete|completed|implemented|done|passing|tests pass|verified|finished|succeeded|success|verified|working|all set|ready)\b/i.test(
+      text,
+    );
+
+  if (!isClarification && !looksLikeSummary) return undefined;
+
+  const lastShell = [...input.state.toolResults]
+    .reverse()
+    .find((r) => r.name === "run_shell_command");
+  const lastShellCommand = lastShell ? getToolResultCommand(lastShell) : "";
+  const lastShellOk = lastShell?.ok === true;
+  const isVerificationShell =
+    !!lastShellCommand &&
+    (isTestCommand(lastShellCommand) ||
+      isBuildCommand(lastShellCommand) ||
+      isVerificationLikeCommand(lastShellCommand));
+
+  const verificationContract =
+    lastShellOk && isVerificationShell
+      ? {
+          commands: [{ command: lastShellCommand, required: true as const }],
+        }
+      : undefined;
+
+  const completionArgs: Extract<ToolCall, { name: "complete_task" }>["args"] = {
+    summary: text.slice(0, 4000),
+    ...(verificationContract ? { verificationContract } : {}),
+    ...(isClarification
+      ? {
+          confidence: "low" as const,
+          clarification: text,
+          known_issues: [
+            `Model asked for clarification instead of completing the task. Reason: ${text.slice(0, 500)}`,
+          ],
+        }
+      : {}),
+  };
+
+  return {
+    id: `synth-complete-${randomUUID()}`,
+    name: "complete_task",
+    args: completionArgs,
+  };
 }
 
 function classifyOrchestrationMode(prompt: string, contentPrep: ContentPrepResult): OrchestrationMode {
