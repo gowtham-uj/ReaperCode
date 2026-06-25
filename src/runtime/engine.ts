@@ -536,9 +536,6 @@ type GraphState = {
   currentStepIndex: number;
   currentStepToolStartIndex: number;
   completedStepIds: string[];
-  patchingStepIndex: number | null;
-  patchAttemptsByStep: Record<string, number>;
-  patcherInvocationCount: number;
   rescueWatchdog: RescueWatchdogState;
   plannedToolCalls?: ToolCall[];
   split?: SplitToolCalls;
@@ -592,12 +589,6 @@ const ReaperGraphState = Annotation.Root({
     reducer: (_left, right) => right,
     default: () => [],
   }),
-  patchingStepIndex: Annotation<number | null>(),
-  patchAttemptsByStep: Annotation<Record<string, number>>({
-    reducer: (_left, right) => right,
-    default: () => ({}),
-  }),
-  patcherInvocationCount: Annotation<number>(),
   rescueWatchdog: Annotation<RescueWatchdogState>({
     reducer: (_left, right) => right,
     default: () => createRescueWatchdogState(),
@@ -999,9 +990,6 @@ export class RuntimeEngine {
         currentStepIndex: 0,
         currentStepToolStartIndex: 0,
         completedStepIds: [],
-        patchingStepIndex: null,
-        patchAttemptsByStep: {},
-        patcherInvocationCount: 0,
         rescueWatchdog: createRescueWatchdogState(),
         lastBatchFailed: false,
         completionGateAttempts: 0,
@@ -1705,7 +1693,6 @@ export class RuntimeEngine {
         state.mode === "autonomous" &&
         Boolean(step) &&
         Boolean(split) &&
-        state.patchingStepIndex === null &&
         rawLastBatchFailed &&
         isOptionalExploratoryPlanStep(step) &&
         hasLaterPlanStep(state.executionPlan, state.currentStepIndex);
@@ -1731,7 +1718,6 @@ export class RuntimeEngine {
       const autoCompleteFinalVerifiedStep =
         state.mode === "autonomous" &&
         Boolean(step) &&
-        state.patchingStepIndex === null &&
         Boolean(split) &&
         !split!.completionSignal &&
         !split!.advancementSignal &&
@@ -1830,7 +1816,6 @@ export class RuntimeEngine {
       const autoAdvanceReadOnlyInspection =
         state.mode === "autonomous" &&
         Boolean(step) &&
-        state.patchingStepIndex === null &&
         !split?.completionSignal &&
         !split?.advancementSignal &&
         !lastBatchFailed &&
@@ -1839,8 +1824,7 @@ export class RuntimeEngine {
 	      const autoAdvanceVerifiedCommandStep =
 	        state.mode === "autonomous" &&
 	        Boolean(step) &&
-	        state.patchingStepIndex === null &&
-        !split?.completionSignal &&
+	        !split?.completionSignal &&
         !split?.advancementSignal &&
         !lastBatchFailed &&
         !stuckDetection.tripped &&
@@ -1851,8 +1835,7 @@ export class RuntimeEngine {
 	        state.mode === "autonomous" &&
 	        Boolean(step) &&
 	        step!.tool_calls.length > 0 &&
-	        state.patchingStepIndex === null &&
-	        !split?.completionSignal &&
+		        !split?.completionSignal &&
 		        !split?.advancementSignal &&
 	        !lastBatchFailed &&
 	        !stuckDetection.tripped &&
@@ -1860,7 +1843,6 @@ export class RuntimeEngine {
 	      const shouldAdvancePlanStep =
 	        state.mode === "autonomous" &&
 	        Boolean(step) &&
-        state.patchingStepIndex === null &&
         !split?.completionSignal &&
         !lastBatchFailed &&
         (Boolean(split?.advancementSignal) ||
@@ -1876,9 +1858,6 @@ export class RuntimeEngine {
         !split?.completionSignal &&
         !lastBatchFailed &&
         isReadOnlyPlanStep(step);
-      const patchAttemptStepId = step?.id;
-      const nextPatchAttemptsByStep = state.patchAttemptsByStep;
-      const patchAttemptCount = patchAttemptStepId ? nextPatchAttemptsByStep[patchAttemptStepId] ?? 0 : 0;
       const shouldAdvanceCurrentStep = shouldAdvancePlanStep || explicitReadOnlyStepAdvance;
       const finalStepAdvancedWithoutCompletion =
         shouldAdvanceCurrentStep && state.currentStepIndex + 1 >= (state.executionPlan?.length ?? 0);
@@ -2008,7 +1987,6 @@ export class RuntimeEngine {
         runtimeBlockers: queuedRuntimeBlockers.length > 0 ? [...state.runtimeBlockers, ...queuedRuntimeBlockers] : state.runtimeBlockers,
         readOnlyBatchSignatures,
         ...(boundaryPivot || (stepBudgetDecision.tripped && !canAdvancePlanStep && !split?.completionSignal) ? { needsReplan: true } : {}),
-        patchAttemptsByStep: nextPatchAttemptsByStep,
         completionGateAttempts: nextCompletionGateAttempts,
         ...(bestOfNCandidateRejected || (queuedRuntimeBlockers.length > 0 && nextCompletionGateAttempts >= blockerAttemptLimit) ? { completionGateExhausted: true } : {}),
         ...(queuedNegativeConstraints.length !== state.negativeConstraints.length
@@ -2063,7 +2041,6 @@ export class RuntimeEngine {
           currentStepIndex: state.currentStepIndex + 1,
           currentStepToolStartIndex: state.toolResults.length,
           completedStepIds: [...state.completedStepIds, step!.id],
-          patchingStepIndex: null,
         }
           : {}),
       };
@@ -2414,8 +2391,6 @@ export class RuntimeEngine {
           currentStepIndex: 0,
           currentStepToolStartIndex: 0,
           completedStepIds: [],
-          patchingStepIndex: null,
-          patchAttemptsByStep: {},
           rescueWatchdog: createRescueWatchdogState(),
           lastBatchFailed: false,
           completionGateAttempts: 0,
@@ -9166,11 +9141,6 @@ function shouldRepairBeforeReplan(state: GraphState): boolean {
   const planLength = state.executionPlan?.length ?? 0;
   const planRemaining = planLength > 0 && state.currentStepIndex < planLength;
   if (!planRemaining && !state.lastBatchFailed) return false;
-  if (state.patchingStepIndex !== null) {
-    const stepId = state.executionPlan?.[state.patchingStepIndex]?.id;
-    const attempts = stepId ? state.patchAttemptsByStep[stepId] ?? 0 : 0;
-    return attempts < getMaxPatchAttemptsPerStep() && state.patcherInvocationCount < getMaxPatchAttemptsPerRun();
-  }
   if (hasRecentVerificationOrRuntimeFailure(state.toolResults)) return true;
   if (getPendingStaleWriteReadRepair(state.toolResults) || getPendingFailedExactEditReadRepair(state.toolResults) || getPendingSafeEditRegionRepair(state.toolResults)) {
     return true;
@@ -9321,23 +9291,6 @@ function getGraphRecursionLimit(): number {
   return 8000;
 }
 
-function getMaxPatchAttemptsPerStep(): number {
-  const raw = process.env.REAPER_MAX_PATCH_ATTEMPTS_PER_STEP;
-  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
-  if (Number.isInteger(parsed) && parsed >= 1) {
-    return parsed;
-  }
-  return 5;
-}
-
-function getMaxPatchAttemptsPerRun(): number {
-  const raw = process.env.REAPER_MAX_PATCH_ATTEMPTS_PER_RUN;
-  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
-  if (Number.isInteger(parsed) && parsed >= 1) {
-    return parsed;
-  }
-  return 24;
-}
 
 function getMaxRescueAttemptsPerDiagnostic(): number {
   const raw = process.env.REAPER_RESCUE_MAX_ATTEMPTS_PER_DIAGNOSTIC;
