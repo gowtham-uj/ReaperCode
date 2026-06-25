@@ -62,6 +62,23 @@ const UNTRUSTED_TOOL_NAMES = new Set([
 ]);
 
 /**
+ * Shell command patterns whose output is intrinsically external data
+ * (network calls, package installs, remote reads). The model should
+ * treat them as untrusted data even though `run_shell_command`
+ * itself is a trusted tool — the output of *these commands* is not.
+ */
+const UNTRUSTED_SHELL_COMMAND_PATTERNS: readonly RegExp[] = [
+  /\bcurl\b/,
+  /\bwget\b/,
+  /\bssh\b/,
+  /\bscp\b/,
+  /\bgit\s+(?:fetch|pull|clone|ls-remote)\b/,
+  /\bnpm\s+(?:view|search|publish|install)\b/,
+  /\b(?:apt|brew|dnf|pacman)\b/,
+  /\b(?:http|https|ftp):\/\//i,
+];
+
+/**
  * Classify a tool result's content as trusted or untrusted.
  *
  * Conservative: when in doubt, mark untrusted. The whole point of
@@ -78,6 +95,17 @@ export function classifyToolResultTrust(
 
   // Built-in external-content tools.
   if (UNTRUSTED_TOOL_NAMES.has(name)) return "untrusted";
+
+  // Shell commands that fetch external data: the tool is trusted but
+  // the *output* of the command is untrusted and must be treated as
+  // data, not instruction.
+  if (name === "run_shell_command") {
+    const args = (result.args ?? {}) as { cmd?: unknown };
+    const cmd = typeof args.cmd === "string" ? args.cmd : "";
+    if (UNTRUSTED_SHELL_COMMAND_PATTERNS.some((pattern) => pattern.test(cmd))) {
+      return "untrusted";
+    }
+  }
 
   // `read_file` from a path outside the workspace is treated as
   // untrusted. We can't resolve `workspaceRoot` here without a
