@@ -9,24 +9,53 @@ export interface MainAgentCockpitOptions {
   workspaceRoot?: string;
 }
 
-const COCKPIT_SECTIONS = [
-  "User Request",
-  "Task Contract",
-  "Repo Snapshot",
-  "Prepared Context",
-  "Tool Shortlist",
-  "Skills / Mentions",
-  "Current Plan",
-  "TODO",
-  "Changed Files / Current Diff",
-  "Recent Tool Results",
-  "Runtime Blockers",
-  "Running Subagents",
-  "Completed Subagent Results",
-  "Verification State",
-  "Budget",
-  "Available Tools",
-] as const;
+/**
+ * Cockpit section metadata used to drive prompt-cache-aware layout.
+ *
+ * Cache tier semantics:
+ *
+ * - `system` is the role prompt and is stable across every turn. It must
+ *   come first so the model can cache it as a prefix.
+ * - `stable` sections change only when the underlying state changes
+ *   (task contract, repo snapshot, available tools). Place them after
+ *   the system prompt so the model can cache them as the next prefix
+ *   layer.
+ * - `volatile` sections change every turn (user request, recent tool
+ *   results, runtime blockers, plan, todo). Place them last so the
+ *   cached prefix can be reused as long as the stable layer is intact.
+ *
+ * Providers that support prompt caching (Anthropic via `cache_control`,
+ * OpenAI via implicit prefix caching) benefit from this ordering
+ * because each turn the cached prefix up to the volatile boundary is
+ * reused without re-tokenizing.
+ */
+const SYSTEM_TIER_SECTIONS: ReadonlyArray<{ name: string; kind: "system" | "stable" | "volatile" }> = [
+  { name: "User Request", kind: "volatile" },
+  { name: "Task Contract", kind: "stable" },
+  { name: "Repo Snapshot", kind: "stable" },
+  { name: "Prepared Context", kind: "stable" },
+  { name: "Tool Shortlist", kind: "stable" },
+  { name: "Skills / Mentions", kind: "stable" },
+  { name: "Current Plan", kind: "volatile" },
+  { name: "TODO", kind: "volatile" },
+  { name: "Changed Files / Current Diff", kind: "volatile" },
+  { name: "Recent Tool Results", kind: "volatile" },
+  { name: "Runtime Blockers", kind: "volatile" },
+  { name: "Running Subagents", kind: "volatile" },
+  { name: "Completed Subagent Results", kind: "volatile" },
+  { name: "Verification State", kind: "volatile" },
+  { name: "Budget", kind: "volatile" },
+  { name: "Available Tools", kind: "stable" },
+];
+
+const COCKPIT_SECTIONS = SYSTEM_TIER_SECTIONS.map((section) => section.name) as readonly string[];
+
+export function cockpitSectionKind(name: string): "system" | "stable" | "volatile" | undefined {
+  for (const section of SYSTEM_TIER_SECTIONS) {
+    if (section.name === name) return section.kind;
+  }
+  return undefined;
+}
 
 export function buildMainAgentSystemPrompt(_state: unknown, _options: MainAgentCockpitOptions = {}): string {
   return [
@@ -44,6 +73,74 @@ export function buildMainAgentSystemPrompt(_state: unknown, _options: MainAgentC
     "Return exactly one JSON object with assistant_message and tool_calls.",
     "Use assistant_message only for blockers or final user-visible status; otherwise keep it empty.",
   ].join("\n");
+}
+
+export interface CockpitTier {
+  kind: "system" | "stable" | "volatile";
+  text: string;
+}
+
+export interface CockpitLayout {
+  system: string;
+  stable: string;
+  volatile: string;
+  /** Tiers already joined with blank lines — suitable as the model's input message body. */
+  combined: string;
+  /** Per-section rendering for the cockpit UI / debugging. */
+  sections: Array<{ name: string; kind: "system" | "stable" | "volatile"; text: string }>;
+}
+
+export function buildMainAgentCockpitLayout(
+  state: unknown,
+  request: unknown,
+  contract: unknown,
+  repoInspection: unknown,
+  verificationState: unknown,
+  budgetState: unknown,
+  options: MainAgentCockpitOptions = {},
+): CockpitLayout {
+  const built = buildMainAgentCockpit(state, request, contract, repoInspection, verificationState, budgetState, options);
+  const sections = parseCockpitSections(built);
+  const byKind: Record<"system" | "stable" | "volatile", string[]> = {
+    system: [],
+    stable: [],
+    volatile: [],
+  };
+  for (const section of sections) byKind[section.kind].push(section.text);
+  const system = byKind.system.join("\n\n");
+  const stable = byKind.stable.join("\n\n");
+  const volatile = byKind.volatile.join("\n\n");
+  return {
+    system,
+    stable,
+    volatile,
+    combined: [system, stable, volatile].filter((text) => text.length > 0).join("\n\n"),
+    sections,
+  };
+}
+
+/**
+ * Parse a built cockpit into individual sections with their cache tier.
+ * The output is a stable array suitable for prefix-level cache
+ * segmentation: the system tier should always be sent first, then the
+ * stable tier, then the volatile tier.
+ */
+function parseCockpitSections(built: string): Array<{ name: string; kind: "system" | "stable" | "volatile"; text: string }> {
+  const lines = built.split("\n");
+  const result: Array<{ name: string; kind: "system" | "stable" | "volatile"; text: string }> = [];
+  let current: { name: string; kind: "system" | "stable" | "volatile"; lines: string[] } | null = null;
+  for (const line of lines) {
+    const match = line.match(/^## (.+?)$/);
+    if (match) {
+      if (current) result.push({ name: current.name, kind: current.kind, text: current.lines.join("\n") });
+      const name = match[1]!;
+      current = { name, kind: cockpitSectionKind(name) ?? "volatile", lines: [line] };
+      continue;
+    }
+    if (current) current.lines.push(line);
+  }
+  if (current) result.push({ name: current.name, kind: current.kind, text: current.lines.join("\n") });
+  return result;
 }
 
 export function buildMainAgentCockpit(
