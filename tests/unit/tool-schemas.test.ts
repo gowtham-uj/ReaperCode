@@ -95,13 +95,12 @@ test("accepts native computer-use tool calls", () => {
   assert.equal(approvalCall.name, "request_human_approval");
 });
 
-test("accepts partial request_patch signals for model fallback repair", () => {
-  const patchCall = ToolCallSchema.parse({
-    id: "patch-1",
-    name: "request_patch",
-    args: { reasonPatchNeeded: "Latest verification still fails." },
-  });
-
-  assert.equal(patchCall.name, "request_patch");
-  assert.equal(patchCall.args.reasonPatchNeeded, "Latest verification still fails.");
+test("rejects removed request_patch legacy signal", () => {
+  assert.throws(() =>
+    ToolCallSchema.parse({
+      id: "patch-1",
+      name: "request_patch",
+      args: { reasonPatchNeeded: "Latest verification still fails." },
+    }),
+  );
 });

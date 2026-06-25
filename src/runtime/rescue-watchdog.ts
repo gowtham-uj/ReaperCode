@@ -155,43 +155,11 @@ function isMeaningfulRescueProgressResult(result: ToolResult): boolean {
   return isMutatingShellCommand(command) || (isProducerOrVerificationCommand(command) && !hasPlaceholderShellOutput(result));
 }
 
-function buildSyntheticPatchRequestSignal(input: {
-  step: ExecutionPlanStep;
-  toolResults: ToolResult[];
-  currentBatchFailed: boolean;
-}): Extract<ToolCall, { name: "request_patch" }> | undefined {
-  const diagnostic = getRescueDiagnostic(input);
-  if (!diagnostic) return undefined;
-  if (!input.currentBatchFailed && input.step.onFailure !== "request_patch" && !diagnostic.force) return undefined;
-  return {
-    id: `synthetic-patch-${stableHash(`${input.step.id}:${diagnostic.signature}:${input.toolResults.length}`)}`,
-    name: "request_patch",
-    args: {
-      reasonPatchNeeded: diagnostic.reason,
-      blockedStep: {
-        id: input.step.id,
-        title: input.step.title,
-        instruction: input.step.instructions,
-      },
-      evidence: {
-        ...(diagnostic.command ? { failingCommand: diagnostic.command } : {}),
-        errorLogs: diagnostic.errorLogs,
-        observedBehavior: diagnostic.observedBehavior,
-        expectedBehavior: diagnostic.expectedBehavior,
-      },
-      filesHint: diagnostic.filesHint,
-      acceptanceCriteria: diagnostic.acceptanceCriteria,
-      resumeFromStepId: input.step.id,
-    },
-  };
-}
-
 function getRescueDiagnostic(input: {
   step: ExecutionPlanStep;
   toolResults: ToolResult[];
   currentBatchFailed: boolean;
 }): RescueDiagnostic | undefined {
-  const stepRequestsPatch = input.step.onFailure === "request_patch";
   const repeated = getRepeatedDiagnosticFailure(input.toolResults);
   if (repeated) {
     return {
@@ -203,13 +171,13 @@ function getRescueDiagnostic(input: {
       errorLogs: repeated.errorLogs,
       filesHint: repeated.filesHint,
       observedBehavior: "The same class of diagnostic failure repeated after attempted repair.",
-      expectedBehavior: "Pinpoint the root cause, patch the cited source/config/test issue, run the narrowest check successfully, then resume the blocked step.",
+      expectedBehavior: "Pinpoint the root cause, repair the cited source/config/test issue, run the narrowest check successfully, then resume the blocked step.",
       acceptanceCriteria: [
-        "State the concrete root-cause hypothesis in the patcher summary.",
-        "Patch the cited source/config/test failure with the smallest safe change.",
+        "State the concrete root-cause hypothesis before repairing.",
+        "Repair the cited source/config/test failure with the smallest safe change.",
         "Run the narrowest meaningful build/test/runtime check that exercises the failure.",
         "Do not repeat unchanged failing commands or broad repository reads.",
-        "Return patched_and_verified only after a concrete check passes.",
+        "Proceed only after a concrete check passes.",
       ],
     };
   }
@@ -225,7 +193,7 @@ function getRescueDiagnostic(input: {
   }
 
   const latestFailure = findLatestRescuerWorthyFailure(input.toolResults);
-  if (latestFailure && stepRequestsPatch) {
+  if (latestFailure && input.step.onFailure === "direct_repair") {
     return buildLatestFailureRescueDiagnostic(latestFailure);
   }
 
@@ -386,7 +354,6 @@ export {
   buildBlockedActionRescueDiagnostic,
   buildLatestFailureRescueDiagnostic,
   buildRuntimeFactsRescueDiagnostic,
-  buildSyntheticPatchRequestSignal,
   findLatestRescuerWorthyBlockedResult,
   findLatestRescuerWorthyFailure,
   getRescueDiagnostic,

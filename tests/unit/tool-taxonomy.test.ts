@@ -14,7 +14,6 @@ const requiredControlTools = [
   "update_task_contract",
   "update_plan",
   "update_todo",
-  "call_subagent",
   "poll_subagent",
   "cancel_subagent",
   "complete_task",
@@ -58,7 +57,6 @@ test("classifies every required executable inspection or mutation tool", () => {
 test("detects mutating tools consistently across executable and control tools", () => {
   const mutatingTools = [
     "update_task_contract",
-    "call_subagent",
     "cancel_subagent",
     "create_checkpoint",
     "restore_checkpoint",
@@ -82,6 +80,7 @@ test("detects mutating tools consistently across executable and control tools", 
     "list_package_scripts",
     "run_test_command",
     "read_test_failure_summary",
+    "call_subagent",
   ];
 
   for (const toolName of mutatingTools) {
@@ -107,4 +106,11 @@ test("unknown tools remain unknown", () => {
   assert.equal(isControlTool("not_a_real_tool"), false);
   assert.equal(isExecutableTool("not_a_real_tool"), false);
   assert.equal(isMutatingTool("not_a_real_tool"), false);
+});
+
+test("removed request_patch legacy route is not classified as a control tool", () => {
+  assert.equal(getToolKind("request_patch"), "unknown");
+  assert.equal(isControlTool("request_patch"), false);
+  assert.equal(isExecutableTool("request_patch"), false);
+  assert.equal(isMutatingTool("request_patch"), false);
 });

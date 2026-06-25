@@ -426,20 +426,6 @@ export function normalizeToolCall(input: unknown): unknown {
           ...(Array.isArray(record.evidence) ? { evidence: record.evidence } : {}),
         };
         break;
-      case "request_patch":
-        args = {
-          ...(typeof record.reasonPatchNeeded === "string"
-            ? { reasonPatchNeeded: record.reasonPatchNeeded }
-            : typeof record.summary === "string"
-              ? { reasonPatchNeeded: record.summary }
-              : {}),
-          ...(record.blockedStep && typeof record.blockedStep === "object" ? { blockedStep: record.blockedStep } : {}),
-          ...(record.evidence && typeof record.evidence === "object" ? { evidence: record.evidence } : {}),
-          ...(Array.isArray(record.filesHint) ? { filesHint: record.filesHint } : {}),
-          ...(Array.isArray(record.acceptanceCriteria) ? { acceptanceCriteria: record.acceptanceCriteria } : {}),
-          ...(typeof record.resumeFromStepId === "string" ? { resumeFromStepId: record.resumeFromStepId } : {}),
-        };
-        break;
       case "delegate_to_plan":
         args = {
           ...(Array.isArray(record.plan) ? { plan: record.plan } : {}),
