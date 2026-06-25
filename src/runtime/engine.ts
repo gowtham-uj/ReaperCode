@@ -514,7 +514,7 @@ type GraphMode = "explicit_tools" | "needs_model" | "autonomous";
 type OrchestrationMode = "simple_executor" | "complex_orchestrator";
 
 type RuntimeBlocker = {
-  source: "progress_guard" | "verification" | "schema" | "tool_validation" | "completion_validation" | "runtime";
+  source: "progress_guard" | "verification" | "schema" | "tool_validation" | "completion_validation" | "runtime" | "model";
   code: string;
   message: string;
   details?: string[];
@@ -1209,6 +1209,7 @@ export class RuntimeEngine {
         } satisfies Partial<GraphState>;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        const transport = classifyMainAgentTransportError(error);
         await this.trajectoryLogger.write({
           event_id: randomUUID(),
           run_id: getBoot().state.runId,
@@ -1218,20 +1219,37 @@ export class RuntimeEngine {
           log_schema_version: 1,
           kind: "assistant_message",
           level: getBoot().state.logLevel,
-          content: `[main_agent_schema_error] ${message}`,
+          content: `[${transport ? "main_agent_transport_error" : "main_agent_schema_error"}] ${message}`,
         });
-        const blocker: RuntimeBlocker = {
-          source: "schema",
-          code: "main_agent_schema_error",
-          message,
-        };
+        const blocker: RuntimeBlocker = transport
+          ? {
+              source: "model",
+              code: transport.code,
+              message: transport.message,
+              details: transport.details,
+            }
+          : {
+              source: "schema",
+              code: "main_agent_schema_error",
+              message,
+            };
+        const attempts = transport ? state.completionGateAttempts : state.completionGateAttempts + 1;
+        const nextRuntimeBlockers = [...state.runtimeBlockers, blocker];
+        const transportRetryExhausted = transport ? countConsecutiveModelTransportBlockers(nextRuntimeBlockers) >= mainAgentTransportRetryLimit() : false;
         return {
           plannedToolCalls: [],
-          assistantMessage: message,
-          feedback: [...state.feedback, message],
-          runtimeBlockers: [...state.runtimeBlockers, blocker],
-          completionGateAttempts: state.completionGateAttempts + 1,
-          completionGateExhausted: state.completionGateAttempts + 1 >= this.config.runtime.completionGateMax,
+          assistantMessage: transportRetryExhausted
+            ? `${transport?.message ?? message}\nMain-agent transport retry budget exhausted; stopping as infrastructure/provider failure instead of looping forever.`
+            : message,
+          feedback: [
+            ...state.feedback,
+            transportRetryExhausted
+              ? `${transport?.message ?? message}\nMain-agent transport retry budget exhausted; stop rather than consuming completion-gate attempts or executing empty tool batches.`
+              : transport?.message ?? message,
+          ],
+          runtimeBlockers: nextRuntimeBlockers,
+          completionGateAttempts: attempts,
+          completionGateExhausted: transport ? (state.completionGateExhausted || transportRetryExhausted) : attempts >= this.config.runtime.completionGateMax,
           iteration: state.iteration + 1,
         } satisfies Partial<GraphState>;
       }
@@ -2368,7 +2386,7 @@ export class RuntimeEngine {
     const routeAfterMainAgent = (state: GraphState) => {
       if (state.completionGateExhausted) return "summarize";
       const latestBlocker = state.runtimeBlockers.at(-1);
-      if (latestBlocker?.source === "schema" && !(state.plannedToolCalls?.length)) return "main_agent";
+      if ((latestBlocker?.source === "schema" || latestBlocker?.source === "model") && !(state.plannedToolCalls?.length)) return "main_agent";
       return "validate_tool_calls";
     };
     const routeAfterToolValidation = (state: GraphState) => {
@@ -6299,6 +6317,66 @@ function hasSuccessfulAcceptanceEvidence(results: ToolResult[]): boolean {
 
 function hasRecentSuccessfulAcceptanceEvidence(results: ToolResult[]): boolean {
   return hasSuccessfulAcceptanceEvidence(results.slice(-12));
+}
+
+export function classifyMainAgentTransportError(error: unknown):
+  | { code: "main_agent_transport_error"; message: string; details: string[] }
+  | undefined {
+  const message = error instanceof Error ? error.message : String(error);
+  const lower = message.toLowerCase();
+  const status = typeof (error as { status?: unknown })?.status === "number" ? (error as { status: number }).status : undefined;
+  const isTransport =
+    status === 408 ||
+    status === 409 ||
+    status === 425 ||
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    status === 529 ||
+    lower.includes("rate_limit") ||
+    lower.includes("rate limit") ||
+    lower.includes("too many requests") ||
+    lower.includes("temporarily unavailable") ||
+    lower.includes("provider_unavailable") ||
+    lower.includes("overloaded") ||
+    lower.includes("timeout") ||
+    lower.includes("timed out") ||
+    lower.includes("econnreset") ||
+    lower.includes("etimedout") ||
+    lower.includes("fetch failed");
+  if (!isTransport) return undefined;
+  const retryClass = status === 429 || lower.includes("rate_limit") || lower.includes("rate limit") || lower.includes("too many requests")
+    ? "rate_limit"
+    : "transport";
+  return {
+    code: "main_agent_transport_error",
+    message: `Main-agent model call failed with a ${retryClass} transport error. This is infrastructure/provider backpressure, not a malformed agent response; retry the model call without consuming completion-gate attempts. Original error: ${message}`,
+    details: [
+      `status=${status ?? "unknown"}`,
+      `class=${retryClass}`,
+      "Do not treat provider 429/5xx/timeouts as empty tool batches or schema failures.",
+    ],
+  };
+}
+
+export function countConsecutiveModelTransportBlockers(blockers: Array<{ source: string; code: string }>): number {
+  let count = 0;
+  for (let index = blockers.length - 1; index >= 0; index -= 1) {
+    const blocker = blockers[index];
+    if (blocker?.source === "model" && blocker.code === "main_agent_transport_error") {
+      count += 1;
+      continue;
+    }
+    break;
+  }
+  return count;
+}
+
+export function mainAgentTransportRetryLimit(): number {
+  const parsed = Number(process.env.REAPER_MAIN_AGENT_TRANSPORT_RETRY_LIMIT ?? 6);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 6;
 }
 
 export function selectRecentStrictVerificationEvidence(results: ToolResult[]): { command: string } | undefined {
