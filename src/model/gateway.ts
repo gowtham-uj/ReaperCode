@@ -112,21 +112,78 @@ export class ConfiguredModelGateway implements ModelGateway {
   async *stream(request: GenerateRequest): AsyncIterable<StreamEvent> {
     const profile = await this.resolveRole(request.role);
     this.assertGenerateCompatibility(request, profile, true);
-    // Note: streaming doesn't go through withFallback — providers are
-    // expected to surface failures inline via StreamEvent errors. The
-    // router_decision event for streams is emitted up-front with no
-    // latency (streaming latency is measured by the consumer).
+    // For streaming, the primary path is preferred because it has the
+    // lowest latency. However, if the primary provider fails BEFORE the
+    // first event, fall back to the configured fallback profile to
+    // preserve long-running agent sessions. Mid-stream failures are
+    // surfaced inline via StreamEvent errors (we don't restart the
+    // stream because the consumer is already in the middle of reading).
+    yield* this.streamWithFallback(profile, request);
+  }
+
+  private async *streamWithFallback(
+    primaryProfile: ResolvedModelProfile,
+    request: GenerateRequest,
+  ): AsyncIterable<StreamEvent> {
     await this.emitRoute({
       role: request.role,
-      selectedProfile: profile.profileName,
-      selectedModel: profile.model,
-      provider: profile.provider,
+      selectedProfile: primaryProfile.profileName,
+      selectedModel: primaryProfile.model,
+      provider: primaryProfile.provider,
       strategy: "primary",
-      reason: "primary profile (streaming path does not auto-failover)",
+      reason: "primary profile (streaming path falls back if no events arrive)",
       resolvedOnPrimary: true,
     });
 
-    for await (const event of this.client.stream(request, profile)) {
+    const primary = this.client.stream(request, primaryProfile);
+    let firstEvent: StreamEvent | undefined;
+    const tail: StreamEvent[] = [];
+    try {
+      for await (const event of primary) {
+        if (firstEvent === undefined) {
+          firstEvent = event;
+          yield event;
+        } else {
+          // Buffer the rest so we can replay it on the fallback path if
+          // the primary fails later in the stream.
+          tail.push(event);
+        }
+      }
+      // Stream finished cleanly — replay the tail.
+      for (const event of tail) yield event;
+      return;
+    } catch (error) {
+      // The primary stream failed before completion. If we already
+      // delivered events, we cannot transparently retry; surface the
+      // error inline. If we never delivered an event, try the fallback
+      // profile so the consumer still gets a response.
+      if (firstEvent !== undefined) {
+        throw error;
+      }
+    }
+
+    const fallbackName = primaryProfile.fallbackProfile;
+    if (!fallbackName) {
+      throw new Error(
+        `Primary streaming provider '${primaryProfile.provider}' failed and no fallback profile is configured.`,
+      );
+    }
+    const fallbackProfile = resolveModelRole(this.config, fallbackName);
+    if (fallbackProfile.profileName === primaryProfile.profileName) {
+      throw new Error(
+        `Primary streaming provider '${primaryProfile.provider}' failed and fallback profile '${fallbackName}' could not be resolved.`,
+      );
+    }
+    await this.emitRoute({
+      role: request.role,
+      selectedProfile: fallbackProfile.profileName,
+      selectedModel: fallbackProfile.model,
+      provider: fallbackProfile.provider,
+      strategy: "fallback",
+      reason: `primary provider failed before first event; switched to fallback profile '${fallbackName}'`,
+      resolvedOnPrimary: false,
+    });
+    for await (const event of this.client.stream(request, fallbackProfile)) {
       yield event;
     }
   }

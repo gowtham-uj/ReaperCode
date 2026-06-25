@@ -48,42 +48,60 @@ export async function callMainAgent(input: MainAgentCallInput): Promise<MainAgen
       validationBlockers: validation.blockers,
     };
   }
-  const toolCalls = parseMainAgentToolCalls(response);
-  const validation = validateToolCallBatch(toolCalls, { agentRole: "main" });
+  const { calls, parseErrors } = parseMainAgentToolCallsDetailed(response);
+  const validation = validateToolCallBatch(calls, { agentRole: "main" });
+  const behaviorFeedback = buildMainAgentBehaviorFeedback(validation.blockers);
+  const parseFeedback = buildToolCallParseErrorsFeedback(parseErrors);
 
   return {
     source: "main_agent",
     response,
     assistantMessage: parseAssistantMessage(response),
-    toolCalls,
-    feedback: validation.ok ? [] : buildMainAgentBehaviorFeedback(validation.blockers),
+    toolCalls: calls,
+    feedback: [...behaviorFeedback, ...parseFeedback],
     validationBlockers: validation.blockers,
   };
 }
 
 export function parseMainAgentToolCalls(response: GenerateResult | unknown): ToolCall[] {
+  return parseMainAgentToolCallsDetailed(response).calls;
+}
+
+/**
+ * Codex/Claude-style self-repair: separate valid tool calls from parse
+ * errors so the agent can keep the valid calls and feed the errors back
+ * as feedback for the next turn. The previous behavior was to throw on
+ * any parse error, which forced the model to retry the entire batch.
+ */
+export function parseMainAgentToolCallsDetailed(
+  response: GenerateResult | unknown,
+): { calls: ToolCall[]; parseErrors: string[] } {
   const rawToolCalls = extractRawToolCalls(response);
-  if (!rawToolCalls) return [];
+  if (!rawToolCalls) return { calls: [], parseErrors: [] };
   if (!Array.isArray(rawToolCalls)) {
-    throw new Error("main_agent response tool_calls must be an array when present.");
+    return {
+      calls: [],
+      parseErrors: ["main_agent response tool_calls must be an array when present."],
+    };
   }
 
-  const parsed: ToolCall[] = [];
-  const errors: string[] = [];
+  const calls: ToolCall[] = [];
+  const parseErrors: string[] = [];
   for (let index = 0; index < rawToolCalls.length; index += 1) {
     const normalized = normalizeToolCallInput(rawToolCalls[index]);
     const result = ToolCallSchema.safeParse(normalized);
     if (result.success) {
-      parsed.push(result.data);
+      calls.push(result.data);
     } else {
-      errors.push(`tool_calls[${index}]: ${result.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`);
+      parseErrors.push(
+        `tool_calls[${index}]: ${result.error.issues
+          .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+          .join("; ")}`,
+      );
     }
   }
 
-  if (errors.length > 0) {
-    throw new Error(`main_agent response contained invalid tool calls. ${errors.join(" | ")}`);
-  }
-  return parsed.slice(0, 32);
+  return { calls: calls.slice(0, 32), parseErrors };
 }
 
 export function buildMainAgentBehaviorFeedback(blockers: ToolValidationBlocker[]): string[] {
@@ -94,6 +112,14 @@ export function buildMainAgentBehaviorFeedback(blockers: ToolValidationBlocker[]
     }
     return blocker.message;
   });
+}
+
+export function buildToolCallParseErrorsFeedback(parseErrors: string[]): string[] {
+  if (parseErrors.length === 0) return [];
+  return [
+    "Some tool calls in your last response were malformed and were dropped. Fix and resend ONLY the malformed ones in your next turn:",
+    ...parseErrors.map((err) => `- ${err}`),
+  ];
 }
 
 function extractRawToolCalls(response: GenerateResult | unknown): unknown {
@@ -133,14 +159,46 @@ function parseJsonObject(content: string): Record<string, unknown> | undefined {
 function normalizeToolCallInput(value: unknown): unknown {
   const record = asRecord(value);
   if (!record) return value;
-  const args = record.args ?? record.arguments ?? record.input ?? record.parameters ?? {};
-  const id = typeof record.id === "string" && record.id.trim() ? record.id : stableToolCallId(record.name, args);
-  const { arguments: _arguments, input: _input, parameters: _parameters, ...withoutLegacyArguments } = record;
+  // Unwrap the OpenAI wire format: `{ type: "function", function: { name, arguments: "..." } }`.
+  // The inner `function` object carries the canonical `name` and a JSON-string `arguments`.
+  const inner = asRecord(record.function);
+  const nameSource = (typeof record.name === "string" && record.name) || (inner && typeof inner.name === "string" ? inner.name : undefined);
+  const argsSource = record.args
+    ?? record.arguments
+    ?? record.input
+    ?? record.parameters
+    ?? (inner ? (inner.arguments ?? inner.input ?? inner.parameters) : undefined);
+  const args = parseArgsValue(argsSource);
+  const id = typeof record.id === "string" && record.id.trim()
+    ? record.id
+    : stableToolCallId(nameSource, args);
+  // Strip OpenAI wire-format keys that aren't part of the strict ToolCallSchema.
+  const { arguments: _arguments, input: _input, parameters: _parameters, type: _type, function: _function, ...rest } = record;
   return {
-    ...withoutLegacyArguments,
+    ...rest,
     id,
+    ...(nameSource ? { name: nameSource } : {}),
     args,
   };
+}
+
+function parseArgsValue(value: unknown): Record<string, unknown> {
+  if (!value) return {};
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      return {};
+    }
+    return {};
+  }
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return {};
 }
 
 function stableToolCallId(name: unknown, args: unknown): string {
