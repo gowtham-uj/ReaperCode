@@ -1,4 +1,5 @@
 import { compactToolHistory, renderToolResultForModel } from "../context/history-compaction.js";
+import { renderSessionSummaryForCockpit, type SessionSummary } from "../context/session-summary.js";
 import { toolRegistry } from "../tools/registry.js";
 import type { ToolResult } from "../tools/types.js";
 import { renderPlanForCockpit, renderTodoForCockpit, type PlanState, type TodoState } from "./plan-state.js";
@@ -31,6 +32,7 @@ export interface MainAgentCockpitOptions {
  */
 const SYSTEM_TIER_SECTIONS: ReadonlyArray<{ name: string; kind: "system" | "stable" | "volatile" }> = [
   { name: "User Request", kind: "volatile" },
+  { name: "Session Summary", kind: "stable" },
   { name: "Task Contract", kind: "stable" },
   { name: "Repo Snapshot", kind: "stable" },
   { name: "Prepared Context", kind: "stable" },
@@ -161,6 +163,7 @@ export function buildMainAgentCockpit(
   const stateRecord = asRecord(state);
   const sections: Record<(typeof COCKPIT_SECTIONS)[number], unknown> = {
     "User Request": renderRequest(request),
+    "Session Summary": renderSessionSummary(pickFirst(stateRecord, ["sessionSummary"])),
     "Task Contract": contract,
     "Repo Snapshot": repoInspection ?? pickFirst(stateRecord, ["repoInspection", "repoSnapshot"]),
     "Prepared Context": renderPreparedContext(pickFirst(stateRecord, ["contentPrep", "preparedContext"])),
@@ -195,6 +198,11 @@ function renderRequest(request: unknown): unknown {
   const record = asRecord(request);
   const payload = asRecord(record?.payload);
   return payload?.prompt ?? record?.prompt ?? request;
+}
+
+function renderSessionSummary(value: unknown): string {
+  if (!value) return "None.";
+  return renderSessionSummaryForCockpit(value as SessionSummary | undefined);
 }
 
 function renderAvailableTools(tools?: Array<{ name: string; description?: string }>): string {
