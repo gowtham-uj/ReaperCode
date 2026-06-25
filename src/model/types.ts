@@ -126,6 +126,12 @@ export interface GenerateRequest {
   responseFormat?: "text" | "json";
   temperature?: number;
   maxTokens?: number;
+  /**
+   * Optional external abort signal. Provider clients should compose this
+   * with their own internal timeouts so an upstream cancel stops the
+   * network call promptly without waiting for the provider timeout.
+   */
+  abortSignal?: AbortSignal;
 }
 
 /**

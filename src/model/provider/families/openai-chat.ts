@@ -124,11 +124,25 @@ class OpenAIChatProvider implements ModelProvider {
         : {}),
       ...(result.toolCalls !== undefined
         ? {
-            toolCalls: (result.toolCalls as Array<{ id?: string; function?: { name?: string; arguments?: string } }>).map((tc) => ({
-              id: tc.id ?? "",
-              name: tc.function?.name ?? "",
-              args: parseArgs(tc.function?.arguments),
-            })),
+            toolCalls: (result.toolCalls as Array<{
+              id?: string;
+              name?: string;
+              function?: { name?: string; arguments?: string };
+              input?: unknown;
+            }>).map((tc) => {
+              // Accept both the OpenAI wire shape (`function.name`/`function.arguments`)
+              // and the normalized shape produced by Reaper's LiteLLM client
+              // (`name`/`input`). Provider catalogs built on top of this family
+              // silently dropped native tool calls before this fix.
+              const name = tc.name ?? tc.function?.name ?? "";
+              const rawArgs = tc.input !== undefined
+                ? tc.input
+                : parseArgs(tc.function?.arguments);
+              const args = rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)
+                ? (rawArgs as Record<string, unknown>)
+                : {};
+              return { id: tc.id ?? "", name, args };
+            }),
           }
         : {}),
       finishReason: mapFinishReason(result.finishReason),

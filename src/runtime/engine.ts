@@ -207,11 +207,15 @@ export interface SplitToolCalls {
   patchRequestSignal?: Extract<ToolCall, { name: "request_patch" }>;
 }
 
-function buildMainAgentModelTools(): Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> {
+function buildGeneralAgentTools(): Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> {
+  // The main agent's tool surface is a curated, always-on set. It is large
+  // enough to support Codex-style workflows (search, edit, verify, plan) but
+  // small enough to keep prompt tokens bounded. The full tool registry stays
+  // discoverable via search_tools when the model needs rare capabilities.
   return [
     {
       name: "read_file",
-      description: "Read a text file from the workspace by relative path.",
+      description: "Read a text file from the workspace by relative path. Returns the file contents (or a window).",
       inputSchema: {
         type: "object",
         properties: {
@@ -224,27 +228,79 @@ function buildMainAgentModelTools(): Array<{ name: string; description: string; 
       },
     },
     {
+      name: "grep_search",
+      description: "Search for a regex pattern across workspace files. Returns matching lines with file paths and line numbers.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          pattern: { type: "string" },
+          path: { type: "string" },
+          maxResults: { type: "number" },
+        },
+        required: ["pattern"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "list_directory",
+      description: "List entries under a workspace directory (non-recursive).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          includeHidden: { type: "boolean" },
+        },
+        required: ["path"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "write_file",
+      description: "Create or fully overwrite a text file in the workspace. Prefer replace_in_file for targeted edits.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          content: { type: "string" },
+        },
+        required: ["path", "content"],
+        additionalProperties: false,
+      },
+    },
+    {
       name: "replace_in_file",
-      description: "Replace an exact string in a workspace file.",
+      description: "Replace an exact string in a workspace file. Use for targeted edits; prefer this over write_file when possible.",
       inputSchema: {
         type: "object",
         properties: {
           path: { type: "string" },
           oldString: { type: "string" },
           newString: { type: "string" },
+          replaceAll: { type: "boolean" },
         },
         required: ["path", "oldString", "newString"],
         additionalProperties: false,
       },
     },
     {
+      name: "delete_file",
+      description: "Delete a workspace file.",
+      inputSchema: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+        additionalProperties: false,
+      },
+    },
+    {
       name: "run_shell_command",
-      description: "Run a shell command in the workspace, usually for tests or verification.",
+      description: "Run a shell command in the workspace, usually for tests, verification, or repo introspection. Outputs above 8KB are spillovered to .reaper/spillover; use get_tool_output to retrieve.",
       inputSchema: {
         type: "object",
         properties: {
           cmd: { type: "string" },
           timeoutMs: { type: "number" },
+          isBackground: { type: "boolean" },
         },
         required: ["cmd"],
         additionalProperties: false,
@@ -252,8 +308,124 @@ function buildMainAgentModelTools(): Array<{ name: string; description: string; 
     },
     {
       name: "git_status",
-      description: "Inspect current git status.",
+      description: "Inspect current git status (modified, added, deleted files).",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    },
+    {
+      name: "git_diff",
+      description: "Show uncommitted changes. With staged:true shows staged diff, with path filter restricts to a file.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          staged: { type: "boolean" },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "create_checkpoint",
+      description: "Snapshot the current workspace into a checkpoint. Use before risky changes so you can restore if the change breaks things.",
+      inputSchema: {
+        type: "object",
+        properties: { label: { type: "string" } },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "restore_checkpoint",
+      description: "Restore the workspace to a previously created checkpoint.",
+      inputSchema: {
+        type: "object",
+        properties: { checkpointId: { type: "string" } },
+        required: ["checkpointId"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "web_search",
+      description: "Search the web for a query. Use for documentation lookups, version-specific answers, and external references.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          maxResults: { type: "number" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "update_plan",
+      description: "Persist or update the agent's working plan. Use to record multi-step intent before acting, and to mark steps as in_progress/completed as work progresses.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          plan: { type: "string" },
+        },
+        required: ["plan"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "update_todo",
+      description: "Update the todo list (status, priority, evidence). Use to keep a durable working memory across turns.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          items: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string" },
+                content: { type: "string" },
+                status: { type: "string", enum: ["pending", "in_progress", "completed", "blocked"] },
+                priority: { type: "string", enum: ["low", "medium", "high"] },
+              },
+              required: ["id", "content", "status"],
+            },
+          },
+        },
+        required: ["items"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "call_subagent",
+      description: "Delegate a focused, read-only investigation to a subagent (codebase exploration, doc lookup, dependency research). The subagent returns a structured result; you stay in control.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          prompt: { type: "string" },
+          tools: { type: "array", items: { type: "string" } },
+        },
+        required: ["prompt"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "search_tools",
+      description: "Discover additional tools beyond the always-on set. Use when none of the always-on tools fit the next step (e.g. browser control, human approval, MCP tools).",
+      inputSchema: {
+        type: "object",
+        properties: { query: { type: "string" } },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "get_tool_output",
+      description: "Retrieve a previously spillovered tool result by artifact id. Use after run_shell_command returns a spillover handle.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          artifactId: { type: "string" },
+          maxLines: { type: "number" },
+        },
+        required: ["artifactId"],
+        additionalProperties: false,
+      },
     },
     {
       name: "complete_task",
@@ -904,6 +1076,7 @@ export class RuntimeEngine {
       state = mutableState;
 
       const system = buildMainAgentSystemPrompt(state);
+      const generalAgentTools = buildGeneralAgentTools();
       const cockpit = buildMainAgentCockpit(
         {
           ...state,
@@ -916,6 +1089,10 @@ export class RuntimeEngine {
           recentToolResults: state.toolResults,
           feedback: state.feedback,
           negativeConstraints: state.negativeConstraints,
+          // Wire the content-prep output (Repo Snapshot, Tool Shortlist, Skills,
+          // Mentions, Prepared Context chunks) so the model actually sees the
+          // output of the expensive prep pipeline that runs in contentPrepNode.
+          contentPrep: state.contentPrep,
         },
         getRequest(),
         state.taskContract ? renderTaskContractForCockpit(state.taskContract) : undefined,
@@ -929,6 +1106,7 @@ export class RuntimeEngine {
         },
         {
           workspaceRoot: this.input.workspaceRoot,
+          availableTools: generalAgentTools,
         },
       );
 
@@ -951,8 +1129,9 @@ export class RuntimeEngine {
           role: modelRoute(this.config, "mainAgent"),
           system,
           cockpit,
-          tools: buildMainAgentModelTools(),
+          tools: generalAgentTools,
           maxTokens: 8192,
+          ...(this.input.abortSignal ? { abortSignal: this.input.abortSignal } : {}),
         });
         await logModelResponseTrace({
           trajectoryLogger: this.trajectoryLogger,

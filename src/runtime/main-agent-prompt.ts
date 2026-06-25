@@ -13,6 +13,9 @@ const COCKPIT_SECTIONS = [
   "User Request",
   "Task Contract",
   "Repo Snapshot",
+  "Prepared Context",
+  "Tool Shortlist",
+  "Skills / Mentions",
   "Current Plan",
   "TODO",
   "Changed Files / Current Diff",
@@ -58,6 +61,9 @@ export function buildMainAgentCockpit(
     "User Request": renderRequest(request),
     "Task Contract": contract,
     "Repo Snapshot": repoInspection ?? pickFirst(stateRecord, ["repoInspection", "repoSnapshot"]),
+    "Prepared Context": renderPreparedContext(pickFirst(stateRecord, ["contentPrep", "preparedContext"])),
+    "Tool Shortlist": renderToolShortlist(pickFirst(stateRecord, ["contentPrep", "toolShortlist"])),
+    "Skills / Mentions": renderSkillsAndMentions(pickFirst(stateRecord, ["contentPrep"])),
     "Current Plan": renderPlanSection(pickFirst(stateRecord, ["planState", "currentPlan", "plan", "executionPlan", "steps"])),
     TODO: renderTodoSection(pickFirst(stateRecord, ["todoState", "todo", "todos", "tasks"])),
     "Changed Files / Current Diff": {
@@ -156,6 +162,59 @@ function isPlanState(value: unknown): value is PlanState {
 function isTodoState(value: unknown): value is TodoState {
   const record = asRecord(value);
   return Boolean(record && Array.isArray(record.items));
+}
+
+function renderPreparedContext(value: unknown): unknown {
+  const record = asRecord(value);
+  if (!record) return value;
+  const preparedContext = asRecord(record.preparedContext) ?? record;
+  const fileTree = Array.isArray(preparedContext.fileTree) ? preparedContext.fileTree.slice(0, 80) : undefined;
+  const chunks = Array.isArray(preparedContext.chunks)
+    ? preparedContext.chunks.slice(0, 6).map((chunk) => {
+        const c = asRecord(chunk);
+        if (!c) return chunk;
+        return {
+          path: c.path,
+          score: c.score,
+          reason: c.reason,
+          content: typeof c.content === "string" ? truncate(c.content, 1500) : c.content,
+        };
+      })
+    : undefined;
+  const summary = preparedContext.summary;
+  return {
+    ...(typeof preparedContext.fingerprint === "string" ? { fingerprint: preparedContext.fingerprint } : {}),
+    ...(fileTree ? { fileTree } : {}),
+    ...(chunks ? { chunks } : {}),
+    ...(summary ? { summary } : {}),
+  };
+}
+
+function renderToolShortlist(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  return value.slice(0, 24).map((entry) => {
+    const record = asRecord(entry);
+    if (!record) return entry;
+    const description = typeof record.description === "string" ? truncateOneLine(record.description, 220) : undefined;
+    return {
+      name: record.name,
+      ...(description ? { description } : {}),
+      ...(typeof record.score === "number" ? { score: record.score } : {}),
+    };
+  });
+}
+
+function renderSkillsAndMentions(value: unknown): unknown {
+  const record = asRecord(value);
+  if (!record) return value;
+  const skills = Array.isArray(record.skillsPrompt) ? record.skillsPrompt : undefined;
+  const mentions = Array.isArray(record.mentions) ? record.mentions.slice(0, 12) : undefined;
+  const envFingerprint = record.environmentFingerprint;
+  return {
+    ...(skills ? { skillsPrompt: typeof skills === "string" ? truncate(skills, 1500) : skills } : {}),
+    ...(mentions && mentions.length ? { mentions } : {}),
+    ...(envFingerprint ? { environmentFingerprint: envFingerprint } : {}),
+  };
 }
 
 function pickFirst(record: Record<string, unknown> | undefined, keys: string[]): unknown {

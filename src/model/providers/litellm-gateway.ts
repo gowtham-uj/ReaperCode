@@ -12,6 +12,7 @@ import { mapGenerateRequestToLiteLLM, mapStreamRequestToLiteLLM } from "./parame
 import { resolveProviderBaseUrl, resolveProviderDefaults, resolveProviderModelName, usesAzureOpenAiV1 } from "./provider-registry.js";
 import { normalizeLiteLLMStream } from "./stream-normalizer.js";
 import { extractUsage, OpenAIChatResponseSchema, OpenAIEmbeddingsResponseSchema, parseToolArguments } from "./response.js";
+import { composeAbortSignals } from "../../util/abort-signal.js";
 
 export interface LiteLLMGatewayOptions {
   fetchImpl?: typeof fetch;
@@ -70,16 +71,19 @@ export class LiteLLMProviderClient implements ProviderModelClient {
     // The original used response.text() which caused OOM crashes with reasoning models
     // that produce 8K-32K tokens of reasoning_content.
     const body = mapGenerateRequestToLiteLLM({ ...request, maxTokens }, profile);
+    const makeFetchInit = (streamBody: boolean): RequestInit & { dispatcher?: unknown } => ({
+      method: "POST",
+      headers: this.buildHeaders(profile),
+      body: JSON.stringify(streamBody ? { ...body, stream: true } : body),
+      ...(this.dispatcher ? { dispatcher: this.dispatcher as NonNullable<Parameters<typeof fetch>[1]> extends { dispatcher?: infer D } ? D : never } : {}),
+    });
+    const attachExternalSignal = (init: RequestInit & { dispatcher?: unknown }, internalSignal: AbortSignal | undefined): RequestInit & { dispatcher?: unknown } => {
+      const composed = composeAbortSignals(internalSignal, request.abortSignal);
+      return composed ? { ...init, signal: composed } : init;
+    };
     if (shouldUseBufferedGenerate(profile, request)) {
       const response = await this.fetchWithRetries(
-        (signal) =>
-          this.fetchImpl(this.resolveUrl(profile, "/chat/completions"), {
-            method: "POST",
-            headers: this.buildHeaders(profile),
-            body: JSON.stringify(body),
-            ...(signal ? { signal } : {}),
-            ...(this.dispatcher ? { dispatcher: this.dispatcher as NonNullable<Parameters<typeof fetch>[1]> extends { dispatcher?: infer D } ? D : never } : {}),
-          }),
+        (signal) => this.fetchImpl(this.resolveUrl(profile, "/chat/completions"), attachExternalSignal(makeFetchInit(false), signal)),
         profile,
         "generate",
       );
@@ -92,14 +96,7 @@ export class LiteLLMProviderClient implements ProviderModelClient {
     }
 
     const response = await this.fetchWithRetries(
-      (signal) =>
-        this.fetchImpl(this.resolveUrl(profile, "/chat/completions"), {
-          method: "POST",
-          headers: this.buildHeaders(profile),
-          body: JSON.stringify({ ...body, stream: true }),
-          ...(signal ? { signal } : {}),
-          ...(this.dispatcher ? { dispatcher: this.dispatcher as NonNullable<Parameters<typeof fetch>[1]> extends { dispatcher?: infer D } ? D : never } : {}),
-        }),
+      (signal) => this.fetchImpl(this.resolveUrl(profile, "/chat/completions"), attachExternalSignal(makeFetchInit(true), signal)),
       profile,
       "generate",
     );

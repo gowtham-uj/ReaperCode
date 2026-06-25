@@ -10,6 +10,7 @@ export interface MainAgentCallInput {
   tools?: unknown[];
   maxTokens?: number;
   temperature?: number;
+  abortSignal?: AbortSignal;
 }
 
 export interface MainAgentCallResult {
@@ -31,6 +32,7 @@ export async function callMainAgent(input: MainAgentCallInput): Promise<MainAgen
     ...(input.tools ? {} : { responseFormat: "json" }),
     ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
     ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+    ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
   });
   if (response.finishReason === "length") {
     const validation = validateToolCallBatch([], { agentRole: "main" });
