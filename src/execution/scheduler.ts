@@ -1,6 +1,7 @@
 import type { RecoverySession } from "../recovery/session.js";
 import { ToolExecutor } from "../tools/executor.js";
 import type { ToolCall, ToolResult } from "../tools/types.js";
+import { optimizeToolCallBatch } from "./optimizer.js";
 import { classifyToolCall } from "./planner.js";
 
 export interface ScheduledExecutionResult {
@@ -25,10 +26,21 @@ export async function executeToolCalls(
       return false;
     }
 
-    const completionResults = await executeConcurrent(pool, executor);
-    results.push(...completionResults);
+    // Apply the dependency-graph optimizer to the current pool: dedup
+    // identical reads/greps, and respect a concurrency cap so the
+    // model cannot accidentally spawn unbounded parallel fs/network
+    // calls. The pool's `pool.length` is the user's intent; the unique
+    // plan is what we actually execute.
+    const optimization = optimizeToolCallBatch(pool);
+    const uniqueResults = await executeConcurrent(
+      optimization.uniquePlan,
+      executor,
+      optimization.concurrency,
+    );
+    const poolResults = fanoutToOriginalOrder(uniqueResults, optimization.uniqueIndex, pool);
+    results.push(...poolResults);
     pool = [];
-    return completionResults.some((result) => !result.ok);
+    return poolResults.some((result) => !result.ok);
   };
 
   for (const call of toolCalls) {
@@ -128,21 +140,79 @@ function markRolledBack(results: ToolResult[], indexes: number[], cause: string)
   }
 }
 
-async function executeConcurrent(pool: ToolCall[], executor: ToolExecutor): Promise<ToolResult[]> {
-  const settled = await Promise.all(
-    pool.map(async (call, index) => {
-      const result = withToolCallId(await executor.execute(call), call);
-      return {
-        result,
-        index,
-        completedAt: process.hrtime.bigint(),
-      };
-    }),
-  );
-
+async function executeConcurrent(
+  pool: ToolCall[],
+  executor: ToolExecutor,
+  concurrency: number = pool.length,
+): Promise<ToolResult[]> {
+  if (pool.length === 0) return [];
+  const effectiveConcurrency = Math.max(1, Math.min(concurrency, pool.length));
+  const settled: Array<{ result: ToolResult; index: number; completedAt: bigint }> = [];
+  let cursor = 0;
+  // Bounded-concurrency runner: a small semaphore ensures we never
+  // have more than `effectiveConcurrency` in-flight promises, and
+  // `await Promise.all` waits for *all* of them to finish — not just
+  // the first. This avoids the "spawn 50 reads in parallel" pathology
+  // without losing any results.
+  let inFlight = 0;
+  const pending: Array<Promise<void>> = [];
+  const launchNext = () => {
+    if (cursor >= pool.length) return;
+    const index = cursor;
+    const call = pool[index]!;
+    cursor += 1;
+    inFlight += 1;
+    const p = (async () => {
+      try {
+        const result = withToolCallId(await executor.execute(call), call);
+        settled.push({ result, index, completedAt: process.hrtime.bigint() });
+      } finally {
+        inFlight -= 1;
+      }
+    })();
+    pending.push(p);
+  };
+  for (let i = 0; i < effectiveConcurrency; i += 1) launchNext();
+  while (cursor < pool.length || inFlight > 0) {
+    if (cursor < pool.length && inFlight < effectiveConcurrency) {
+      launchNext();
+      continue;
+    }
+    if (pending.length > 0) {
+      await Promise.all(pending.splice(0, pending.length).map((p) => p.then(() => undefined)));
+    } else {
+      // Defensive: avoid an infinite loop if pending is empty but
+      // something is still considered in-flight.
+      break;
+    }
+  }
+  // Drain any straggler promises.
+  if (pending.length > 0) {
+    await Promise.all(pending.splice(0, pending.length).map((p) => p.then(() => undefined)));
+  }
   return settled
     .sort((a, b) => (a.completedAt !== b.completedAt ? (a.completedAt < b.completedAt ? -1 : 1) : a.index - b.index))
     .map((entry) => entry.result);
+}
+
+/**
+ * Re-attach unique-plan results to the original call list, in the
+ * original order. Duplicates get the canonical entry's result.
+ */
+function fanoutToOriginalOrder(
+  uniqueResults: ToolResult[],
+  uniqueIndex: number[],
+  originalPool: ToolCall[],
+): ToolResult[] {
+  if (uniqueResults.length === uniqueIndex.length && uniqueResults.length === originalPool.length) {
+    return uniqueResults;
+  }
+  const out: ToolResult[] = new Array(originalPool.length);
+  for (let i = 0; i < originalPool.length; i += 1) {
+    const planIdx = uniqueIndex[i]!;
+    out[i] = uniqueResults[planIdx]!;
+  }
+  return out;
 }
 
 function withToolCallId(result: ToolResult, call: ToolCall): ToolResult {
