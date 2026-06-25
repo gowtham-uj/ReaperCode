@@ -1283,6 +1283,25 @@ export class RuntimeEngine {
         ? ingestReviewerVerdicts(state.verificationState, state.toolResults)
         : state.verificationState;
       const completion = state.split?.completionSignal;
+      if (completion && isLowConfidenceCompletion(completion)) {
+        const knownIssues = completion.args.known_issues ?? [];
+        const issueText = knownIssues.length ? ` Known issues: ${knownIssues.join("; ")}` : "";
+        const clarificationText = completion.args.clarification ? ` Clarification requested: ${completion.args.clarification}` : "";
+        const blocker: RuntimeBlocker = {
+          source: "completion_validation",
+          code: "low_confidence_completion_blocked",
+          message: `The model emitted a low-confidence completion instead of verified success.${clarificationText}${issueText}`.trim(),
+        };
+        const { completionSignal: _completionSignal, ...splitWithoutCompletion } = state.split ?? { executableToolCalls: [] };
+        return {
+          split: splitWithoutCompletion,
+          plannedToolCalls: [],
+          runtimeBlockers: [...state.runtimeBlockers, blocker],
+          feedback: [...state.feedback, blocker.message],
+          completionGateAttempts: state.completionGateAttempts,
+          completionGateExhausted: true,
+        } satisfies Partial<GraphState>;
+      }
       const validation = validateStrictCompletion({
         toolCalls: state.plannedToolCalls ?? [],
         ...(completion ? { completionSignal: completion } : {}),
@@ -2194,6 +2213,8 @@ export class RuntimeEngine {
 	      const latestTransportBlocker = [...state.runtimeBlockers]
 	        .reverse()
 	        .find((blocker) => blocker.code === "main_agent_transport_error");
+	      const latestTerminalBlocker = state.runtimeBlockers.at(-1);
+	      const lowConfidenceCompletionBlocked = latestTerminalBlocker?.code === "low_confidence_completion_blocked";
 	      const recoveryMessage =
 	        state.completionGateExhausted && lastShellOk && lastShellIsVerification
 	          ? "Task verified by the last passing test/build/check; the model did not emit complete_task, but the engine accepted the final passing verification."
@@ -2204,7 +2225,9 @@ export class RuntimeEngine {
 	        (state.mode === "autonomous" && !state.split?.completionSignal
 	          ? transportRetryExhausted
 	              ? `${latestTransportBlocker?.message ?? "Main-agent provider/API request failed."}\nMain-agent transport retry budget exhausted after ${mainAgentTransportRetryLimit()} attempt(s); stopping as infrastructure/provider failure instead of a completion-gate failure.`
-	              : state.completionGateExhausted
+	              : lowConfidenceCompletionBlocked
+	                ? latestTerminalBlocker?.message ?? "The model emitted a low-confidence completion instead of verified success."
+	                : state.completionGateExhausted
 	                ? `Task stopped after the completion gate exhausted ${state.completionGateAttempts} attempt(s) without a valid complete_task or concrete remaining work signal.`
 	                : state.stuckDetection.tripped
 	              ? `Task appears stuck: ${state.stuckDetection.reason ?? "repeated ineffective tool execution detected."}`
@@ -2287,6 +2310,7 @@ export class RuntimeEngine {
 	      const activeBoot = getBoot();
 	      const taskCompleted = state.events.some((event) => event.message_type === "task_completed");
 	      const transportRetryExhausted = countConsecutiveModelTransportBlockers(state.runtimeBlockers) >= mainAgentTransportRetryLimit();
+	      const lowConfidenceCompletionBlocked = state.runtimeBlockers.at(-1)?.code === "low_confidence_completion_blocked";
 	      const sessionMetrics = buildSessionMetricsSummary({
 	        toolResults: state.toolResults,
 	        completionGateAttempts: state.completionGateAttempts,
@@ -2295,6 +2319,7 @@ export class RuntimeEngine {
 	        stuckTripped: state.stuckDetection.tripped,
 	        gateExhausted: state.completionGateExhausted,
 	        ...(transportRetryExhausted ? { stopReasonOverride: "infra_failed" as const } : {}),
+	        ...(lowConfidenceCompletionBlocked ? { stopReasonOverride: "error" as const } : {}),
 	      });
 	      const metrics = buildTrajectoryEfficiencyMetrics({
 	        startedAt,
@@ -5878,6 +5903,14 @@ function getCompletionSummary(toolCalls: ToolCall[]): string | undefined {
     (call): call is Extract<ToolCall, { name: "complete_task" }> => call.name === "complete_task",
   );
   return completion?.args.summary;
+}
+
+function isLowConfidenceCompletion(completion: Extract<ToolCall, { name: "complete_task" }>): boolean {
+  return (
+    completion.args.confidence === "low" ||
+    Boolean(completion.args.clarification?.trim()) ||
+    Boolean(completion.args.known_issues?.length)
+  );
 }
 
 /**
