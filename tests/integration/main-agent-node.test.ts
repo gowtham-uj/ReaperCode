@@ -9,6 +9,7 @@ import {
   callMainAgent,
   parseMainAgentToolCalls,
 } from "../../src/runtime/main-agent-node.js";
+import { buildMainAgentSystemPrompt } from "../../src/runtime/main-agent-prompt.js";
 import { validateToolCallBatch } from "../../src/runtime/tool-validation.js";
 import type {
   EmbeddingRequest,
@@ -58,8 +59,21 @@ test("calls model gateway with main-agent role route and source metadata", async
   assert.equal(result.toolCalls[0]?.name, "list_directory");
 });
 
+test("non-empty no-tool assistant response is accepted as terminal summary", async () => {
+  const gateway = new StaticGateway({ assistant_message: "Done: the task is complete and tests pass.", tool_calls: [] });
+  const result = await callMainAgent({
+    modelGateway: gateway,
+    system: "system",
+    cockpit: "cockpit",
+  });
+
+  assert.equal(result.toolCalls.length, 0);
+  assert.equal(result.validationBlockers.length, 0);
+  assert.equal(result.feedback.length, 0);
+});
+
 test("empty main-agent response gets behavior feedback", async () => {
-  const gateway = new StaticGateway({ assistant_message: "I will explain instead.", tool_calls: [] });
+  const gateway = new StaticGateway({ assistant_message: "", tool_calls: [] });
   const result = await callMainAgent({
     modelGateway: gateway,
     system: "system",
@@ -68,8 +82,15 @@ test("empty main-agent response gets behavior feedback", async () => {
 
   assert.equal(result.toolCalls.length, 0);
   assert.equal(result.validationBlockers[0]?.code, "empty_tool_call_batch");
-  assert.match(result.feedback.join("\n"), /did not include tool calls/i);
-  assert.match(buildMainAgentBehaviorFeedback(result.validationBlockers).join("\n"), /complete_task/);
+  assert.match(result.feedback.join("\n"), /did not include tool calls or a final assistant summary/i);
+  assert.match(buildMainAgentBehaviorFeedback(result.validationBlockers).join("\n"), /final assistant_message/i);
+});
+
+test("main-agent system prompt allows Codex-style final summary without forced tools", () => {
+  const prompt = buildMainAgentSystemPrompt({});
+  assert.match(prompt, /Codex-style terminal behavior/);
+  assert.match(prompt, /final assistant_message and no tool_calls/);
+  assert.doesNotMatch(prompt, /Do not complete without complete_task/);
 });
 
 test("truncated main-agent response is rejected before tool parsing", async () => {

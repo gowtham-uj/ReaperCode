@@ -27,6 +27,11 @@ async function main() {
       );
     }
     console.log(`  verification:   ${summary.details?.verificationOk}`);
+    if (summary.details?.stopReason) console.log(`  stop reason:    ${summary.details.stopReason}`);
+    if (summary.details?.completionGateAttempts !== undefined) console.log(`  gate attempts:  ${summary.details.completionGateAttempts}`);
+    if (summary.status !== "passed" && summary.details?.assistantMessage) {
+      console.log(`  assistant:      ${summary.details.assistantMessage.split("\n")[0].slice(0, 220)}`);
+    }
     if (summary.status !== "passed") failed += 1;
   }
   console.log(`\n${tasks.length - failed}/${tasks.length} tasks passed.`);

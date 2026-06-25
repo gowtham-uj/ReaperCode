@@ -1183,6 +1183,9 @@ export class RuntimeEngine {
         let plannedToolCalls = result.toolCalls;
         let validationBlockers = result.validationBlockers;
         let feedback = result.feedback;
+        if (validationBlockers.some((blocker) => blocker.code === "empty_tool_call_batch") && state.lastBatchFailed) {
+          feedback = [...feedback, buildEmptyBatchAfterFailedToolFeedback(state)];
+        }
         if (plannedToolCalls.length === 0 && result.assistantMessage.trim().length > 0) {
           const synthesized =
             synthesizeCompletionFromSummary({
@@ -2243,8 +2246,9 @@ export class RuntimeEngine {
 	        .find((blocker) => blocker.code === "main_agent_transport_error");
 	      const latestTerminalBlocker = state.runtimeBlockers.at(-1);
 	      const lowConfidenceCompletionBlocked = latestTerminalBlocker?.code === "low_confidence_completion_blocked";
+	      const recoveredPostVerificationLoop = shouldRecoverAfterReadOnlyPostVerificationLoop(state);
 	      const recoveryMessage =
-	        state.completionGateExhausted && lastShellOk && lastShellIsVerification
+	        (state.completionGateExhausted && lastShellOk && lastShellIsVerification) || recoveredPostVerificationLoop
 	          ? state.assistantMessage?.trim() || "Task verified by the last passing test/build/check; the model did not emit complete_task, but the engine accepted the final passing verification."
 	          : null;
 	      const missingVerificationCommandOnly =
@@ -2275,7 +2279,7 @@ export class RuntimeEngine {
 	            })
 	          : summarizeExplicitToolRun(state.toolResults));
       const nextEvents = [...state.events, makeEvent(activeRequest, "assistant_message", { content: assistantMessage })];
-      const recoveredByLastPassingShell = state.completionGateExhausted && lastShellOk && lastShellIsVerification;
+      const recoveredByLastPassingShell = (state.completionGateExhausted || recoveredPostVerificationLoop) && lastShellOk && lastShellIsVerification;
       const effectiveFinalVerification =
         recoveredByLastPassingShell && missingVerificationCommandOnly
           ? {
@@ -2412,6 +2416,7 @@ export class RuntimeEngine {
     const routeAfterMainAgent = (state: GraphState) => {
       if (state.completionGateExhausted) return "summarize";
       const latestBlocker = state.runtimeBlockers.at(-1);
+      if (latestBlocker?.source === "model" && latestBlocker.code === "main_agent_transport_error") return "main_agent";
       if ((latestBlocker?.source === "schema" || latestBlocker?.source === "model") && !(state.plannedToolCalls?.length) && !state.assistantMessage?.trim()) return "main_agent";
       return "validate_tool_calls";
     };
@@ -2427,6 +2432,7 @@ export class RuntimeEngine {
       if (state.completionGateExhausted) return "summarize";
       const currentBatchFailed = state.split ? state.lastBatchFailed && hasFailedCurrentBatch(state.split.executableToolCalls, state.toolResults) : state.lastBatchFailed;
       if (state.split?.completionSignal && !currentBatchFailed) return "verify_completion";
+      if (shouldRecoverAfterReadOnlyPostVerificationLoop(state)) return "summarize";
       return "main_agent";
     };
     const routeAfterCompletionValidation = (state: GraphState) => {
@@ -5969,6 +5975,62 @@ function extractShellCommandFromUnknownResult(result: ToolResult): string {
     }
   }
   return candidates.find((item): item is string => typeof item === "string" && item.trim().length > 0)?.trim() ?? "";
+}
+
+function toolResultSucceeded(result: ToolResult): boolean {
+  if (result.ok === true) return true;
+  const record = result as unknown as Record<string, unknown>;
+  const output = record.output && typeof record.output === "object" ? (record.output as Record<string, unknown>) : {};
+  return output.exitCode === 0 || output.exit_code === 0;
+}
+
+function isReadOnlyPostVerificationToolResult(result: ToolResult): boolean {
+  return [
+    "read_file",
+    "search_files",
+    "git_diff",
+    "git_status",
+    "list_files",
+    "get_file_tree",
+  ].includes(result.name);
+}
+
+function shouldRecoverAfterReadOnlyPostVerificationLoop(state: GraphState): boolean {
+  let verificationIndex = -1;
+  for (let index = state.toolResults.length - 1; index >= 0; index -= 1) {
+    const result = state.toolResults[index];
+    if (!result || result.name !== "run_shell_command" || !toolResultSucceeded(result)) continue;
+    const command = getToolResultCommand(result) || extractShellCommandFromUnknownResult(result);
+    if (isTestCommand(command) || isBuildCommand(command) || isVerificationLikeCommand(command) || /\btest\b/.test(command)) {
+      verificationIndex = index;
+      break;
+    }
+  }
+  if (verificationIndex < 0) return false;
+  const trailing = state.toolResults.slice(verificationIndex + 1);
+  if (trailing.length < 3) return false;
+  return trailing.every((result) => isReadOnlyPostVerificationToolResult(result) && toolResultSucceeded(result));
+}
+
+function buildEmptyBatchAfterFailedToolFeedback(state: GraphState): string {
+  const failed = [...state.toolResults].reverse().find((result) => result.ok === false);
+  if (!failed) {
+    return "Your previous batch failed. Do not emit an empty tool batch; inspect the failure and use edit/read/shell tools to continue fixing the task.";
+  }
+  const command = failed.name === "run_shell_command" ? getToolResultCommand(failed) || extractShellCommandFromUnknownResult(failed) : "";
+  const record = failed as unknown as Record<string, unknown>;
+  const error = record.error && typeof record.error === "object" ? (record.error as Record<string, unknown>) : {};
+  const message = typeof error.message === "string" ? error.message : typeof record.message === "string" ? record.message : "";
+  const output = renderUnknownValue(record.output ?? error).slice(0, 1200);
+  return [
+    `Your last tool batch failed${command ? ` while running: ${command}` : ""}.`,
+    "Do not emit an empty tool batch and do not call complete_task yet.",
+    "Use the failure evidence to edit the implementation or run a narrower diagnostic command, then rerun verification.",
+    message ? `Failure message: ${message.slice(0, 1200)}` : "",
+    output ? `Failure output: ${output}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function extractLastShellCommandFromState(state: GraphState): string {
