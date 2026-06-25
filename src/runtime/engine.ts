@@ -509,7 +509,7 @@ interface RuntimeDeadlinePressure {
 }
 
 type GraphMode = "explicit_tools" | "needs_model" | "autonomous";
-type OrchestrationMode = "simple_executor" | "complex_orchestrator";
+type OrchestrationMode = "general_agent_direct" | "general_agent_orchestrated";
 
 type RuntimeBlocker = {
   source: "progress_guard" | "verification" | "schema" | "tool_validation" | "completion_validation" | "runtime" | "model";
@@ -730,7 +730,7 @@ function runtimeBlockerFromCompletionValidation(blocker: CompletionValidationBlo
   };
 }
 
-function buildSystemPromptForRole(role: string): string {
+function buildRuntimeAgentSystemPrompt(role: string): string {
   const base = "You are a Reaper sub-agent. Emit only valid tool-call JSON. Do not invent tools.";
   if (role === "repair") return `${base} Focus on the smallest concrete fix and validate it.`;
   if (role === "recovery") return `${base} Collapse complexity to the externally visible contract.`;
@@ -810,10 +810,9 @@ export class RuntimeEngine {
     setActiveRunDir(runContext.runDir);
     installCrashHandlers();
     // Cache-friendly system-prompt prefix for provider prompt caching. Set
-    // once per run so all sub-agent calls (planner, patcher, executor, repair,
-    // recovery) share the same cacheable prefix. Anthropic/OpenRouter/Codex
+    // once per run so runtime model calls share the same cacheable prefix. Anthropic/OpenRouter/Codex
     // use the literal prefix bytes as the cache key.
-    const systemPromptPrefix = buildSystemPromptForRole("executor");
+    const systemPromptPrefix = buildRuntimeAgentSystemPrompt("executor");
     const releaseModelCallContext = pushModelCallContext({
       workspaceRoot: this.input.workspaceRoot,
       runId: runContext.runId,
@@ -1416,7 +1415,7 @@ export class RuntimeEngine {
         role: modelRoute(this.config, "executor"),
         switchModeOnTruncation: true,
         maxTokens: 8192,
-        system: buildSystemPromptForRole("executor"),
+        system: buildRuntimeAgentSystemPrompt("executor"),
         messages: [
           {
             role: "user",
@@ -1441,7 +1440,7 @@ export class RuntimeEngine {
         sessionId: getBoot().state.sessionId,
         traceId: getBoot().state.runId,
         level: getBoot().state.logLevel,
-        source: "simple_executor",
+        source: "general_agent_direct",
         assistantMessage: rawAssistantMessage,
         toolCalls: result.tool_calls,
       });
@@ -1451,7 +1450,7 @@ export class RuntimeEngine {
         sessionId: getBoot().state.sessionId,
         traceId: getBoot().state.runId,
         level: getBoot().state.logLevel,
-        source: "simple_executor",
+        source: "general_agent_direct",
         content: rawAssistantMessage,
       });
       const assistantMessage = getCompletionSummary(result.tool_calls) ? rawAssistantMessage : "";
@@ -3231,10 +3230,19 @@ function getUnresolvedDiagnosticTarget(toolResults: ToolResult[]): { path: strin
       .filter((item) => item && !isGeneratedOrBuildPath(item) && isActionableDiagnosticPath(item));
     for (const candidate of candidates) {
       if (hasDiagnosticTargetBeenAddressedSince(candidate, command, toolResults.slice(index + 1))) continue;
+      // For test failures, the implementation under test is also a
+      // legitimate fix target. Expand the related paths so the model is
+      // not forced to edit the test file just because the test runner
+      // output mentions it.
+      const related = uniqueStrings([
+        candidate,
+        ...expandDiagnosticTargetRelatedPaths(candidate, result),
+        ...candidates,
+      ]);
       return {
         path: candidate,
         basename: path.basename(candidate),
-        relatedPaths: uniqueStrings(candidates),
+        relatedPaths: related,
         commandOrSource: command || result.name,
       };
     }
@@ -3326,6 +3334,43 @@ function normalizeDiagnosticCommand(command: string): string {
 function extractLeadingCdDirectory(command: string): string {
   const match = command.match(/^\s*cd\s+(['"]?)([^'";&|]+)\1\s*&&/);
   return match?.[2]?.trim() ?? "";
+}
+
+/**
+ * For test-file diagnostic targets, derive the implementation files the
+ * test imports. The model must be allowed to fix the implementation, not
+ * just the cited test file, otherwise a failing test about a buggy
+ * implementation becomes unsolvable.
+ */
+export function expandDiagnosticTargetRelatedPaths(targetPath: string, result: ToolResult): string[] {
+  if (!isTestFilePath(targetPath)) return [];
+  const message = result.error?.message ?? "";
+  const candidates = new Set<string>();
+  // Common convention: foo.test.js imports foo.js
+  const basename = path.basename(targetPath);
+  const baseNoTest = basename.replace(/\.test\.[A-Za-z0-9_]+$/i, "").replace(/\.spec\.[A-Za-z0-9_]+$/i, "");
+  if (baseNoTest && baseNoTest !== basename) {
+    const dir = path.dirname(targetPath);
+    for (const ext of [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py", ".go", ".rs", ".java"]) {
+      candidates.add(normalizeArtifactPathForMatch(stripWorkspacePrefix(path.join(dir, baseNoTest + ext))));
+      candidates.add(normalizeArtifactPathForMatch(stripWorkspacePrefix(path.join(dir, "src", baseNoTest + ext))));
+    }
+  }
+  // Capture import / from paths mentioned in the failure message
+  for (const match of message.matchAll(/(?:from|require|import)\s+['"]([^'"]+)['"]/g)) {
+    if (match[1]) candidates.add(normalizeArtifactPathForMatch(stripWorkspacePrefix(match[1])));
+  }
+  return [...candidates].filter(Boolean);
+}
+
+export function isTestFilePath(filePath: string): boolean {
+  const base = path.basename(filePath);
+  if (/\.(test|spec)\.[A-Za-z0-9_]+$/i.test(base)) return true;
+  // Python: test_*.py or *_test.py
+  if (/^test_.*\.py$/i.test(base) || /.*_test\.py$/i.test(base)) return true;
+  // Go: *_test.go
+  if (/_test\.go$/i.test(base)) return true;
+  return false;
 }
 
 function isBuildOrVerificationSuccessThatClearsFailure(successCommand: string, failingCommand: string): boolean {
@@ -5850,12 +5895,12 @@ function classifyOrchestrationMode(prompt: string, contentPrep: ContentPrepResul
   ];
   const existingFiles = contentPrep.preparedContext.fileTree.length;
   if (patchSignals.some((signal) => text.includes(signal)) && existingFiles > 0) {
-    return "complex_orchestrator";
+    return "general_agent_orchestrated";
   }
   if (text.includes("complex task") || matchedSignals >= 2 || prompt.length > 500 || (matchedSignals >= 1 && existingFiles > 80)) {
-    return "complex_orchestrator";
+    return "general_agent_orchestrated";
   }
-  return "simple_executor";
+  return "general_agent_direct";
 }
 
 function shouldRunCompaction(input: { prompt: string; toolResults: ToolResult[]; softCap: number }): boolean {
@@ -8226,7 +8271,7 @@ async function generateFinalSummary(input: {
   	    modelGateway: input.modelGateway,
   	    role: input.role,
   	    maxTokens: 1024,
-  	    system: buildSystemPromptForRole("recovery"),
+      system: buildRuntimeAgentSystemPrompt("recovery"),
   	    messages: [
       {
         role: "user",
