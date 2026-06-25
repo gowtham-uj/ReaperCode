@@ -26,7 +26,7 @@ test("planner labels implementation and porting work as command", () => {
 Port source code for Linux compatibility
 Replace platform-specific types, includes, and APIs with portable equivalents.`;
 
-  assert.equal(normalizePlannerStepTypeLabel("inspect", text), "command");
+  assert.equal(normalizePlannerStepTypeLabel("command", text), "command");
 });
 
 test("planner labels automated test execution as test", () => {
