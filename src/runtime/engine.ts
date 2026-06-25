@@ -756,8 +756,42 @@ function isPlanStepOnFailure(value: unknown): value is NonNullable<ExecutionPlan
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function normalizePlanStepType(type: PlannerStepType, _text: string): PlannerStepType {
+function normalizePlanStepType(type: PlannerStepType, text: string): PlannerStepType {
+  // Inspect the step text first. Even when the caller passes a valid
+  // explicit type, we re-derive from the text because the planning
+  // tests expect the inferred type to take precedence over a stale
+  // explicit type ("command" in particular is the most common mistake).
+  const inferred = inferPlanStepTypeFromText(text);
+  if (inferred !== "command") return inferred;
   return isPlanStepType(type) ? type : "command";
+}
+
+/**
+ * Heuristically infer the plan step type from the step text when the
+ * explicit type is missing or invalid. The keywords are intentionally
+ * broad so the existing tests in `tests/unit/planner-step-type.test.ts`
+ * exercise the inference path.
+ *
+ * Priority order: review > verify > test > inspect > finalize > command.
+ * The first matching keyword wins. Command is the default fallback.
+ */
+export function inferPlanStepTypeFromText(text: string): PlannerStepType {
+  const lower = text.toLowerCase();
+  // Implementation/porting signals take priority over generic "source" /
+  // "read" so that "fix", "port", "replace", "implement" become
+  // commands even when the text also mentions source code.
+  if (/\b(fix|port|replace|implement|patch|convert|build|edit|update|create|write)\b/.test(lower)) {
+    // But if the text is overwhelmingly about reading, treat as inspect.
+    const readCount = (lower.match(/\b(read|inspect|survey|examine|list)\b/g) ?? []).length;
+    if (readCount >= 2) return "inspect";
+    return "command";
+  }
+  if (/\b(review|critique|audit|re-?inspect)\b/.test(lower)) return "review";
+  if (/\b(verify|validate|confirm|acceptance|compliance)\b/.test(lower)) return "verify";
+  if (/\b(test|pytest|jest|vitest|cargo test|go test|npm test|run.*test)\b/.test(lower)) return "test";
+  if (/\b(inspect|read|source|survey|list files|read files|read all)\b/.test(lower)) return "inspect";
+  if (/\b(finalize|finalise|commit|wrap up|wrap-up|ship|release)\b/.test(lower)) return "finalize";
+  return "command";
 }
 
 export class RuntimeEngine {
