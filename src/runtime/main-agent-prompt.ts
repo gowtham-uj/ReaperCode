@@ -321,10 +321,40 @@ function renderSkillsAndMentions(value: unknown): unknown {
   const skills = Array.isArray(record.skillsPrompt) ? record.skillsPrompt : undefined;
   const mentions = Array.isArray(record.mentions) ? record.mentions.slice(0, 12) : undefined;
   const envFingerprint = record.environmentFingerprint;
+  const resourceTrust = record.resourceTrust;
+  const resources = record.resources;
   return {
     ...(skills ? { skillsPrompt: typeof skills === "string" ? truncate(skills, 1500) : skills } : {}),
     ...(mentions && mentions.length ? { mentions } : {}),
+    ...(resourceTrust ? { resourceTrust } : {}),
+    ...(resources ? { resources: renderResourceSummary(resources) } : {}),
     ...(envFingerprint ? { environmentFingerprint: envFingerprint } : {}),
+  };
+}
+
+function renderResourceSummary(value: unknown): unknown {
+  const record = asRecord(value);
+  if (!record) return value;
+  const summarize = (items: unknown): unknown => {
+    if (!Array.isArray(items)) return items;
+    return items.slice(0, 16).map((item) => {
+      const r = asRecord(item);
+      if (!r) return item;
+      return {
+        id: r.id,
+        enabled: r.enabled,
+        scope: asRecord(r.metadata)?.scope,
+        source: asRecord(r.metadata)?.source,
+        origin: asRecord(r.metadata)?.origin,
+        path: r.path,
+        ...(r.disabledReason ? { disabledReason: r.disabledReason } : {}),
+      };
+    });
+  };
+  return {
+    extensions: summarize(record.extensions),
+    skills: summarize(record.skills),
+    prompts: summarize(record.prompts),
   };
 }
 
