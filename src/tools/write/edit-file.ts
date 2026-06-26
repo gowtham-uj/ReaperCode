@@ -1,5 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { normalizeWorkspacePath } from "../../policy/paths.js";
+import { globalFileMutationQueue } from "./file-mutation-queue.js";
 
 /**
  * Normalizes curly quotes to straight quotes for robust matching.
@@ -74,49 +75,26 @@ export async function editFileTool(
   args: { path: string; edits: Array<{ oldString: string; newString: string }> }
 ) {
   const filePath = normalizeWorkspacePath(workspaceRoot, args.path);
-  const content = await readFile(filePath, "utf8");
-  const applied = applyEditFileContent(content, args);
-  await writeFile(filePath, applied.content, "utf8");
-  return { path: filePath, appliedEdits: applied.appliedEdits, skippedAlreadyApplied: applied.skippedAlreadyApplied };
+  return globalFileMutationQueue.run(filePath, async () => {
+    const content = await readFile(filePath, "utf8");
+    const applied = applyEditFileContent(content, args);
+    await writeFile(filePath, applied.content, "utf8");
+    return { path: filePath, appliedEdits: applied.appliedEdits, skippedAlreadyApplied: applied.skippedAlreadyApplied };
+  });
 }
 
 export function applyEditFileContent(
   originalContent: string,
   args: { path: string; edits: Array<{ oldString: string; newString: string }> },
 ): { content: string; appliedEdits: number; skippedAlreadyApplied: number } {
-  let content = originalContent;
-  let appliedEdits = 0;
+  const planned: Array<{ start: number; end: number; actualOldString: string; oldString: string; newString: string }> = [];
   let skippedAlreadyApplied = 0;
 
   for (const edit of args.edits) {
     const { oldString, newString } = edit;
-    
-    // 1. Try exact match, including line-ending variants because read_file presents
-    // normalized lines while legacy files may use CRLF on disk.
-    let actualOldString: string | null = findLineEndingVariant(content, oldString);
-    
-    // 2. Try normalized match if exact fails
+    const actualOldString = findLineEndingVariant(originalContent, oldString) ?? findQuoteNormalizedVariant(originalContent, oldString);
     if (!actualOldString) {
-      const normOld = normalizeQuotes(oldString.trim());
-      const normContent = normalizeQuotes(content);
-      
-      // If the trimmed version matches (ignoring leading/trailing empty lines)
-      if (normContent.includes(normOld)) {
-        // We find the index and try to extract the original chunk
-        // This is tricky due to character mapping. 
-        // For now, we only support exact matches or simple quote-normalized matches.
-        const index = normContent.indexOf(normOld);
-        actualOldString = content.substring(index, index + oldString.length);
-        
-        // Verify it actually matches when normalized
-        if (normalizeQuotes(actualOldString.trim()) !== normOld) {
-          actualOldString = null;
-        }
-      }
-    }
-
-    if (!actualOldString) {
-      if (newString && findLineEndingVariant(content, newString)) {
+      if (newString && findLineEndingVariant(originalContent, newString)) {
         skippedAlreadyApplied++;
         continue;
       }
@@ -126,20 +104,36 @@ export function applyEditFileContent(
       );
     }
 
-    const matches = content.split(actualOldString).length - 1;
-    if (matches > 1) {
+    const matches = allIndexesOf(originalContent, actualOldString);
+    if (matches.length > 1) {
       throw new Error(
         `Multiple matches found for block in file '${args.path}'. Provide more surrounding context, use replace_in_file with ` +
         `startLine/endLine/content, or use replace_in_file with allowMultiple:true only when an intentional global replacement is safe.`,
       );
     }
-
-    const appliedNewString = normalizeReplacementLineEndings(preserveQuoteStyle(oldString, actualOldString, newString), actualOldString);
-    content = content.replace(actualOldString, appliedNewString);
-    appliedEdits++;
+    const start = matches[0];
+    if (start === undefined) {
+      throw new Error(`Block not found in file '${args.path}'.`);
+    }
+    planned.push({ start, end: start + actualOldString.length, actualOldString, oldString, newString });
   }
 
-  return { content, appliedEdits, skippedAlreadyApplied };
+  planned.sort((a, b) => a.start - b.start);
+  for (let index = 1; index < planned.length; index += 1) {
+    const previous = planned[index - 1]!;
+    const current = planned[index]!;
+    if (current.start < previous.end) {
+      throw new Error(`Multi-edit ranges overlap in file '${args.path}'. Re-read and provide non-overlapping exact edits.`);
+    }
+  }
+
+  let content = originalContent;
+  for (const edit of [...planned].reverse()) {
+    const appliedNewString = normalizeReplacementLineEndings(preserveQuoteStyle(edit.oldString, edit.actualOldString, edit.newString), edit.actualOldString);
+    content = `${content.slice(0, edit.start)}${appliedNewString}${content.slice(edit.end)}`;
+  }
+
+  return { content, appliedEdits: planned.length, skippedAlreadyApplied };
 }
 
 function findLineEndingVariant(content: string, oldString: string): string | null {
@@ -155,6 +149,27 @@ function findLineEndingVariant(content: string, oldString: string): string | nul
     if (content.includes(variant)) return variant;
   }
   return null;
+}
+
+function findQuoteNormalizedVariant(content: string, oldString: string): string | null {
+  const normOld = normalizeQuotes(oldString.trim());
+  const normContent = normalizeQuotes(content);
+  const index = normContent.indexOf(normOld);
+  if (index === -1) return null;
+  const candidate = content.substring(index, index + oldString.length);
+  return normalizeQuotes(candidate.trim()) === normOld ? candidate : null;
+}
+
+function allIndexesOf(content: string, search: string): number[] {
+  if (search.length === 0) return [];
+  const indexes: number[] = [];
+  let start = 0;
+  while (true) {
+    const index = content.indexOf(search, start);
+    if (index === -1) return indexes;
+    indexes.push(index);
+    start = index + search.length;
+  }
 }
 
 function normalizeReplacementLineEndings(newString: string, actualOldString: string): string {

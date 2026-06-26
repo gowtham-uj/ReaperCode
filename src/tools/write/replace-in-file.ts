@@ -1,6 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 
 import { normalizeWorkspacePath } from "../../policy/paths.js";
+import { globalFileMutationQueue } from "./file-mutation-queue.js";
 
 export async function replaceInFileTool(
   workspaceRoot: string,
@@ -9,17 +10,19 @@ export async function replaceInFileTool(
     | { path: string; startLine: number; endLine: number; content: string },
 ) {
   const filePath = normalizeWorkspacePath(workspaceRoot, args.path);
-  const content = await readFile(filePath, "utf8");
+  return globalFileMutationQueue.run(filePath, async () => {
+    const content = await readFile(filePath, "utf8");
 
-  if ("startLine" in args) {
-    const { next, endLine } = replaceLineRange(content, args.startLine, args.endLine, args.content, args.path);
+    if ("startLine" in args) {
+      const { next, endLine } = replaceLineRange(content, args.startLine, args.endLine, args.content, args.path);
+      await writeFile(filePath, next, "utf8");
+      return { path: filePath, startLine: args.startLine, endLine, replacements: 1 };
+    }
+
+    const { next, replacements } = replaceExactString(content, args.oldString, args.newString, args.allowMultiple ?? false, args.path);
     await writeFile(filePath, next, "utf8");
-    return { path: filePath, startLine: args.startLine, endLine, replacements: 1 };
-  }
-
-  const { next, replacements } = replaceExactString(content, args.oldString, args.newString, args.allowMultiple ?? false, args.path);
-  await writeFile(filePath, next, "utf8");
-  return { path: filePath, replacements };
+    return { path: filePath, replacements };
+  });
 }
 
 export function replaceExactString(
