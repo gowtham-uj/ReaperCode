@@ -8,7 +8,8 @@
     "build": "tsc -p tsconfig.build.json",
     "reaper": "node bin/reaper",
     "reaper:dev": "tsx watch --clear-screen=false scripts/run-reaper.ts",
-    "reaper:exec": "node bin/reaper exec run --prompt"
+    "reaper:exec": "node bin/reaper exec run --prompt",
+    "stress": "node --import=tsx scripts/stress-reaper.ts"
   },
   "dependencies": {
     "@google/gemini-cli": "^0.40.1",
