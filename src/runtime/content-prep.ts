@@ -12,9 +12,13 @@ import type { ToolResult } from "../tools/types.js";
 import { z } from "zod";
 import type { SwePrunerConfig } from "../context/swe-pruner.js";
 import type { MergedToolRegistry } from "../tools/mcp/registry.js";
+import { ProjectTrustStore, resolveProjectTrusted, type ProjectTrustResolution } from "../resources/project-trust.js";
+import { resolveResources, type ResolvedResources } from "../resources/resource-loader.js";
+import { DefaultResourcePackageManager } from "../resources/package-manager.js";
 
 export interface ContentPrepInput {
   workspaceRoot: string;
+  userHome?: string;
   prompt: string;
   maxContextTokens: number;
   toolResults?: ToolResult[];
@@ -35,6 +39,8 @@ export interface ContentPrepResult {
   skills: Skill[];
   skillsPrompt: string;
   environmentFingerprint: EnvironmentFingerprint;
+  resourceTrust: ProjectTrustResolution & { diagnostics: string[] };
+  resources: ResolvedResources;
   backgroundProcesses?: Array<{ pid: number; status: "running" | "finished"; exitCode: number | null }>;
 }
 
@@ -135,6 +141,7 @@ function hashPrunerConfig(cfg: SwePrunerConfig | undefined): string {
 function buildCacheKey(input: ContentPrepInput): string {
   return [
     input.workspaceRoot,
+    `h:${input.userHome ?? ""}`,
     `p:${input.prompt.length}:${fnv1a(input.prompt)}`,
     `t:${input.maxContextTokens}`,
     `c:${input.compactToolResults ? 1 : 0}`,
@@ -207,7 +214,31 @@ async function computeContentPrep(input: ContentPrepInput): Promise<ContentPrepR
   const skills = discoverSkills(input.workspaceRoot);
   const skillsPrompt = formatSkillsForPrompt(skills, input.prompt);
 
-  const base = {
+  const userHome = input.userHome ?? process.env.HOME ?? process.cwd();
+  const resourceTrustBase = await resolveProjectTrusted({
+    workspaceRoot: input.workspaceRoot,
+    store: ProjectTrustStore.create(userHome),
+    defaultDecision: "never",
+  });
+  const resourceTrust = {
+    ...resourceTrustBase,
+    diagnostics: resourceTrustBase.requiresTrust && !resourceTrustBase.trusted
+      ? ["Project resources exist but are not trusted; project extensions/hooks/packages/prompts were not loaded."]
+      : [],
+  };
+  const resources = resourceTrust.trusted
+    ? await resolveResources({
+        workspaceRoot: input.workspaceRoot,
+        userHome,
+        packages: new DefaultResourcePackageManager({
+          workspaceRoot: input.workspaceRoot,
+          userHome,
+          runner: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+        }).resolvePackageResourceInputs(),
+      })
+    : { extensions: [], skills: [], prompts: [] };
+
+  const base: ContentPrepResult = {
     index,
     preparedContext,
     compactedHistory,
@@ -218,6 +249,8 @@ async function computeContentPrep(input: ContentPrepInput): Promise<ContentPrepR
     mentions,
     skills,
     skillsPrompt,
+    resourceTrust,
+    resources,
     environmentFingerprint: await environmentFingerprintPromise,
     ...(input.backgroundProcesses ? { backgroundProcesses: input.backgroundProcesses } : {}),
   };
@@ -230,6 +263,8 @@ async function computeContentPrep(input: ContentPrepInput): Promise<ContentPrepR
     mentions: z.object({ fileMentions: z.array(z.string()), symbolMentions: z.array(z.string()) }),
     skills: z.array(z.any()),
     skillsPrompt: z.string(),
+    resourceTrust: z.any(),
+    resources: z.any(),
     environmentFingerprint: z.any(),
     backgroundProcesses: z.array(z.object({ pid: z.number(), status: z.string(), exitCode: z.number().nullable() })).optional(),
   }) as unknown as z.ZodType<ContentPrepResult>;

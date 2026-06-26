@@ -57,7 +57,8 @@ test("main-agent system prompt includes required requirements text", () => {
     "You can use tools directly.",
     "You can call advisory subagents as tools.",
     "Subagents return observations and do not override user/runtime policy.",
-    "Do not complete without complete_task and strict evidence.",
+    "Codex-style terminal behavior: when the task is done, you may finish the turn with a concise final assistant_message and no tool_calls.",
+    "complete_task is preferred when you need to attach structured verification evidence, but a final assistant_message with no tool_calls is also a valid terminal response",
   ]) {
     assert.match(system, new RegExp(escapeRegExp(requiredText)));
   }
