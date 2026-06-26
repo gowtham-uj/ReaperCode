@@ -84,6 +84,11 @@ export class ProviderMultiplexerClient implements ProviderModelClient {
     bindProvidersToFamily(["cerebras"], "cerebras-direct");
     registerFamily("deepseek-direct", () => this.deepseek);
     registerFamily("cerebras-direct", () => this.cerebras);
+    // Anthropic speaks the native Anthropic Messages wire, not the
+    // OpenAI-compatible one. It gets its own family binding after the
+    // broad openai-chat binding so it overrides the default.
+    bindProvidersToFamily(["anthropic"], "anthropic-messages");
+    registerFamily("anthropic-messages", () => this.anthropic);
   }
 
   generate(request: GenerateRequest, profile: ResolvedModelProfile): Promise<GenerateResult> {
