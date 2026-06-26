@@ -2,6 +2,7 @@ import { mkdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { normalizeWorkspacePath } from "../../policy/paths.js";
+import { globalFileMutationQueue } from "./file-mutation-queue.js";
 
 export async function writeFileTool(workspaceRoot: string, args: { path: string; content: string }) {
   const filePath = normalizeWorkspacePath(workspaceRoot, args.path);
@@ -14,7 +15,9 @@ export async function writeFileTool(workspaceRoot: string, args: { path: string;
   if (existing?.isDirectory()) {
     throw new Error(`write_file target '${args.path}' is a directory. Use a concrete file path such as '${path.posix.join(args.path, "index.js")}', or use run_shell_command for shell commands.`);
   }
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, args.content, "utf8");
-  return { path: filePath, bytesWritten: Buffer.byteLength(args.content, "utf8") };
+  return globalFileMutationQueue.run(filePath, async () => {
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, args.content, "utf8");
+    return { path: filePath, bytesWritten: Buffer.byteLength(args.content, "utf8") };
+  });
 }
