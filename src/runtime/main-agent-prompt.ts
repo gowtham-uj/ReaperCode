@@ -38,6 +38,7 @@ const SYSTEM_TIER_SECTIONS: ReadonlyArray<{ name: string; kind: "system" | "stab
   { name: "Prepared Context", kind: "stable" },
   { name: "Tool Shortlist", kind: "stable" },
   { name: "Skills / Mentions", kind: "stable" },
+  { name: "Context Files", kind: "stable" },
   { name: "Current Plan", kind: "volatile" },
   { name: "TODO", kind: "volatile" },
   { name: "Changed Files / Current Diff", kind: "volatile" },
@@ -170,6 +171,7 @@ export function buildMainAgentCockpit(
     "Prepared Context": renderPreparedContext(pickFirst(stateRecord, ["contentPrep", "preparedContext"])),
     "Tool Shortlist": renderToolShortlist(pickFirst(stateRecord, ["contentPrep", "toolShortlist"])),
     "Skills / Mentions": renderSkillsAndMentions(pickFirst(stateRecord, ["contentPrep"])),
+    "Context Files": renderContextFiles(pickFirst(stateRecord, ["contentPrep", "contextFiles"])),
     "Current Plan": renderPlanSection(pickFirst(stateRecord, ["planState", "currentPlan", "plan", "executionPlan", "steps"])),
     TODO: renderTodoSection(pickFirst(stateRecord, ["todoState", "todo", "todos", "tasks"])),
     "Changed Files / Current Diff": {
@@ -355,6 +357,18 @@ function renderResourceSummary(value: unknown): unknown {
     extensions: summarize(record.extensions),
     skills: summarize(record.skills),
     prompts: summarize(record.prompts),
+  };
+}
+
+function renderContextFiles(value: unknown): unknown {
+  const record = asRecord(value);
+  if (!record) return value;
+  const combined = typeof record.combined === "string" ? record.combined : "";
+  if (!combined) return "No context files loaded.";
+  return {
+    loaded: Array.isArray(record.files) ? record.files.map((f) => asRecord(f)?.source) : [],
+    diagnostics: record.diagnostics,
+    content: truncate(combined, 8000),
   };
 }
 

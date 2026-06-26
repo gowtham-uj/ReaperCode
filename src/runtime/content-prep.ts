@@ -15,6 +15,7 @@ import type { MergedToolRegistry } from "../tools/mcp/registry.js";
 import { ProjectTrustStore, resolveProjectTrusted, type ProjectTrustResolution } from "../resources/project-trust.js";
 import { resolveResources, type ResolvedResources } from "../resources/resource-loader.js";
 import { DefaultResourcePackageManager } from "../resources/package-manager.js";
+import { loadContextFiles, type ContextFileLoadResult } from "../resources/context-files.js";
 
 export interface ContentPrepInput {
   workspaceRoot: string;
@@ -38,6 +39,7 @@ export interface ContentPrepResult {
   mentions: ReturnType<typeof resolveMentions>;
   skills: Skill[];
   skillsPrompt: string;
+  contextFiles: ContextFileLoadResult;
   environmentFingerprint: EnvironmentFingerprint;
   resourceTrust: ProjectTrustResolution & { diagnostics: string[] };
   resources: ResolvedResources;
@@ -238,6 +240,12 @@ async function computeContentPrep(input: ContentPrepInput): Promise<ContentPrepR
       })
     : { extensions: [], skills: [], prompts: [] };
 
+  const contextFiles = await loadContextFiles({
+    workspaceRoot: input.workspaceRoot,
+    userHome,
+    trusted: resourceTrust.trusted,
+  });
+
   const base: ContentPrepResult = {
     index,
     preparedContext,
@@ -249,6 +257,7 @@ async function computeContentPrep(input: ContentPrepInput): Promise<ContentPrepR
     mentions,
     skills,
     skillsPrompt,
+    contextFiles,
     resourceTrust,
     resources,
     environmentFingerprint: await environmentFingerprintPromise,
@@ -263,6 +272,7 @@ async function computeContentPrep(input: ContentPrepInput): Promise<ContentPrepR
     mentions: z.object({ fileMentions: z.array(z.string()), symbolMentions: z.array(z.string()) }),
     skills: z.array(z.any()),
     skillsPrompt: z.string(),
+    contextFiles: z.any(),
     resourceTrust: z.any(),
     resources: z.any(),
     environmentFingerprint: z.any(),
