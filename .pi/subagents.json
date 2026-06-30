@@ -1,0 +1,8 @@
+{
+  "maxConcurrent": 6,
+  "defaultJoinMode": "smart",
+  "schedulingEnabled": false,
+  "scopeModels": true,
+  "disableDefaultAgents": false,
+  "toolDescriptionMode": "full"
+}

@@ -1,0 +1,23 @@
+{
+  "name": "repo-understanding",
+  "version": "1.0.0",
+  "description": "Map a repository's structure, conventions, build, and entry points.",
+  "category": "repo-understanding",
+  "whenToUse": "Use when you need to understand an unfamiliar repo's layout, conventions, build steps, or test commands before making changes.",
+  "triggers": ["map repo", "explore repo", "understand codebase", "find entry points", "codebase overview", "what does this repo do"],
+  "pathPatterns": ["**/*"],
+  "allowedTools": ["read_file", "view_file", "list_directory", "grep_search", "skim_file", "inspect_environment"],
+  "arguments": [
+    { "name": "focus", "description": "Optional area to focus on (e.g. 'auth', 'cli', 'api').", "required": false }
+  ],
+  "validation": { "commands": [{ "id": "smoke", "command": "node -e \"process.exit(0)\"" }] },
+  "memoryPolicy": {
+    "mayReadProjectMemory": true,
+    "mayWriteProjectMemory": true,
+    "mayReadUserMemory": false,
+    "mayWriteUserMemory": false
+  },
+  "trust": "builtin",
+  "author": "Reaper",
+  "license": "MIT"
+}

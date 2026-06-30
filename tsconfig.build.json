@@ -1,0 +1,21 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "noEmit": false,
+    "declaration": false,
+    "sourceMap": true,
+    "incremental": true
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "scripts/run-reaper.ts"
+  ],
+  "exclude": [
+    "tests/**",
+    "dev-ui/**",
+    "scripts/tools/**",
+    "vite.config.ts"
+  ]
+}

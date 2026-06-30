@@ -1,0 +1,20 @@
+{
+  "name": "completion-gate-debugging",
+  "version": "1.0.0",
+  "description": "Diagnose completion-gate, verification, and finalization failures.",
+  "category": "completion-gate-debugging",
+  "whenToUse": "Use when the agent refuses to complete a task despite work being done, or completion is misfiring.",
+  "triggers": ["completion gate", "won't complete", "verification failed", "task incomplete", "complete_task denied"],
+  "pathPatterns": ["**/*"],
+  "allowedTools": ["read_file", "view_file", "list_directory", "grep_search", "skim_file", "bash"],
+  "validation": { "commands": [{ "id": "smoke", "command": "node -e \"process.exit(0)\"" }] },
+  "memoryPolicy": {
+    "mayReadProjectMemory": true,
+    "mayWriteProjectMemory": true,
+    "mayReadUserMemory": false,
+    "mayWriteUserMemory": false
+  },
+  "trust": "builtin",
+  "author": "Reaper",
+  "license": "MIT"
+}

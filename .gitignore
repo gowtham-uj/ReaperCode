@@ -1,0 +1,67 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.env
+.hypothesis/
+swebench_workspaces/
+swebench_runs/
+*.jsonl
+.reaper/
+
+# Reaper Agent
+reaper_tasks/
+reaper_sessions/
+node_modules
+
+# Local Reaper eval outputs
+initial_tasks/
+private_logs/
+
+# Pi local runtime state
+.pi/sessions/
+.pi/cache/
+.pi/tmp/
+.pi/logs/
+.pi/agent/
+
+# Local agent/runtime credentials and state
+.env
+.env.*
+!.env.example
+.reaper/
+.reaper_data/
+.hermes/cron/
+.hermes/audio_cache/
+.hermes/tts_cache/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-shm
+*.db-wal
+*auth.json
+*credentials*.json
+*token*.json
+
+# Build/test/eval outputs
+dist/
+build/
+coverage/
+reaper_eval/workspaces/
+reaper_eval/run_logs/
+reaper_eval/parity-runs/
+reaper_eval/terminal-bench-runs/
+reports/
+scratchpad/
+*.log
+
+# Local virtualenvs and generated media/docs
+.venv*/
+.pdf-edit-packages/
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.pdf
+*.docx
