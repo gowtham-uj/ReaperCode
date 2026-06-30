@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
-import { isThemeFileName, listThemeFiles, resolveTheme, type ResolvedTheme } from "./themes.js";
+import { listThemeFiles,  type ResolvedTheme } from "./themes.js";
 
 export type ResourceKind = "extensions" | "skills" | "prompts" | "themes";
 export type ResourceScope = "project" | "user" | "temporary";

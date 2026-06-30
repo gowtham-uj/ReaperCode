@@ -7,7 +7,7 @@ import {
   type StructuredResponseMode,
 } from "./response-adapter.js";
 
-import { globalLlmQueue, enqueueLlmCall } from "./concurrency.js";
+import { enqueueLlmCall } from "./concurrency.js";
 import { QueryGuard } from "../runtime/query-guard.js";
 import type { Hooks } from "../adaptive/hooks.js";
 import { recordModelCall } from "./observability.js";

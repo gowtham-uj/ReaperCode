@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { classifyToolCall, ExecutionKind } from "../../src/execution/planner.js";
+import { classifyToolCall} from "../../src/execution/planner.js";
 import type { ToolCall } from "../../src/tools/types.js";
 
 function makeCall(name: ToolCall["name"], args: Record<string, unknown> = {}): ToolCall {

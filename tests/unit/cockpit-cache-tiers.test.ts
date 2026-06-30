@@ -2,10 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  buildMainAgentCockpit,
-  buildMainAgentCockpitLayout,
-  cockpitSectionKind,
-} from "../../src/runtime/main-agent-prompt.js";
+  buildMainAgentCockpitLayout, 
+  cockpitSectionKind} from "../../src/runtime/main-agent-prompt.js";
 
 test("cockpitSectionKind returns the right tier for every section", () => {
   assert.equal(cockpitSectionKind("Available Tools"), "stable");

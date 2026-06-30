@@ -1,6 +1,4 @@
-import { z } from "zod";
-import type { ToolCall, ToolResult } from "../tools/types.js";
-import type { SafetyProfile } from "./rules.js";
+import type { ToolCall} from "../tools/types.js";
 
 // ── Permission modes ──
 // yolo: allow everything (default)

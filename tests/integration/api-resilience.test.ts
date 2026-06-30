@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ResilientModelGateway, FallbackTriggeredError } from "../../src/model/retry-orchestrator.js";
-import type { GenerateRequest, GenerateResult, ModelGateway, ResolvedModelProfile, StreamEvent, EmbeddingRequest, EmbeddingResult, TokenCountRequest } from "../../src/model/types.js";
+import type { GenerateRequest,  GenerateResult,  ModelGateway,  StreamEvent,  EmbeddingRequest,  EmbeddingResult,  TokenCountRequest } from "../../src/model/types.js";
 
 function createFailingGateway(failures: Array<{ status?: number; message?: string; kind: "http" | "throw" }>): ModelGateway & { attempt: number } {
   let attempt = 0;

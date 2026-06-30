@@ -1,4 +1,4 @@
-import type { ToolCall, ToolResult } from "../tools/types.js";
+import type { ToolResult } from "../tools/types.js";
 import {
   extractFilePathsFromFailure,
   inferFilesHintFromResults,

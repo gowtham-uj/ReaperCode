@@ -22,7 +22,6 @@
 
 import type { HookEventName, HookResult } from "../adaptive/types.js";
 import type { ExtensionEvent } from "../extension/bus.js";
-import { withTimeout } from "./sandbox.js";
 
 /** Hook event names that gate security-relevant operations. */
 const SECURITY_EVENTS: ReadonlySet<HookEventName> = new Set<HookEventName>([

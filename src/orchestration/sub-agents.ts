@@ -1,6 +1,3 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
-
 import { RuntimeEngine, type RuntimeEngineResult } from "../runtime/engine.js";
 import type { ToolCall } from "../tools/types.js";
 import { selectVerificationCommand, runVerificationCommand } from "../verify/runner.js";

@@ -114,21 +114,102 @@ export async function* normalizeLiteLLMStream(
   const decoder = SSE_DECODER;
   const state = createState();
   let buffer = "";
+  const reader = response.body.getReader();
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n");
+      buffer = parts.pop() ?? "";
 
-  for await (const chunk of response.body) {
-    buffer += decoder.decode(chunk, { stream: true });
-    const parts = buffer.split("\n");
-    buffer = parts.pop() ?? "";
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith("data:")) {
+          continue;
+        }
 
-    for (const part of parts) {
-      const line = part.trim();
-      if (!line.startsWith("data:")) {
-        continue;
-      }
+        const payload = line.slice("data:".length).trim();
+        if (payload === "[DONE]") {
+          if (!state.ended) {
+            for (const tc of state.toolCalls.values()) {
+              if (tc.emitted) continue;
+              yield {
+                type: "tool_call",
+                content: tc.arguments,
+                data: { id: tc.id, name: tc.name, arguments: tc.arguments },
+              };
+              tc.emitted = true;
+            }
+            state.toolCalls.clear();
+            state.byId.clear();
+            yield {
+              type: "message_end",
+              data: {
+                finishReason: state.finishReason ?? "tool_calls",
+                ...(state.finishReason && state.finishReason !== "stop" ? {} : { finishReason: "tool_calls" }),
+              },
+            };
+            state.ended = true;
+          }
+          continue;
+        }
 
-      const payload = line.slice("data:".length).trim();
-      if (payload === "[DONE]") {
-        if (!state.ended) {
+        let parsed: {
+          choices?: Array<{
+            delta?: {
+              content?: string;
+              reasoning_content?: string;
+              tool_calls?: OpenAIToolCallDelta[];
+            };
+            finish_reason?: string | null;
+          }>;
+          usage?: { prompt_tokens?: number; completion_tokens?: number };
+        };
+        try {
+          parsed = JSON.parse(payload);
+        } catch {
+          continue;
+        }
+
+        const reasoningContent = parsed.choices?.[0]?.delta?.reasoning_content;
+        if (reasoningContent) {
+          yield { type: "reasoning_delta", content: reasoningContent, data: parsed };
+        }
+
+        const content = parsed.choices?.[0]?.delta?.content;
+        if (content) {
+          yield { type: "message_delta", content, data: parsed };
+        }
+
+        const toolCallDeltas = parsed.choices?.[0]?.delta?.tool_calls ?? [];
+        for (const tc of toolCallDeltas) {
+          const index = tc.index ?? 0;
+          let acc = state.toolCalls.get(index);
+          if (!acc) {
+            acc = { index, id: "", name: "", arguments: "", emitted: false };
+            state.toolCalls.set(index, acc);
+          }
+          if (tc.id) {
+            acc.id = tc.id;
+            state.byId.set(tc.id, acc);
+          }
+          if (tc.function?.name) {
+            acc.name += tc.function.name;
+          }
+          if (tc.function?.arguments) {
+            acc.arguments += tc.function.arguments;
+          }
+          if (acc.id && acc.name && acc.arguments) {
+            const completed = fireCompletedIfReady(acc, state);
+            if (completed) yield completed;
+          }
+        }
+
+        const finishReason = parsed.choices?.[0]?.finish_reason;
+        if (finishReason) {
+          state.finishReason = finishReason;
+          // Flush any not-yet-emitted accumulators.
           for (const tc of state.toolCalls.values()) {
             if (tc.emitted) continue;
             yield {
@@ -143,98 +224,23 @@ export async function* normalizeLiteLLMStream(
           yield {
             type: "message_end",
             data: {
-              finishReason: state.finishReason ?? "tool_calls",
-              ...(state.finishReason && state.finishReason !== "stop" ? {} : { finishReason: "tool_calls" }),
+              finishReason,
+              ...(parsed.usage
+                ? {
+                    usage: {
+                      promptTokens: parsed.usage.prompt_tokens ?? 0,
+                      completionTokens: parsed.usage.completion_tokens ?? 0,
+                    },
+                  }
+                : {}),
             },
           };
           state.ended = true;
         }
-        continue;
-      }
-
-      let parsed: {
-        choices?: Array<{
-          delta?: {
-            content?: string;
-            reasoning_content?: string;
-            tool_calls?: OpenAIToolCallDelta[];
-          };
-          finish_reason?: string | null;
-        }>;
-        usage?: { prompt_tokens?: number; completion_tokens?: number };
-      };
-      try {
-        parsed = JSON.parse(payload);
-      } catch {
-        continue;
-      }
-
-      const reasoningContent = parsed.choices?.[0]?.delta?.reasoning_content;
-      if (reasoningContent) {
-        yield { type: "reasoning_delta", content: reasoningContent, data: parsed };
-      }
-
-      const content = parsed.choices?.[0]?.delta?.content;
-      if (content) {
-        yield { type: "message_delta", content, data: parsed };
-      }
-
-      const toolCallDeltas = parsed.choices?.[0]?.delta?.tool_calls ?? [];
-      for (const tc of toolCallDeltas) {
-        const index = tc.index ?? 0;
-        let acc = state.toolCalls.get(index);
-        if (!acc) {
-          acc = { index, id: "", name: "", arguments: "", emitted: false };
-          state.toolCalls.set(index, acc);
-        }
-        if (tc.id) {
-          acc.id = tc.id;
-          state.byId.set(tc.id, acc);
-        }
-        if (tc.function?.name) {
-          acc.name += tc.function.name;
-        }
-        if (tc.function?.arguments) {
-          acc.arguments += tc.function.arguments;
-        }
-        if (acc.id && acc.name && acc.arguments) {
-          const completed = fireCompletedIfReady(acc, state);
-          if (completed) yield completed;
-        }
-      }
-
-      const finishReason = parsed.choices?.[0]?.finish_reason;
-      if (finishReason) {
-        state.finishReason = finishReason;
-        // Flush any not-yet-emitted accumulators.
-        for (const tc of state.toolCalls.values()) {
-          if (tc.emitted) continue;
-          yield {
-            type: "tool_call",
-            content: tc.arguments,
-            data: { id: tc.id, name: tc.name, arguments: tc.arguments },
-          };
-          tc.emitted = true;
-        }
-        state.toolCalls.clear();
-        state.byId.clear();
-        yield {
-          type: "message_end",
-          data: {
-            finishReason,
-            ...(parsed.usage
-              ? {
-                  usage: {
-                    promptTokens: parsed.usage.prompt_tokens ?? 0,
-                    completionTokens: parsed.usage.completion_tokens ?? 0,
-                  },
-                }
-              : {}),
-          },
-        };
-        state.ended = true;
       }
     }
+  } finally {
+    try { reader.releaseLock(); } catch { /* already released */ }
   }
   if (!state.ended) {
     for (const tc of state.toolCalls.values()) {

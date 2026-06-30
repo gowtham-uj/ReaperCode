@@ -40,13 +40,17 @@ test("OpenAI stream tool-call deltas assemble into one complete tool_call before
   assert.equal(toolCallEvents.length, 1, "tool_call emitted exactly once, at finish_reason");
   assert.equal(toolCallEvents[0]?.type, "tool_call");
   assert.equal((toolCallEvents[0] as { data?: { finishReason?: string } }).data?.finishReason, undefined);
-  const lastToolCall = events.findLast?.((e) => e.type === "tool_call") ?? toolCallEvents[0];
+  const lastToolCall =
+    (events.findLast((e) => e.type === "tool_call") as (typeof events)[number] | undefined) ??
+    (toolCallEvents[0] as (typeof events)[number] | undefined);
+  if (!lastToolCall) throw new Error("expected a tool_call event");
   assert.equal((lastToolCall as { data?: { name?: string } }).data?.name, "write_file");
   assert.equal(
     (lastToolCall as { data?: { arguments?: string } }).data?.arguments,
     '{"path":"package.json","content":"{}"}',
   );
   const last = events[events.length - 1];
+  if (!last) throw new Error("expected at least one event");
   assert.equal(last.type, "message_end");
   assert.deepEqual((last as { data?: { finishReason?: string } }).data, { finishReason: "tool_calls" });
 });
