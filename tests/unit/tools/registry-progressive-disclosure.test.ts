@@ -24,10 +24,11 @@ import { executeSearchTools } from "../../../src/tools/write/search-tools.js";
 
 test("CORE_TOOL_NAMES contains the expected always-present basics", () => {
   const expected: ToolName[] = [
-    "read_file",
+    "file_view",
+    "file_scroll",
+    "file_find",
+    "file_edit",
     "write_file",
-    "edit_file",
-    "replace_in_file",
     "bash",
     "list_directory",
     "grep_search",

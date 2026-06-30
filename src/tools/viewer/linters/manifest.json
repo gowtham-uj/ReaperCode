@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "defaultTimeoutMs": 5000,
+  "installTimeoutMs": 30000,
+  "entries": [
+    {
+      "kind": "pinned_package",
+      "extensions": [".ts", ".mts", ".cts"],
+      "languages": ["ts"],
+      "package": "jsonc-parser",
+      "version": "2.2.1",
+      "import": "jsonc-parser",
+      "symbol": "lint"
+    }
+  ]
+}

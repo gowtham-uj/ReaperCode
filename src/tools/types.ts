@@ -25,6 +25,12 @@ import {
   UninstallHookArgsSchema,
   ReloadHooksArgsSchema,
 } from "./types/hook-tools.schema.js";
+import {
+  FileEditArgsSchema,
+  FileFindArgsSchema,
+  FileScrollArgsSchema,
+  FileViewArgsSchema,
+} from "./viewer/types.js";
 
 export const SearchToolsArgsSchema = z.object({
   query: z.string().min(1).describe("Keywords describing the capability you need, or select:tool_name for direct selection (e.g. 'background process', 'web search', 'symbol rename', 'select:read_background_output')"),
@@ -580,6 +586,10 @@ export const ToolCallSchema = z.discriminatedUnion("name", [
   z.object({ id: z.string().min(1), name: z.literal("git_diff"), args: GitDiffArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("web_search"), args: WebSearchArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("write_file"), args: WriteFileArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("file_view"), args: FileViewArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("file_scroll"), args: FileScrollArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("file_find"), args: FileFindArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("file_edit"), args: FileEditArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("replace_in_file"), args: ReplaceInFileArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("edit_file"), args: EditFileArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("replace_symbol"), args: ReplaceSymbolArgsSchema }).strict(),
