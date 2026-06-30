@@ -1,0 +1,20 @@
+{
+  "name": "test-failure-debugging",
+  "version": "1.0.0",
+  "description": "Triage and repair failing tests.",
+  "category": "test-failure-debugging",
+  "whenToUse": "Use when tests are failing and you need a structured workflow to triage them.",
+  "triggers": ["test failed", "test failure", "tests broken", "failing test", "red build", "ci broken"],
+  "pathPatterns": ["**/test/**", "**/tests/**", "**/__tests__/**", "**/*.test.*", "**/*.spec.*"],
+  "allowedTools": ["read_file", "view_file", "list_directory", "grep_search", "skim_file", "bash", "write_file", "edit_file", "replace_in_file"],
+  "validation": { "commands": [{ "id": "smoke", "command": "node -e \"process.exit(0)\"" }] },
+  "memoryPolicy": {
+    "mayReadProjectMemory": true,
+    "mayWriteProjectMemory": true,
+    "mayReadUserMemory": false,
+    "mayWriteUserMemory": false
+  },
+  "trust": "builtin",
+  "author": "Reaper",
+  "license": "MIT"
+}

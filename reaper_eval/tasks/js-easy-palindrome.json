@@ -1,0 +1,13 @@
+{
+  "id": "js-easy-palindrome",
+  "title": "Fix palindrome check",
+  "description": "The file index.js exports isPalindrome which compares the raw string to its reverse. Make it case-insensitive and ignore non-alphanumeric characters. Run tests.",
+  "difficulty": "easy",
+  "language": "javascript",
+  "projectFiles": {
+    "package.json": "{\n  \"name\": \"easy-palindrome\",\n  \"version\": \"1.0.0\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"test\": \"node --test index.test.js\"\n  }\n}",
+    "index.js": "export function isPalindrome(s) { return s === s.split('').reverse().join(''); }\n",
+    "index.test.js": "import { test } from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { isPalindrome } from \"./index.js\";\n\ntest(\"case and punctuation insensitive\", () => {\n  assert.equal(isPalindrome(\"A man, a plan, a canal: Panama\"), true);\n  assert.equal(isPalindrome(\"hello\"), false);\n});\n"
+  },
+  "verification": { "command": "npm test" }
+}

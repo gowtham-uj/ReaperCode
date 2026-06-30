@@ -1,0 +1,252 @@
+[
+  {
+    "id": "missing-script-test",
+    "description": "package.json 'test' script referenced but not defined",
+    "input": {
+      "stderr": "npm ERR! missing script: test\nnpm ERR! A complete log of this run can be found in:",
+      "stdout": ""
+    },
+    "expectedClass": "missing_script",
+    "strategyContains": "manifest"
+  },
+  {
+    "id": "missing-script-build",
+    "description": "package.json 'build' script referenced but not defined",
+    "input": {
+      "stderr": "npm error Missing script: \"build\"\nnpm error",
+      "stdout": ""
+    },
+    "expectedClass": "missing_script",
+    "strategyContains": "manifest"
+  },
+  {
+    "id": "missing-artifact-output",
+    "description": "Test expected an output file that wasn't produced",
+    "input": {
+      "stderr": "FileNotFoundError: [Errno 2] No such file or directory: '/tmp/output.json'",
+      "stdout": ""
+    },
+    "expectedClass": "missing_artifact",
+    "strategyContains": "artifact"
+  },
+  {
+    "id": "missing-artifact-pytest",
+    "description": "pytest module/function not found",
+    "input": {
+      "stderr": "ERROR: not found: /workspace/tests/test_integration.py",
+      "stdout": ""
+    },
+    "expectedClass": "missing_artifact",
+    "strategyContains": "artifact"
+  },
+  {
+    "id": "missing-dependency-import",
+    "description": "Cannot find a required module in node_modules",
+    "input": {
+      "stderr": "Error: Cannot find module 'lodash'\nRequire stack:",
+      "stdout": ""
+    },
+    "expectedClass": "missing_dependency",
+    "strategyContains": "dependency"
+  },
+  {
+    "id": "missing-dependency-resolve",
+    "description": "Module resolution failed at install time",
+    "input": {
+      "stderr": "npm ERR! ERESOLVE could not resolve dependency",
+      "stdout": ""
+    },
+    "expectedClass": "missing_dependency",
+    "strategyContains": "dependency"
+  },
+  {
+    "id": "missing-type-dependency",
+    "description": "TypeScript types missing for a library",
+    "input": {
+      "stderr": "error TS7016: Could not find a declaration file for module 'untyped-pkg'",
+      "stdout": ""
+    },
+    "expectedClass": "missing_type_dependency",
+    "strategyContains": "types"
+  },
+  {
+    "id": "permission-denied-shebang",
+    "description": "Script not executable due to missing mode bit",
+    "input": {
+      "stderr": "bash: ./scripts/run.sh: Permission denied",
+      "stdout": ""
+    },
+    "expectedClass": "permission_or_executable",
+    "strategyContains": "executable"
+  },
+  {
+    "id": "permission-denied-eacces",
+    "description": "Node EACCES on file write",
+    "input": {
+      "stderr": "Error: EACCES: permission denied, open '/var/log/app.log'",
+      "stdout": ""
+    },
+    "expectedClass": "permission_or_executable",
+    "strategyContains": "executable"
+  },
+  {
+    "id": "encoding-unicode",
+    "description": "Unicode decode error reading binary as text",
+    "input": {
+      "stderr": "UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte",
+      "stdout": ""
+    },
+    "expectedClass": "text_encoding_or_binary_output",
+    "strategyContains": "encoding"
+  },
+  {
+    "id": "test-discovery-empty",
+    "description": "Test runner finds zero tests",
+    "input": {
+      "stderr": "jest: No tests found, exiting with code 1",
+      "stdout": ""
+    },
+    "expectedClass": "test_discovery",
+    "strategyContains": "test discovery"
+  },
+  {
+    "id": "test-discovery-pytest-empty",
+    "description": "Pytest collects zero items",
+    "input": {
+      "stderr": "collected 0 items\n\nno tests ran",
+      "stdout": ""
+    },
+    "expectedClass": "test_discovery",
+    "strategyContains": "test discovery"
+  },
+  {
+    "id": "typecheck-ts-error",
+    "description": "TypeScript compiler reports an error",
+    "input": {
+      "stderr": "src/index.ts(12,5): error TS2322: Type 'string' is not assignable to type 'number'.",
+      "stdout": ""
+    },
+    "expectedClass": "typecheck",
+    "strategyContains": "typecheck"
+  },
+  {
+    "id": "compile-error-gcc",
+    "description": "Native compile failure",
+    "input": {
+      "stderr": "fatal error: 'openssl/ssl.h' file not found",
+      "stdout": ""
+    },
+    "expectedClass": "compile_error",
+    "strategyContains": "compile"
+  },
+  {
+    "id": "build-config-missing",
+    "description": "tsconfig.json not found",
+    "input": {
+      "stderr": "error TS6053: File 'tsconfig.json' not found.",
+      "stdout": ""
+    },
+    "expectedClass": "build_config",
+    "strategyContains": "build config"
+  },
+  {
+    "id": "runtime-exception-unhandled",
+    "description": "Uncaught JS exception in production code",
+    "input": {
+      "stderr": "UnhandledPromiseRejectionWarning: TypeError: Cannot read properties of undefined",
+      "stdout": ""
+    },
+    "expectedClass": "runtime_exception",
+    "strategyContains": "runtime"
+  },
+  {
+    "id": "assertion-failure",
+    "description": "Test assertion failed",
+    "input": {
+      "stderr": "AssertionError: expected 5 to equal 6\n  at Object.<anonymous> (/workspace/tests/foo.test.ts:42:7)",
+      "stdout": ""
+    },
+    "expectedClass": "assertion_failure",
+    "strategyContains": "assertion"
+  },
+  {
+    "id": "exact-output-mismatch",
+    "description": "stdout did not match expected output verbatim",
+    "input": {
+      "stderr": "Expected output 'foo' but got 'bar'",
+      "stdout": "bar"
+    },
+    "expectedClass": "exact_output_mismatch",
+    "strategyContains": "output"
+  },
+  {
+    "id": "external-service-unavailable",
+    "description": "Test failed due to network/service issue, not code",
+    "input": {
+      "stderr": "Error: getaddrinfo ENOTFOUND api.example.com",
+      "stdout": ""
+    },
+    "expectedClass": "external_service",
+    "strategyContains": "external"
+  },
+  {
+    "id": "timeout-verification",
+    "description": "Test runner timed out",
+    "input": {
+      "stderr": "ERROR: test timed out after 30000ms",
+      "stdout": ""
+    },
+    "expectedClass": "timeout",
+    "strategyContains": "timeout"
+  },
+  {
+    "id": "dependency-install-failed",
+    "description": "npm install itself failed",
+    "input": {
+      "stderr": "npm ERR! code ENOENT\nnpm ERR! syscall open\nnpm ERR! path /workspace/package.json",
+      "stdout": ""
+    },
+    "expectedClass": "dependency_install",
+    "strategyContains": "install"
+  },
+  {
+    "id": "schema-migration",
+    "description": "Database schema mismatch",
+    "input": {
+      "stderr": "django.db.migrations.exceptions.InconsistentMigrationHistory",
+      "stdout": ""
+    },
+    "expectedClass": "schema_or_migration",
+    "strategyContains": "schema"
+  },
+  {
+    "id": "environment-missing-conda",
+    "description": "Conda environment not found",
+    "input": {
+      "stderr": "EnvironmentLocationNotFound: Not a conda environment: /opt/conda/envs/build",
+      "stdout": ""
+    },
+    "expectedClass": "environment_missing",
+    "strategyContains": "environment"
+  },
+  {
+    "id": "performance-regression-bench",
+    "description": "Benchmark exceeded time budget",
+    "input": {
+      "stderr": "expected operation to complete faster than 500ms; got 1240ms (performance regression)",
+      "stdout": ""
+    },
+    "expectedClass": "performance_regression",
+    "strategyContains": "performance"
+  },
+  {
+    "id": "unknown-no-pattern-match",
+    "description": "Failure output that does not match any known pattern falls through to 'unknown'",
+    "input": {
+      "stderr": "the widget misbehaved in a way we have not classified",
+      "stdout": ""
+    },
+    "expectedClass": "unknown",
+    "strategyContains": ""
+  }
+]  

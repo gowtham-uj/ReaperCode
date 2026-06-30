@@ -1,0 +1,66 @@
+{
+  "version": "1",
+  "name": "terminal-bench-reaper-tool-stress",
+  "tasks": [
+    {
+      "id": "reaper-stress-001",
+      "title": "Fix and harden case-insensitive palindrome checker",
+      "description": "The target repository has a broken `isPalindrome` function and a failing test. Diagnose the bug, edit the implementation and tests, run the test suite, and ensure it passes.",
+      "targetRepo": "file:///tmp/reaper-stress-target",
+      "targetRepoRef": "main",
+      "verification": {
+        "command": "npm test",
+        "maxIterations": 3,
+        "allowJudgeRetry": true
+      }
+    },
+    {
+      "id": "reaper-stress-002",
+      "title": "Fix off-by-one in array chunking",
+      "description": "The target repository has a broken `chunk` function that mishandles array boundaries. Diagnose the bug, edit the implementation, and ensure the existing test suite passes.",
+      "targetRepo": "file:///tmp/reaper-stress-target-chunk",
+      "targetRepoRef": "main",
+      "verification": {
+        "command": "npm test",
+        "maxIterations": 3,
+        "allowJudgeRetry": true
+      }
+    },
+    {
+      "id": "reaper-stress-003",
+      "title": "Add missing error handling in JSON parser",
+      "description": "The target repository has a `parseJson` function that throws on invalid input. Update the implementation to return null for invalid JSON and add a corresponding test case.",
+      "targetRepo": "file:///tmp/reaper-stress-target-json",
+      "targetRepoRef": "main",
+      "verification": {
+        "command": "npm test",
+        "maxIterations": 3,
+        "allowJudgeRetry": true
+      }
+    },
+    {
+      "id": "reaper-stress-004",
+      "title": "Add debounce function to a multi-file library",
+      "description": "The target repository has a small utils library that needs a debounce function added to it. The function should delay calling the wrapped function by the given wait time, with the most recent call arguments. Add the implementation to utils.js, add a corresponding test to utils.test.js, and ensure all tests pass.",
+      "targetRepo": "file:///tmp/reaper-stress-target-debounce",
+      "targetRepoRef": "main",
+      "verification": {
+        "command": "npm test",
+        "maxIterations": 3,
+        "allowJudgeRetry": true
+      }
+    },
+    {
+      "id": "reaper-stress-005",
+      "title": "Fix string truncation bug in truncate helper",
+      "description": "The target repository has a `truncate` function that should shorten a string to a max length and add an ellipsis suffix, but the current implementation has a boundary bug with multi-byte characters and the max length is off by one. Diagnose the bug, fix the implementation, and ensure tests pass.",
+      "targetRepo": "file:///tmp/reaper-stress-target-truncate",
+      "targetRepoRef": "main",
+      "verification": {
+        "command": "npm test",
+        "maxIterations": 3,
+        "allowJudgeRetry": true
+      }
+    }
+  ]
+}

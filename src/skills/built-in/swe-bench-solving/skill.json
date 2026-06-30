@@ -1,0 +1,20 @@
+{
+  "name": "swe-bench-solving",
+  "version": "1.0.0",
+  "description": "Approach SWE-bench tasks systematically — read the issue, localize, patch, test.",
+  "category": "swe-bench-solving",
+  "whenToUse": "Use when solving a SWE-bench task — issue, repo, expected tests to pass.",
+  "triggers": ["swe-bench", "swe bench", "sweb", "patch issue"],
+  "pathPatterns": ["**/*"],
+  "allowedTools": ["read_file", "view_file", "list_directory", "grep_search", "skim_file", "bash", "write_file", "edit_file", "replace_in_file", "inspect_environment"],
+  "validation": { "commands": [{ "id": "smoke", "command": "node -e \"process.exit(0)\"" }] },
+  "memoryPolicy": {
+    "mayReadProjectMemory": true,
+    "mayWriteProjectMemory": true,
+    "mayReadUserMemory": false,
+    "mayWriteUserMemory": false
+  },
+  "trust": "builtin",
+  "author": "Reaper",
+  "license": "MIT"
+}

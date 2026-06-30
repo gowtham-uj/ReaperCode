@@ -1,0 +1,20 @@
+{
+  "name": "prompt-enhancement",
+  "version": "1.0.0",
+  "description": "Improve prompts for clarity, completeness, and reliability.",
+  "category": "prompt-enhancement",
+  "whenToUse": "Use when refining a prompt that produces inconsistent or vague model output.",
+  "triggers": ["improve prompt", "prompt better", "rewrite prompt", "vague output", "prompt engineering"],
+  "pathPatterns": ["**/*.md", "**/*.txt", "**/prompts/**", "**/templates/**"],
+  "allowedTools": ["read_file", "view_file", "list_directory", "grep_search", "write_file", "edit_file", "replace_in_file"],
+  "validation": { "commands": [{ "id": "smoke", "command": "node -e \"process.exit(0)\"" }] },
+  "memoryPolicy": {
+    "mayReadProjectMemory": true,
+    "mayWriteProjectMemory": true,
+    "mayReadUserMemory": false,
+    "mayWriteUserMemory": false
+  },
+  "trust": "builtin",
+  "author": "Reaper",
+  "license": "MIT"
+}
