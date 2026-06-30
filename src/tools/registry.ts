@@ -48,6 +48,12 @@ import {
   CancelSubagentArgsSchema,
   SearchToolsArgsSchema,
 } from "./types.js";
+import {
+  FileViewArgsSchema,
+  FileScrollArgsSchema,
+  FileFindArgsSchema,
+  FileEditArgsSchema,
+} from "./viewer/types.js";
 import { AgentArgsSchema } from "./agent.types.js";
 import { AgentSwarmArgsSchema } from "./agent-swarm.types.js";
 import {
@@ -144,6 +150,28 @@ export const toolRegistry = {
     description: "Delete a file",
     argsSchema: DeleteFileArgsSchema,
   },
+  // ---- viewer tools (Phase 2: schemas registered, NOT in CORE_TOOL_NAMES yet).
+  file_view: {
+    description:
+      "View a numbered window of a file (default 50 lines starting at line 1). Preferred over read_file for inspection; the model always sees line numbers in the response. Use file_scroll to navigate within the same file. Bounded by file_line_limit_max (config; default 500 lines per response).",
+    argsSchema: FileViewArgsSchema,
+  },
+  file_scroll: {
+    description:
+      "Move the viewport for an already-viewed file. Direction: up/down/top/bottom. Lines optional (defaults to the previous window size). Reuses the same viewport as file_view / file_find for the same file.",
+    argsSchema: FileScrollArgsSchema,
+  },
+  file_find: {
+    description:
+      "Find the first occurrence of a pattern within a single file and recenter the viewport on it. Pattern is a literal substring (no regex). Returns a numbered window around the match.",
+    argsSchema: FileFindArgsSchema,
+  },
+  file_edit: {
+    description:
+      "Edit a single contiguous line range and run the configured language linter on the result. On lint failure the file is rolled back atomically and the error is returned to the model (file content is never left in a broken state). Preferred over replace_in_file for line-anchored edits because oldString never has to be guessed.",
+    argsSchema: FileEditArgsSchema,
+  },
+  // -------------------------------------------------------------------------------
   bash: {
     description:
       "Run a bash command in the workspace for real execution: package installs, tests, builds, typechecks, dev-server smoke checks, or concise environment probes. Do not use bash as a file reader (`cat`, `ls`, `find`, etc.) for files you just wrote; the cockpit's Changed Files section already summarizes shipped artifacts. Prefer `read_file` for targeted file inspection only when a write failed or a verifier points to a concrete line. Provide a concise `description` and explicit `timeout`/`timeoutMs`. Use `isBackground` (or `run_in_background`: true) for long-running servers. For one-shot smoke tests that temporarily start a server, use a bounded self-cleaning command (`timeout`, `trap 'kill $PID ...' EXIT`, curl/check, then exit) so foreground stdio closes. After a failed broad build/test, run a targeted diagnostic/check before repeating the broad command unchanged. If output is large, inspect the returned log/spillover path with read_file.",
@@ -398,15 +426,19 @@ export const toolRegistry = {
  * until the model discovers it via search_tools.
  */
 export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
-  "read_file",
-  "view_file",
-  "write_file",
-  "edit_file",
-  "replace_in_file",
+  // ---- viewer (Phase 4: promoted to always-on so the model sees them every turn) ----
+  "file_view",
+  "file_scroll",
+  "file_find",
+  "file_edit",
+  // ---- legacy fallbacks (Phase 4: demoted to on-demand; reach for the viewer equivalents) ----
+  "view_file",          // on-demand legacy alias for file_view
+  "write_file",         // always-on: full-file rewrites for new files + intentional overrides
+  "edit_file",          // on-demand: legacy edit-by-edits tool (prefer file_edit)
   "delete_file",
   "list_directory",
-  "grep_search",
-  "bash",
+  "grep_search",        // always-on: cross-file patterns
+  "bash",               // always-on: tests, git, installs only
   "sandbox_service_control",
   "advance_step",
   "complete_task",
@@ -419,6 +451,17 @@ export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   "agent",
   "agent_swarm",
   "delegate_to_plan",
+]);
+
+// Tools that were demoted from CORE_TOOL_NAMES in Phase 4. Kept registered
+// in `toolRegistry` for back-compat but no longer in the model's per-turn
+// shortlist. The model reaches them via `search_tools("discover:read_file")`
+// or `search_tools("discover:replace_in_file")`. Phase 5 replaces the first
+// with an auto-aliased file_view shim; Phase 5 removes the second entirely
+// and substitutes a synonym alias that routes to file_edit's schema.
+export const DEMOTED_LEGACY_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
+  "read_file",
+  "replace_in_file",
 ]);
 
 export type ToolName = keyof typeof toolRegistry;

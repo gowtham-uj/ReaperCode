@@ -15,6 +15,10 @@
 const TOOL_ALLOWED_ARGS: Record<string, readonly string[]> = {
   read_file: ["path", "startLine", "endLine"],
   view_file: ["path", "startLine", "endLine"],
+  file_view: ["path", "start_line", "window"],
+  file_scroll: ["path", "direction", "lines"],
+  file_find: ["path", "pattern", "start_line"],
+  file_edit: ["path", "start_line", "end_line", "new_content", "reason"],
   list_directory: ["path", "includeHidden"],
   grep_search: ["pattern", "path", "include"],
   skim_file: ["path", "goalHint"],
