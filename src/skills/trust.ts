@@ -29,7 +29,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join, sep } from "node:path";
 
 import type { ExtensionTrust } from "../extensions/types.js";
-import type { SkillManifest, SkillTrust, SkillTrustRecord } from "./types.js";
+import type { SkillTrust,  SkillTrustRecord } from "./types.js";
 
 export interface TrustResolverOptions {
   /** Absolute path to the built-in skills root (e.g. /workspace/src/skills/built-in). */

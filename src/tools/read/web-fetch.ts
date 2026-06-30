@@ -1,4 +1,3 @@
-import { normalizeWorkspacePath } from "../../policy/paths.js";
 
 export interface WebFetchArgs {
   url: string;

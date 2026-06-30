@@ -18,8 +18,6 @@
  * (or a no-op in CLI mode).
  */
 
-import type { SkillManifest } from "../skills/types.js";
-import type { ToolMetadata } from "../governance/tool-metadata.js";
 import type {
   ExtensionSlashCommandRegistration,
   ExtensionSkillRegistration,

@@ -23,8 +23,8 @@
  * TTY; output is plain text or JSON. The CLI never stores secrets.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from "node:fs";
-import { join, basename } from "node:path";
+import { existsSync,  readFileSync} from "node:fs";
+import { join} from "node:path";
 
 import {
   parseSkillFromRaw,
@@ -38,7 +38,6 @@ import { SkillMemoryRegistry } from "./skill-memory-registry.js";
 import { PersistentMemoryStore } from "./persistent-memory-store.js";
 import { MemoryScopePolicy } from "./memory-scope-policy.js";
 import { VisualInputAnalyzer } from "./visual-input-analyzer.js";
-import { ScreenshotContextBridge } from "./screenshot-context-bridge.js";
 import { ModelCapabilitiesRegistry } from "./model-capabilities.js";
 import { Hooks } from "./hooks.js";
 import { redactSecrets } from "./redact.js";
@@ -47,7 +46,7 @@ import { redactSecrets } from "./redact.js";
 import { SkillRegistry } from "../skills/registry.js";
 import { SkillLifecycle } from "../skills/lifecycle.js";
 import { TrustResolver as SkillTrustResolver } from "../skills/trust.js";
-import { discoverSkills, defaultSkillLocations } from "../skills/discovery.js";
+import { discoverSkills} from "../skills/discovery.js";
 import { ExtensionRegistry } from "../extensions/registry.js";
 import { ExtensionLifecycle } from "../extensions/lifecycle.js";
 import { HookRunner } from "../extensions/hook-runner.js";

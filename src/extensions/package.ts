@@ -7,7 +7,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 
-import { ExtensionValidationError, type ExtensionManifest } from "./types.js";
+import { type ExtensionManifest } from "./types.js";
 
 export interface PackageMetadata {
   name?: string;

@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { saveSession } from "../sessions-store.js";
 
 /**
  * SessionStore — the single source of truth for the TUI. Components

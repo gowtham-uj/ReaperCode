@@ -17,9 +17,8 @@
  *  - Contradictory memory candidates trigger an "ask" decision.
  */
 
-import { createHash } from "node:crypto";
 
-import type { MemoryDecision, MemoryKind, MemoryRecord, MemoryScope, MemorySource, Redaction } from "./types.js";
+import type { MemoryDecision,  MemoryKind,  MemoryRecord,  MemoryScope,  MemorySource} from "./types.js";
 import { redactSecrets } from "./redact.js";
 
 const USER_EXPLICIT_PREFIXES = /^(always|never|i prefer|i always|i never|please always|please never|remember that|note:)\b/i;

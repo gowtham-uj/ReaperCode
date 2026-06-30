@@ -13,7 +13,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join, sep } from "node:path";
 
-import type { ExtensionTrust, ExtensionManifest } from "./types.js";
+import type { ExtensionTrust} from "./types.js";
 
 export interface ExtensionTrustResolverOptions {
   /** Absolute path to the built-in extensions root. */

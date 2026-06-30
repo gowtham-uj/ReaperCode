@@ -59,16 +59,46 @@ test("foreground shell returns after wrapper exit even if a temporary child keep
   assert.ok(isForegroundShellResult(result), "test command should produce a foreground shell result");
   assert.equal(result.exitCode, 0);
   assert.match(result.stdout, /foreground-done/);
+  // Pi-style idle grace is 250ms; allow generous slack for slow CI.
   assert.ok(Date.now() - started < 4_500, "foreground command should not wait for orphan child until timeout");
-
-  let stillRunning = false;
+  // Cleanup: best-effort kill of the leftover so the test process exits cleanly.
   try {
-    execFileSync("pgrep", ["-f", marker], { stdio: "ignore" });
-    stillRunning = true;
+    execFileSync("pkill", ["-f", marker], { stdio: "ignore" });
   } catch {
-    stillRunning = false;
+    // ignore: marker may have already exited.
   }
-  assert.equal(stillRunning, false, "foreground cleanup should terminate leftover child process");
+});
+
+test("foreground shell resolves quickly when inner bash -c leaves a grandchild server running", async () => {
+  // Reproduces the live A/B hang: an inner `bash -c` starts a server with `&`,
+  // prints its exit marker, and exits — leaving a grandchild holding the
+  // wrapper's stdout/stderr pipes. Pi's waitForChildProcess pattern (see
+  // earendil-works/pi#5303) is what allows us to finalize the bash tool
+  // result without killing the orphan; we mirror that pattern in
+  // runShellCommandTool's close handler.
+  const workspace = await mkdtemp(path.join(tmpdir(), "reaper-shell-grandchild-"));
+  const marker = `reaper-grandchild-${Date.now()}-${process.pid}`;
+  const innerCmd = `node -e "process.title=${JSON.stringify(marker)}; setInterval(()=>{},1000)" & printf 'orphan-backgrounded\\n'`;
+  const started = Date.now();
+  const result = await runShellCommandTool(
+    workspace,
+    {
+      cmd: `bash -c ${JSON.stringify(innerCmd)}`,
+      timeoutMs: 5_000,
+    },
+    "allow_all",
+    workspace,
+  );
+  assert.ok(isForegroundShellResult(result), "expected foreground shell result");
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stdout, /orphan-backgrounded/);
+  assert.ok(Date.now() - started < 4_500, "foreground bash with backgrounded grandchild must not hang to the wall-clock timeout");
+  // Best-effort cleanup so the test process exits cleanly.
+  try {
+    execFileSync("pkill", ["-f", marker], { stdio: "ignore" });
+  } catch {
+    // ignore
+  }
 });
 
 test("shell output spill keeps command running and writes foreground output to a process log", async () => {

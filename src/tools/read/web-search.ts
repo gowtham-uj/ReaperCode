@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 
 interface SearchResult {
   title: string;

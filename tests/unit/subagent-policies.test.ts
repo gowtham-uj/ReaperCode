@@ -2,12 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  createVerificationState,
-  applyReviewerVerdict,
-  isReviewerBlocking,
-  deriveMissingEvidence,
-  recordVerificationCheck,
-} from "../../src/runtime/verification-state.js";
+  createVerificationState, 
+  applyReviewerVerdict, 
+  isReviewerBlocking, 
+  recordVerificationCheck} from "../../src/runtime/verification-state.js";
 
 test("initial reviewer verdict is undefined", () => {
   const state = createVerificationState(["npm test"]);

@@ -16,7 +16,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, symlink, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp,  rm,  symlink,  writeFile} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 

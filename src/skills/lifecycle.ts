@@ -26,7 +26,7 @@
  */
 
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 
 import type { SkillMemoryRegistry } from "../adaptive/skill-memory-registry.js";
 import { parseSkillManifest, sha256OfManifest, writeSkillManifest } from "./manifest.js";
