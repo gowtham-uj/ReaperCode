@@ -1,0 +1,7 @@
+{
+  "name": "hello",
+  "version": "1.0.0",
+  "description": "Example extension with one tool, one slash command, and one PreToolUse hook.",
+  "main": "dist/index.js",
+  "engines": { "reaper": "^1.0.0" }
+}

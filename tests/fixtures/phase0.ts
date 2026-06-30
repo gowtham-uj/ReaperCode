@@ -1,0 +1,111 @@
+import type { ReaperConfig } from "../../src/config/model-config.js";
+import type { AgentRequestEnvelope } from "../../src/connection/schemas.js";
+
+export function createValidConfig(): ReaperConfig {
+  return {
+    connection: {
+      auth: {
+        allowAnonymous: true,
+        bearerTokens: [],
+      },
+      rateLimit: {
+        maxRequests: 60,
+        windowMs: 60_000,
+      },
+      maxPayloadBytes: 64 * 1024,
+      requestTimeoutMs: 30_000,
+      maxAttachments: 8,
+      maxArtifactRefs: 8,
+    },
+    pruner: {
+      enabled: true,
+      localOnly: true,
+      threshold: 0.5,
+    },
+    logging: {
+      devMode: false,
+      sampleRate: 1.0,
+      sessionMetrics: true,
+    },
+    runtime: {
+      recedingHorizonPlanContext: true,
+      voteAttempts: 1,
+      serviceSupervisor: {
+        enabled: true,
+        readinessTimeoutMs: 30_000,
+        minimumStableMs: 1_500,
+        autoRecover: true,
+        maxAutoRecoveriesPerService: 1,
+        crashLoopThreshold: 2,
+      },
+    },
+    verification: {
+      requireGroundedCompletion: false,
+      enforceFailBeforeFixForGeneratedChecks: true,
+      selfDebugExplanation: {
+        enabled: false,
+      },
+      freshContextDiffReview: {
+        enabled: false,
+        maxDiffChars: 12_000,
+      },
+      contractCoverage: {
+        enabled: true,
+      },
+      executionConsensusRanking: true,
+    },
+    modelRouting: {
+      mainAgent: "main_reasoner",
+      planner: "main_reasoner",
+      executor: "fast_reasoner",
+      repair: "main_reasoner",
+      patcher: "fast_reasoner",
+      completionGate: "fast_reasoner",
+      summarizer: "fast_reasoner",
+      judge: "judge",
+    },
+    mcp: {
+      enabled: false,
+      maxActiveMCPTools: 6,
+      refreshIntervalTurns: 10,
+      servers: [],
+    },
+    models: {
+      default_model: {
+        provider: "nuralwatt",
+        model: "kimi-k2.7-code",
+        apiKeyEnv: "NURALWATT_API_KEY2",
+        apiBase: "https://api.neuralwatt.com/v1",
+        timeoutMs: 300000,
+        maxRetries: 2,
+        capabilities: {
+          streaming: true,
+          toolCalling: true,
+          jsonMode: true,
+          structuredOutput: true,
+          embeddings: false,
+          maxContextTokens: 262128,
+          maxOutputTokens: 32000,
+        },
+      },
+    },
+  };
+}
+
+export function createValidRequestEnvelope(): AgentRequestEnvelope {
+  return {
+    connection_id: "conn-1",
+    session_id: "session-1",
+    turn_id: "turn-1",
+    request_id: "request-1",
+    message_type: "user_prompt",
+    timestamp: "2026-05-05T12:00:00.000Z",
+    trace_id: "trace-1",
+    payload: {
+      prompt: "Fix the failing test",
+    },
+    metadata: {
+      source: "test",
+    },
+  };
+}

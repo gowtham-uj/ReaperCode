@@ -1,0 +1,19 @@
+{
+  "id": "hello",
+  "version": "1.0.0",
+  "description": "Example extension with one tool, one slash command, and one PreToolUse hook.",
+  "main": "dist/index.js",
+  "engines": { "reaper": "^1.0.0" },
+  "permissions": ["tools:read_file"],
+  "contributes": {
+    "tools": [
+      { "name": "hello.echo", "description": "Echo a string back to the model" }
+    ],
+    "slashCommands": [
+      { "name": "hello", "description": "Say hello from an extension" }
+    ],
+    "hooks": [
+      { "event": "PreToolUse", "timeoutMs": 2000 }
+    ]
+  }
+}

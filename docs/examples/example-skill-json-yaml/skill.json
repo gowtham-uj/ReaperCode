@@ -1,0 +1,29 @@
+{
+  "name": "json-yaml",
+  "version": "1.0.0",
+  "description": "Convert between JSON and YAML formats.",
+  "category": "documentation-writing",
+  "whenToUse": "user asks to translate JSON to YAML or vice versa",
+  "triggers": ["json", "yaml", "convert"],
+  "pathPatterns": ["**/*.json", "**/*.yaml", "**/*.yml"],
+  "allowedTools": ["read_file", "write_file", "edit_file", "bash"],
+  "arguments": [
+    { "name": "direction", "description": "json-to-yaml or yaml-to-json", "required": true },
+    { "name": "path", "description": "file to convert", "required": true }
+  ],
+  "examples": ["examples/before.json", "examples/after.yaml"],
+  "validation": {
+    "commands": [
+      { "id": "load-after-yaml", "command": "node -e \"require('fs').readFileSync('examples/after.yaml','utf8')\"" }
+    ]
+  },
+  "memoryPolicy": {
+    "mayReadProjectMemory": true,
+    "mayWriteProjectMemory": false,
+    "mayReadUserMemory": false,
+    "mayWriteUserMemory": false
+  },
+  "trust": "user-trusted",
+  "author": "reaper-docs",
+  "license": "Apache-2.0"
+}
