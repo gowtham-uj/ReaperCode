@@ -15,7 +15,12 @@ test("default main-agent tools expose executable coding tools, not plan/todo boo
   const names = tools.map((tool) => tool.name);
 
   assert.ok(names.includes("write_file"));
-  assert.ok(names.includes("read_file"));
+  assert.ok(names.includes("file_view"));
+  assert.ok(names.includes("file_scroll"));
+  assert.ok(names.includes("file_find"));
+  assert.ok(names.includes("file_edit"));
+  assert.ok(!names.includes("read_file"));
+  assert.ok(!names.includes("replace_in_file"));
   assert.ok(names.includes("bash"));
   assert.ok(!names.includes("update_plan"));
   assert.ok(!names.includes("update_todo"));

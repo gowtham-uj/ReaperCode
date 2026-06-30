@@ -207,6 +207,42 @@ export function normalizeToolCall(input: unknown): unknown {
           ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
         };
         break;
+      case "file_view":
+        args = {
+          ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
+          ...(typeof record.start_line === "number" ? { start_line: record.start_line } : {}),
+          ...(typeof record.startLine === "number" ? { start_line: record.startLine } : {}),
+          ...(typeof record.window === "number" ? { window: record.window } : {}),
+          ...(typeof record.startLine === "number" ? { window: record.startLine } : {}),
+        };
+        break;
+      case "file_scroll":
+        args = {
+          ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
+          ...(typeof record.direction === "string" ? { direction: record.direction } : {}),
+          ...(typeof record.lines === "number" ? { lines: record.lines } : {}),
+        };
+        break;
+      case "file_find":
+        args = {
+          ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
+          ...(typeof record.pattern === "string" ? { pattern: record.pattern } : {}),
+          ...(typeof record.start_line === "number" ? { start_line: record.start_line } : {}),
+          ...(typeof record.startLine === "number" ? { start_line: record.startLine } : {}),
+        };
+        break;
+      case "file_edit":
+        args = {
+          ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
+          ...(typeof record.start_line === "number" ? { start_line: record.start_line } : {}),
+          ...(typeof record.startLine === "number" ? { start_line: record.startLine } : {}),
+          ...(typeof record.end_line === "number" ? { end_line: record.end_line } : {}),
+          ...(typeof record.endLine === "number" ? { end_line: record.endLine } : {}),
+          ...(typeof record.new_content === "string" ? { new_content: record.new_content } : {}),
+          ...(typeof record.newContent === "string" ? { new_content: record.newContent } : {}),
+          ...(typeof record.reason === "string" ? { reason: record.reason } : {}),
+        };
+        break;
       case "bash":
         args = {
           ...(normalizedCmd ? { cmd: normalizedCmd } : {}),

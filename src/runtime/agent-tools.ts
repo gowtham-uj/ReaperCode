@@ -17,16 +17,49 @@ export function buildGeneralAgentTools(): AgentToolDescriptor[] {
   // discoverable via search_tools when the model needs rare capabilities.
   return [
     {
-      name: "read_file",
-      description: "Read a text file from the workspace by relative path. Returns the file contents (or a window).",
+      name: "file_view",
+      description: "Primary file-reading tool. Open a stable numbered viewport into a workspace file. Use this before editing existing files so you can reference exact line numbers; prefer file_scroll for nearby context and file_find for within-file search instead of rereading whole files.",
       inputSchema: {
         type: "object",
         properties: {
-          path: { type: "string" },
-          startLine: { type: "number" },
-          endLine: { type: "number" },
+          path: { type: "string", description: "Workspace-relative file path." },
+          start_line: { type: "number", description: "1-based line to start at. Defaults to 1." },
+          window: { type: "number", description: "Number of lines to show. Defaults to 80." },
         },
         required: ["path"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "file_scroll",
+      description: "Move an existing file_view viewport up/down/to a line without rereading the whole file. Use after file_view when you need adjacent context.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Workspace-relative file path already viewed." },
+          direction: { type: "string", enum: ["up", "down", "to"], description: "Scroll up/down or jump to a line." },
+          lines: { type: "number", description: "Lines to move for up/down." },
+          line: { type: "number", description: "Target 1-based line for direction=to." },
+          window: { type: "number", description: "Optional new viewport size." },
+        },
+        required: ["path", "direction"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "file_find",
+      description: "Search within one file and return matching line numbers plus snippets. Use after grep_search identifies a file, or instead of scanning a viewed file manually.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Workspace-relative file path." },
+          pattern: { type: "string", description: "Plain text or regex pattern." },
+          regex: { type: "boolean", description: "Treat pattern as regex when true." },
+          case_sensitive: { type: "boolean" },
+          max_results: { type: "number" },
+          context: { type: "number", description: "Context lines around matches." },
+        },
+        required: ["path", "pattern"],
         additionalProperties: false,
       },
     },
@@ -71,17 +104,18 @@ export function buildGeneralAgentTools(): AgentToolDescriptor[] {
       },
     },
     {
-      name: "replace_in_file",
-      description: "Replace an exact string in a workspace file. Use for targeted edits; prefer this over write_file when possible.",
+      name: "file_edit",
+      description: "Primary targeted editing tool for existing files. Replace a 1-based inclusive line range with new content, then run the pinned linter and automatically roll back if validation fails. Use after file_view/file_find gives exact line numbers. Prefer this over replace_in_file for existing-file edits.",
       inputSchema: {
         type: "object",
         properties: {
-          path: { type: "string" },
-          oldString: { type: "string" },
-          newString: { type: "string" },
-          replaceAll: { type: "boolean" },
+          path: { type: "string", description: "Workspace-relative file path." },
+          start_line: { type: "number", description: "1-based first line to replace." },
+          end_line: { type: "number", description: "1-based last line to replace, inclusive." },
+          new_content: { type: "string", description: "Replacement text for the selected line range." },
+          reason: { type: "string", description: "Brief reason for the edit." },
         },
-        required: ["path", "oldString", "newString"],
+        required: ["path", "start_line", "end_line", "new_content"],
         additionalProperties: false,
       },
     },

@@ -1,8 +1,8 @@
 /**
- * Build-like fresh repo tasks should not expose the full exploration/planning
- * surface before the model has shipped artifacts. This prevents the A/B failure
- * where Reaper spent early turns on read/list/env loops while the reference
- * agent immediately wrote many files.
+ * Build-like fresh repo tasks should keep a compact early tool surface before
+ * the model has shipped artifacts, but the model-facing names must remain
+ * canonical. In particular, viewer tools are exposed directly as file_view /
+ * file_scroll / file_find / file_edit — no short-name aliases.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -22,16 +22,16 @@ const nonBuildRequest = {
   },
 };
 
-test("build fast-start mirrors Pi's minimal read/bash/edit/write surface before any writes", () => {
+test("build fast-start exposes canonical viewer/edit/write/bash/search surface before any writes", () => {
   const names = selectGeneralAgentToolsForTurn({
     request: buildRequest as never,
     state: { toolResults: [] } as never,
     tools: buildGeneralAgentTools(),
   }).map((tool) => tool.name);
-  assert.deepEqual(names.sort(), ["bash", "edit", "grep", "ls", "read", "write"].sort());
+  assert.deepEqual(names.sort(), ["bash", "file_edit", "file_find", "file_scroll", "file_view", "grep_search", "list_directory", "write_file"].sort());
 });
 
-test("build fast-start exposes read/ls/grep until enough artifacts exist", () => {
+test("build fast-start keeps canonical viewer tools until enough artifacts exist", () => {
   const names = selectGeneralAgentToolsForTurn({
     request: buildRequest as never,
     state: {
@@ -39,7 +39,7 @@ test("build fast-start exposes read/ls/grep until enough artifacts exist", () =>
     } as never,
     tools: buildGeneralAgentTools(),
   }).map((tool) => tool.name);
-  assert.deepEqual(names.sort(), ["bash", "edit", "grep", "ls", "read", "write"].sort());
+  assert.deepEqual(names.sort(), ["bash", "file_edit", "file_find", "file_scroll", "file_view", "grep_search", "list_directory", "write_file"].sort());
 });
 
 test("non-build tasks keep the full tool surface", () => {

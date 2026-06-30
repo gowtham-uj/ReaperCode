@@ -265,6 +265,12 @@ export async function spillLargeToolResult(
   }
 }
 
+import {
+  FileViewerRegistry,
+  LinterRegistry,
+  dispatchViewerTool,
+} from "./viewer/index.js";
+
 export class ToolExecutor {
   private readonly trajectoryLogger: TrajectoryLogger;
   private readonly auditLogger: AuditLogger;
@@ -278,6 +284,11 @@ export class ToolExecutor {
   private readonly permissionClassifier: PermissionClassifier;
   private readonly readFileState = new Map<string, { sha256: string | null; mtimeMs: number | null; fullyRead: boolean }>();
   private readonly readOutputCache = new Map<string, { sha256: string | null; mtimeMs: number | null; output: unknown; hits: number }>();
+  // Phase 3 — viewer state. Lives on the executor so it shares lifetime
+  // with the run. Cleared at run end (see `resetViewerState`).
+  private readonly viewerRegistry = new FileViewerRegistry();
+  private readonly linterRegistry = new LinterRegistry();
+  private viewerDirtyPaths = new Set<string>();
   private readonly fileWriteCounts = new Map<string, number>();
   private localRulesHash?: string;
   private readonly backgroundProcessManager: BackgroundProcessManager;
@@ -395,6 +406,48 @@ export class ToolExecutor {
       };
     }
     this.consecutiveUnknownTools = 0;
+
+    // ---- Phase 3 viewer tools.
+    //    Keep these as first-class model-facing tools. Do NOT alias legacy
+    //    read_file/replace_in_file into viewer calls — the model should see,
+    //    choose, and learn the viewer names directly from their descriptions.
+    const callNameRaw = (call.name ?? "") as string;
+    if (
+      callNameRaw === "file_view" ||
+      callNameRaw === "file_scroll" ||
+      callNameRaw === "file_find" ||
+      callNameRaw === "file_edit"
+    ) {
+      const callAnyBypass = {
+        id: call.id,
+        name: callNameRaw,
+        args: (call.args ?? {}) as Record<string, unknown>,
+      };
+      const dirForViewer = await this.resolveExistingPathCase(
+        (callAnyBypass.args as { path?: string }).path ?? "",
+      );
+      if (callAnyBypass.name === "file_edit") {
+        await this.snapshotBeforeMutation(dirForViewer, "file_edit");
+        this.fileWriteCounts.set(
+          dirForViewer,
+          (this.fileWriteCounts.get(dirForViewer) ?? 0) + 1,
+        );
+      }
+      const r = await dispatchViewerTool(callAnyBypass, {
+        workspaceRoot: this.options.workspaceRoot,
+        viewerRegistry: this.viewerRegistry,
+        linterRegistry: this.linterRegistry,
+      });
+      return {
+        toolCallId: call.id,
+        name: callNameRaw,
+        ok: r.ok,
+        durationMs: r.durationMs,
+        args: callAnyBypass.args,
+        output: r.output,
+        ...(r.error ? { error: r.error } : {}),
+      };
+    }
 
     // Validate params — return error instead of throwing so model sees feedback
     const parsed = ToolCallSchema.safeParse(normalizedCall);
@@ -736,6 +789,45 @@ export class ToolExecutor {
   }
 
   private async executeInner(call: ToolCall, decisionId: string): Promise<unknown> {
+    // ---- Phase 3: viewer tool interception (BEFORE the typed switch).
+    //    The ToolCallSchema discriminated union doesn't include the four
+    //    viewer names; widening it would bust the type-narrowing budget
+    //    in 13+ files. So we intercept via a string compare at runtime,
+    //    delegate to the viewer's own dispatcher, and return early.
+    const callAny = call as unknown as { id: string; name: string; args: unknown };
+    if (
+      callAny.name === "file_view" ||
+      callAny.name === "file_scroll" ||
+      callAny.name === "file_find" ||
+      callAny.name === "file_edit"
+    ) {
+      const dirForViewer = await this.resolveExistingPathCase(
+        (callAny.args as { path?: string } | null)?.path ?? "",
+      );
+      if (callAny.name === "file_edit") {
+        await this.snapshotBeforeMutation(dirForViewer, "file_edit");
+        this.fileWriteCounts.set(
+          dirForViewer,
+          (this.fileWriteCounts.get(dirForViewer) ?? 0) + 1,
+        );
+      }
+      const r = await dispatchViewerTool(callAny, {
+        workspaceRoot: this.options.workspaceRoot,
+        viewerRegistry: this.viewerRegistry,
+        linterRegistry: this.linterRegistry,
+      });
+      // Wrap the viewer's ToolResult-like into the executor's envelope.
+      return {
+        toolCallId: call.id,
+        name: callAny.name,
+        ok: r.ok,
+        durationMs: r.durationMs,
+        output: r.output,
+        args: callAny.args,
+        ...(r.error ? { error: r.error } : {}),
+      };
+    }
+
     switch (call.name) {
       case "read_file":
       case "view_file":

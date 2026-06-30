@@ -1110,6 +1110,7 @@ export class RuntimeEngine {
         } satisfies Partial<GraphState>;
       }
 
+
       const split = splitControlToolCalls(toolCalls);
       const advisoryUpdate = applyAdvisoryToolCalls(state, split.advisoryToolCalls ?? []);
       const categorized = split.executableToolCalls.map((call) => ({ id: call.id, name: call.name, kind: classifyToolCall(call) }));
@@ -2128,49 +2129,30 @@ export function selectGeneralAgentToolsForTurn(input: {
   if (!detectBuildLikeTask(input.request)) return input.tools;
 
   const writeCount = input.state.toolResults.filter((result) =>
-    result.ok && ["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file"].includes(result.name),
+    result.ok && ["write_file", "file_edit", "edit_file", "replace_symbol", "delete_file"].includes(result.name),
   ).length;
 
-  // the reference loop's working build loop exposes short tool names. In Reaper's cockpit
-  // loop, exposing `read` too early causes the model to re-read every file it
-  // just wrote instead of advancing to the next package/app. Keep the early
-  // build surface write/edit/bash-only until enough artifacts exist; alias
-  // parsing still accepts the reference loop's read/write/edit names whenever they appear.
+  // Build-like tasks still get a compact fast-start surface, but keep canonical
+  // tool names on the wire. The model should see and learn `file_view`,
+  // `file_scroll`, `file_find`, and `file_edit` directly — no legacy aliases or
+  // short-name renames (`read`/`edit`/`write`).
   if (writeCount < 20) {
-    return toReferenceBuildFastStartTools(input.tools);
+    return toCanonicalBuildFastStartTools(input.tools);
   }
   return input.tools;
 }
 
-function toReferenceBuildFastStartTools(tools: AgentToolDescriptor[]): AgentToolDescriptor[] {
+function toCanonicalBuildFastStartTools(tools: AgentToolDescriptor[]): AgentToolDescriptor[] {
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
-  // Core write/edit verb — reference-style rename for the model.
-  const write = byName.get("write_file");
-  const edit = byName.get("replace_in_file") ?? byName.get("edit_file");
-  const bash = byName.get("bash");
-  // Read/list/grep discovery tools — the model prefers these over `bash
-  // find` / `bash ls` / `bash cat`, which is what the reference loop's default surface does.
-  // Every shell call costs a network round-trip and a throttling slot on
-  // providers like nuralwatt; listing the same directory ten times via bash
-  // is the single biggest source of upstream throttling in our A/B runs.
-  const renameRead = (tool: AgentToolDescriptor | undefined, name: string) =>
-    tool
-      ? {
-          ...tool,
-          name,
-          // Force the description to anchor "this is for inspecting the
-          // workspace" so the model picks it instead of `bash`.
-          description:
-            `${tool.description} Bash equivalent: cat / ls / find. Prefer this over bash for workspace inspection — it does not spawn a shell and does not consume a throttling slot.`,
-        }
-      : undefined;
   return [
-    write ? { ...write, name: "write", description: write.description.replace(/write_file/g, "write") } : undefined,
-    edit ? { ...edit, name: "edit", description: edit.description.replace(/replace_in_file|edit_file/g, "edit") } : undefined,
-    bash,
-    renameRead(byName.get("read_file"), "read"),
-    renameRead(byName.get("list_directory"), "ls"),
-    renameRead(byName.get("grep_search"), "grep"),
+    byName.get("write_file"),
+    byName.get("file_edit"),
+    byName.get("bash"),
+    byName.get("file_view"),
+    byName.get("file_scroll"),
+    byName.get("file_find"),
+    byName.get("list_directory"),
+    byName.get("grep_search"),
   ].filter((tool): tool is AgentToolDescriptor => Boolean(tool));
 }
 
@@ -3266,9 +3248,16 @@ function getToolResultSummary(result: ToolResult): string {
   return typeof args.summary === "string" ? args.summary : "";
 }
 function makeLowInformationToolCallSignature(call: ToolCall): string | undefined {
-  if (call.name === "read_file" || call.name === "view_file" || call.name === "list_directory") {
-    const args = call.args as { path?: unknown };
-    return typeof args.path === "string" ? `${call.name}:${JSON.stringify({ path: args.path })}` : undefined;
+  if (call.name === "read_file" || call.name === "view_file" || call.name === "file_view" || call.name === "file_scroll" || call.name === "list_directory") {
+    const args = call.args as { path?: unknown; direction?: unknown; lines?: unknown; start_line?: unknown; window?: unknown };
+    if (typeof args.path !== "string") return undefined;
+    return `${call.name}:${JSON.stringify({ path: args.path, direction: args.direction, lines: args.lines, start_line: args.start_line, window: args.window })}`;
+  }
+  if (call.name === "file_find") {
+    const args = call.args as { path?: unknown; pattern?: unknown; start_line?: unknown };
+    return typeof args.path === "string" && typeof args.pattern === "string"
+      ? `${call.name}:${JSON.stringify({ path: args.path, pattern: args.pattern, start_line: args.start_line })}`
+      : undefined;
   }
   if (call.name === "grep_search") {
     const args = call.args as { pattern?: unknown; path?: unknown; include?: unknown };
@@ -3286,9 +3275,16 @@ function makeLowInformationToolCallSignature(call: ToolCall): string | undefined
 }
 
 function makeLowInformationToolResultSignature(result: ToolResult): string | undefined {
-  if (result.name === "read_file" || result.name === "view_file" || result.name === "list_directory") {
-    const args = result.args && typeof result.args === "object" ? (result.args as { path?: unknown }) : {};
-    return typeof args.path === "string" ? `${result.name}:${JSON.stringify({ path: args.path })}` : undefined;
+  if (result.name === "read_file" || result.name === "view_file" || result.name === "file_view" || result.name === "file_scroll" || result.name === "list_directory") {
+    const args = result.args && typeof result.args === "object" ? (result.args as { path?: unknown; direction?: unknown; lines?: unknown; start_line?: unknown; window?: unknown }) : {};
+    if (typeof args.path !== "string") return undefined;
+    return `${result.name}:${JSON.stringify({ path: args.path, direction: args.direction, lines: args.lines, start_line: args.start_line, window: args.window })}`;
+  }
+  if (result.name === "file_find") {
+    const args = result.args && typeof result.args === "object" ? (result.args as { path?: unknown; pattern?: unknown; start_line?: unknown }) : {};
+    return typeof args.path === "string" && typeof args.pattern === "string"
+      ? `${result.name}:${JSON.stringify({ path: args.path, pattern: args.pattern, start_line: args.start_line })}`
+      : undefined;
   }
   if (result.name === "grep_search") {
     const args = result.args && typeof result.args === "object" ? (result.args as { pattern?: unknown; path?: unknown; include?: unknown }) : {};
