@@ -8,16 +8,14 @@ import {
   uniqueStrings,
 } from "./file-hints.js";
 import {
-  describeToolResultTarget,
-  getToolResultCommand,
-  isBuildCommand,
-  isDependencyManifestPath,
-  isInstallOrUpgradeCommand,
-  isTestCommand,
-  isVerificationLikeCommand,
-  isSourceLikePath,
-  isProjectConfigPath,
-} from "./relevance-gate.js";
+  getToolResultCommand, 
+  isBuildCommand, 
+  isDependencyManifestPath, 
+  isInstallOrUpgradeCommand, 
+  isTestCommand, 
+  isVerificationLikeCommand, 
+  isSourceLikePath, 
+  isProjectConfigPath} from "./relevance-gate.js";
 import {
   escapeRegExp,
   hasShellWriteToLikelyPath,
@@ -26,15 +24,11 @@ import {
   stripQuotedShellText,
 } from "./shell-parser.js";
 import {
-  isBuildArtifactRuntimeCommand,
-  isCompileOrBuildError,
-  isExternalRuntimeLibraryPath,
-  isProducerOrVerificationCommand,
-  isRuntimeOrVerificationFailure,
-  isSandboxServiceDiagnosticPath,
-  isSemanticFailedCheckResult,
-  isToolchainOrDependencyDiagnosticPath,
-} from "./engine.js";
+  isCompileOrBuildError, 
+  isExternalRuntimeLibraryPath, 
+  isRuntimeOrVerificationFailure, 
+  isSemanticFailedCheckResult, 
+  isToolchainOrDependencyDiagnosticPath} from "./engine.js";
 import {
   getShellCommandArg,
   isMutatingToolCall,

@@ -22,13 +22,10 @@ import { classifyShellCommandSemantics } from "../tools/command-semantics.js";im
 import { getShellCommandArg, isMutatingToolCall } from "./tool-call-utils.js";
 import { renderToolResultForModel } from "../context/history-compaction.js";
 import {
-  extractFilePathsFromFailure,
-  inferFilesHintFromResults,
-  isGeneratedOrBuildPath,
-  normalizeArtifactPathForMatch,
-  stripWorkspacePrefix,
-  uniqueStrings,
-} from "./file-hints.js";
+  isGeneratedOrBuildPath, 
+  normalizeArtifactPathForMatch, 
+  stripWorkspacePrefix, 
+  uniqueStrings} from "./file-hints.js";
 
 export function isProjectConfigPath(filePath: string): boolean {
   return /(?:^|\/)(?:CMakeLists\.txt|Makefile|package\.json|tsconfig\.json|pyproject\.toml|Cargo\.toml|go\.mod|pom\.xml|build\.gradle|requirements(?:-[^/]*)?\.txt|Dockerfile|docker-compose\.ya?ml)$/i.test(filePath);

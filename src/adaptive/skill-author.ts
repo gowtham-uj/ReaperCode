@@ -31,8 +31,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, unlinkSync, rmdirSync } from "node:fs";
-import { join, dirname, basename, relative } from "node:path";
-import { randomUUID } from "node:crypto";
+import { join,  dirname} from "node:path";
 
 import type { ReaperSkill, SkillScope, SkillType, SkillValidationSpec, SkillMemoryPolicy, SkillReference } from "./types.js";
 

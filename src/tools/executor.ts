@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { appendFile, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile,  mkdir,  mkdtemp,  readFile,  readdir,  rm,  stat,  writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { ForegroundShellResult } from "./global/run-shell-command.js";

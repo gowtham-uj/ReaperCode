@@ -30,7 +30,7 @@
  */
 
 import { getToolMetadata, hasToolMetadata, type RiskLevel, type PolicyRole, type ToolMetadata } from "./tool-metadata.js";
-import { ROLE_PROFILES, roleAllowsTool, roleToleratesCommandRisk, getRoleProfile } from "./role-profiles.js";
+import { roleAllowsTool,  roleToleratesCommandRisk,  getRoleProfile } from "./role-profiles.js";
 import { classifyCommandRisk, type ShellRisk, type ShellRiskFinding } from "./shell-risk.js";
 import { canCompleteTask, type CompletionContext, type CompletionDecision } from "./completion-safety.js";
 import { getOrderingAdvisories, type OrderingAdvisory } from "./preferred-ordering.js";

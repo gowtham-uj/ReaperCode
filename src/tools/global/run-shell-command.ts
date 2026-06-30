@@ -192,6 +192,7 @@ exit 0
       let lastOutputAt = Date.now();
       let lastOutputLength = 0;
       let sigkillTimer: NodeJS.Timeout | undefined;
+      let idleGraceTimer: NodeJS.Timeout | undefined;
       let wrapperExitObserved = false;
       let wrapperExitCleanupTimer: NodeJS.Timeout | undefined;
       const startTime = Date.now();
@@ -277,7 +278,142 @@ exit 0
         }
         reject(error);
       });
+            // Pi-style post-exit idle grace for the bash tool result to return
+      // even when a backgrounded grandchild inherited the wrapper's stdout/
+      // stderr pipes (earendil-works/pi#5303). The wrapper is `detached`,
+      // so its `pid` is the foreground process-group leader and its stdio
+      // pipes can be held open by a grandchild long after the wrapper has
+      // exited. We listen for the actual process exit (which fires regardless
+      // of stdio) and then wait for either the streams to drain to EOF
+      // (preferred) or a short idle grace to elapse, then finalize the bash
+      // result directly — without waiting for `close`, which is not
+      // guaranteed to fire while a grandchild holds the pipes.
+      const STDOUT_IDLE_GRACE_MS = 250;
+      let resolved = false;
+      let wrapperExitCode: number | null = null;
+      let wrapperExitSignal: NodeJS.Signals | null = null;
+      const finalizeFromExit = async (exitCode: number | null, signal: NodeJS.Signals | null) => {
+        if (resolved) return;
+        resolved = true;
+        if (idleGraceTimer) clearTimeout(idleGraceTimer);
+        // Mirror the same teardown the close handler performs, then run
+        // the same body. Idempotent: clearTimeout on already-fired timers
+        // is a no-op, and child listeners are removed by the underlying
+        // promise resolution path anyway.
+        clearTimeout(timer);
+        if (idleTimer) clearInterval(idleTimer);
+        clearInterval(stallTimer);
+        if (sigkillTimer) clearTimeout(sigkillTimer);
+        if (wrapperExitCleanupTimer) clearTimeout(wrapperExitCleanupTimer);
+        const logPath = await logPathPromise;
+
+        // Extract CWD and real Exit Code from wrapper output (same logic
+        // as the original close handler).
+        let realCwd = effectiveWorkingDirectory;
+        let realExitCode = exitCode;
+        const cwdMatch = stdout.match(/___REAPER_CWD:(.*)___/);
+        if (cwdMatch) {
+          realCwd = cwdMatch[1]!.trim();
+          stdout = stdout.replace(/___REAPER_CWD:.*___\n?/, "");
+        }
+        try {
+          normalizeWorkspacePath(workspaceRoot, realCwd);
+        } catch {
+          reject(new PathPolicyError(`Command changed directory outside workspace root '${path.resolve(workspaceRoot)}': ${realCwd}`));
+          return;
+        }
+        const codeMatch = stdout.match(/___REAPER_EXIT_CODE:(\d+)___/);
+        if (codeMatch) {
+          realExitCode = parseInt(codeMatch[1]!, 10);
+          stdout = stdout.replace(/___REAPER_EXIT_CODE:.*___\n?/, "");
+        }
+
+        if (stalled) {
+          reject(new Error([
+            `Shell command stalled on interactive prompt: ${args.cmd}`,
+            `stdout: ${tail(stdout.trim(), 2000) || "<empty>"}`,
+            `stderr: ${tail(stderr.trim(), 2000) || "<empty>"}`,
+            "",
+            "[REMEDIATION TIP]: The command appears to be waiting for interactive input. Use non-interactive flags, provide input via file tools, or run with explicit stdin. Do not run interactive commands.",
+          ].join("\n")));
+          return;
+        }
+        if (sizeLimitExceeded && logPath) {
+          stdout = appendOutputSpillNotice(stdout, logPath, totalOutputBytes);
+        }
+        if (timedOut) {
+          reject(new Error(formatCommandFailure({ cmd: args.cmd, timeoutMs, stdout, stderr, signal, timedOut: true, timedOutKind: args.idleTimeoutMs && Date.now() - lastOutputAt >= args.idleTimeoutMs ? "idle" : "wall" })));
+          return;
+        }
+        if (realExitCode === 1 && isNoMatchSearchCommand(args.cmd, stdout, stderr)) {
+          resolve({ stdout: stdout.trimEnd() ? stdout : "[REAPER SEARCH RESULT]: no matches found\n", stderr, exitCode: 0, wouldBlock: decision.outcome === "would_block", nextCwd: realCwd, ...(logPath ? { logPath, persistedOutputSize: totalOutputBytes } : {}) });
+          return;
+        }
+        if (realExitCode && realExitCode !== 0 && isIdempotentMissingMoveAlreadyApplied(workspaceRoot, effectiveWorkingDirectory, args.cmd, stdout, stderr)) {
+          resolve({ stdout: `${stdout.trimEnd()}\n[REAPER IDEMPOTENT FILE OP]: mv source was already absent and the target already exists; treating this as already applied.\n`.trimStart(), stderr, exitCode: 0, wouldBlock: decision.outcome === "would_block", nextCwd: realCwd, ...(logPath ? { logPath, persistedOutputSize: totalOutputBytes } : {}) });
+          return;
+        }
+        if (realExitCode && realExitCode !== 0) {
+          reject(new Error(formatCommandFailure({ cmd: args.cmd, exitCode: realExitCode, stdout, stderr, signal, timedOut: false })));
+          return;
+        }
+        if (isCancelledScaffoldCommand(args.cmd, stdout, stderr)) {
+          reject(new Error([
+            "Interactive scaffold command exited without creating the project.",
+            `Command: ${args.cmd}`,
+            `stdout: ${tail(stdout.trim(), 4000) || "<empty>"}`,
+            `stderr: ${tail(stderr.trim(), 4000) || "<empty>"}`,
+            "",
+            "[REMEDIATION TIP]: The scaffold tool cancelled because it needed interactive input or refused an existing directory. Do not repeat the same command unchanged. Use documented non-interactive flags, create the files directly with file tools, or inspect the target directory and continue from its current state.",
+          ].join("\n")));
+          return;
+        }
+        resolve({ stdout: appendCommandWarnings(args.cmd, stdout, stderr, Date.now() - startTime, timeoutMs), stderr, exitCode: realExitCode, wouldBlock: decision.outcome === "would_block", nextCwd: realCwd, ...(logPath ? { logPath, persistedOutputSize: totalOutputBytes } : {}) });
+      };
+      // Replace the implicit `child.on("close")` path. We now drive
+      // resolution from `child.on("exit")` directly, with a Pi-style idle
+      // grace (re-armed on every post-exit data chunk) to wait for
+      // grandchild output to drain before finalizing. The `close` event
+      // is no longer required to fire, since a grandchild holding the
+      // stdio pipes open would otherwise block the bash tool result
+      // indefinitely.
+      child.on("exit", (exitCode, signal) => {
+        wrapperExitCode = exitCode;
+        wrapperExitSignal = signal;
+        if (resolved) return;
+        // If the stream APIs are not available (e.g. stdio was nulled),
+        // finalize immediately.
+        if (!child.stdout || !child.stderr) {
+          void finalizeFromExit(exitCode, signal);
+          return;
+        }
+        // Otherwise, wait for either EOF on both streams or the idle
+        // grace to elapse. Re-arm the grace on every chunk so an
+        // actively writing descendant keeps us reading.
+        const armGrace = () => {
+          if (idleGraceTimer) clearTimeout(idleGraceTimer);
+          idleGraceTimer = setTimeout(() => {
+            if (resolved) return;
+            try { child.stdout?.destroy(); } catch {}
+            try { child.stderr?.destroy(); } catch {}
+            void finalizeFromExit(exitCode, signal);
+          }, STDOUT_IDLE_GRACE_MS);
+        };
+        let stdoutEnded = false;
+        let stderrEnded = false;
+        const onEnd = () => {
+          if (stdoutEnded && stderrEnded && !resolved) {
+            void finalizeFromExit(exitCode, signal);
+          }
+        };
+        child.stdout.on("end", () => { stdoutEnded = true; onEnd(); });
+        child.stderr.on("end", () => { stderrEnded = true; onEnd(); });
+        child.stdout.on("data", () => { if (!resolved) armGrace(); });
+        child.stderr.on("data", () => { if (!resolved) armGrace(); });
+        armGrace();
+      });
       child.on("close", async (exitCode, signal) => {
+        if (resolved) return;
         clearTimeout(timer);
         if (idleTimer) clearInterval(idleTimer);
         clearInterval(stallTimer);

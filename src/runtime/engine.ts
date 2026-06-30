@@ -1,18 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir,  readFile,  writeFile } from "node:fs/promises";
 import path from "node:path";
 
 
 import { parseReaperConfig, type ReaperConfig } from "../config/model-config.js";
-import {
-  buildProblemContractText, buildRecentDiagnosticText, describeToolResultTarget,
-  isProjectConfigPath, classifyActionRelevance, classifyShellCommandRelevance, isGeneratedBuildCleanupCommand, isRequiredSourceAcquisitionCommand, extractGitCloneTarget, extractGitCloneUrl, stripShellToken,
-  classifyMutationRelevance, getMutationLiteralText, findVerifierOnlyExpectedLiteralInResults, extractExpectedOracleLiteralsFromResults, isVerifierOrTestFailureText, hasTrustedLiteralEvidenceBefore, getToolResultVisibleOutput, renderUnknownValue, normalizeLiteralEvidence, extractExpectedOracleLiterals,
-  isLikelyFinalOutputPath, isTaskFacingDeliverableMutation, isDeliverableFilePath, pathTokensForRelevance, tokenMatchesProblemText, isTemporaryValidationSourcePath, renderStepText, isInstallOrUpgradeCommand, isLintFormatCleanupCommand, isFrameworkMigrationCommand,
-  isLintOrFormattingConfigPath, isDependencyManifestPath, isSourceLikePath, extractRmTargets, getToolResultCommand, isBuildCommand, isTestCommand, normalizePlanStepText, textSimilarity, normalizeVerificationCommand,
-  isVerificationLikeCommand, hasInlineAssertionOrFailureExit, shellCommandDirectlyWritesLiteral,
+import { describeToolResultTarget,  renderStepText,  getToolResultCommand,  isBuildCommand,  isTestCommand,  normalizeVerificationCommand, 
+  isVerificationLikeCommand,  hasInlineAssertionOrFailureExit, 
   persistExecutionPlanProgress
 } from "./relevance-gate.js";
 
@@ -36,18 +30,13 @@ import { generateFinalSummary, summarizeExplicitToolRun } from "./final-summary.
 import { classifyRunFinalStatus, persistRunFailure } from "./run-finalize.js";
 import { buildGeneralAgentTools, type AgentToolDescriptor } from "./agent-tools.js";
 import {
-  escapeRegExp,
-  hasShellWriteToLikelyPath,
-  hasSourceMutationShellFragment,
-  isBroadSourceWriteTarget,
-  isBuildArtifactRuntimeCommand,
-  isCheckLikeShellCommand,
-  isLikelyShellPath,
-  parseShellWords,
-  shouldBlockVerifierOwnedShellMutation,
-  splitUnquotedShellSegments,
-  stripQuotedShellText,
-} from "./shell-parser.js";
+  escapeRegExp, 
+  hasSourceMutationShellFragment, 
+  isBuildArtifactRuntimeCommand, 
+  isCheckLikeShellCommand, 
+  parseShellWords, 
+  splitUnquotedShellSegments, 
+  stripQuotedShellText} from "./shell-parser.js";
 import { generateStructuredJson } from "../model/json-response.js";
 import type { ModelGateway, ModelRole, ResolvedModelProfile } from "../model/types.js";
 import { pushModelCallContext } from "../model/observability.js";
@@ -55,17 +44,15 @@ import { appendFailureMemory, loadRecentFailureMemory } from "../recovery/failur
 import { commitVerifiedRunKnowledge, loadVerifiedLessons } from "../recovery/verified-memory.js";
 import { RecoverySession } from "../recovery/session.js";
 import {ToolExecutor} from "../tools/executor.js";
-import type {AuthoringToolDeps, ShellRunner} from "../tools/executor.js";
+import type { ShellRunner} from "../tools/executor.js";
 import type {Hooks} from "../adaptive/hooks.js";
 import {SubagentPool} from "./subagent-pool.js";
 import {
-  extractFilePathsFromFailure,
-  inferFilesHintFromResults,
-  isGeneratedOrBuildPath,
-  normalizeArtifactPathForMatch,
-  stripWorkspacePrefix,
-  uniqueStrings,
-} from "./file-hints.js";
+  extractFilePathsFromFailure, 
+  isGeneratedOrBuildPath, 
+  normalizeArtifactPathForMatch, 
+  stripWorkspacePrefix, 
+  uniqueStrings} from "./file-hints.js";
 import {
   createTask as createSessionTask,
   listTasks as listSessionTasks,
@@ -75,20 +62,11 @@ import {
 import { getDiscoveredTools, discoverTools, clearDiscoveredTools } from "../tools/discovery.js";
 import { toolRegistry, CORE_TOOL_NAMES } from "../tools/registry.js";
 import {
-  getShellCommandArg,
-  isMutatingToolCall,
-} from "./tool-call-utils.js";
+  getShellCommandArg} from "./tool-call-utils.js";
 import {
-  getUnresolvedDiagnosticTarget,
-  expandDiagnosticTargetRelatedPaths,
-  isTestFilePath,
-  isActionableDiagnosticPath,
-  isInternalGuardBlockedResult,
-  isReadOnlyRuntimeInspectionCommand,
-  normalizeDiagnosticCommand,
-  renderCompilerDiagnosticGuidance,
-  renderApiMismatchRecoveryGuidance,
-} from "./diagnostic-target.js";
+  getUnresolvedDiagnosticTarget, 
+  isInternalGuardBlockedResult, 
+  normalizeDiagnosticCommand} from "./diagnostic-target.js";
 import { classifyShellCommandSemantics } from "../tools/command-semantics.js";
 import { loadMcpServersFromFile } from "../tools/mcp/config.js";
 import { MergedToolRegistry } from "../tools/mcp/registry.js";
@@ -123,49 +101,41 @@ import { createReaperRunContext, ensureReaperRunContext, writeLatestRunPointer, 
 import { renderFingerprintForPrompt } from "./fingerprint.js";
 import { registerCleanup, runCleanupFunctions, setActiveRunDir, installCrashHandlers } from "./cleanup-registry.js";
 import { buildDerivedSecretEncodingFeedback } from "./derived-secret-encoding.js";
-import { enforcePatcherStatusIntegrity } from "./status-integrity.js";
 import { buildSessionMetricsSummary } from "./session-metrics.js";
 import { collectWorkspaceDiff, runFreshContextDiffReview } from "../verify/diff-review.js";
 import { getContractCoverageBlocker, renderContractCoverageMatrix } from "../verify/contract-coverage.js";
-import { getArtifactObligationBlocker, renderArtifactObligationLedger } from "./artifact-obligations.js";
+import { renderArtifactObligationLedger } from "./artifact-obligations.js";
 import { buildRescueHypothesisLedger, renderRescueHypothesisLedger } from "./hypothesis-ledger.js";
-import { callMainAgent } from "./main-agent-node.js";
 import { printToolCalls, printTurnHeader } from "./session-printer.js";
 import { buildMainAgentCockpit, buildMainAgentSystemPrompt, detectBuildLikeTask } from "./main-agent-prompt.js";
 import { validateToolCallBatch, type ToolValidationBlocker } from "./tool-validation.js";
-import { validateStrictCompletion, type CompletionValidationBlocker } from "./completion-validation.js";
-import { getCompletionSummary, isLowConfidenceCompletion } from "./completion-signals.js";
+import { type CompletionValidationBlocker } from "./completion-validation.js";
+import { getCompletionSummary} from "./completion-signals.js";
 import { getRuntimeDeadlinePressure, type RuntimeDeadlinePressure } from "./deadline-pressure.js";
 import { hasRecentIncompleteGeneratedArtifact, hasRecentStructuredResponseFallbackFeedback } from "./generated-artifact-feedback.js";
 import { extractTaskContract, renderTaskContractForCockpit, type TaskContract } from "./task-contract.js";
 import {
-  addTodoItem,
-  applyCandidatePlan,
-  createPlanState,
-  createTodoState,
-  planProgress,
-  renderPlanForCockpit,
-  renderTodoForCockpit,
-  setPlanSteps,
-  updateTodoItem,
-  type PlanState,
-  type TodoState,
-} from "./plan-state.js";
+  applyCandidatePlan, 
+  createPlanState, 
+  createTodoState, 
+  planProgress, 
+  renderPlanForCockpit, 
+  renderTodoForCockpit, 
+  setPlanSteps, 
+  updateTodoItem, 
+  type PlanState, 
+  type TodoState} from "./plan-state.js";
 import {
-  createVerificationState,
-  ingestReviewerVerdicts,
-  isReviewerBlocking,
-  recordVerificationCheck,
-  renderVerificationStateForCockpit,
-  type VerificationState,
-} from "./verification-state.js";
+  createVerificationState, 
+  ingestReviewerVerdicts, 
+  recordVerificationCheck, 
+  renderVerificationStateForCockpit, 
+  type VerificationState} from "./verification-state.js";
 import {
-  createRescueWatchdogState,
-  evaluateRescueWatchdog,
-  isNoDiagnosticShellExitFailure,
-  type RescueWatchdogState,
-  type RuntimeBlockingFacts,
-} from "./rescue-watchdog.js";
+  createRescueWatchdogState, 
+  isNoDiagnosticShellExitFailure, 
+  type RescueWatchdogState, 
+  type RuntimeBlockingFacts} from "./rescue-watchdog.js";
 
 export { createRescueWatchdogState, evaluateRescueWatchdog } from "./rescue-watchdog.js";
 export type { RescueDiagnostic, RescueWatchdogState, RuntimeBlockingFacts } from "./rescue-watchdog.js";

@@ -24,9 +24,8 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, statSync } from "node:fs";
+import { existsSync,  readFileSync,  mkdirSync,  appendFileSync,  statSync } from "node:fs";
 import { join, basename } from "node:path";
-import { randomUUID } from "node:crypto";
 
 import type {
   VisualAnalysisResult,

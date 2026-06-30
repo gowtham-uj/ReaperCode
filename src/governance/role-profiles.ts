@@ -26,7 +26,7 @@
  * wins.
  */
 
-import type { PolicyRole, RiskLevel, ToolMetadata } from "./tool-metadata.js";
+import type { PolicyRole,  RiskLevel} from "./tool-metadata.js";
 import { TOOL_METADATA, getToolMetadata } from "./tool-metadata.js";
 
 /* -------------------------------------------------------------------------- */

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { mkdir, mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
+import { mkdir,  mkdtemp,  writeFile,  readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { ConfiguredModelGateway } from "../../src/model/gateway.js";
