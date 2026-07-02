@@ -1,8 +1,7 @@
 import type { RecoverySession } from "../recovery/session.js";
 import { ToolExecutor } from "../tools/executor.js";
 import type { ToolCall, ToolResult } from "../tools/types.js";
-import { optimizeToolCallBatch } from "./optimizer.js";
-import { classifyToolCall } from "./planner.js";
+import { optimizeToolCallBatch, partitionsForParallelExecution } from "./optimizer.js";
 
 export interface ScheduledExecutionResult {
   results: ToolResult[];
@@ -16,96 +15,38 @@ export async function executeToolCalls(
   abortSignal?: AbortSignal,
 ): Promise<ScheduledExecutionResult> {
   const results: ToolResult[] = [];
-  let pool: ToolCall[] = [];
-  let barrierFlushed = false;
   let pendingWriteResultIndexes: number[] = [];
-  let flushedWriteResultIndexes: number[] = [];
 
-  const flushPool = async (): Promise<boolean> => {
-    if (pool.length === 0) {
-      return false;
-    }
-
-    // Apply the dependency-graph optimizer to the current pool: dedup
-    // identical reads/greps, and respect a concurrency cap so the
-    // model cannot accidentally spawn unbounded parallel fs/network
-    // calls. The pool's `pool.length` is the user's intent; the unique
-    // plan is what we actually execute.
-    const optimization = optimizeToolCallBatch(pool);
-    const uniqueResults = await executeConcurrent(
-      optimization.uniquePlan,
-      executor,
-      optimization.concurrency,
-    );
-    const poolResults = fanoutToOriginalOrder(uniqueResults, optimization.uniqueIndex, pool);
-    results.push(...poolResults);
-    pool = [];
-    return poolResults.some((result) => !result.ok);
-  };
-
-  for (const call of toolCalls) {
+  const partition = partitionsForParallelExecution(toolCalls);
+  for (const island of partition.islands) {
     if (abortSignal?.aborted) {
       await recoverySession.abort("Execution aborted by signal");
       return { results, aborted: true };
     }
 
-    const kind = classifyToolCall(call);
-    if (kind === "read" || kind === "shell_non_barrier") {
-      pool.push(call);
-      continue;
+    if (island.startsWithShellBarrier && recoverySession.hasPendingWrites()) {
+      await recoverySession.flushForBarrier();
+      pendingWriteResultIndexes = [];
     }
 
-    if (await flushPool()) {
-      return { results, aborted: false };
+    const islandCalls = island.calls.map((entry) => entry.call);
+    const optimization = optimizeToolCallBatch(islandCalls);
+    const uniqueResults = island.canParallelize
+      ? await executeConcurrent(optimization.uniquePlan, executor, island.concurrency)
+      : await executeSerial(optimization.uniquePlan, executor);
+    const islandResults = fanoutToOriginalOrder(uniqueResults, optimization.uniqueIndex, islandCalls);
+    const resultBaseIndex = results.length;
+    results.push(...islandResults);
+
+    if (island.containsWrite) {
+      pendingWriteResultIndexes.push(...range(resultBaseIndex, islandResults.length));
     }
 
-    if (kind === "write") {
-      // Flush the read/non-barrier pool first so its results are
-      // visible to the model. The previous code skipped this on
-      // early-return paths, dropping the read results on the floor
-      // and leaving any side effects (e.g. from shell_non_barrier)
-      // unsnapshotted.
-      const poolResults = await flushPool();
-      if (poolResults) {
-        return { results, aborted: false };
-      }
-      const result = withToolCallId(await executor.execute(call), call);
-      results.push(result);
-      if (!result.ok) {
-        const cause = result.error?.message ?? `Tool call ${call.id} failed`;
-        await recoverySession.rollback(cause);
-        markRolledBack(results, pendingWriteResultIndexes, cause);
-        return { results, aborted: false };
-      }
-      pendingWriteResultIndexes.push(results.length - 1);
-      continue;
-    }
-
-    if (kind === "shell_barrier") {
-      const poolResults = await flushPool();
-      if (poolResults) {
-        return { results, aborted: false };
-      }
-      if (recoverySession.hasPendingWrites()) {
-        await recoverySession.flushForBarrier();
-        barrierFlushed = true;
-        flushedWriteResultIndexes = [...flushedWriteResultIndexes, ...pendingWriteResultIndexes];
-        pendingWriteResultIndexes = [];
-      }
-
-      const result = withToolCallId(await executor.execute(call), call);
-      results.push(result);
-      if (!result.ok) {
-        // Failed build/test/runtime checks are diagnostic feedback for the next
-        // agent step. Preserve preceding edits so the model can inspect and
-        // repair the actual attempted state instead of chasing rolled-back files.
-        return { results, aborted: false };
-      }
-    }
-  }
-
-  if (await flushPool()) {
-    return { results, aborted: false };
+    // Do not hard-stop a model turn because one tool failed. Reference-agent
+    // semantics require every tool call the model emitted to receive the real
+    // tool result/error so the model can decide how to recover. The scheduler
+    // only controls safe ordering/concurrency; it must not synthesize failures,
+    // suppress later calls, or reshape the model's working loop.
   }
 
   if (abortSignal?.aborted) {
@@ -118,6 +59,34 @@ export async function executeToolCalls(
   }
 
   return { results, aborted: false };
+}
+
+function range(start: number, length: number): number[] {
+  return Array.from({ length }, (_, offset) => start + offset);
+}
+
+async function executeSerial(pool: ToolCall[], executor: ToolExecutor): Promise<ToolResult[]> {
+  const out: ToolResult[] = [];
+  for (const call of pool) {
+    out.push(await executeOne(call, executor));
+  }
+  return out;
+}
+
+async function executeOne(call: ToolCall, executor: ToolExecutor): Promise<ToolResult> {
+  try {
+    return withToolCallId(await executor.execute(call), call);
+  } catch (error) {
+    const message = (error as Error)?.message ?? String(error);
+    return {
+      name: call.name,
+      toolCallId: call.id,
+      ok: false as const,
+      output: "",
+      durationMs: 0,
+      error: { message, code: "executor_threw" },
+    };
+  }
 }
 
 function markRolledBack(results: ToolResult[], indexes: number[], cause: string): void {
@@ -164,7 +133,7 @@ async function executeConcurrent(
     inFlight += 1;
     const p = (async () => {
       try {
-        const result = withToolCallId(await executor.execute(call), call);
+        const result = await executeOne(call, executor);
         settled.push({ result, index, completedAt: process.hrtime.bigint() });
       } finally {
         inFlight -= 1;
@@ -191,7 +160,7 @@ async function executeConcurrent(
     await Promise.all(pending.splice(0, pending.length).map((p) => p.then(() => undefined)));
   }
   return settled
-    .sort((a, b) => (a.completedAt !== b.completedAt ? (a.completedAt < b.completedAt ? -1 : 1) : a.index - b.index))
+    .sort((a, b) => a.index - b.index)
     .map((entry) => entry.result);
 }
 

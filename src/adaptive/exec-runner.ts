@@ -33,7 +33,7 @@ import { ConfiguredModelGateway } from "../model/gateway.js";
 import { ProviderMultiplexerClient } from "../model/providers/provider-client.js";
 import type { ModelCapabilities } from "../model/types.js";
 
-type ExecProvider = "anthropic" | "openai" | "minimax" | "deepseek" | "nuralwatt";
+type ExecProvider = "anthropic" | "openai" | "minimax" | "deepseek" | "nuralwatt" | "nuralwatt2";
 
 export interface ExecRunnerOptions {
   workspaceRoot: string;
@@ -82,6 +82,28 @@ export interface ExecRunnerResult {
   notices: Array<{ kind: string; message: string }>;
 }
 
+/**
+ * Pure mapping from engine output + abort signal to the exec-runner status.
+ * Extracted so it can be unit-tested without spinning up the runtime.
+ *
+ *   - verification.ok === true  -> "completed"
+ *   - verification.ok === false -> "failed"
+ *   - "task_completed" event present (autonomous natural stop) -> "completed"
+ *   - aborted and no verification -> "aborted"
+ *   - otherwise -> "failed"
+ */
+export function deriveExecFinalStatus(input: {
+  aborted: boolean;
+  verification: { ok: boolean } | undefined;
+  events: ReadonlyArray<{ message_type?: string }> | undefined;
+}): "completed" | "failed" | "aborted" {
+  if (input.verification?.ok === true) return "completed";
+  if (input.verification?.ok === false) return "failed";
+  if (input.events?.some((e) => e.message_type === "task_completed")) return "completed";
+  if (input.aborted) return "aborted";
+  return "failed";
+}
+
 const DEFAULT_CAPABILITIES: ModelCapabilities = {
   streaming: true,
   toolCalling: true,
@@ -95,7 +117,10 @@ function pickAuthToken(provider: ExecProvider): string | undefined {
     return process.env.MINIMAX_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN ?? process.env.ANTHROPIC_API_KEY;
   }
   if (provider === "nuralwatt") {
-    return process.env.NURALWATT_API_KEY2 ?? process.env.NURALWATT_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN ?? process.env.ANTHROPIC_API_KEY;
+    return process.env.NURALWATT_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN ?? process.env.ANTHROPIC_API_KEY;
+  }
+  if (provider === "nuralwatt2") {
+    return process.env.NURALWATT_API_KEY2 ?? process.env.ANTHROPIC_AUTH_TOKEN ?? process.env.ANTHROPIC_API_KEY;
   }
   if (provider === "deepseek") {
     return process.env.DEEPSEEK_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN ?? process.env.ANTHROPIC_API_KEY;
@@ -136,15 +161,17 @@ export function buildConfig(opts: ExecRunnerOptions): unknown {
         : provider === "deepseek"
         ? "exec with --provider deepseek requires DEEPSEEK_API_KEY (or ANTHROPIC_AUTH_TOKEN) in the environment"
         : provider === "nuralwatt"
-        ? "exec with --provider nuralwatt requires NURALWATT_API_KEY2 (or NURALWATT_API_KEY) in the environment"
+        ? "exec with --provider nuralwatt requires NURALWATT_API_KEY in the environment"
+        : provider === "nuralwatt2"
+        ? "exec with --provider nuralwatt2 requires NURALWATT_API_KEY2 in the environment"
         : provider === "openai"
         ? "exec with --provider openai requires OPENAI_API_KEY (or ANTHROPIC_AUTH_TOKEN) in the environment"
         : "exec requires ANTHROPIC_AUTH_TOKEN (or ANTHROPIC_API_KEY) in the environment",
     );
   }
-  const model = opts.model ?? process.env.ANTHROPIC_MODEL ?? (provider === "minimax" ? "MiniMax-M3" : provider === "nuralwatt" ? "kimi-k2.7-code" : "claude-sonnet-4-6");
+  const model = opts.model ?? process.env.ANTHROPIC_MODEL ?? (provider === "minimax" ? "MiniMax-M3" : (provider === "nuralwatt" || provider === "nuralwatt2") ? "kimi-k2.7-code" : "claude-sonnet-4-6");
   const maxTokens = opts.maxTokens ?? 4096;
-  if (provider === "openai" || provider === "minimax" || provider === "deepseek" || provider === "nuralwatt") {
+  if (provider === "openai" || provider === "minimax" || provider === "deepseek" || provider === "nuralwatt" || provider === "nuralwatt2") {
     // OpenAI-compatible: the LiteLLM gateway client reads from
     // OPENAI_API_KEY + the apiBase on the profile. We forward
     // `reasoning_effort` from the configured effort. For `minimax`,
@@ -156,13 +183,15 @@ export function buildConfig(opts: ExecRunnerOptions): unknown {
     if (provider === "deepseek") {
       process.env.DEEPSEEK_API_KEY = authToken;
     } else if (provider === "nuralwatt") {
+      process.env.NURALWATT_API_KEY = authToken;
+    } else if (provider === "nuralwatt2") {
       process.env.NURALWATT_API_KEY2 = authToken;
     } else {
       process.env.OPENAI_API_KEY = authToken;
     }
     const apiBase = provider === "minimax"
       ? "https://api.minimax.io/v1"
-      : provider === "nuralwatt"
+      : (provider === "nuralwatt" || provider === "nuralwatt2")
         ? "https://api.neuralwatt.com/v1"
         : provider === "deepseek"
         ? "https://api.deepseek.com"
@@ -177,10 +206,12 @@ export function buildConfig(opts: ExecRunnerOptions): unknown {
               ? "deepseek"
               : provider === "nuralwatt"
                 ? "nuralwatt"
-                : "litellm",
+                : provider === "nuralwatt2"
+                  ? "nuralwatt2"
+                  : "litellm",
           model,
           apiBase,
-          apiKeyEnv: provider === "deepseek" ? "DEEPSEEK_API_KEY" : provider === "nuralwatt" ? "NURALWATT_API_KEY2" : "OPENAI_API_KEY",
+          apiKeyEnv: provider === "deepseek" ? "DEEPSEEK_API_KEY" : provider === "nuralwatt" ? "NURALWATT_API_KEY" : provider === "nuralwatt2" ? "NURALWATT_API_KEY2" : "OPENAI_API_KEY",
           timeoutMs: 600_000,
           maxRetries: 2,
           capabilities: DEFAULT_CAPABILITIES,
@@ -260,7 +291,7 @@ export function buildConfigForProvider(args: {
     workspaceRoot: args.workspaceRoot,
     prompt: "",
     model: modelId,
-    provider: args.providerId as "openai" | "anthropic" | "deepseek" | "minimax" | "nuralwatt",
+    provider: args.providerId as "openai" | "anthropic" | "deepseek" | "minimax" | "nuralwatt" | "nuralwatt2",
   });
 }
 
@@ -340,16 +371,22 @@ export async function runExec(opts: ExecRunnerOptions): Promise<ExecRunnerResult
     modelGateway: gateway,
     abortSignal: abort.signal,
   });
-  const timeoutMs = opts.timeoutMs ?? 600_000;
-  // Long live-eval/A-B runs must be able to continue until the model reaches
-  // its natural terminal response. Passing --timeout-ms 0 disables the CLI
-  // abort timer; provider/network limits may still fail independently.
+  // Default: no CLI-side wall-clock timer. The run is bounded by the
+  // model's own natural-stop decision (an assistant turn with no tool
+  // calls), not by a Reaper-side clock. This honours the rule that
+  // the model owns the stop decision. Operators who need a hard cap
+  // can pass --timeout-ms N. N=0 is the canonical "no Reaper timer".
+  const timeoutMs = opts.timeoutMs ?? 0;
   const timer = timeoutMs > 0 ? setTimeout(() => abort.abort(), timeoutMs) : undefined;
   try {
     const result = await engine.run();
     const v = result.verification;
     return {
-      status: abort.signal.aborted ? "aborted" : "completed",
+      status: deriveExecFinalStatus({
+        aborted: abort.signal.aborted,
+        verification: v,
+        events: result.events,
+      }),
       assistantMessage: result.assistantMessage ?? "",
       toolResults: (result.toolResults ?? []).map((tr) => ({
         id: String((tr as { call_id?: string }).call_id ?? ""),

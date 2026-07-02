@@ -20,7 +20,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { resolveBaseUrl, buildConfig, runExec, buildRequestEnvelope } from "../../../src/adaptive/exec-runner.js";
+import { resolveBaseUrl, buildConfig, runExec, buildRequestEnvelope, deriveExecFinalStatus } from "../../../src/adaptive/exec-runner.js";
 import { ReaperCLI } from "../../../src/adaptive/cli.js";
 
 function withEnv<T>(patch: Record<string, string | undefined>, fn: () => T): T {
@@ -137,11 +137,11 @@ test("buildConfig: --provider minimax routes through api.minimax.io + OPENAI_API
   );
 });
 
-test("buildConfig: --provider nuralwatt seeds NURALWATT_API_KEY2 and points at NeuralWatt", () => {
+test("buildConfig: --provider nuralwatt seeds NURALWATT_API_KEY and points at NeuralWatt", () => {
   withEnv(
     {
-      NURALWATT_API_KEY2: "nw-key",
-      NURALWATT_API_KEY: undefined,
+      NURALWATT_API_KEY: "nw-key",
+      NURALWATT_API_KEY2: undefined,
       ANTHROPIC_AUTH_TOKEN: undefined,
       ANTHROPIC_API_KEY: undefined,
       OPENAI_API_KEY: undefined,
@@ -154,9 +154,34 @@ test("buildConfig: --provider nuralwatt seeds NURALWATT_API_KEY2 and points at N
       }) as { models: { default_model: { provider: string; apiBase: string; apiKeyEnv: string; model: string } } };
       assert.equal(cfg.models.default_model.provider, "nuralwatt");
       assert.equal(cfg.models.default_model.apiBase, "https://api.neuralwatt.com/v1");
+      assert.equal(cfg.models.default_model.apiKeyEnv, "NURALWATT_API_KEY");
+      assert.equal(cfg.models.default_model.model, "kimi-k2.7-code");
+      assert.equal(process.env.NURALWATT_API_KEY, "nw-key");
+      assert.equal(process.env.OPENAI_API_KEY, undefined);
+    },
+  );
+});
+
+test("buildConfig: --provider nuralwatt2 seeds NURALWATT_API_KEY2 and points at NeuralWatt", () => {
+  withEnv(
+    {
+      NURALWATT_API_KEY2: "nw-key2",
+      NURALWATT_API_KEY: undefined,
+      ANTHROPIC_AUTH_TOKEN: undefined,
+      ANTHROPIC_API_KEY: undefined,
+      OPENAI_API_KEY: undefined,
+    },
+    () => {
+      const cfg = buildConfig({
+        workspaceRoot: "/tmp",
+        prompt: "hi",
+        provider: "nuralwatt2",
+      }) as { models: { default_model: { provider: string; apiBase: string; apiKeyEnv: string; model: string } } };
+      assert.equal(cfg.models.default_model.provider, "nuralwatt2");
+      assert.equal(cfg.models.default_model.apiBase, "https://api.neuralwatt.com/v1");
       assert.equal(cfg.models.default_model.apiKeyEnv, "NURALWATT_API_KEY2");
       assert.equal(cfg.models.default_model.model, "kimi-k2.7-code");
-      assert.equal(process.env.NURALWATT_API_KEY2, "nw-key");
+      assert.equal(process.env.NURALWATT_API_KEY2, "nw-key2");
       assert.equal(process.env.OPENAI_API_KEY, undefined);
     },
   );
@@ -291,7 +316,7 @@ test("buildRequestEnvelope: yolo system prompt is prepended to user prompt", () 
   const p = env.payload.prompt;
   assert.match(p, /exec environment/i, "should announce exec environment");
   assert.match(p, /Workspace:\s+\/tmp\/my-build/, "should interpolate workspace path");
-  assert.match(p, /write_file\/replace_in_file\/edit_file/, "should warn about source-edit rule");
+  assert.match(p, /write_file for new files\/full rewrites/, "should warn about source-edit rule");
   assert.match(p, /shell heredocs or redirection/, "should warn about heredoc or redirection source writes");
   assert.match(p, /Shell calls start in \/tmp\/my-build/, "should warn about cwd");
   assert.match(p, /finish with a concise final assistant message and no tool calls/, "should give the natural-stop rule");
@@ -305,8 +330,51 @@ test("buildRequestEnvelope: user prompt is preserved verbatim and not double-wra
     workspaceRoot: "/tmp/x",
     prompt: "line1\nline2\nline3",
   }) as { payload: { prompt: string } };
-  // The system block and the user prompt are joined with "\n\n", so the
-  // user prompt appears exactly once and in its original form.
   const occurrences = (env.payload.prompt.match(/line1\nline2\nline3/g) || []).length;
   assert.equal(occurrences, 1);
+});
+
+test("deriveExecFinalStatus: verification.ok=true wins even when abort fired", () => {
+  const status = deriveExecFinalStatus({
+    aborted: true,
+    verification: { ok: true },
+    events: [],
+  });
+  assert.equal(status, "completed");
+});
+
+test("deriveExecFinalStatus: verification.ok=false wins even when abort fired", () => {
+  const status = deriveExecFinalStatus({
+    aborted: true,
+    verification: { ok: false },
+    events: [],
+  });
+  assert.equal(status, "failed");
+});
+
+test("deriveExecFinalStatus: task_completed event without verification yields completed", () => {
+  const status = deriveExecFinalStatus({
+    aborted: false,
+    verification: undefined,
+    events: [{ message_type: "task_completed" }],
+  });
+  assert.equal(status, "completed");
+});
+
+test("deriveExecFinalStatus: aborted with no verification and no task_completed event yields aborted", () => {
+  const status = deriveExecFinalStatus({
+    aborted: true,
+    verification: undefined,
+    events: [],
+  });
+  assert.equal(status, "aborted");
+});
+
+test("deriveExecFinalStatus: nothing verified and not aborted yields failed", () => {
+  const status = deriveExecFinalStatus({
+    aborted: false,
+    verification: undefined,
+    events: [],
+  });
+  assert.equal(status, "failed");
 });

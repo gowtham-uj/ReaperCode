@@ -207,6 +207,20 @@ export function normalizeToolCall(input: unknown): unknown {
           ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
         };
         break;
+      case "bash":
+        args = {
+          ...(normalizedCmd ? { cmd: normalizedCmd } : {}),
+          ...(typeof record.summary === "string" ? { summary: record.summary } : {}),
+          ...(typeof record.description === "string" ? { description: record.description } : {}),
+          ...(typeof record.timeout === "number" ? { timeout: record.timeout } : {}),
+          ...(typeof record.timeoutMs === "number" ? { timeoutMs: record.timeoutMs } : {}),
+          ...(typeof record.idleTimeoutMs === "number" ? { idleTimeoutMs: record.idleTimeoutMs } : {}),
+          ...(typeof record.barrier === "boolean" ? { barrier: record.barrier } : {}),
+          ...(typeof record.forceNonBarrier === "boolean" ? { forceNonBarrier: record.forceNonBarrier } : {}),
+          ...(typeof record.isBackground === "boolean" ? { isBackground: record.isBackground } : {}),
+          ...(typeof record.run_in_background === "boolean" ? { run_in_background: record.run_in_background } : {}),
+        };
+        break;
       case "file_view":
         args = {
           ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),

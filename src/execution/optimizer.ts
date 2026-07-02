@@ -24,8 +24,9 @@
  * touch the executor. The scheduler still drives the actual execution.
  */
 
-import type { ToolCall } from "../tools/types.js";
-import { classifyToolCall } from "./planner.js";
+import type { ResourceKeys, ToolCall } from "../tools/types.js";
+import { declaredResourcesForToolCall } from "../tools/resource-keys.js";
+import { classifyToolCall, type ExecutionKind } from "./planner.js";
 
 export interface OptimizationResult {
   /** Calls in the same order as the input, with duplicates kept (caller should execute the unique plan and re-attach results). */
@@ -47,6 +48,25 @@ export interface OptimizerOptions {
   maxParallelReads?: number;
   /** Maximum number of non-barrier shell commands in parallel. Default 4. */
   maxParallelShell?: number;
+}
+
+export interface IslandCall {
+  call: ToolCall;
+  originalIndex: number;
+  kind: ExecutionKind;
+  resources: ResourceKeys;
+}
+
+export interface ExecutionIsland {
+  calls: IslandCall[];
+  canParallelize: boolean;
+  concurrency: number;
+  containsWrite: boolean;
+  startsWithShellBarrier: boolean;
+}
+
+export interface IslandPartitionResult {
+  islands: ExecutionIsland[];
 }
 
 /**
@@ -137,6 +157,66 @@ function dedupKey(call: ToolCall): string | undefined {
     default:
       return undefined;
   }
+}
+
+export function partitionsForParallelExecution(
+  calls: ToolCall[],
+  options: OptimizerOptions = {},
+): IslandPartitionResult {
+  const maxParallelReads = options.maxParallelReads ?? DEFAULT_MAX_PARALLEL_READS;
+  const maxParallelShell = options.maxParallelShell ?? DEFAULT_MAX_PARALLEL_SHELL;
+  const islands: ExecutionIsland[] = [];
+  let current: IslandCall[] = [];
+
+  const flush = () => {
+    if (current.length === 0) return;
+    const canParallelize = current.every((c) => c.resources.declared);
+    const reads = current.filter((c) => c.kind === "read").length;
+    const shells = current.filter((c) => c.kind === "shell_non_barrier").length;
+    const writes = current.filter((c) => c.kind === "write").length;
+    const concurrency = canParallelize
+      ? Math.max(1, Math.min(current.length, Math.max(Math.min(reads + writes, maxParallelReads), Math.min(shells, maxParallelShell))))
+      : 1;
+    islands.push({
+      calls: current,
+      canParallelize,
+      concurrency,
+      containsWrite: current.some((c) => c.kind === "write"),
+      startsWithShellBarrier: current[0]?.kind === "shell_barrier",
+    });
+    current = [];
+  };
+
+  const sharesKey = (a: IslandCall, b: IslandCall): boolean => {
+    const aKeys = a.resources.keys ?? [];
+    const bKeys = b.resources.keys ?? [];
+    if (aKeys.length === 0 || bKeys.length === 0) return false;
+    const keys = new Set(aKeys);
+    return bKeys.some((key) => keys.has(key));
+  };
+
+  for (let i = 0; i < calls.length; i += 1) {
+    const call = calls[i]!;
+    const kind = classifyToolCall(call);
+    const resources = declaredResourcesForToolCall(call);
+    const item: IslandCall = { call, originalIndex: i, kind, resources };
+
+    if (kind === "shell_barrier") {
+      flush();
+      current.push(item);
+      flush();
+      continue;
+    }
+
+    const unsafeIntoParallel = current.some((c) => !c.resources.declared) || !resources.declared;
+    const collides = current.some((c) => sharesKey(c, item));
+    if (current.length > 0 && (unsafeIntoParallel || collides)) {
+      flush();
+    }
+    current.push(item);
+  }
+  flush();
+  return { islands };
 }
 
 /**

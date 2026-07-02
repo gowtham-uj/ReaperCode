@@ -169,7 +169,7 @@ export function getUnresolvedDiagnosticTarget(toolResults: ToolResult[]): { path
 
 export function isInternalGuardBlockedResult(result: ToolResult): boolean {
   const code = result.error?.code ?? "";
-  return /(?:_blocked$|policy_block|path_escape|same_batch_|relevance_gate|diagnostic_target_gate|no_progress_loop|repeated_failed_action|repeated_low_information|unsafe_|stale_write|verifier_owned|source_shell_write|synthetic_result)/i.test(
+  return /(?:policy_block|path_escape|synthetic_result)/i.test(
     code,
   );
 }

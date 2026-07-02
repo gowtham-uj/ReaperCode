@@ -90,7 +90,23 @@ export async function executeBashCommand(
 ): Promise<BashExecutionResult> {
   const command = input.command;
   const description = input.description;
-  const timeoutMs = input.timeout ?? BASH_INPUT_DEFAULTS.DEFAULT_TIMEOUT_MS;
+  // The bash tool has NO DEFAULT TIMEOUT. The model-facing schema
+  // requires `timeout` in SECONDS (matching the reference-agent
+  // pattern, e.g. pi-mono). We enforce the requirement here too
+  // so any internal caller that forgot to set it gets a clear
+  // error rather than a silent 60-second fallback.
+  if (input.timeout === undefined) {
+    throw new Error(
+      "bash tool: `timeout` is required (in SECONDS, 1-3600). " +
+      "There is no default timeout. The model and all internal callers " +
+      "MUST pass an explicit `timeout` on every bash call. " +
+      "Suggested values: 60 for short probes, 300 for builds/installs/tests, " +
+      "larger for long-running jobs.",
+    );
+  }
+  // The model-facing schema documents `timeout` in SECONDS. Convert
+  // to milliseconds for the underlying shell runner.
+  const timeoutMs = Math.max(1, Math.floor(input.timeout * 1000));
   const args = {
     cmd: command,
     timeoutMs,

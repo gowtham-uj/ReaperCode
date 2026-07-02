@@ -56,10 +56,7 @@ export function computeMaxActionRepeat(results: ToolResult[]): number {
 }
 
 export function countNoProgressTrips(results: ToolResult[]): number {
-  return results.filter((result) => {
-    const code = result.error?.code;
-    return code === "no_progress_loop_blocked" || code === "read_loop_advisory";
-  }).length;
+  return 0;
 }
 
 export function makeActionSignature(result: ToolResult): string {

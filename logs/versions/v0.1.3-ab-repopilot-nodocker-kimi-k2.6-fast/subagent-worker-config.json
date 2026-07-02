@@ -1,0 +1,91 @@
+{
+  "connection": {
+    "auth": {
+      "allowAnonymous": true,
+      "bearerTokens": []
+    },
+    "rateLimit": {
+      "maxRequests": 60,
+      "windowMs": 60000
+    },
+    "maxPayloadBytes": 65536,
+    "requestTimeoutMs": 30000,
+    "maxAttachments": 8,
+    "maxArtifactRefs": 8
+  },
+  "logging": {
+    "devMode": false,
+    "sampleRate": 1,
+    "sessionMetrics": true
+  },
+  "pruner": {
+    "enabled": true,
+    "localOnly": true,
+    "threshold": 0.5
+  },
+  "runtime": {
+    "recedingHorizonPlanContext": true,
+    "voteAttempts": 1,
+    "serviceSupervisor": {
+      "enabled": true,
+      "readinessTimeoutMs": 30000,
+      "minimumStableMs": 1500,
+      "autoRecover": true,
+      "maxAutoRecoveriesPerService": 1,
+      "crashLoopThreshold": 2
+    }
+  },
+  "verification": {
+    "requireGroundedCompletion": true,
+    "enforceFailBeforeFixForGeneratedChecks": true,
+    "selfDebugExplanation": {
+      "enabled": true
+    },
+    "freshContextDiffReview": {
+      "enabled": true,
+      "maxDiffChars": 12000
+    },
+    "contractCoverage": {
+      "enabled": true
+    },
+    "executionConsensusRanking": true
+  },
+  "modelRouting": {
+    "mainAgent": "main_reasoner",
+    "planner": "default_model",
+    "executor": "default_model",
+    "repair": "main_reasoner",
+    "patcher": "fast_reasoner",
+    "completionGate": "fast_reasoner",
+    "summarizer": "default_model",
+    "judge": "judge"
+  },
+  "models": {
+    "default_model": {
+      "provider": "nuralwatt2",
+      "model": "kimi-k2.6-fast",
+      "apiBase": "https://api.neuralwatt.com/v1",
+      "apiKeyEnv": "NURALWATT_API_KEY2",
+      "timeoutMs": 600000,
+      "maxRetries": 2,
+      "capabilities": {
+        "streaming": true,
+        "toolCalling": true,
+        "jsonMode": true,
+        "structuredOutput": true,
+        "embeddings": false
+      },
+      "defaultParams": {
+        "temperature": 0,
+        "maxTokens": 4096,
+        "reasoningEffort": "medium"
+      }
+    }
+  },
+  "mcp": {
+    "enabled": true,
+    "maxActiveMCPTools": 6,
+    "refreshIntervalTurns": 10,
+    "servers": []
+  }
+}
