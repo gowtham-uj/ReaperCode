@@ -174,7 +174,16 @@ export const toolRegistry = {
   // -------------------------------------------------------------------------------
   bash: {
     description:
-      "Run a bash command in the workspace for real execution: package installs, tests, builds, typechecks, dev-server smoke checks, or concise environment probes. Do not use bash as a file reader (`cat`, `ls`, `find`, etc.) for files you just wrote; the cockpit's Changed Files section already summarizes shipped artifacts. Prefer `read_file` for targeted file inspection only when a write failed or a verifier points to a concrete line. Provide a concise `description` and explicit `timeout`/`timeoutMs`. Use `isBackground` (or `run_in_background`: true) for long-running servers. For one-shot smoke tests that temporarily start a server, use a bounded self-cleaning command (`timeout`, `trap 'kill $PID ...' EXIT`, curl/check, then exit) so foreground stdio closes. After a failed broad build/test, run a targeted diagnostic/check before repeating the broad command unchanged. If output is large, inspect the returned log/spillover path with read_file.",
+      "Run a bash command in the workspace for real execution: package installs, tests, builds, typechecks, dev-server smoke checks, or concise environment probes. " +
+      "REQUIRED per call: a concise `description` and an explicit `timeout` (in SECONDS — e.g. 300 for ~5 minutes). The bash tool has NO DEFAULT TIMEOUT; if the model omits `timeout`, the call fails with a clear schema error. " +
+      "Do not use bash as a file reader (`cat`, `ls`, `find`) for files you just wrote; the cockpit's Changed Files section already summarizes shipped artifacts. " +
+      "Prefer `read_file` for targeted file inspection only when a write failed or a verifier points to a concrete line. " +
+      "If output is large, inspect the returned log/spillover path with `read_file` rather than re-running. " +
+      "SERVER LIFECYCLE: when you start a server for a smoke test or for active probing (e.g. `pnpm dev`, `node dist/index.js`, `python -m http.server`), it MUST be self-cleaning. " +
+      "Use one of: (a) `isBackground: true` / `run_in_background: true` to start it as a tracked background process you can stop later, or (b) a single-shot bounded command like `timeout 30 pnpm dev & sleep 5; curl ...; kill $! 2>/dev/null || true`, or (c) `trap 'kill $PID 2>/dev/null || true' EXIT` inside the command. " +
+      "Do not leave a foreground server attached to stdio — the wrapper cannot close until it does, and your own subsequent tool calls will hang. " +
+      "If the user explicitly asks you to keep a server running, use `isBackground: true` so the runtime tracks it; otherwise spin it down inside the same command. " +
+      "After a failed broad build/test, run a targeted diagnostic/check before repeating the broad command unchanged.",
     argsSchema: RunShellCommandArgsSchema,
   },
   sandbox_service_control: {
@@ -439,14 +448,11 @@ export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   "list_directory",
   "grep_search",        // always-on: cross-file patterns
   "bash",               // always-on: tests, git, installs only
-  "sandbox_service_control",
   "advance_step",
-  "complete_task",
+  // ---- planning tools (on-demand, but kept in CORE for now) ----
   "task_create",
   "task_update",
   "task_list",
-  "update_plan",
-  "update_todo",
   "search_tools",
   "agent",
   "agent_swarm",

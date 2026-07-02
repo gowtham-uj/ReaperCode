@@ -22,9 +22,9 @@ test("unresolved runtime crash opens diagnostic mode until a real runtime check 
 
 test("crash diagnostics recognize debugger, sanitizer, layout, and read-only probes", () => {
   const calls: ToolCall[] = [
-    { id: "asan", name: "bash", args: { cmd: "clang++ -g -fsanitize=address main.cpp" } },
-    { id: "gdb", name: "bash", args: { cmd: "gdb -batch -ex bt ./app" } },
-    { id: "layout", name: "bash", args: { cmd: "printf 'sizeof record' && ./layout_probe" } },
+    { id: "asan", name: "bash", args: { cmd: "clang++ -g -fsanitize=address main.cpp", timeout: 30 } },
+    { id: "gdb", name: "bash", args: { cmd: "gdb -batch -ex bt ./app", timeout: 30 } },
+    { id: "layout", name: "bash", args: { cmd: "printf 'sizeof record' && ./layout_probe", timeout: 30 } },
     { id: "read", name: "read_file", args: { path: "src/main.cpp" } },
   ];
 

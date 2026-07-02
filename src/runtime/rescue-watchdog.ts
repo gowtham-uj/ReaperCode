@@ -208,7 +208,7 @@ function isRescuerWorthyBlockedResult(result: ToolResult): boolean {
   if (isTerminalNoProgressBlockedResult(result)) return false;
   const code = result.error?.code ?? "";
   const message = result.error?.message ?? "";
-  return /(?:_blocked$|policy_block|path_escape|same_state_failed_action_retry|no_progress_loop|repeated_|stale_write|missing_artifact|sandbox_service|conda_recovery)/i.test(
+  return /(?:policy_block|path_escape|synthetic_result)/i.test(
     `${code}\n${message}`,
   );
 }
@@ -216,7 +216,7 @@ function isRescuerWorthyBlockedResult(result: ToolResult): boolean {
 function isTerminalNoProgressBlockedResult(result: ToolResult): boolean {
   const code = result.error?.code ?? "";
   const message = result.error?.message ?? "";
-  return /same_state_failed_action_retry_blocked|repeated_failed_action_blocked|no_progress_loop_blocked|no-progress loop/i.test(
+  return /no-progress loop/i.test(
     `${code}\n${message}`,
   );
 }

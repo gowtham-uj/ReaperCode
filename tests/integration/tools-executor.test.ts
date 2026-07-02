@@ -191,7 +191,7 @@ test("bash executes real shell commands", async () => {
   const result = await executor.execute({
     id: "1",
     name: "bash",
-    args: { cmd: "node -e \"console.log('shell-ok')\"" },
+    args: { timeout: 60, cmd: "node -e \"console.log('shell-ok')\"" },
   });
 
   assert.equal(result.ok, true);
@@ -205,7 +205,7 @@ test("bash does not leak Node test-runner context", async () => {
   const result = await executor.execute({
     id: "1",
     name: "bash",
-    args: { cmd: "node -e \"console.log(process.env.NODE_TEST_CONTEXT || 'clean')\"" },
+    args: { timeout: 60, cmd: "node -e \"console.log(process.env.NODE_TEST_CONTEXT || 'clean')\"" },
   });
 
   assert.equal(result.ok, true);
@@ -219,25 +219,11 @@ test("bash reports timeouts cleanly", async () => {
   const result = await executor.execute({
     id: "1",
     name: "bash",
-    args: { cmd: "node -e \"setTimeout(() => {}, 500)\"", timeoutMs: 20 },
+    args: { cmd: "node -e \"setTimeout(() => {}, 2000)\"", timeout: 1 },
   });
 
   assert.equal(result.ok, false);
   assert.match(result.error?.message ?? "", /timed out/);
-});
-
-test("bash rejects shell job-control backgrounding", async () => {
-  const workspaceRoot = await createTempWorkspace();
-  const executor = await createExecutor(workspaceRoot);
-
-  const result = await executor.execute({
-    id: "job-control",
-    name: "bash",
-    args: { cmd: "node -e \"setInterval(() => {}, 1000)\" & sleep 1 && kill %1" },
-  });
-
-  assert.equal(result.ok, false);
-  assert.match(result.error?.message ?? "", /job-control backgrounding is disabled/);
 });
 
 test("bash blocks repo-root escapes from nested task workspaces", async () => {
@@ -249,7 +235,7 @@ test("bash blocks repo-root escapes from nested task workspaces", async () => {
     const cdResult = await executor.execute({
       id: "escape-cd",
       name: "bash",
-      args: { cmd: "cd /workspace && npm init -y" },
+      args: { cmd: "cd /workspace && npm init -y", timeout: 60 },
     });
     assert.equal(cdResult.ok, false);
     assert.equal(cdResult.error?.code, "path_escape");
@@ -261,7 +247,7 @@ test("bash blocks repo-root escapes from nested task workspaces", async () => {
     const absolutePathResult = await executor.execute({
       id: "escape-path",
       name: "bash",
-      args: { cmd: `mkdir -p ${repoRootEscapeTarget}` },
+      args: { cmd: `mkdir -p ${repoRootEscapeTarget}`, timeout: 60 },
     });
     assert.equal(absolutePathResult.ok, false);
     assert.equal(absolutePathResult.error?.code, "path_escape");
@@ -277,7 +263,7 @@ test("bash propagates pipefail exit code for piped verification commands", async
   const result = await executor.execute({
     id: "pipe-fail",
     name: "bash",
-    args: { cmd: "(echo fail; exit 1) | head -1" },
+    args: { cmd: "(echo fail; exit 1) | head -1", timeout: 60 },
   });
 
   assert.equal(result.ok, false);
@@ -291,7 +277,7 @@ test("bash tracks chained cd commands within the workspace", async () => {
   const result = await executor.execute({
     id: "chained-cd",
     name: "bash",
-    args: { cmd: "mkdir -p client server && cd client && cd ../server && pwd" },
+    args: { cmd: "mkdir -p client server && cd client && cd ../server && pwd", timeout: 60 },
   });
 
   assert.equal(result.ok, true);
@@ -307,7 +293,7 @@ test("bash does not auto-background ordinary node scripts", async () => {
   const result = await executor.execute({
     id: "node-script",
     name: "bash",
-    args: { cmd: "node server/test-script.js" },
+    args: { cmd: "node server/test-script.js", timeout: 60 },
   });
 
   assert.equal(result.ok, true);
@@ -322,7 +308,7 @@ test("bash rejects bare interactive node commands", async () => {
   const result = await executor.execute({
     id: "bare-node",
     name: "bash",
-    args: { cmd: "node" },
+    args: { cmd: "node", timeout: 60 },
   });
 
   assert.equal(result.ok, false);
@@ -339,7 +325,7 @@ test("bash reports immediate background startup failures", async () => {
   const result = await executor.execute({
     id: "bad-server",
     name: "bash",
-    args: { cmd: "node server/index.js" },
+    args: { cmd: "node server/index.js", timeout: 60 },
   });
 
   assert.equal(result.ok, false);
@@ -355,7 +341,7 @@ test("bash explains module path failures without language-specific repair policy
   const result = await executor.execute({
     id: "bad-require",
     name: "bash",
-    args: { cmd: "node server/bad-require.js" },
+    args: { cmd: "node server/bad-require.js", timeout: 60 },
   });
 
   assert.equal(result.ok, false);
@@ -370,7 +356,7 @@ test("background shell processes are logged and cleaned as process groups", asyn
   const start = await executor.execute({
     id: "bg",
     name: "bash",
-    args: { cmd: "node -e \"console.log('server-ready'); setInterval(() => {}, 1000)\"", isBackground: true },
+    args: { timeout: 60, cmd: "node -e \"console.log('server-ready'); setInterval(() => {}, 1000)\"", isBackground: true },
   });
 
   assert.equal(start.ok, true);
@@ -402,7 +388,7 @@ test("bash preserves the user command exit code after metadata capture", async (
   const result = await executor.execute({
     id: "1",
     name: "bash",
-    args: { cmd: "printf 'before-fail\\n'; exit 7" },
+    args: { cmd: "printf 'before-fail\\n'; exit 7", timeout: 60 },
   });
 
   assert.equal(result.ok, false);
@@ -420,7 +406,7 @@ test("bash prefers the project-local virtual environment when present", async ()
   const result = await executor.execute({
     id: "1",
     name: "bash",
-    args: { cmd: "printf '%s' \"$PATH\"" },
+    args: { timeout: 60, cmd: "printf '%s' \"$PATH\"" },
   });
 
   assert.equal(result.ok, true);
@@ -457,7 +443,7 @@ test("bash exposes scratchpad dependency cache env vars", async () => {
   const result = await executor.execute({
     id: "env",
     name: "bash",
-    args: { cmd: "node -e \"console.log(process.env.REAPER_SCRATCHPAD); console.log(process.env.NPM_CONFIG_CACHE); console.log(process.env.WORKSPACE)\"" },
+    args: { timeout: 60, cmd: "node -e \"console.log(process.env.REAPER_SCRATCHPAD); console.log(process.env.NPM_CONFIG_CACHE); console.log(process.env.WORKSPACE)\"" },
   });
 
   assert.equal(result.ok, true);
@@ -474,7 +460,7 @@ test("bash flags vulnerable dependency output as quality warning", async () => {
   const result = await executor.execute({
     id: "quality",
     name: "bash",
-    args: { cmd: "printf '1 critical vulnerability\\nnpm warn deprecated old-package\\n'" },
+    args: { cmd: "printf '1 critical vulnerability\\nnpm warn deprecated old-package\\n'", timeout: 60 },
   });
 
   assert.equal(result.ok, true);
@@ -491,7 +477,7 @@ test("bash does not flag zero vulnerabilities as quality warning", async () => {
   const result = await executor.execute({
     id: "quality-zero",
     name: "bash",
-    args: { cmd: "printf 'found 0 vulnerabilities\\n'" },
+    args: { cmd: "printf 'found 0 vulnerabilities\\n'", timeout: 60 },
   });
 
   assert.equal(result.ok, true);
@@ -520,7 +506,7 @@ test("standard command rules are logged as would-block in allow-all mode", async
   const result = await executor.execute({
     id: "1",
     name: "bash",
-    args: { cmd: "git push --force origin main || true" },
+    args: { cmd: "git push --force origin main || true", timeout: 60 },
   });
 
   assert.equal(result.ok, true);

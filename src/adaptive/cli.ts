@@ -469,7 +469,7 @@ export class ReaperCLI {
     const timeoutMs = flags["timeout-ms"] ? Number(flags["timeout-ms"]) : undefined;
     const providerRaw = flags["provider"];
     const isExecProvider = (value: string | undefined): value is NonNullable<ExecRunnerOptions["provider"]> =>
-      value === "openai" || value === "anthropic" || value === "minimax" || value === "deepseek" || value === "nuralwatt";
+      value === "openai" || value === "anthropic" || value === "minimax" || value === "deepseek" || value === "nuralwatt" || value === "nuralwatt2";
     let provider: ExecRunnerOptions["provider"] | undefined = isExecProvider(providerRaw) ? providerRaw : undefined;
     let selectedModel = model;
     if (this.opts.userHome === undefined) {
@@ -604,8 +604,8 @@ export class ReaperCLI {
       "  visual      list | analyze | bridge",
       "  capability  show | probe",
       "  redact      <file|->",
-      "  exec        run --prompt <text> [--workspace <dir>] [--model <id>] [--provider anthropic|openai|minimax|deepseek|nuralwatt] [--reasoning-effort low|medium|high] [--max-tokens N] [--timeout-ms N] [--json]",
-      "  tui         interactive REPL (default if no group given) [--model <id>] [--provider anthropic|openai|minimax|deepseek|nuralwatt] [--workspace <dir>]",
+      "  exec        run --prompt <text> [--workspace <dir>] [--model <id>] [--provider anthropic|openai|minimax|deepseek|nuralwatt|nuralwatt2] [--reasoning-effort low|medium|high] [--max-tokens N] [--timeout-ms N] [--json]",
+      "  tui         interactive REPL (default if no group given) [--model <id>] [--provider anthropic|openai|minimax|deepseek|nuralwatt|nuralwatt2] [--workspace <dir>]",
     ].join("\n");
     return { exitCode: 0, stdout: usage + "\n", stderr: "" };
   }

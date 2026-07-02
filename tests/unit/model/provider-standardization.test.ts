@@ -20,8 +20,13 @@ test("findProviderDescriptor returns descriptors for the two supported families"
   const nuralwatt = findProviderDescriptor("nuralwatt");
   assert.equal(nuralwatt?.sdkFamily, "openai-chat");
   assert.equal(nuralwatt?.baseUrl, "https://api.neuralwatt.com/v1");
-  assert.equal(nuralwatt?.envVar, "NURALWATT_API_KEY2");
+  assert.equal(nuralwatt?.envVar, "NURALWATT_API_KEY");
   assert.equal(nuralwatt?.defaultModel, "kimi-k2.7-code");
+  const nuralwatt2 = findProviderDescriptor("nuralwatt2");
+  assert.equal(nuralwatt2?.sdkFamily, "openai-chat");
+  assert.equal(nuralwatt2?.baseUrl, "https://api.neuralwatt.com/v1");
+  assert.equal(nuralwatt2?.envVar, "NURALWATT_API_KEY2");
+  assert.equal(nuralwatt2?.defaultModel, "kimi-k2.7-code");
 });
 
 test("buildProvider throws for unknown provider ids", () => {
@@ -92,10 +97,16 @@ test("resolveProvider reads API key from env var for supported families", () => 
     assert.equal(resolved.apiKey, "sk-test-openai");
     assert.equal(resolved.descriptor.sdkFamily, "openai-chat");
   });
-  withEnv({ NURALWATT_API_KEY2: "test-nuralwatt" }, () => {
+  withEnv({ NURALWATT_API_KEY: "test-nuralwatt" }, () => {
     const descriptor = findProviderDescriptor("nuralwatt")!;
     const resolved = resolveProvider(descriptor);
     assert.equal(resolved.apiKey, "test-nuralwatt");
+    assert.equal(resolved.descriptor.sdkFamily, "openai-chat");
+  });
+  withEnv({ NURALWATT_API_KEY2: "test-nuralwatt2" }, () => {
+    const descriptor = findProviderDescriptor("nuralwatt2")!;
+    const resolved = resolveProvider(descriptor);
+    assert.equal(resolved.apiKey, "test-nuralwatt2");
     assert.equal(resolved.descriptor.sdkFamily, "openai-chat");
   });
 });

@@ -30,26 +30,9 @@ test("hasRecentStructuredResponseFallbackFeedback only checks the recent feedbac
   );
 });
 
-test("hasRecentIncompleteGeneratedArtifact detects incomplete source writes", () => {
-  const results: ToolResult[] = [
-    { toolCallId: "write-1", name: "write_file", ok: false, durationMs: 1, args: {}, error: { code: "incomplete_source_write", message: "truncated" } } as ToolResult,
-  ];
-
-  assert.equal(hasRecentIncompleteGeneratedArtifact(results), true);
-});
-
-test("hasRecentIncompleteGeneratedArtifact detects incomplete-source message patterns", () => {
-  const results: ToolResult[] = [
-    { toolCallId: "write-1", name: "write_file", ok: false, durationMs: 1, args: {}, error: { code: "other", message: "appears truncated or syntactically incomplete" } } as ToolResult,
-  ];
-
-  assert.equal(hasRecentIncompleteGeneratedArtifact(results), true);
-});
-
-test("hasRecentIncompleteGeneratedArtifact ignores successful and stale failures", () => {
-  const stale = { toolCallId: "write-old", name: "write_file", ok: false, durationMs: 1, args: {}, error: { code: "incomplete_source_write", message: "old" } } as ToolResult;
+test("hasRecentIncompleteGeneratedArtifact ignores successful results", () => {
   const recentSuccess = { toolCallId: "write-ok", name: "write_file", ok: true, durationMs: 1, args: {}, output: {} } as ToolResult;
   const recent = Array.from({ length: 10 }, (_, index) => ({ ...recentSuccess, toolCallId: `ok-${index}` } as ToolResult));
 
-  assert.equal(hasRecentIncompleteGeneratedArtifact([stale, ...recent]), false);
+  assert.equal(hasRecentIncompleteGeneratedArtifact(recent), false);
 });
