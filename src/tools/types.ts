@@ -247,9 +247,32 @@ export const RunShellCommandArgsSchema = z
     isBackground: z.boolean().optional(),
     /** Alias for `isBackground`. */
     run_in_background: z.boolean().optional(),
-    timeoutMs: z.number().int().positive().optional(),
-    /** Alias for `timeoutMs` in milliseconds. */
-    timeout: z.number().int().positive().optional(),
+    /**
+     * DEPRECATED. Use `timeout` (in seconds) instead. This field is
+     * kept for backward compatibility with internal callers. The
+     * model-facing convention is `timeout` in seconds; do not emit
+     * `timeoutMs` from the model.
+     */
+    timeoutMs: z.number().int().positive().max(600_000).optional(),
+    /**
+     * REQUIRED: timeout for the command, IN SECONDS (matching the
+     * reference-agent pattern, e.g. pi-mono). The bash tool has
+     * NO DEFAULT TIMEOUT. The model MUST pass an explicit value
+     * on every call, otherwise the call will fail with a clear
+     * error. Suggested values: 60 for short probes, 300 for
+     * builds/installs/tests, larger for long-running jobs.
+     */
+    timeout: z
+      .number()
+      .int()
+      .min(1)
+      .max(3600)
+      .describe(
+        "REQUIRED. Timeout in SECONDS (1-3600). There is no default; " +
+        "you must pass an explicit value on every bash call. " +
+        "Use 60 for short probes, 300 for builds/installs/tests, " +
+        "larger for long-running jobs.",
+      ),
     idleTimeoutMs: z.number().int().positive().optional(),
   })
   .strict()
@@ -670,6 +693,24 @@ export const ToolResultSchema = z
 
 export type ToolCall = z.infer<typeof ToolCallSchema>;
 export type ToolResult = z.infer<typeof ToolResultSchema>;
+
+/**
+ * Per-tool resource keys used by the parallel scheduler's island partitioner.
+ *
+ * Shape expected by the partitioner:
+ * - `declared`: whether the tool declared any non-default resources. If false
+ *   (e.g. an unknown tool or a no-default-static tool), the partitioner
+ *   treats the call as barrier-only (sequential) to be safe.
+ * - `keys`: the union of all resource keys the tool touches (read, write,
+ *   and lock). Two calls with overlapping keys cannot run in parallel
+ *   in the same batch.
+ */
+export interface ResourceKeys {
+  declared?: boolean;
+  keys?: readonly string[];
+}
+
+export const EMPTY_RESOURCE_KEYS: ResourceKeys = Object.freeze({});
 export type CallSubagentArgs = z.infer<typeof CallSubagentArgsSchema>;
 export type PollSubagentArgs = z.infer<typeof PollSubagentArgsSchema>;
 export type CancelSubagentArgs = z.infer<typeof CancelSubagentArgsSchema>;

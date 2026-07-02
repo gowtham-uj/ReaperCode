@@ -50,18 +50,22 @@ test("BashInputSchema accepts new canonical field names", () => {
   const modern = BashInputSchema.parse({
     command: "echo hello",
     description: "say hi",
-    timeout: 5000,
+    timeout: 30,
     run_in_background: false,
   });
   assert.equal(modern.command, "echo hello");
-  assert.equal(modern.timeout, 5000);
-});
-
-test("BashInputSchema optional timeout defaults at execute time", () => {
-  const parsed = BashInputSchema.parse({ command: "echo hi" });
-  assert.equal(parsed.timeout, undefined);
+  assert.equal(modern.timeout, 30);
 });
 
 test("BashInputSchema requires a command", () => {
   assert.throws(() => BashInputSchema.parse({}));
+});
+
+test("BashInputSchema requires a timeout (no default)", () => {
+  // The bash tool requires `timeout` in seconds (matching the
+  // reference-agent pattern, e.g. pi-mono). Parsing without it
+  // throws — there is no default.
+  assert.throws(() => BashInputSchema.parse({ command: "echo hi" } as any));
+  assert.throws(() => BashInputSchema.parse({ command: "echo hi", timeout: 0 } as any));
+  assert.throws(() => BashInputSchema.parse({ command: "echo hi", timeout: 4000 } as any));
 });

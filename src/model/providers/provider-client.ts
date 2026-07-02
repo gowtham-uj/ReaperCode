@@ -69,6 +69,7 @@ export class ProviderMultiplexerClient implements ProviderModelClient {
         "mimo",
         "minimax",
         "nuralwatt",
+        "nuralwatt2",
         "zai",
         "azure",
         "litellm",

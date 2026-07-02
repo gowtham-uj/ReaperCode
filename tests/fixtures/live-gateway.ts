@@ -21,7 +21,7 @@ import {
   getDefaultOpenRouterModel,
 } from "./live-models.js";
 
-type SupportedLiveProvider = "deepinfra" | "deepseek" | "cerebras" | "openrouter" | "crazyrouter" | "openai" | "anthropic" | "minimax" | "minimax-oauth" | "mimo" | "nuralwatt" | "azure";
+type SupportedLiveProvider = "deepinfra" | "deepseek" | "cerebras" | "openrouter" | "crazyrouter" | "openai" | "anthropic" | "minimax" | "minimax-oauth" | "mimo" | "nuralwatt" | "nuralwatt2" | "azure";
 
 interface LiveProviderDefaults {
   provider: SupportedLiveProvider;
@@ -445,14 +445,14 @@ function getLiveProvider(): SupportedLiveProvider {
   ).trim().toLowerCase();
   if (isSupportedProvider(raw)) return raw;
   throw new Error(
-    `Unsupported REAPER_LIVE_PROVIDER '${raw}'. Supported providers: deepinfra, deepseek, cerebras, openrouter, crazyrouter, openai, anthropic, minimax, minimax-oauth, mimo, nuralwatt, azure`,
+    `Unsupported REAPER_LIVE_PROVIDER '${raw}'. Supported providers: deepinfra, deepseek, cerebras, openrouter, crazyrouter, openai, anthropic, minimax, minimax-oauth, mimo, nuralwatt, nuralwatt2, azure`,
   );
 }
 
 function getProviderDefaults(provider: string, model?: string): LiveProviderDefaults {
   if (!isSupportedProvider(provider)) {
     throw new Error(
-      `Unsupported provider '${provider}'. Supported providers: deepinfra, deepseek, cerebras, openrouter, crazyrouter, openai, anthropic, minimax, minimax-oauth, mimo, nuralwatt, azure`,
+      `Unsupported provider '${provider}'. Supported providers: deepinfra, deepseek, cerebras, openrouter, crazyrouter, openai, anthropic, minimax, minimax-oauth, mimo, nuralwatt, nuralwatt2, azure`,
     );
   }
 
@@ -528,6 +528,15 @@ function getProviderDefaults(provider: string, model?: string): LiveProviderDefa
       return {
         provider,
         model: model ?? getDefaultNuralWattModel(),
+        apiKeyEnv: "NURALWATT_API_KEY",
+        apiBase: process.env.NURALWATT_BASE_URL ?? "https://api.neuralwatt.com/v1",
+        maxContextTokens: 262128,
+        maxTokens: 32000,
+      };
+    case "nuralwatt2":
+      return {
+        provider,
+        model: model ?? getDefaultNuralWattModel(),
         apiKeyEnv: "NURALWATT_API_KEY2",
         apiBase: process.env.NURALWATT_BASE_URL ?? "https://api.neuralwatt.com/v1",
         maxContextTokens: 262128,
@@ -578,6 +587,7 @@ function isSupportedProvider(provider: string): provider is SupportedLiveProvide
     provider === "minimax-oauth" ||
     provider === "mimo" ||
     provider === "nuralwatt" ||
+    provider === "nuralwatt2" ||
     provider === "azure"
   );
 }

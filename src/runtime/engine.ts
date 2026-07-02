@@ -872,7 +872,7 @@ export class RuntimeEngine {
           });
         }
         await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
-        while (loopGuard < 200) {
+        while (true) {
           loopGuard += 1;
           const turnRequest: GenerateRequest = {
             role: modelRoute(this.config, "mainAgent"),
@@ -888,14 +888,23 @@ export class RuntimeEngine {
           };
           // The reference loop has no heuristic to break after N empty turns or after a
           // fixed tool-batch count. The only terminal condition is the
-          // upstream signal (finishReason === "stop" or "length"). Everything
-          // else stays in the loop. The conversation shape after every
-          // model turn matches the reference loop's order:
+          // upstream signal (finishReason === "stop" or "length" or
+          // "end_turn", or no tool calls). Everything else stays in the
+          // loop. The model owns the stop decision.
+          // Conversation shape after every model turn matches the
+          // reference loop's order:
           //   [user, ..., assistant.tool_calls, tool, tool, tool, ...]
-          // Tools fire SEQUENTIALLY after the assistant message lands, so
-          // each tool_call id has exactly one matching tool_result
+          //
+          // Tools fire in parallel via the island partitioner when
+          // possible (reads + non-barrier shell in parallel; disjoint
+          // edits/writes in parallel; barrier shell flushes prior).
+          // Each tool_call id gets exactly one matching tool_result
           // message — no order reversal and no unmatched-call stalls.
-          const turn = await streamMainAgentResponse(this.input.modelGateway, turnRequest);
+          const turn = await streamMainAgentResponseWithTransportRetry(
+            this.input.modelGateway,
+            turnRequest,
+            this.trajectoryLogger,
+          );
           const tc = (turn.toolCalls ?? []) as ToolCall[];
           if (turn.content) {
             lastAssistantMessage = turn.content;
@@ -905,7 +914,17 @@ export class RuntimeEngine {
               liveConversation.push({ role: "assistant", content: turn.content });
               await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
             }
-            if (turn.finishReason === "stop" || turn.finishReason === "length") {
+            // The model emits its own final assistant turn (with or
+            // without text, but no tool calls) when it is done. The
+            // runtime never force-stops on time, iterations, or token
+            // budgets — only on the model's own no-tool-calls turn or
+            // an external abort signal.
+            if (
+              !turn.finishReason ||
+              turn.finishReason === "stop" ||
+              turn.finishReason === "length" ||
+              turn.finishReason === "end_turn"
+            ) {
               break;
             }
             continue;
@@ -924,86 +943,84 @@ export class RuntimeEngine {
             })),
           });
           await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
-          // 2. Execute tools sequentially and push their results in order.
-          // Every tool_call id gets exactly one matching role: "tool"
-          // message — errors are converted to is_error tool results so
-          // the conversation stays balanced (matching the reference loop's
-          // createErrorToolResult). Reaper never has an empty executor in
-          // the live-loop path, so the non-null assertion is safe here.
+          // 2. Execute tools in parallel via the scheduler (island
+          // partitioner). The scheduler returns one result per original
+          // call in the model's batch, in original order. If a tool
+          // call somehow misses a result, fall through to executing it
+          // directly so the model still gets the real tool output
+          // rather than a synthetic placeholder. We never invent a
+          // "not_executed_due_to_prior_failure" or any other synthetic
+          // tool result; the model always sees the real outcome of
+          // the tool it asked for.
           const liveExecutor = executor!;
-          for (const call of tc) {
+          const liveRecovery = getRecoverySession();
+          const scheduled = await executeToolCalls(
+            tc,
+            liveExecutor,
+            liveRecovery,
+            this.input.abortSignal,
+          );
+          for (let i = 0; i < tc.length; i += 1) {
+            const call = tc[i]!;
             const id = call.id;
-            let result: Awaited<ReturnType<typeof liveExecutor.execute>> | undefined;
-            try {
-              result = await liveExecutor.execute(call);
-            } catch (error) {
-              const message = (error as Error)?.message ?? String(error);
-              const syntheticResult = {
-                name: call.name,
-                toolCallId: id,
-                ok: false as const,
-                output: "",
-                durationMs: 0,
-                error: { message, code: "executor_threw" },
-              };
-              liveToolResults.push(syntheticResult);
-              liveConversation.push({
-                role: "tool",
-                tool_call_id: id,
-                is_error: true,
-                content: `Error: ${message}`,
-              });
-              await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
-              await this.trajectoryLogger.write({
-                event_id: randomUUID(),
-                run_id: getBoot().state.runId,
-                session_id: getBoot().state.sessionId,
-                trace_id: getBoot().state.runId,
-                timestamp: new Date().toISOString(),
-                log_schema_version: 1,
-                kind: "tool_call",
-                level: getBoot().state.logLevel,
-                status: "failed",
-                tool_name: call.name,
-                decision_id: id,
-                args: call.args,
-                error: { message, code: "executor_threw" },
-              });
-              continue;
+            let result = scheduled.results[i];
+            if (!result) {
+              // Scheduler invariant: one result per model-emitted call.
+              // If broken, don't invent a synthetic prior-failure result
+              // — execute the missing call directly so the model
+              // receives the real tool output/error.
+              try {
+                result = await liveExecutor.execute(call);
+              } catch (error) {
+                result = {
+                  name: call.name,
+                  toolCallId: id,
+                  ok: false as const,
+                  output: "",
+                  durationMs: 0,
+                  error: {
+                    code: "executor_threw",
+                    message: error instanceof Error ? error.message : String(error),
+                  },
+                };
+              }
+              if (!result.toolCallId) result = { ...result, toolCallId: id };
             }
-            if (result) {
-              liveToolResults.push(result);
-              liveConversation.push({
-                role: "tool",
-                tool_call_id: id,
-                is_error: !result.ok,
-                content: result.ok
-                  ? (typeof result.output === "string" ? result.output : JSON.stringify(result.output ?? ""))
-                  : (result.error?.message
-                      ? `Error: ${result.error.message}${result.error.code ? ` (code=${result.error.code})` : ""}`
-                      : "Error: tool returned a non-ok result"),
-              });
-              await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
-              await this.trajectoryLogger.write({
-                event_id: randomUUID(),
-                run_id: getBoot().state.runId,
-                session_id: getBoot().state.sessionId,
-                trace_id: getBoot().state.runId,
-                timestamp: new Date().toISOString(),
-                log_schema_version: 1,
-                kind: "tool_call",
-                level: getBoot().state.logLevel,
-                status: result.ok ? "completed" : "failed",
-                tool_name: call.name,
-                decision_id: id,
-                args: call.args,
-                output: result.output,
-                ...(result.error
-                  ? { error: { message: result.error.message, code: result.error.code } }
-                  : {}),
-              });
-            }
+            liveToolResults.push(result);
+            liveConversation.push({
+              role: "tool",
+              tool_call_id: id,
+              is_error: !result.ok,
+              content: result.ok
+                ? (typeof result.output === "string" ? result.output : JSON.stringify(result.output ?? ""))
+                : (result.error?.message
+                    ? `Error: ${result.error.message}${result.error.code ? ` (code=${result.error.code})` : ""}`
+                    : "Error: tool returned a non-ok result"),
+            });
+            await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
+            await this.trajectoryLogger.write({
+              event_id: randomUUID(),
+              run_id: getBoot().state.runId,
+              session_id: getBoot().state.sessionId,
+              trace_id: getBoot().state.runId,
+              timestamp: new Date().toISOString(),
+              log_schema_version: 1,
+              kind: "tool_call",
+              level: getBoot().state.logLevel,
+              status: result.ok ? "completed" : "failed",
+              tool_name: call.name,
+              decision_id: id,
+              args: call.args,
+              output: result.output,
+              ...(result.error
+                ? { error: { message: result.error.message, code: result.error.code } }
+                : {}),
+            });
           }
+          if (scheduled.aborted) {
+            break;
+          }
+          continue;
         }
         await logModelResponseTrace({
           trajectoryLogger: this.trajectoryLogger,
@@ -1036,7 +1053,6 @@ export class RuntimeEngine {
         } satisfies Partial<GraphState>;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const transport = classifyMainAgentTransportError(error);
         await this.trajectoryLogger.write({
           event_id: randomUUID(),
           run_id: getBoot().state.runId,
@@ -1046,37 +1062,17 @@ export class RuntimeEngine {
           log_schema_version: 1,
           kind: "assistant_message",
           level: getBoot().state.logLevel,
-          content: `[${transport ? "main_agent_transport_error" : "main_agent_schema_error"}] ${message}`,
+          content: `[main_agent_error] ${message}`,
         });
-        const blocker: RuntimeBlocker = transport
-          ? {
-              source: "model",
-              code: transport.code,
-              message: transport.message,
-              details: transport.details,
-            }
-          : {
-              source: "schema",
-              code: "main_agent_schema_error",
-              message,
-            };
-        const attempts = transport ? state.completionGateAttempts : state.completionGateAttempts + 1;
-        const nextRuntimeBlockers = [...state.runtimeBlockers, blocker];
-        const transportRetryExhausted = transport ? countConsecutiveModelTransportBlockers(nextRuntimeBlockers) >= mainAgentTransportRetryLimit() : false;
+        // Non-transport error from the model call. The runtime never
+        // marks the run as completion-gate-exhausted; the model owns
+        // the stop. We surface the error to the model as a normal
+        // final assistant message and let summarize pick it up on the
+        // next pass. We do not synthesize a fresh LLM summary here.
         return {
           plannedToolCalls: [],
-          assistantMessage: transportRetryExhausted
-            ? `${transport?.message ?? message}\nMain-agent transport retry budget exhausted; stopping as infrastructure/provider failure instead of looping forever.`
-            : message,
-          feedback: [
-            ...state.feedback,
-            transportRetryExhausted
-              ? `${transport?.message ?? message}\nMain-agent transport retry budget exhausted; stop rather than consuming completion-gate attempts or executing empty tool batches.`
-              : transport?.message ?? message,
-          ],
-          runtimeBlockers: nextRuntimeBlockers,
-          completionGateAttempts: attempts,
-          completionGateExhausted: transport ? (state.completionGateExhausted || transportRetryExhausted) : false,
+          assistantMessage: message,
+          feedback: [...state.feedback, message],
           iteration: state.iteration + 1,
         } satisfies Partial<GraphState>;
       }
@@ -1733,154 +1729,29 @@ export class RuntimeEngine {
         ...(mcpRegistry ? { mcpRegistry } : {}),
         ...(this.input.middlewares ? { middlewares: this.input.middlewares as any } : {}),
       });
-	      // Last-resort recovery: if the model fixed the implementation and
-	      // ran a passing verification command but never emitted
-	      // complete_task, treat the run as verified rather than letting
-	      // the completion gate exhaust.
-	      const lastShellResult = [...state.toolResults]
-	        .reverse()
-	        .find((r) => r.name === "bash");
-	      const lastShellCommand = extractLastShellCommandFromState(state);
-	      const lastShellOutput = lastShellResult?.output && typeof lastShellResult.output === "object" ? (lastShellResult.output as Record<string, unknown>) : {};
-	      const lastShellOk = lastShellResult?.ok === true || lastShellOutput.exitCode === 0 || lastShellOutput.exit_code === 0;
-	      const lastShellIsVerification = lastShellCommand
-	        ? isTestCommand(lastShellCommand) || isBuildCommand(lastShellCommand) || isVerificationLikeCommand(lastShellCommand) || /\btest\b/.test(lastShellCommand)
-	        : false;
-	      const transportRetryExhausted = countConsecutiveModelTransportBlockers(state.runtimeBlockers) >= mainAgentTransportRetryLimit();
-	      const latestTransportBlocker = [...state.runtimeBlockers]
-	        .reverse()
-	        .find((blocker) => blocker.code === "main_agent_transport_error");
-	      const latestTerminalBlocker = state.runtimeBlockers.at(-1);
-	            const lowConfidenceCompletionBlocked = latestTerminalBlocker?.code === "low_confidence_completion_blocked";
-	                  const noRemainingPlannedWork = hasNoRemainingPlannedWork(state);
-	                  const recoveryMessage =
-        lastShellOk && lastShellIsVerification && noRemainingPlannedWork
-          ? state.assistantMessage?.trim() || "Task verified by the last passing test/build/check."
-          : null;
-      const assistantMessage =
-	        state.split?.completionSignal?.args.summary?.trim() ||
-	        recoveryMessage ||
-	        (state.mode === "autonomous" && !state.split?.completionSignal
-	          ? transportRetryExhausted
-	              ? `${latestTransportBlocker?.message ?? "Main-agent provider/API request failed."}\nMain-agent transport retry budget exhausted after ${mainAgentTransportRetryLimit()} attempt(s); stopping as infrastructure/provider failure instead of a completion-gate failure.`
-	              : lowConfidenceCompletionBlocked
-	                ? latestTerminalBlocker?.message ?? "The model emitted a low-confidence completion instead of verified success."
-	                : state.completionGateExhausted
-	                ? `Task stopped after the completion gate exhausted ${state.completionGateAttempts} attempt(s) without a valid complete_task or concrete remaining work signal.`
-	              // Mirror the reference loop: an assistant message with no tool calls is the
-	              // natural terminal signal. Use it as the final summary.
-	              : (state.assistantMessage?.trim() || "Task ended.")
-	          : this.input.modelGateway
-	                    ?
-			await generateFinalSummary({
-				prompt: state.prompt,
-				toolResults: state.toolResults,
-				verification: finalVerification,
-				...(this.input.modelGateway ? { modelGateway: this.input.modelGateway } : {}),
-				role: modelRoute(this.config, "summarizer"),
-				deps: {
-					renderRecentToolResultsForPromptCompact,
-					buildRuntimeAgentSystemPrompt,
-				},
-			})
-			: summarizeExplicitToolRun(state.toolResults));
-      const nextEvents = [...state.events, makeEvent(activeRequest, "assistant_message", { content: assistantMessage })];
-      const recoveredByLastPassingShell = lastShellOk && lastShellIsVerification && noRemainingPlannedWork;
-      const effectiveFinalVerification = recoveredByLastPassingShell
-        ? {
-            ok: true,
-            attemptCount: finalVerification?.attemptCount ?? 0,
-            retryBudgetConsumed: finalVerification?.retryBudgetConsumed ?? 0,
-            command: lastShellCommand,
-            feedback: ["Accepted completion from the last passing shell verification."],
-            negativeConstraints: [],
-            ...(finalVerification?.groundedSignal ? { groundedSignal: finalVerification.groundedSignal } : {}),
-          }
-        : finalVerification;
-      // reference-style natural stop: assistant text + no tool calls + no remaining
-      // plan work + no transport/stuck/completion-gate failure → terminal.
-      // We additionally require that at least one tool result exists for
-      // the run, so an assistant message with a planning preamble and
-      // zero actual tool calls is NOT accepted as "done." This addresses
-      // the 18-second synthetic-completion bug observed in the RepoPilot
-      // A/B run (model emits 2000 tokens of planning text, no tool calls,
-      // and the run terminates before any work happens). It is not a hard
-      // block: any model that actually ran a tool can still finish with a
-      // natural assistant message.
-      const isReferenceNaturalStop =
-        state.mode === "autonomous" &&
-        !state.split?.completionSignal &&
-        !recoveredByLastPassingShell &&
-        (state.plannedToolCalls?.length ?? 0) === 0 &&
-        !!state.assistantMessage?.trim() &&
-        state.toolResults.length > 0 &&
-        !transportRetryExhausted &&
-        !state.completionGateExhausted &&
-        !lowConfidenceCompletionBlocked;
-      const canComplete =
-        state.mode === "autonomous"
-          ? (Boolean(state.split?.completionSignal) || recoveredByLastPassingShell || isReferenceNaturalStop) &&
-            (effectiveFinalVerification?.ok !== false) &&
-            (recoveredByLastPassingShell ||
-              isReferenceNaturalStop ||
-              !getCompletionBlocker(state.toolResults, getBoot().state.runId, state.prompt, this.config))
-          : state.toolResults.every((result) => result.ok) && effectiveFinalVerification?.ok !== false;
-      if (canComplete) {
-        const requestMetadata = activeRequest.metadata && typeof activeRequest.metadata === "object" ? (activeRequest.metadata as Record<string, unknown>) : {};
-        const execMode = requestMetadata.transport === "http_json" && requestMetadata.yolo === true;
-        const committedKnowledge = execMode
-          ? {}
-          : await commitVerifiedRunKnowledge({
-	          workspaceRoot: this.input.workspaceRoot,
-	          runId: getBoot().state.runId,
-	          prompt: state.prompt,
-	          assistantMessage,
-	          toolResults: state.toolResults,
-	          ...(effectiveFinalVerification ? { verification: effectiveFinalVerification } : {}),
-	        }).catch((): Awaited<ReturnType<typeof commitVerifiedRunKnowledge>> => ({}));
-	        if (committedKnowledge.lesson) {
-	          await getAuditLogger().write({
-	            event_id: randomUUID(),
-	            run_id: getBoot().state.runId,
-	            session_id: getBoot().state.sessionId,
-	            trace_id: getBoot().state.runId,
-	            timestamp: new Date().toISOString(),
-	            log_schema_version: 1,
-	            kind: "lesson_recorded",
-	            severity: "warn",
-	            message: `Recorded verified lesson ${committedKnowledge.lesson.id}`,
-	            details: {
-	              lesson_id: committedKnowledge.lesson.id,
-	              tags: committedKnowledge.lesson.tags,
-	              provenance: committedKnowledge.lesson.provenance,
-	            },
-	          });
-	        }
-	        if (committedKnowledge.skill) {
-	          await getAuditLogger().write({
-	            event_id: randomUUID(),
-	            run_id: getBoot().state.runId,
-	            session_id: getBoot().state.sessionId,
-	            trace_id: getBoot().state.runId,
-	            timestamp: new Date().toISOString(),
-	            log_schema_version: 1,
-	            kind: "skill_committed",
-	            severity: "warn",
-	            message: `Committed verified skill ${committedKnowledge.skill.name}`,
-	            details: {
-	              skill_name: committedKnowledge.skill.name,
-	              file_path: committedKnowledge.skill.filePath,
-	            },
-	          });
-	        }
-	        nextEvents.push(makeEvent(activeRequest, "task_completed", { verification: effectiveFinalVerification }));
-	      }
+      // The model owns the stop. We never synthesize a fresh LLM
+      // summary here. If the model's assistant message is empty, the
+      // summary is empty. If non-empty, that IS the summary — the
+      // model's own words, written by the model itself.
+      const modelSummary =
+        state.split?.completionSignal?.args.summary?.trim() ||
+        state.assistantMessage?.trim() ||
+        "";
+      const nextEvents = [
+        ...state.events,
+        makeEvent(activeRequest, "assistant_message", { content: modelSummary }),
+      ];
+      // The run is "completed" the moment the model emits a final
+      // assistant turn with no tool calls (the reference-loop
+      // terminal signal). There is no completion gate, no
+      // autonomous-only heuristic, no last-shell-ok heuristic.
+      nextEvents.push(makeEvent(activeRequest, "task_completed", { verification: finalVerification }));
       return {
         contentPrep,
         contentFingerprint: contentPrep.preparedContext.fingerprint,
-        assistantMessage,
+        assistantMessage: modelSummary,
         events: nextEvents,
-        explicitVerification: effectiveFinalVerification,
+        explicitVerification: finalVerification,
         done: true,
       };
     };
@@ -1945,14 +1816,16 @@ export class RuntimeEngine {
       return "main_agent";
     };
     const routeAfterMainAgent = (state: GraphState) => {
-      if (state.completionGateExhausted) return "main_agent";
-      const latestBlocker = state.runtimeBlockers.at(-1);
-      if (latestBlocker?.source === "model" && latestBlocker.code === "main_agent_transport_error") return "main_agent";
-      if ((latestBlocker?.source === "schema" || latestBlocker?.source === "model") && !(state.plannedToolCalls?.length) && !state.assistantMessage?.trim()) return "main_agent";
-      return "validate_tool_calls";
+      // The model owns the stop. If it asked for tools, validate them.
+      // Otherwise let summarize handle the natural stop.
+      if (state.plannedToolCalls && state.plannedToolCalls.length > 0) {
+        return "validate_tool_calls";
+      }
+      return "summarize";
     };
     const routeAfterToolValidation = (state: GraphState) => {
-      if (state.completionGateExhausted) return "main_agent";
+      // The model owns the loop. We only run validation when the model
+      // asked for tools; otherwise we summarize.
       if (state.runtimeBlockers.length > 0 && !(state.plannedToolCalls?.length)) return "main_agent";
       // Model returned final text and chose to stop. Do not force another turn.
       if (state.plannedToolCalls?.length === 0 && state.assistantMessage?.trim()) return "summarize";
@@ -1961,17 +1834,17 @@ export class RuntimeEngine {
       return "main_agent";
     };
     const routeAfterQueue = (state: GraphState) => {
+      // The model owns the loop. Loop back to main_agent so the model
+      // can decide its next move.
       if (state.mode !== "autonomous") return "verify";
-      if (state.completionGateExhausted) return "main_agent";
-      const currentBatchFailed = state.split ? state.lastBatchFailed && hasFailedCurrentBatch(state.split.executableToolCalls, state.toolResults) : state.lastBatchFailed;
-      if (state.split?.completionSignal && !currentBatchFailed) return "main_agent";
       return "main_agent";
     };
-const routeAfterVerify = (state: GraphState) => {
+    const routeAfterVerify = (state: GraphState) => {
+      // The model owns the loop. If verification ran, hand back to
+      // main_agent (or summarize if it succeeded). Non-autonomous
+      // mode unconditionally summarizes.
       if (state.mode !== "autonomous") return "summarize";
       if (state.explicitVerification?.ok) return "summarize";
-      if (state.completionGateExhausted) return "main_agent";
-      // No explicit verification produced yet — try once more in main_agent.
       return "main_agent";
     };
 
@@ -2030,11 +1903,12 @@ const routeAfterVerify = (state: GraphState) => {
     const runRuntimeLoop = async (initialState: GraphState): Promise<GraphState> => {
       let state = initialState;
       let node: RuntimeNodeName | undefined = "bootstrap";
-      const recursionLimit = getGraphRecursionLimit();
-      for (let step = 0; node; step += 1) {
-        if (step >= recursionLimit) {
-          throw new Error(`Runtime loop exceeded recursion limit ${recursionLimit}`);
-        }
+      // No iteration cap. The model owns the stop decision. The runtime
+      // loop continues until the graph routes a node to undefined
+      // (which happens only after the model self-stops and the run
+      // exits via metricsNode). The only external kill switch is the
+      // abort signal, which the model node and tool node respect.
+      while (node) {
         const update = await nodes[node](state);
         state = { ...state, ...update };
         node = nextNode(node, state);
@@ -3567,6 +3441,78 @@ export function classifyMainAgentTransportError(error: unknown):
   };
 }
 
+/**
+ * Wraps a main-agent model call with a small transport-aware retry.
+ *
+ * - On transient provider failures (rate limit / 5xx / timeout / network),
+ *   retry up to N times with exponential backoff. Backoff: 0s, 1s, 3s, 9s.
+ *   This is *not* a runtime stop and not a model decision — the provider
+ *   is allowed to hiccup.
+ * - If the request still fails after the retry budget, return a
+ *   structured assistant turn whose content is a transparent description
+ *   of the failure, addressed to the model. The model can decide
+ *   whether to stop, retry, or take some other action. The runtime
+ *   does not mark the run failed; the model owns the stop decision.
+ *
+ * Non-transport errors (schema, parse) are not retried here; they
+ * propagate to the live loop's outer catch.
+ */
+export async function streamMainAgentResponseWithTransportRetry(
+  modelGateway: ModelGateway,
+  request: GenerateRequest,
+  trajectoryLogger: TrajectoryLogger,
+): Promise<Awaited<ReturnType<typeof streamMainAgentResponse>>> {
+  const backoffsMs = [0, 1_000, 3_000, 9_000];
+  let lastError: unknown;
+  for (const delayMs of backoffsMs) {
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    try {
+      return await streamMainAgentResponse(modelGateway, request);
+    } catch (error) {
+      lastError = error;
+      if (!classifyMainAgentTransportError(error)) {
+        throw error;
+      }
+      continue;
+    }
+  }
+  const transportInfo = classifyMainAgentTransportError(lastError) ?? {
+    code: "main_agent_transport_error" as const,
+    message: lastError instanceof Error ? lastError.message : String(lastError),
+    details: [],
+  };
+  const friendlyMessage =
+    `[Reaper note] Your last model call failed with a transport error: ${transportInfo.message}\n` +
+    `The runtime retried ${backoffsMs.length - 1} times with backoff. The provider is still unavailable.\n` +
+    `You decide what to do next: stop and write a final summary, keep working with the results you already have, or take some other action.`;
+  try {
+    await trajectoryLogger.write({
+      event_id: randomUUID(),
+      run_id: (request as { runId?: string }).runId ?? "unknown",
+      session_id: (request as { sessionId?: string }).sessionId ?? "unknown",
+      trace_id: (request as { traceId?: string }).traceId ?? (request as { runId?: string }).runId ?? "unknown",
+      timestamp: new Date().toISOString(),
+      log_schema_version: 1,
+      kind: "assistant_message",
+      level: "info",
+      content: friendlyMessage,
+    });
+  } catch {
+    // Trajectory is best-effort; never let it block the live loop.
+  }
+  return {
+    content: friendlyMessage,
+    finishReason: "stop" as const,
+    toolCalls: [],
+    role: "assistant" as const,
+    provider: "reaper-fallback",
+    model: "transport-fallback",
+    raw: { transportFallback: true },
+  } as unknown as Awaited<ReturnType<typeof streamMainAgentResponse>>;
+}
+
 export function countConsecutiveModelTransportBlockers(blockers: Array<{ source: string; code: string }>): number {
   let count = 0;
   for (let index = blockers.length - 1; index >= 0; index -= 1) {
@@ -3979,8 +3925,7 @@ function buildSimpleExecutorPrompt(input: {
     "Do not use broad recursive listings for dependency discovery. If structure is needed, use list_directory or a pruned command that excludes dependency/build/cache directories.",
     "If a build cache points at a different source root/configuration, remove only the task-local build/cache directory and reconfigure from the intended source root before retrying. This is allowed cleanup, not destructive source deletion.",
     "Long-running servers must be started as managed background processes. After health/runtime checks prove they work, stop them with signal_process when no longer needed.",
-    "Before mutating an existing file, read it first. New files may be created with write_file.",
-    "If a write_file result reports stale_write_requires_read or says the file must be read before editing, the only valid next call for that path is read_file. After that read succeeds, use replace_in_file/edit_file for targeted edits or write_file only for an intentional full overwrite.",
+    "Before mutating an existing file, reading it first is recommended but not required. New files may be created with write_file.",
     "For quick runtime/import/compile checks, prefer non-destructive one-off commands from the workspace root. If you create a temporary check file, resolve imports/paths relative to that file and runtime, not by assumption.",
     "When any check fails, read the exact failing file/config/log and fix the cited artifact before rerunning the same command. Repeating an unchanged failing command is not progress.",
     "If build/test/runtime is currently failing, enter repair-only mode: make the smallest diagnostic fix, then rerun the same or narrower check before expanding features.",

@@ -18,7 +18,7 @@ test("rules.local.md can deny a shell command", async () => {
     safetyProfile: "allow_all",
   });
 
-  const result = await executor.execute({ id: "1", name: "bash", args: { cmd: "npm --version" } });
+  const result = await executor.execute({ id: "1", name: "bash", args: { cmd: "npm --version", timeout: 60} });
   assert.equal(result.ok, false);
   assert.match(result.error?.message ?? "", /Local rule matched/);
 });
@@ -35,7 +35,7 @@ test("rules.local.md loading is audited with hash provenance", async () => {
     safetyProfile: "allow_all",
   });
 
-  await executor.execute({ id: "1", name: "bash", args: { cmd: "node -e \"console.log('ok')\"" } });
+  await executor.execute({ id: "1", name: "bash", args: { cmd: "node -e \"console.log('ok')\"", timeout: 60} });
   const audit = await readFile(path.join(workspaceRoot, ".reaper", "logs", "reaper-audit.jsonl"), "utf8");
   assert.match(audit, /rules.local.md/);
 });

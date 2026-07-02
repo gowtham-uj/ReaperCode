@@ -68,16 +68,6 @@ export async function runShellCommandTool(
       `Create .reaper-scratch/package.json with write_file using a valid package name, then run npm install inside .reaper-scratch.`,
     );
   }
-  if (/&\s*(?:sleep|wait|kill\b|$)|kill\s+%\d+/i.test(args.cmd)) {
-    throw new Error(
-      "Shell job-control backgrounding is disabled for reliability. Use run_shell_command with isBackground:true, then read_background_output and signal_process.",
-    );
-  }
-  if (isInteractiveShellCommand(args.cmd)) {
-    throw new Error(
-      "Interactive shell commands are disabled because they can hang unattended. Provide a script/file, use a non-interactive one-liner such as 'node -e \"...\"', or set isBackground:true only for long-running servers.",
-    );
-  }
   if (isUnboundedRecursiveListing(args.cmd)) {
     throw new Error(
       "Unbounded recursive listing is disabled because it floods context with dependency/build artifacts. " +
@@ -665,11 +655,6 @@ function backgroundStartupProbeMs(cmd: string): number {
   const normalized = stripLeadingCdCommands(cmd.trim());
   if (/^(npm|pnpm|yarn)\s+(?:start|run\s+(?:dev|start|serve))(?:\s|$)/.test(normalized)) return 2_500;
   return /^node\s+/.test(normalized) ? 1_500 : 1_000;
-}
-
-function isInteractiveShellCommand(cmd: string): boolean {
-  const trimmed = stripLeadingCdCommands(cmd.trim());
-  return /^(node|python|python3|ruby|irb|php -a|sqlite3|psql|mysql)\s*$/.test(trimmed);
 }
 
 function isLikelyServerCommand(cmd: string): boolean {

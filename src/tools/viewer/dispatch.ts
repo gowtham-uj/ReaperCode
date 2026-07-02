@@ -15,6 +15,7 @@ import { existsSync } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { normalizeWorkspacePath as normalizePolicyPath, PathPolicyError } from "../../policy/paths.js";
 import {
   FileEditArgsSchema,
   FileFindArgsSchema,
@@ -83,11 +84,11 @@ async function sha256OfPath(absPath: string): Promise<{ sha: string; mtimeMs: nu
 
 function normalizeWorkspacePath(workspaceRoot: string, p: string): string | null {
   if (!p || typeof p !== "string") return null;
-  if (path.isAbsolute(p)) return null; // disallow absolute paths to escape the workspace
-  const resolved = path.resolve(workspaceRoot, p);
-  const wsWithSep = workspaceRoot.endsWith(path.sep) ? workspaceRoot : workspaceRoot + path.sep;
-  if (resolved !== workspaceRoot && !resolved.startsWith(wsWithSep)) return null;
-  return resolved;
+  try {
+    return normalizePolicyPath(workspaceRoot, p);
+  } catch {
+    return null;
+  }
 }
 
 const DEFAULT_WINDOW = 50;

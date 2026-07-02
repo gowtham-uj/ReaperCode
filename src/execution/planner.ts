@@ -192,6 +192,10 @@ export function classifyToolCall(call: ToolCall): ExecutionKind {
   }
   if (
     call.name === "read_file" ||
+    call.name === "view_file" ||
+    call.name === "file_view" ||
+    call.name === "file_scroll" ||
+    call.name === "file_find" ||
     call.name === "list_directory" ||
     call.name === "grep_search" ||
     call.name === "git_status" ||
@@ -202,7 +206,9 @@ export function classifyToolCall(call: ToolCall): ExecutionKind {
 
   if (
     call.name === "write_file" ||
+    call.name === "file_edit" ||
     call.name === "replace_in_file" ||
+    call.name === "edit_file" ||
     call.name === "replace_symbol" ||
     call.name === "delete_file" ||
     call.name === "create_checkpoint" ||

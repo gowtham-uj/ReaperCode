@@ -34,7 +34,7 @@ import type { HookEvent } from "../adaptive/types.js";
 export interface EngineDriverOptions {
   workspaceRoot: string;
   model: string;
-  provider: "anthropic" | "openai" | "minimax" | "deepseek" | "nuralwatt";
+  provider: "anthropic" | "openai" | "minimax" | "deepseek" | "nuralwatt" | "nuralwatt2";
   store: SessionStore;
 }
 

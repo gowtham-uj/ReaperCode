@@ -74,7 +74,7 @@ test.skip("large shell outputs are stored as artifacts and retrievable", async (
   const result = await executor.execute({
     id: "1",
     name: "bash",
-    args: { cmd: "python -c \"import sys; sys.stdout.write('x' * 1100000)\"", timeoutMs: 30000 },
+    args: { cmd: "python -c \"import sys; sys.stdout.write('x' * 1100000)\"", timeout: 30 },
   });
 
   assert.equal(result.ok, true);

@@ -74,6 +74,12 @@ const providerDefaults: Record<string, ProviderDefaults> = {
     pathStyle: "openai",
     modelTransform: (model) => model,
   },
+  nuralwatt2: {
+    apiBase: "https://api.neuralwatt.com/v1",
+    authHeader: "authorization",
+    pathStyle: "openai",
+    modelTransform: (model) => model,
+  },
   azure: {
     apiBase: process.env.AZURE_OPENAI_BASE_URL ?? "",
     authHeader: "api-key",

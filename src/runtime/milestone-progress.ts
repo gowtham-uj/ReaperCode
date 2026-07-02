@@ -135,7 +135,7 @@ function isHighSignalFailure(result: ToolResult): boolean {
 
 function isBlockedDiagnostic(result: ToolResult): boolean {
   if (result.ok) return false;
-  return /^(?:source_shell_write_blocked|masked_verification_pipe_blocked|missing_build_artifact_runtime_blocked|diagnostic_target_gate_blocked|no_progress_loop_blocked)$/.test(
+  return /^(?:synthetic_result)$/.test(
     result.error?.code ?? "",
   );
 }

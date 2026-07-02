@@ -852,31 +852,6 @@ export class ToolExecutor {
             cached.hits += 1;
             await this.recordReadState(args.path, unboundedRead && !(cached.output as { truncated?: boolean }).truncated);
             const baseOutput = this.withReadCacheNote(cached.output, cached.hits);
-            // Non-blocking no-progress advisory: after 5+ identical re-reads
-            // of a file the model has not modified, surface a runtime note so
-            // the cockpit (and the model) can see the loop. The model is
-            // still allowed to re-read — we just inject an advisory into the
-            // tool result so the runtime can count it as a no-progress trip.
-            const noProgressThreshold = 5;
-            if (cached.hits >= noProgressThreshold) {
-              const fileTouches = this.fileWriteCounts.get(args.path) ?? 0;
-              const note =
-                `Read of '${args.path}' returned the cached result (hit #${cached.hits}). ` +
-                (fileTouches === 0
-                  ? "This file has not been written by any tool in this run; reading it again is unlikely to make progress. Consider writing it instead."
-                  : `This file has been written ${fileTouches}× already; the cached content is the current state. Re-reads are a no-progress signal — use replace_in_file or edit_file to make targeted changes instead.`);
-              // Non-blocking no-progress advisory: surface a structured
-              // `read_loop_advisory` error code so session-metrics can count
-              // it as a no_progress_trips without making `ok: false`. The
-              // model still receives the cached content (so it isn't
-              // blocked from continuing); the engine just sees a count.
-              const outputRecord = baseOutput && typeof baseOutput === "object" && !Array.isArray(baseOutput) ? baseOutput : { value: baseOutput };
-              return {
-                ...outputRecord,
-                note,
-                error: { code: "read_loop_advisory", message: note },
-              };
-            }
             return baseOutput;
           }
           const result = await readFileTool(this.options.workspaceRoot, {
@@ -1055,8 +1030,6 @@ export class ToolExecutor {
       case "write_file":
         {
           const args = toolRegistry.write_file.argsSchema.parse(call.args);
-          assertCompleteSourceWrite(args.path, args.content);
-          await this.assertSafeFullFileOverwrite(args.path, args.content);
           await this.assertEditorGuard(args.path, args.content, "write_file");
           await this.snapshotBeforeMutation(args.path, "write_file");
           this.fileWriteCounts.set(args.path, (this.fileWriteCounts.get(args.path) ?? 0) + 1);
@@ -1112,7 +1085,15 @@ export class ToolExecutor {
         };
         const effectiveCommand = (args.command || args.cmd).trim();
         const effectiveDescription = args.description ?? args.summary;
-        const effectiveTimeoutMs = args.timeoutMs ?? args.timeout;
+        // Timeout conversion: `timeout` is in SECONDS (the model-facing
+        // convention); `timeoutMs` is in milliseconds (legacy field for
+        // internal callers). The bash tool requires `timeout` to be set
+        // (no default). When both are present, prefer the
+        // model-passed `timeout` (seconds) because that is what the
+        // model actually meant when it emitted the call.
+        const effectiveTimeoutSeconds = args.timeoutMs !== undefined
+          ? Math.max(1, Math.floor(args.timeoutMs / 1000))
+          : args.timeout;
         const effectiveIsBackground = args.isBackground ?? args.run_in_background ?? false;
 
         if (this.options.shellRunner && hasSandboxServiceContext() && isDockerCliCommand(effectiveCommand)) {
@@ -1136,10 +1117,18 @@ export class ToolExecutor {
           });
         }
 
+        if (effectiveTimeoutSeconds === undefined) {
+          const error = new Error(
+            "bash tool: `timeout` is required (in SECONDS, 1-3600). There is no default timeout; pass an explicit value on every bash call.",
+          ) as Error & { code?: string };
+          error.code = "bash_timeout_required";
+          throw error;
+        }
+
         const bashInput = {
           command: effectiveCommand,
           ...(effectiveDescription ? { description: effectiveDescription } : {}),
-          ...(effectiveTimeoutMs !== undefined ? { timeout: effectiveTimeoutMs } : {}),
+          timeout: effectiveTimeoutSeconds,
           ...(effectiveIsBackground ? { run_in_background: true } : {}),
         };
 
@@ -1209,7 +1198,10 @@ export class ToolExecutor {
             ? await (async () => {
                 const shellArgs = {
                   cmd: effectiveCommand,
-                  ...(effectiveTimeoutMs !== undefined ? { timeoutMs: effectiveTimeoutMs } : {}),
+                  // The shellRunner indirection uses millisecond
+                  // timeouts (legacy API). Convert from the
+                  // model-facing seconds value.
+                  ...(effectiveTimeoutSeconds !== undefined ? { timeoutMs: effectiveTimeoutSeconds * 1000 } : {}),
                   ...(effectiveIsBackground ? { isBackground: true } : {}),
                 };
                 const raw = await this.options.shellRunner!(this.options.workspaceRoot, shellArgs, this.currentWorkingDirectory, bashCtx.runtime);
@@ -2188,43 +2180,6 @@ export class ToolExecutor {
       note: `${note}Read cache hit ${hits}; file hash and mtime are unchanged, so this is the cached observation. Use a different line range or search target if more context is needed.`,
     };
   }
-  private async assertSafeFullFileOverwrite(targetPath: string, nextContent: string): Promise<void> {
-    if (!isSourceLikeWritePath(targetPath)) return;
-    const absolutePath = normalizeWorkspacePath(this.options.workspaceRoot, targetPath);
-    const currentSnapshot = await this.getFreshnessSnapshot(targetPath, absolutePath);
-    if (currentSnapshot.sha256 === null) return;
-
-    const currentContent = this.recoverySession
-      ? await this.recoverySession.wal.readText(targetPath)
-      : await readFile(absolutePath, "utf8");
-    if (currentContent === nextContent) return;
-
-    const currentLines = countLogicalLines(currentContent);
-    const nextLines = countLogicalLines(nextContent);
-    const currentBytes = Buffer.byteLength(currentContent, "utf8");
-    const nextBytes = Buffer.byteLength(nextContent, "utf8");
-    if (currentLines < 8 && currentBytes < 400) return;
-
-    const prior = this.readFileState.get(absolutePath);
-    const currentWasFullyRead = prior?.fullyRead === true && prior.sha256 === currentSnapshot.sha256;
-    const severeContraction =
-      (currentLines >= 12 && nextLines <= Math.max(3, Math.floor(currentLines * 0.35))) ||
-      (currentBytes >= 400 && nextBytes <= Math.max(160, Math.floor(currentBytes * 0.35)));
-
-    if (!currentWasFullyRead || severeContraction) {
-      const reason = [
-        `write_file refused a risky full-file overwrite of existing source file '${targetPath}' (${currentLines} line(s), ${currentBytes} byte(s)) with ${nextLines} line(s), ${nextBytes} byte(s).`,
-        currentWasFullyRead
-          ? "The replacement is a severe contraction and is likely a partial or corrupted patch."
-          : "The current file was not fully read immediately before the overwrite.",
-        "Use replace_in_file/edit_file for the smallest affected region, or read the whole file and provide a complete full-file replacement of comparable scope.",
-      ].join(" ");
-      const error = new Error(reason) as Error & { code?: string };
-      error.code = "unsafe_full_file_overwrite";
-      throw error;
-    }
-  }
-
   private async buildReplaceCandidateContent(args: ReplaceInFileCandidateArgs): Promise<string> {
     const currentContent = await this.readCurrentWorkspaceText(args.path);
     if ("startLine" in args) {
@@ -2359,56 +2314,6 @@ function isMissingFileError(error: unknown): boolean {
 
 function assertNever(value: never): never {
   throw new Error(`Unexpected value: ${String(value)}`);
-}
-
-function assertCompleteSourceWrite(filePath: string, content: string): void {
-  if (!isSourceLikeWritePath(filePath)) return;
-  const trimmed = content.trimEnd();
-  if (!trimmed) return;
-  const maxSourceWriteBytes = getMaxSourceWriteBytes();
-  if (Buffer.byteLength(trimmed, "utf8") > maxSourceWriteBytes) {
-    const reason = [
-      `write_file payload for '${filePath}' is too large for one reliable source write (${Buffer.byteLength(trimmed, "utf8")} bytes > ${maxSourceWriteBytes} bytes).`,
-      "Create the smallest complete compiling/runnable scaffold first, then extend it with focused replace_in_file/edit_file chunks and narrow checks.",
-      "This prevents truncated structured responses and makes failures attributable.",
-    ].join(" ");
-    const error = new Error(reason) as Error & { code?: string };
-    error.code = "incomplete_source_write";
-    throw error;
-  }
-  const lineCount = trimmed.split(/\r?\n/).length;
-  const looksLikePartialText =
-    /(?:=\s*|return\s+|=>\s*|,\s*|\(\s*|\[\s*|\{\s*|["'`])$/.test(trimmed) ||
-    /(?:fopen|open|write|print|printf|fprintf|console\.log|JSON\.stringify)\s*\([^)]*$/.test(trimmed);
-  const lastMeaningfulLine = trimmed.split(/\r?\n/).reverse().find((line) => line.trim() && !line.trim().startsWith("//"))?.trim() ?? "";
-  const balance = getCodeBalance(trimmed);
-  const hasOpenDelimiter = balance.brace > 0 || balance.paren > 0 || balance.bracket > 0;
-  const danglingFinalLine =
-    lastMeaningfulLine.length > 0 &&
-    !/[;})\]>"'`]$/.test(lastMeaningfulLine) &&
-    !/^\s*(?:else|try|do)\s*$/.test(lastMeaningfulLine);
-  const suspiciouslyIncomplete =
-    balance.inString ||
-    balance.unclosedTemplate ||
-    balance.brace < 0 ||
-    balance.paren < 0 ||
-    balance.bracket < 0 ||
-    (lineCount >= 8 && hasOpenDelimiter && (looksLikePartialText || danglingFinalLine));
-  if (!suspiciouslyIncomplete) return;
-
-  const reason = [
-    `write_file payload for '${filePath}' appears truncated or syntactically incomplete.`,
-    "Do not accept partial full-file writes as progress.",
-    "Retry with a smaller complete file, split implementation across smaller edits, or write a minimal compilable skeleton and then extend it.",
-  ].join(" ");
-  const error = new Error(reason) as Error & { code?: string };
-  error.code = "incomplete_source_write";
-  throw error;
-}
-
-function getMaxSourceWriteBytes(): number {
-  const raw = Number(process.env.REAPER_MAX_SOURCE_WRITE_BYTES ?? 8000);
-  return Number.isFinite(raw) && raw >= 2000 ? raw : 8000;
 }
 
 function countLogicalLines(content: string): number {

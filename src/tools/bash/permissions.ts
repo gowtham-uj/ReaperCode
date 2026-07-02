@@ -12,8 +12,14 @@ export interface PermissionEvaluation {
 
 const MODE_ORDER: SandboxMode[] = ["read_only", "workspace_write", "network_disabled", "danger_full_access"];
 
+// The permission check only inspects `command` (and optionally
+// `description`). We accept a partial BashInput so callers in tests
+// and policy modules can pass a minimal shape without the required
+// `timeout` field.
+type PermissionInput = Pick<BashInput, "command"> & Partial<Pick<BashInput, "description">>;
+
 export function evaluateBashPermission(
-  input: BashInput,
+  input: PermissionInput,
   mode: SandboxMode,
   _workspaceRoot: string,
   _cwd: string,
@@ -65,10 +71,6 @@ export function evaluateBashPermission(
       allowedIn: ["network_disabled", "danger_full_access"],
       ruleId: "bash_network_would_block",
     };
-  }
-
-  if (classification.category === "interactive") {
-    return { outcome: "deny", reason: "Interactive commands are not allowed", allowedIn: [], ruleId: "bash_interactive" };
   }
 
   return { outcome: "allow", reason: `${mode} allows ${description}`, ruleId: "bash_allowed" };
