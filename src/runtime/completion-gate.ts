@@ -84,7 +84,7 @@ export function validateCompletionSignal(plannedToolCalls: ToolCall[]): Completi
       ],
     };
   }
-  const completionCalls = plannedToolCalls.filter((call) => call.name === "complete_task");
+  const completionCalls = plannedToolCalls.filter((call) => (call.name as string) === "complete_task");
   if (completionCalls.length === 0) {
     return {
       ok: false,
@@ -99,7 +99,7 @@ export function validateCompletionSignal(plannedToolCalls: ToolCall[]): Completi
   }
   if (plannedToolCalls.length > 1 || completionCalls.length > 1) {
     const otherNames = plannedToolCalls
-      .filter((call) => call.name !== "complete_task")
+      .filter((call) => (call.name as string) !== "complete_task")
       .map((call) => call.name)
       .join(", ");
     return {

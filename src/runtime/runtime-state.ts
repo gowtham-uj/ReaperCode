@@ -113,38 +113,13 @@ export async function logModelResponseTrace(input: {
     assistant_message: input.assistantMessage,
     tool_call_count: input.toolCalls.length,
     tool_calls: input.toolCalls.map((call) => ({ id: call.id, name: call.name })),
-    has_completion_signal: input.toolCalls.some((call) => call.name === "complete_task"),
-    has_advance_signal: input.toolCalls.some((call) => call.name === "advance_step"),
   });
 }
 
 export function splitControlToolCalls(toolCalls: ToolCall[]): SplitToolCalls {
-  const executableToolCalls: ToolCall[] = [];
-  const advisoryToolCalls: Array<Extract<ToolCall, { name: "update_plan" | "update_todo" }>> = [];
-  let completionSignal: Extract<ToolCall, { name: "complete_task" }> | undefined;
-  let advancementSignal: Extract<ToolCall, { name: "advance_step" }> | undefined;
-
-  for (const call of toolCalls) {
-    if (call.name === "update_plan" || call.name === "update_todo") {
-      advisoryToolCalls.push(call);
-      continue;
-    }
-    if (call.name === "complete_task") {
-      completionSignal = call;
-      break;
-    }
-    if (call.name === "advance_step") {
-      advancementSignal = call;
-      continue;
-    }
-    executableToolCalls.push(call);
-  }
-
+  // All tool calls are executable — no advisory/control-plane split.
   return {
-    executableToolCalls,
-    ...(advisoryToolCalls.length ? { advisoryToolCalls } : {}),
-    ...(completionSignal ? { completionSignal } : {}),
-    ...(advancementSignal ? { advancementSignal } : {}),
+    executableToolCalls: toolCalls,
   };
 }
 

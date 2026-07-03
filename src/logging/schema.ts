@@ -83,8 +83,6 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
         name: z.string().min(1),
       }),
     ),
-    has_completion_signal: z.boolean(),
-    has_advance_signal: z.boolean(),
   }),
   CommonLogFieldsSchema.extend({
     kind: z.literal("step_analysis"),
@@ -193,7 +191,6 @@ export const AuditEntrySchema = CommonLogFieldsSchema.extend({
     "verification_gate",
     "skill_committed",
     "lesson_recorded",
-    "complete_task_synthesis_blocked",
     "tool_args_strip_failed",
     "tool_args_stripped",
     "failure_memory_load_failed",

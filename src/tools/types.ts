@@ -1,7 +1,10 @@
 import { z } from "zod";
 
-import { AgentArgsSchema } from "./agent.types.js";
-import { AgentSwarmArgsSchema } from "./agent-swarm.types.js";
+import { ApplyPatchArgsSchema } from "./apply-patch.js";
+import { GlobArgsSchema } from "./glob.js";
+import { EvalArgsSchema } from "./eval.js";
+import { JobArgsSchema } from "./job.js";
+import { AstGrepArgsSchema, DiagnosticsArgsSchema } from "./ast-grep.js";
 import {
   CreateSkillArgsSchema,
   TestSkillArgsSchema,
@@ -76,78 +79,10 @@ export const SkimFileArgsSchema = z
 
 export const InspectEnvironmentArgsSchema = z.object({}).strict();
 
-export const UpdatePlanArgsSchema = z
-  .object({
-    markdown: z.string().min(1).optional(),
-    activePlanMarkdown: z.string().min(1).optional(),
-    candidate: z.boolean().optional(),
-    /**
-     * Optional typed plan steps. When supplied, these replace the
-     * existing `state.steps` and become the canonical plan. The
-     * markdown field is still rendered as the human-readable fallback.
-     */
-    steps: z
-      .array(
-        z
-          .object({
-            id: z.string().min(1),
-            title: z.string().min(1),
-            status: z.enum(["pending", "in_progress", "completed", "blocked"]).optional(),
-            detail: z.string().optional(),
-            evidence: z.string().optional(),
-            acceptanceCriteria: z.string().optional(),
-          })
-          .strict(),
-      )
-      .optional(),
-  })
-  .strict();
 
-export const UpdateTodoArgsSchema = z
-  .object({
-    items: z
-      .array(
-        z
-          .object({
-            id: z.string().min(1),
-            content: z.string().min(1),
-            /** @deprecated use `status` instead. */
-            done: z.boolean().optional(),
-            status: z.enum(["pending", "in_progress", "completed", "blocked"]).optional(),
-            priority: z.enum(["low", "medium", "high"]).optional(),
-            evidence: z.string().optional(),
-          })
-          .strict(),
-      ),
-    append: z.boolean().optional(),
-  })
-  .strict();
 
-export const CallSubagentArgsSchema = z
-  .object({
-    type: z.enum(["planner", "reviewer", "repair", "tester", "researcher"]),
-    task: z.string().min(1),
-    context: z.string().min(1).optional(),
-    mode: z.enum(["blocking", "background"]).optional(),
-    allowedFiles: z.array(z.string().min(1)).optional(),
-    forbiddenFiles: z.array(z.string().min(1)).optional(),
-    timeoutMs: z.number().int().positive().optional(),
-    outputSchema: z.enum(["plan", "review", "repair", "test_strategy", "freeform"]).optional(),
-  })
-  .strict();
 
-export const PollSubagentArgsSchema = z
-  .object({
-    jobId: z.string().min(1),
-  })
-  .strict();
 
-export const CancelSubagentArgsSchema = z
-  .object({
-    jobId: z.string().min(1),
-    reason: z.string().min(1).optional(),
-  })
-  .strict();
 
 export const CreateCheckpointArgsSchema = z
   .object({
@@ -483,78 +418,10 @@ export const WebFetchArgsSchema = z
   })
   .strict();
 
-export const TaskCreateArgsSchema = z
-  .object({
-    subject: z.string().min(1),
-    description: z.string().min(1),
-    status: z.enum(["pending", "in_progress", "completed"]).default("pending"),
-  })
-  .strict();
 
-export const TaskUpdateArgsSchema = z
-  .object({
-    taskId: z.string().min(1),
-    status: z.enum(["pending", "in_progress", "completed", "deleted"]).optional(),
-    subject: z.string().min(1).optional(),
-    description: z.string().optional(),
-  })
-  .strict();
 
-export const TaskListArgsSchema = z
-  .object({
-    status: z.enum(["pending", "in_progress", "completed"]).optional(),
-  })
-  .strict();
 
-export const CompleteTaskArgsSchema = z
-  .object({
-    summary: z.string().min(1),
-    verificationContract: z
-      .object({
-        intent: z.string().min(1).optional(),
-        commands: z
-          .array(
-            z
-              .object({
-                id: z.string().min(1).optional(),
-                command: z.string().min(1),
-                purpose: z.string().min(1).optional(),
-                required: z.boolean().optional(),
-              })
-              .strict(),
-          )
-          .optional(),
-        expectedArtifacts: z.array(z.string().min(1)).optional(),
-      })
-      .strict()
-      .optional(),
-    objectives: z
-      .array(
-        z
-          .object({
-            id: z.string().min(1),
-            status: z.enum(["done", "pending", "blocked", "wont_do"]),
-            note: z.string().optional(),
-          })
-          .strict(),
-      )
-      .optional(),
-    // Optional engine-only fields used by the synthesizer and the
-    // self-repair prompt: model can report low confidence and capture
-    // unresolved known issues for the user.
-    confidence: z.enum(["high", "low"]).optional(),
-    known_issues: z.array(z.string().min(1)).optional(),
-    clarification: z.string().optional(),
-  })
-  .strict();
 
-export const AdvanceStepArgsSchema = z
-  .object({
-    summary: z.string().min(1),
-    stepId: z.string().min(1).optional(),
-    evidence: z.array(z.string().min(1)).optional(),
-  })
-  .strict();
 
 export const GetToolOutputArgsSchema = z
   .object({
@@ -588,13 +455,6 @@ export const DelegateSubTaskSchema = z
   })
   .strict();
 
-export const DelegateToPlanArgsSchema = z
-  .object({
-    mode: z.enum(["initial", "replan", "update_todo"]),
-    current_step_id: z.string().min(1).optional(),
-    reason: z.string().min(1).optional(),
-  })
-  .strict();
 
 export const ToolCallSchema = z.discriminatedUnion("name", [
   z.object({ id: z.string().min(1), name: z.literal("read_file"), args: ReadFileArgsSchema }).strict(),
@@ -639,21 +499,8 @@ export const ToolCallSchema = z.discriminatedUnion("name", [
   z.object({ id: z.string().min(1), name: z.literal("write_to_process"), args: WriteToProcessArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("activate_skill"), args: ActivateSkillArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("get_tool_output"), args: GetToolOutputArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("advance_step"), args: AdvanceStepArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("complete_task"), args: CompleteTaskArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("delegate_to_plan"), args: DelegateToPlanArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("web_fetch"), args: WebFetchArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("task_create"), args: TaskCreateArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("task_update"), args: TaskUpdateArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("task_list"), args: TaskListArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("update_plan"), args: UpdatePlanArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("update_todo"), args: UpdateTodoArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("call_subagent"), args: CallSubagentArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("poll_subagent"), args: PollSubagentArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("cancel_subagent"), args: CancelSubagentArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("search_tools"), args: SearchToolsArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("agent"), args: AgentArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("agent_swarm"), args: AgentSwarmArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("create_skill"), args: CreateSkillArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("test_skill"), args: TestSkillArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("approve_skill"), args: ApproveSkillArgsSchema }).strict(),
@@ -671,6 +518,12 @@ export const ToolCallSchema = z.discriminatedUnion("name", [
   z.object({ id: z.string().min(1), name: z.literal("approve_hook"), args: ApproveHookArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("uninstall_hook"), args: UninstallHookArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("reload_hooks"), args: ReloadHooksArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("apply_patch_edit"), args: ApplyPatchArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("glob"), args: GlobArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("eval"), args: EvalArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("job"), args: JobArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("ast_grep"), args: AstGrepArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("diagnostics"), args: DiagnosticsArgsSchema }).strict(),
 ]);
 
 export const ToolResultSchema = z
@@ -711,8 +564,5 @@ export interface ResourceKeys {
 }
 
 export const EMPTY_RESOURCE_KEYS: ResourceKeys = Object.freeze({});
-export type CallSubagentArgs = z.infer<typeof CallSubagentArgsSchema>;
-export type PollSubagentArgs = z.infer<typeof PollSubagentArgsSchema>;
-export type CancelSubagentArgs = z.infer<typeof CancelSubagentArgsSchema>;
 export type BrowserControlArgs = z.infer<typeof BrowserControlArgsSchema>;
 export type ComputerControlArgs = z.infer<typeof ComputerControlArgsSchema>;

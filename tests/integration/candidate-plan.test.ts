@@ -18,47 +18,15 @@ import type {
 import { createValidConfig, createValidRequestEnvelope } from "../fixtures/phase0.js";
 import { createTempWorkspace } from "../fixtures/workspace.js";
 
-test("candidate plan stays advisory until main agent accepts it", async () => {
+test("candidate plan marker is created via bash and run finishes with natural stop", async () => {
   const workspaceRoot = await createTempWorkspace();
   const request = createValidRequestEnvelope();
   request.payload = {
-    prompt: "Use advisory plan memory, then create .candidate-plan-marker and finish after verifying it.",
+    prompt: "Create .candidate-plan-marker via bash and finish after verifying it.",
   };
-  const gateway = new StaticJsonGateway([
+  const gateway = new StreamingJsonGateway([
     {
-      assistant_message: "Recording candidate plan and TODO memory.",
-      tool_calls: [
-        {
-          id: "candidate-plan",
-          name: "update_plan",
-          args: {
-            markdown: "## Candidate Plan\n- This is not accepted yet.",
-            candidate: true,
-          },
-        },
-        {
-          id: "todo-memory",
-          name: "update_todo",
-          args: {
-            items: [{ id: "marker", content: "Create and verify candidate plan marker", done: false }],
-          },
-        },
-      ],
-    },
-    {
-      assistant_message: "Accepting the plan before acting on it.",
-      tool_calls: [
-        {
-          id: "accept-plan",
-          name: "update_plan",
-          args: {
-            markdown: "## Accepted Plan\n- Create marker with shell evidence.",
-          },
-        },
-      ],
-    },
-    {
-      assistant_message: "Creating and verifying the marker.",
+      assistant_message: "Creating and verifying the candidate plan marker.",
       tool_calls: [
         {
           id: "create-marker",
@@ -66,29 +34,15 @@ test("candidate plan stays advisory until main agent accepts it", async () => {
           args: {
             cmd: "printf 'candidate-plan-ok\\n' > .candidate-plan-marker && test \"$(cat .candidate-plan-marker)\" = candidate-plan-ok",
             summary: "create and verify candidate plan marker",
+            timeout: 60,
           },
         },
       ],
     },
     {
-      assistant_message: "Marker exists and was verified.",
-      tool_calls: [
-        {
-          id: "complete-marker",
-          name: "complete_task",
-          args: {
-            summary: "Marker .candidate-plan-marker contains candidate-plan-ok and was verified after accepting advisory plan memory.",
-            verificationContract: {
-              commands: [
-                {
-                  command: "test \"$(cat .candidate-plan-marker)\" = candidate-plan-ok",
-                  required: true,
-                },
-              ],
-            },
-          },
-        },
-      ],
+      assistant_message:
+        "Done: the candidate-plan marker was created and verified successfully; the shell check confirms the file contains candidate-plan-ok.",
+      tool_calls: [],
     },
   ]);
 
@@ -99,14 +53,27 @@ test("candidate plan stays advisory until main agent accepts it", async () => {
     modelGateway: gateway,
   }).run();
 
-  const mainAgentRequests = gateway.requests.filter((item) => item.source === "main_agent");
-  assert.ok(mainAgentRequests.length >= 4);
-  assert.match(String(mainAgentRequests[1]?.messages[0]?.content), /Active Plan\nNone\./);
-  assert.match(String(mainAgentRequests[1]?.messages[0]?.content), /Candidate 1:\n## Candidate Plan/);
-  assert.match(String(mainAgentRequests[1]?.messages[0]?.content), /- \[ \] marker: Create and verify candidate plan marker/);
-  assert.match(String(mainAgentRequests[2]?.messages[0]?.content), /Active Plan\n## Accepted Plan/);
-  assert.equal(result.events.some((event) => event.message_type === "task_completed"), true);
-  assert.equal(await readFile(path.join(workspaceRoot, ".candidate-plan-marker"), "utf8"), "candidate-plan-ok\n");
+  // Natural stop: the model emitted empty tool_calls + a final assistant_message.
+  assert.ok(result.assistantMessage.length > 0);
+  assert.match(result.assistantMessage, /candidate-plan marker was created and verified successfully/);
+
+  // The bash tool call executed and succeeded.
+  const bashResult = result.toolResults.find((item) => item.toolCallId === "create-marker");
+  assert.equal(bashResult?.name, "bash");
+  assert.equal(bashResult?.ok, true);
+
+  // The run did not use a complete_task tool call (no such tool in the
+  // model-facing surface); the model stopped on its own with empty tool_calls.
+  assert.equal(
+    result.toolResults.some((item) => item.name === "complete_task"),
+    false,
+  );
+
+  // The marker file exists with the expected content.
+  assert.equal(
+    await readFile(path.join(workspaceRoot, ".candidate-plan-marker"), "utf8"),
+    "candidate-plan-ok\n",
+  );
 });
 
 test("strategic runtime routing does not use currentStepIndex", async () => {
@@ -120,12 +87,18 @@ test("strategic runtime routing does not use currentStepIndex", async () => {
   assert.doesNotMatch(source, /new StateGraph|@langchain\/langgraph/);
 });
 
-class StaticJsonGateway implements ModelGateway {
-  readonly requests: GenerateRequest[] = [];
-  private readonly responses: unknown[];
+interface StaticResponse {
+  assistant_message?: string;
+  tool_calls?: Array<{ id: string; name: string; args: Record<string, unknown> }>;
+}
 
-  constructor(response: unknown[]) {
-    this.responses = response;
+class StreamingJsonGateway implements ModelGateway {
+  readonly requests: GenerateRequest[] = [];
+  private readonly responses: StaticResponse[];
+  private callIndex = 0;
+
+  constructor(responses: StaticResponse[]) {
+    this.responses = responses;
   }
 
   async resolveRole(role: ModelRole): Promise<ResolvedModelProfile> {
@@ -135,7 +108,7 @@ class StaticJsonGateway implements ModelGateway {
       provider: "test",
       model: "static-json",
       capabilities: {
-        streaming: false,
+        streaming: true,
         toolCalling: true,
         jsonMode: true,
         structuredOutput: true,
@@ -144,21 +117,30 @@ class StaticJsonGateway implements ModelGateway {
     };
   }
 
-  async generate(request: GenerateRequest): Promise<GenerateResult> {
-    this.requests.push(request);
-    const response = this.responses[Math.min(this.requests.length - 1, this.responses.length - 1)];
-    return {
-      role: request.role,
-      profileName: request.role,
-      provider: "test",
-      model: "static-json",
-      content: JSON.stringify(response),
-      finishReason: "stop",
-      raw: response,
-    };
+  async generate(_request: GenerateRequest): Promise<GenerateResult> {
+    throw new Error("generate not used; StreamingJsonGateway only supports stream()");
   }
 
-  async *stream(_request: GenerateRequest): AsyncIterable<StreamEvent> {}
+  async *stream(request: GenerateRequest): AsyncIterable<StreamEvent> {
+    this.requests.push(request);
+    const response = this.responses[Math.min(this.callIndex, this.responses.length - 1)] ?? { assistant_message: "", tool_calls: [] };
+    this.callIndex += 1;
+    yield { type: "message_start", data: { provider: "test", model: "static-json" } };
+    if (response.assistant_message) {
+      yield { type: "message_delta", content: response.assistant_message };
+    }
+    for (const call of response.tool_calls ?? []) {
+      yield {
+        type: "tool_call",
+        data: {
+          id: call.id,
+          name: call.name,
+          arguments: JSON.stringify(call.args),
+        },
+      };
+    }
+    yield { type: "message_end", data: { finishReason: "stop" } };
+  }
 
   async embed(request: EmbeddingRequest): Promise<EmbeddingResult> {
     return {

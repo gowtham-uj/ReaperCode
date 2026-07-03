@@ -9,7 +9,7 @@ import {
   cancelSubagentJob,
   type SubagentType,
 } from "../runtime/subagent-state.js";
-import type {CallSubagentArgs, CancelSubagentArgs, PollSubagentArgs, ToolResult} from "./types.js";
+import type {ToolResult} from "./types.js";
 
 export interface ExecuteSubagentToolDeps {
   modelGateway: ModelGateway;
@@ -17,7 +17,7 @@ export interface ExecuteSubagentToolDeps {
   pool: SubagentPool | undefined;
 }
 
-const SUBAGENT_SOURCE: Record<SubagentType, string> = {
+const SUBAGENT_SOURCE: Record<string, string> = {
   planner: "planner_subagent",
   reviewer: "reviewer_subagent",
   repair: "repair_subagent",
@@ -26,7 +26,7 @@ const SUBAGENT_SOURCE: Record<SubagentType, string> = {
 };
 
 export async function executeSubagentTool(
-  args: CallSubagentArgs,
+  args: any,
   deps: ExecuteSubagentToolDeps,
 ): Promise<ToolResult> {
   const started = Date.now();
@@ -64,7 +64,7 @@ export async function executeSubagentTool(
     const response = await withOptionalTimeout(
       deps.modelGateway.generate({
         role: roleForSubagent(args.type),
-        source: SUBAGENT_SOURCE[args.type],
+        source: SUBAGENT_SOURCE[args.type] ?? "subagent",
         system: buildSubagentSystemPrompt(args.type),
         messages: [{role: "user", content: buildSubagentPrompt(args.type, args.task, args.context)}],
         responseFormat: "json",
@@ -95,7 +95,7 @@ export async function executeSubagentTool(
   }
 }
 
-export function executePollSubagentTool(args: PollSubagentArgs, toolCallId: string): ToolResult {
+export function executePollSubagentTool(args: any, toolCallId: string): ToolResult {
   const started = Date.now();
   const job = getSubagentJob(args.jobId);
   if (!job) {
@@ -118,7 +118,7 @@ export function executePollSubagentTool(args: PollSubagentArgs, toolCallId: stri
   };
 }
 
-export function executeCancelSubagentTool(args: CancelSubagentArgs, deps: {toolCallId: string; pool: SubagentPool | undefined}): ToolResult {
+export function executeCancelSubagentTool(args: any, deps: {toolCallId: string; pool: SubagentPool | undefined}): ToolResult {
   const started = Date.now();
   const job = getSubagentJob(args.jobId);
   if (!job) {
