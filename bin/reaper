@@ -1,0 +1,19 @@
+#!/usr/bin/env node
+// bin/reaper — CLI entry point for Reaper.
+import { spawn } from "node:child_process";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const script = resolve(__dirname, "..", "scripts", "run-reaper.ts");
+
+const args = ["tsx", script, ...process.argv.slice(2)];
+const child = spawn("npx", args, {
+  stdio: "inherit",
+  cwd: resolve(__dirname, ".."),
+  env: process.env,
+});
+
+child.on("exit", (code) => {
+  process.exit(code ?? 1);
+});
