@@ -500,32 +500,36 @@ export class ReaperCLI {
       if (wantJson) {
         return { exitCode: result.status === "completed" ? 0 : 1, stdout: JSON.stringify(result, null, 2) + "\n", stderr: "" };
       }
+      const isDev = process.env.REAPER_DEV === "1" || process.env.REAPER_DEV === "true";
       const lines: string[] = [];
-      lines.push(`status: ${result.status}`);
-      lines.push(`duration: ${result.durationMs}ms`);
-      if (result.trajectoryPath) lines.push(`trajectory: ${result.trajectoryPath}`);
-      if (result.contentFingerprint) lines.push(`fingerprint: ${result.contentFingerprint}`);
-      if (result.verification) {
-        lines.push(`verification: ${result.verification.ok ? "ok" : "fail"} (attempts=${result.verification.attemptCount}${result.verification.reason ? `, reason=${result.verification.reason}` : ""})`);
-      }
-      if (result.assistantMessage) {
-        lines.push("");
-        lines.push("--- assistant ---");
-        lines.push(result.assistantMessage);
-      }
-      if (result.toolResults.length) {
-        lines.push("");
-        lines.push(`--- tool results (${result.toolResults.length}) ---`);
-        for (const tr of result.toolResults) {
-          lines.push(`- ${tr.name}${tr.id ? ` [${tr.id}]` : ""}`);
+      if (isDev) {
+        lines.push(`status: ${result.status}`);
+        lines.push(`duration: ${result.durationMs}ms`);
+        if (result.trajectoryPath) lines.push(`trajectory: ${result.trajectoryPath}`);
+        if (result.contentFingerprint) lines.push(`fingerprint: ${result.contentFingerprint}`);
+        if (result.verification) {
+          lines.push(`verification: ${result.verification.ok ? "ok" : "fail"} (attempts=${result.verification.attemptCount}${result.verification.reason ? `, reason=${result.verification.reason}` : ""})`);
+        }
+        if (result.assistantMessage) {
+          lines.push("");
+          lines.push("--- assistant ---");
+          lines.push(result.assistantMessage);
+        }
+        if (result.toolResults.length) {
+          lines.push("");
+          lines.push(`--- tool results (${result.toolResults.length}) ---`);
+          for (const tr of result.toolResults) {
+            lines.push(`- ${tr.name}${tr.id ? ` [${tr.id}]` : ""}`);
+          }
+        }
+        if (result.notices.length) {
+          lines.push("");
+          lines.push("--- notices ---");
+          for (const n of result.notices) lines.push(`[${n.kind}] ${n.message}`);
         }
       }
-      if (result.notices.length) {
-        lines.push("");
-        lines.push("--- notices ---");
-        for (const n of result.notices) lines.push(`[${n.kind}] ${n.message}`);
-      }
-      return { exitCode: result.status === "completed" ? 0 : 1, stdout: lines.join("\n") + "\n", stderr: "" };
+      // In prod mode, model output was already streamed live — nothing extra to print.
+      return { exitCode: result.status === "completed" ? 0 : 1, stdout: lines.length ? lines.join("\n") + "\n" : "", stderr: "" };
     } catch (e) {
       return { exitCode: 1, stdout: "", stderr: e instanceof Error ? e.message : String(e) };
     }
