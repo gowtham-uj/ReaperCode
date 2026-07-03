@@ -77,7 +77,7 @@
     "typescript": "^5.9.3"
   },
   "name": "reaper",
-  "version": "0.1.35",
+  "version": "0.1.36",
   "description": "Reaper coding agent runtime.",
   "main": "vite.config.js",
   "directories": {

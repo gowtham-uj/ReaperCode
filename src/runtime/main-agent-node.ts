@@ -1,7 +1,7 @@
 import type { GenerateRequest, GenerateResult, ModelGateway, ModelRole, TokenUsage } from "../model/types.js";
 import { normalizeToolCall } from "../tools/normalize.js";
 import { ToolCallSchema, type ToolCall } from "../tools/types.js";
-import { printAgentReasoning } from "./session-printer.js";
+import { dim } from "./session-printer.js";
 import { validateToolCallBatch, type ToolValidationBlocker } from "./tool-validation.js";
 
 export interface MainAgentCallInput {
@@ -46,7 +46,8 @@ export async function callMainAgent(input: MainAgentCallInput): Promise<MainAgen
     console.error("[REAPER_DEBUG_MAIN_AGENT] RESPONSE content:", response.content.slice(0, 2000));
     console.error("[REAPER_DEBUG_MAIN_AGENT] RESPONSE toolCalls:", JSON.stringify(response.toolCalls));
   }
-  printAgentReasoning(response.reasoningContent, response.content);
+  // Reasoning and content are already streamed to stdout live during
+  // streamMainAgentResponse — no need to print them again here.
   if (response.finishReason === "length") {
     const validation = validateToolCallBatch([], { agentRole: "main" });
     return {
@@ -106,13 +107,24 @@ export async function streamMainAgentResponse(
       continue;
     }
     if (event.type === "message_delta") {
-      if (typeof event.content === "string") content += event.content;
+      if (typeof event.content === "string") {
+        content += event.content;
+        // Live stream actual model output to stdout immediately — no buffering
+        process.stdout.write(event.content);
+      }
       const data = asRecord(event.data);
-      if (typeof data?.reasoningContent === "string") reasoningContent += data.reasoningContent;
+      if (typeof data?.reasoningContent === "string") {
+        reasoningContent += data.reasoningContent;
+        // Live stream reasoning as dimmed "thinking" text
+        process.stdout.write(dim(data.reasoningContent, process.stdout as NodeJS.WriteStream));
+      }
       continue;
     }
     if (event.type === "reasoning_delta") {
-      if (typeof event.content === "string") reasoningContent += event.content;
+      if (typeof event.content === "string") {
+        reasoningContent += event.content;
+        process.stdout.write(dim(event.content, process.stdout as NodeJS.WriteStream));
+      }
       continue;
     }
     if (event.type === "tool_call") {

@@ -14,7 +14,39 @@
  */
 
 import path from "node:path";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync, existsSync } from "node:fs";
+
+function loadEnvFiles(): void {
+  const candidates = [
+    path.join(process.env.HOME ?? "~", ".reaper", ".env"),
+    path.join(process.env.HOME ?? "~", ".hermes", ".env"),
+    path.resolve(process.cwd(), ".env"),
+  ];
+  for (const envPath of candidates) {
+    if (!existsSync(envPath)) continue;
+    try {
+      const content = readFileSync(envPath, "utf8");
+      for (const line of content.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith("#")) continue;
+        const eqIdx = trimmed.indexOf("=");
+        if (eqIdx === -1) continue;
+        const key = trimmed.slice(0, eqIdx).trim();
+        let value = trimmed.slice(eqIdx + 1).trim();
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+          value = value.slice(1, -1);
+        }
+        if (!process.env[key]) {
+          process.env[key] = value;
+        }
+      }
+    } catch {
+      // ignore read errors
+    }
+  }
+}
+
+loadEnvFiles();
 
 import { ReaperCLI } from "../src/adaptive/cli.js";
 
