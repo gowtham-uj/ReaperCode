@@ -73,11 +73,12 @@ test("replace_symbol updates a parsed symbol safely", async () => {
   assert.match(file, /a \+ b \+ 10/);
 });
 
-test("large-file safe edit guard blocks replace_in_file until a full read occurs", async () => {
+test("large-file safe edit guard is removed — replace_in_file succeeds without pre-reading", async () => {
   const workspaceRoot = await createGraphWorkspace();
   const executor = createExecutor(workspaceRoot);
 
-  const blocked = await executor.execute({
+  // With the safe-edit guard removed, editing a large file without reading first should SUCCEED.
+  const result = await executor.execute({
     id: "1",
     name: "replace_in_file",
     args: {
@@ -87,23 +88,7 @@ test("large-file safe edit guard blocks replace_in_file until a full read occurs
     },
   });
 
-  assert.equal(blocked.ok, false);
-  assert.match(blocked.error?.message ?? "", /safe-edit threshold/);
-
-  const read = await executor.execute({ id: "2", name: "read_file", args: { path: "src/large.ts" } });
-  assert.equal(read.ok, true);
-
-  const allowed = await executor.execute({
-    id: "3",
-    name: "replace_in_file",
-    args: {
-      path: "src/large.ts",
-      oldString: "export const line_10 = 10;",
-      newString: "export const line_10 = 999;",
-    },
-  });
-
-  assert.equal(allowed.ok, true);
+  assert.equal(result.ok, true, "replace_in_file should succeed without pre-reading (guard removed)");
 });
 
 test("dependency ranking uses structure and lexical relevance", async () => {

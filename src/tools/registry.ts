@@ -1,7 +1,4 @@
 import {
-  CompleteTaskArgsSchema,
-  AdvanceStepArgsSchema,
-  DelegateToPlanArgsSchema,
   DeleteFileArgsSchema,
   GetToolOutputArgsSchema,
   GrepSearchArgsSchema,
@@ -38,14 +35,6 @@ import {
   WriteFileArgsSchema,
   ActivateSkillArgsSchema,
   WebFetchArgsSchema,
-  TaskCreateArgsSchema,
-  TaskUpdateArgsSchema,
-  TaskListArgsSchema,
-  UpdatePlanArgsSchema,
-  UpdateTodoArgsSchema,
-  CallSubagentArgsSchema,
-  PollSubagentArgsSchema,
-  CancelSubagentArgsSchema,
   SearchToolsArgsSchema,
 } from "./types.js";
 import {
@@ -54,8 +43,11 @@ import {
   FileFindArgsSchema,
   FileEditArgsSchema,
 } from "./viewer/types.js";
-import { AgentArgsSchema } from "./agent.types.js";
-import { AgentSwarmArgsSchema } from "./agent-swarm.types.js";
+import { ApplyPatchArgsSchema } from "./apply-patch.js";
+import { GlobArgsSchema } from "./glob.js";
+import { EvalArgsSchema } from "./eval.js";
+import { JobArgsSchema } from "./job.js";
+import { AstGrepArgsSchema, DiagnosticsArgsSchema } from "./ast-grep.js";
 import {
   CreateSkillArgsSchema,
   TestSkillArgsSchema,
@@ -273,76 +265,14 @@ export const toolRegistry = {
     description: "Activates a specialized agent skill by name (Available: 'skill-creator', 'github', etc.). Returns the skill's instructions wrapped in <activated_skill> tags.",
     argsSchema: ActivateSkillArgsSchema,
   },
-  complete_task: {
-    description: "Signal task completion and trigger verification",
-    argsSchema: CompleteTaskArgsSchema,
-  },
-  advance_step: {
-    description: "Signal that the current plan step is complete and Reaper should move to the next step. This is a control-plane signal, not a filesystem operation.",
-    argsSchema: AdvanceStepArgsSchema,
-  },
-  delegate_to_plan: {
-    description: "Delegate work to orchestrated sub-agents",
-    argsSchema: DelegateToPlanArgsSchema,
-  },
   web_fetch: {
     description: "Fetch and extract text content from a URL. Use for reading documentation, API references, or any web page.",
     argsSchema: WebFetchArgsSchema,
-  },
-  task_create: {
-    description:
-      "Create a task in the session todo list. Use proactively for any work requiring 3+ distinct steps, multi-file changes, or multiple features. Each task has an imperative 'subject' (e.g. 'Add auth middleware') and a 'description' of what done looks like. Decompose the user's request into specific, actionable tasks at the start of work; add new ones as you discover follow-up work.",
-    argsSchema: TaskCreateArgsSchema,
-  },
-  task_update: {
-    description:
-      "Update a task's status. Set status='in_progress' BEFORE starting work on it; set status='completed' IMMEDIATELY after finishing (do not batch completions). Exactly ONE task should be in_progress at a time. Only mark completed when fully accomplished (tests passing, implementation finished, no unresolved errors).",
-    argsSchema: TaskUpdateArgsSchema,
-  },
-  task_list: {
-    description:
-      "List current todos with their statuses. Call this when uncertain what to work on next, or to confirm the task list is up to date before completion.",
-    argsSchema: TaskListArgsSchema,
-  },
-  update_plan: {
-    description:
-      "Update advisory cockpit plan memory for this run only. Use candidate:true to store a candidate plan without replacing the current active plan.",
-    argsSchema: UpdatePlanArgsSchema,
-  },
-  update_todo: {
-    description:
-      "Update advisory cockpit TODO memory for this run only. By default replaces the list; append:true upserts the provided items into the current list.",
-    argsSchema: UpdateTodoArgsSchema,
-  },
-  call_subagent: {
-    description:
-      "Call a blocking or background advisory subagent (planner, reviewer, repair, tester, or researcher) and return its JSON result as an observation. Subagents cannot execute tools, mutate files, alter routing, or call subagents.",
-    argsSchema: CallSubagentArgsSchema,
-  },
-  poll_subagent: {
-    description:
-      "Check the status of a background subagent job by its jobId. Returns running, completed, failed, or cancelled along with the result/error when completed.",
-    argsSchema: PollSubagentArgsSchema,
-  },
-  cancel_subagent: {
-    description:
-      "Cancel a background subagent job by its jobId. Returns the updated status.",
-    argsSchema: CancelSubagentArgsSchema,
   },
   search_tools: {
     description:
       "Search available tools by keyword or direct select:<tool_name>. Call this when you need a capability not shown in the current tool list (e.g. background processes, web fetching, symbol rename). Returns matching tool names and descriptions, and promotes them to full-schema rendering on subsequent turns.",
     argsSchema: SearchToolsArgsSchema,
-  },
-  agent: {
-    description:
-      "Delegate a focused task to a subagent and get a compact summary back. The subagent has its own context and tool set; you only see its final summary. Use this when work can be cleanly isolated, parallelized, or has a clearly bounded scope. Built-in types: `coder` (default; full read/write/test/command), `explore` (read-only fast codebase exploration), `plan` (read-only planning). Subagents cannot spawn further subagents by default.",
-    argsSchema: AgentArgsSchema,
-  },
-  agent_swarm: {
-    description:
-      "Fan out a task to many subagents in parallel from a single tool call. Provide a `prompt_template` containing the `{{item}}` placeholder and an `items` list — each element is substituted in and launches one subagent. Up to 128 items, bounded concurrency. Each subagent's transcript is independent; you only see the consolidated `<agent_swarm_result>` block. Use this when you have many independent investigations or tasks that can run in parallel.",
-    argsSchema: AgentSwarmArgsSchema,
   },
   /* ----- Skill authoring (5) ----- */
   create_skill: {
@@ -426,6 +356,36 @@ export const toolRegistry = {
   reload_hooks: {
     description: "Re-walk the hook install dirs and rebuild the in-memory hook registry. Useful after hand-editing.",
     argsSchema: ReloadHooksArgsSchema,
+  },
+  apply_patch_edit: {
+    description:
+      "Apply a unified-diff patch that can modify multiple files in a single call. Supports new file creation (--- /dev/null), context lines, additions, and removals. Use for multi-file edits or when you need to apply a diff from an external source. Post-write diagnostics are advisory only. Pass dry_run:true to preview without writing.",
+    argsSchema: ApplyPatchArgsSchema,
+  },
+  glob: {
+    description:
+      "Find files matching a glob pattern without using bash. Supports patterns like 'src/tools/*.ts' or 'double-star recursive matching'. Returns matching file paths and count. Faster and more structured than 'bash find'.",
+    argsSchema: GlobArgsSchema,
+  },
+  eval: {
+    description:
+      "Evaluate a short JavaScript or Python code snippet and return the output. Faster than bash for small computations, counting, or AST probes. Supports timeout (default 10s, max 30s). Use 'javascript' (default) or 'python' language.",
+    argsSchema: EvalArgsSchema,
+  },
+  job: {
+    description:
+      "Unified facade over background processes. Actions: start (background command), list (all jobs), poll (read output), cancel (send signal), write (to stdin). Unifies read_background_output + signal_process + write_to_process.",
+    argsSchema: JobArgsSchema,
+  },
+  ast_grep: {
+    description:
+      "Search for symbol declarations (functions, classes, methods, variables) across the codebase by name. Returns file, line, kind, and snippet. Supports language and kind filters. Faster and more precise than grep for code navigation.",
+    argsSchema: AstGrepArgsSchema,
+  },
+  diagnostics: {
+    description:
+      "Run post-write diagnostics (tsc, eslint) on a file and return results as advisory info. Never blocks the write — just reports. Use after editing a file to check for type or lint errors.",
+    argsSchema: DiagnosticsArgsSchema,
   },
 } as const;
 

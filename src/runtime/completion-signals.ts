@@ -16,16 +16,16 @@ export interface CompletionToolCall {
   };
 }
 
-function isCompletionToolCall(call: ToolCall): call is ToolCall & CompletionToolCall {
-  return call.name === "complete_task" && typeof (call as CompletionToolCall).args?.summary === "string";
+function isany(call: ToolCall): call is ToolCall & any {
+  return (call.name as string) === "complete_task" && typeof (call as any).args?.summary === "string";
 }
 
 export function getCompletionSummary(toolCalls: ToolCall[]): string | undefined {
-  const completion = toolCalls.find(isCompletionToolCall);
+  const completion = toolCalls.find(isany);
   return completion?.args.summary;
 }
 
-export function isLowConfidenceCompletion(completion: CompletionToolCall): boolean {
+export function isLowConfidenceCompletion(completion: any): boolean {
   return (
     completion.args.confidence === "low" ||
     Boolean(completion.args.clarification?.trim()) ||

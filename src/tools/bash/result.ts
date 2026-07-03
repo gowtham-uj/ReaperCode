@@ -19,7 +19,12 @@ export async function buildBashResultOutput(
   let stdout = base.stdout;
   let stderr = base.stderr;
 
-  if (base.persisted_output_path && stdout.length > BASH_INPUT_DEFAULTS.PREVIEW_SIZE_CHARS) {
+  // Only truncate if output was ACTUALLY persisted due to size,
+  // not just because a process log file exists.
+  // The persisted_output_path is set for every command (process logging),
+  // but persisted_output_size > 0 combined with stdout exceeding the
+  // PERSIST_THRESHOLD means the output was too large to return inline.
+  if (base.persisted_output_path && base.persisted_output_size && base.persisted_output_size > BASH_INPUT_DEFAULTS.PERSIST_THRESHOLD_CHARS && stdout.length > BASH_INPUT_DEFAULTS.PREVIEW_SIZE_CHARS) {
     stdout = stdout.slice(0, BASH_INPUT_DEFAULTS.PREVIEW_SIZE_CHARS) +
       `\n\n... output persisted to ${base.persisted_output_path} (${base.persisted_output_size ?? "unknown"} bytes) ...\n`;
     stderr = stderr.slice(0, BASH_INPUT_DEFAULTS.PREVIEW_SIZE_CHARS) || "";
@@ -36,7 +41,9 @@ export async function buildBashResultOutput(
   if (stderr) {
     text += `\n\nstderr:\n${stderr}`;
   }
-  if (base.persisted_output_path) {
+  // Only show the "Full output written to" notice if the output was
+  // actually persisted due to size (not just process logging).
+  if (base.persisted_output_path && base.persisted_output_size && base.persisted_output_size > BASH_INPUT_DEFAULTS.PERSIST_THRESHOLD_CHARS) {
     text += `\n\n[Full output written to ${base.persisted_output_path}]`;
   }
 

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -9,97 +10,49 @@ import { RuntimeEngine } from "../../src/runtime/engine.js";
 import { createValidConfig, createValidRequestEnvelope } from "../fixtures/phase0.js";
 import { createTempWorkspace } from "../fixtures/workspace.js";
 
-test("non-barrier shell commands see staged WAL content before final flush", async () => {
+test("tool_calls execute in order and a shell command sees the file written by an earlier call", async () => {
   const workspaceRoot = await createTempWorkspace();
   const request = createValidRequestEnvelope();
   request.payload = {
-    prompt: "Stage a write and inspect it without flushing first",
+    prompt: "Write a file then read it back with bash",
     tool_calls: [
-      { id: "1", name: "replace_in_file", args: { path: "src/app.ts", oldString: "41", newString: "42" } },
-      { id: "2", name: "bash", args: { cmd: "node -e \"const fs=require('fs'); process.stdout.write(fs.readFileSync('src/app.ts','utf8'))\"" } },
-    ],
-  };
-
-  const engine = new RuntimeEngine({ config: createValidConfig(), workspaceRoot, requestEnvelope: request });
-  const result = await engine.run();
-  const shellOutput = result.toolResults.find((item) => item.name === "bash")?.output as { stdout: string };
-  const disk = await readFile(path.join(workspaceRoot, "src", "app.ts"), "utf8");
-
-  assert.match(shellOutput.stdout, /42/);
-  assert.match(disk, /42/);
-});
-
-test("barrier-flushed writes survive later batch failures", async () => {
-  const workspaceRoot = await createTempWorkspace();
-  const request = createValidRequestEnvelope();
-  request.payload = {
-    prompt: "Use a barrier command and then fail later",
-    tool_calls: [
-      { id: "1", name: "replace_in_file", args: { path: "src/app.ts", oldString: "41", newString: "42" } },
+      { id: "1", name: "write_file", args: { path: "src/app.ts", content: "export const answer = 42;\n" } },
       {
         id: "2",
         name: "bash",
         args: {
           cmd: "node -e \"const fs=require('fs'); process.stdout.write(fs.readFileSync('src/app.ts','utf8'))\"",
-          barrier: true,
+          timeout: 60,
         },
       },
-      { id: "3", name: "replace_in_file", args: { path: "src/app.ts", oldString: "does-not-exist", newString: "99" } },
     ],
   };
 
   const engine = new RuntimeEngine({ config: createValidConfig(), workspaceRoot, requestEnvelope: request });
   const result = await engine.run();
-  const shellOutput = result.toolResults.find((item) => item.toolCallId === "2")?.output as { stdout: string };
+  const shellOutput = result.toolResults.find((item) => item.toolCallId === "2")?.output as { stdout?: string };
   const disk = await readFile(path.join(workspaceRoot, "src", "app.ts"), "utf8");
 
-  assert.match(shellOutput.stdout, /42/);
   assert.equal(result.toolResults.find((item) => item.toolCallId === "1")?.ok, true);
-  assert.equal(result.toolResults.find((item) => item.toolCallId === "3")?.ok, false);
-  assert.match(disk, /42/);
-});
-
-test("build-style commands are auto-promoted to barrier mode", async () => {
-  const workspaceRoot = await createTempWorkspace();
-  const request = createValidRequestEnvelope();
-  request.payload = {
-    prompt: "Use npm version while staged write exists",
-    tool_calls: [
-      { id: "1", name: "replace_in_file", args: { path: "src/app.ts", oldString: "41", newString: "42" } },
-      { id: "2", name: "bash", args: { cmd: "npm --version" } },
-    ],
-  };
-
-  const engine = new RuntimeEngine({ config: createValidConfig(), workspaceRoot, requestEnvelope: request });
-  const result = await engine.run();
-  const shellOutput = result.toolResults.find((item) => item.toolCallId === "2")?.output as { stdout: string };
-  const disk = await readFile(path.join(workspaceRoot, "src", "app.ts"), "utf8");
-
   assert.equal(result.toolResults.find((item) => item.toolCallId === "2")?.ok, true);
-  assert.match(shellOutput.stdout, /\d+/);
+  assert.match(shellOutput?.stdout ?? "", /42/);
   assert.match(disk, /42/);
 });
 
-test("concurrent non-barrier pool returns results in completion order", async () => {
+test("when one tool call fails and another succeeds, the successful write persists on disk", async () => {
   const workspaceRoot = await createTempWorkspace();
   const request = createValidRequestEnvelope();
   request.payload = {
-    prompt: "Run two independent non-barrier commands concurrently",
+    prompt: "Make a valid write and a failing write; the valid one should survive",
     tool_calls: [
+      { id: "1", name: "write_file", args: { path: "src/valid.ts", content: "export const persisted = true;\n" } },
       {
-        id: "slow",
+        id: "2",
         name: "bash",
         args: {
-          cmd: "node -e \"const fs=require('fs'); const start=Date.now(); const tick=()=>{ if (fs.existsSync('fast.marker') || Date.now()-start>5000) setTimeout(()=>console.log('slow'),250); else setTimeout(tick,25); }; tick();\"",
-          forceNonBarrier: true,
-        },
-      },
-      {
-        id: "fast",
-        name: "bash",
-        args: {
-          cmd: "node -e \"require('fs').writeFileSync('fast.marker','1'); console.log('fast')\"",
-          forceNonBarrier: true,
+          // writing into a nonexistent directory fails (non-barrier shell)
+          cmd: "printf 'x' > nope/missing-dir/file.txt",
+          timeout: 60,
         },
       },
     ],
@@ -107,32 +60,40 @@ test("concurrent non-barrier pool returns results in completion order", async ()
 
   const engine = new RuntimeEngine({ config: createValidConfig(), workspaceRoot, requestEnvelope: request });
   const result = await engine.run();
-  const completed = result.events
-    .filter((event) => event.message_type === "tool_call_completed")
-    .map((event) => ({
-      toolCallId: (event.payload as { result?: { toolCallId?: string } }).result?.toolCallId,
-    }));
+  const disk = await readFile(path.join(workspaceRoot, "src", "valid.ts"), "utf8");
 
-  assert.equal(completed[0]?.toolCallId, "fast");
-  assert.equal(completed[1]?.toolCallId, "slow");
+  assert.equal(result.toolResults.find((item) => item.toolCallId === "1")?.ok, true);
+  assert.equal(result.toolResults.find((item) => item.toolCallId === "2")?.ok, false);
+  assert.match(disk, /persisted/);
 });
 
-test("runtime blocks shell-created empty source placeholders", async () => {
+test("shell command that creates empty source placeholders succeeds (no synthetic block)", async () => {
   const workspaceRoot = await createTempWorkspace();
   const request = createValidRequestEnvelope();
   request.payload = {
-    prompt: "Try to create empty source placeholders",
+    prompt: "Try to create empty source placeholders via shell",
     tool_calls: [
-      { id: "1", name: "bash", args: { cmd: ": > src/db.ts && touch src/types.ts" } },
+      {
+        id: "1",
+        name: "bash",
+        args: {
+          cmd: ": > src/db.ts && touch src/types.ts",
+          timeout: 60,
+        },
+      },
     ],
   };
 
   const engine = new RuntimeEngine({ config: createValidConfig(), workspaceRoot, requestEnvelope: request });
   const result = await engine.run();
-  const blocked = result.toolResults.find((item) => item.toolCallId === "1");
+  const shellResult = result.toolResults.find((item) => item.toolCallId === "1");
 
-  assert.equal(blocked?.ok, false);
-  assert.equal(blocked?.error?.code, "source_empty_placeholder_shell_blocked");
+  // The guard that used to block this (source_empty_placeholder_shell_blocked)
+  // was removed. The model gets the real shell result: the command succeeds.
+  assert.equal(shellResult?.ok, true);
+  assert.notEqual(shellResult?.error?.code, "source_empty_placeholder_shell_blocked");
+  await access(path.join(workspaceRoot, "src", "db.ts"));
+  await access(path.join(workspaceRoot, "src", "types.ts"));
 });
 
 test("allocated scratch workspaces allow full writes over empty generated source files", async () => {
