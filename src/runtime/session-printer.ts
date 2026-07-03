@@ -53,7 +53,7 @@ function supportsColor(out: NodeJS.WriteStream): boolean {
   return false;
 }
 
-function dim(text: string, out: NodeJS.WriteStream = globalOut): string {
+export function dim(text: string, out: NodeJS.WriteStream = globalOut): string {
   return supportsColor(out) ? `\x1b[2m${text}\x1b[0m` : text;
 }
 
