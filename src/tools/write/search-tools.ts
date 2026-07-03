@@ -1,8 +1,10 @@
 import type { z } from "zod";
 import { toolRegistry } from "../registry.js";
-import { normalizeToolName, scoreTool } from "../../context/tool-search.js";
+import { normalizeToolName } from "../../context/tool-search.js";
 import { discoverTools } from "../discovery.js";
 import { SearchToolsArgsSchema } from "../types.js";
+import { bm25SearchTools, resetBM25Index } from "../bm25-search.js";
+import { buildDescriptorsFromRegistry, resetDescriptors } from "../descriptor-builder.js";
 
 export { SearchToolsArgsSchema };
 
@@ -14,11 +16,27 @@ export interface SearchToolsResult {
   total_tools: number;
 }
 
+/** Ensure descriptors are built before BM25 search. */
+function ensureDescriptors(): void {
+  if (getAllToolDescriptors().length === 0) {
+    buildDescriptorsFromRegistry();
+  }
+}
+
+// Need to import getAllToolDescriptors for the guard
+import { getAllToolDescriptors } from "../descriptor.js";
+
 /**
- * Search the tool registry by keyword and promote matches to full-schema rendering.
+ * Search the tool registry by keyword (BM25) and promote matches to full-schema rendering.
  * The model calls this when it needs a capability not in the core tool set.
+ *
+ * Phase 2: now uses BM25 ranking over the ToolDescriptor index instead of
+ * the old keyword-substring scoring. Select: prefix still works for exact
+ * name promotion.
  */
 export function executeSearchTools(query: string, runId: string): SearchToolsResult {
+  ensureDescriptors();
+
   const normalized = query.toLowerCase().trim();
   const catalog = Object.entries(toolRegistry);
   const selectMatch = normalized.match(/^select:(.+)$/i);
@@ -43,37 +61,13 @@ export function executeSearchTools(query: string, runId: string): SearchToolsRes
     };
   }
 
-  const requiredTerms: string[] = [];
-  const optionalTerms: string[] = [];
-  for (const term of normalized.split(/\s+/).filter(Boolean)) {
-    if (term.startsWith("+") && term.length > 1) {
-      requiredTerms.push(term.slice(1));
-    } else {
-      optionalTerms.push(term);
-    }
-  }
-  const searchText = [...requiredTerms, ...optionalTerms].join(" ");
-
-  const scored = catalog
-    .filter(([name, spec]) => {
-      if (requiredTerms.length === 0) return true;
-      const haystack = `${name.toLowerCase()} ${normalizeToolName(name)} ${spec.description.toLowerCase()}`;
-      return requiredTerms.every((term) => haystack.includes(term));
-    })
-    .map(([name, spec]) => ({
-      name,
-      description: spec.description,
-      score: scoreTool(name, spec.description, searchText),
-    }))
-    .filter((item) => item.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 6);
-
-  const discovered = scored.map((s) => s.name);
+  // Phase 2: BM25 search over descriptor index
+  const bm25Results = bm25SearchTools(query, 6);
+  const discovered = bm25Results.map((r) => r.name);
   discoverTools(discovered, runId);
 
   return {
-    matches: scored.map(({ name, description }) => ({ name, description })),
+    matches: bm25Results.map(({ name, description }) => ({ name, description })),
     discovered,
     total_tools: Object.keys(toolRegistry).length,
   };

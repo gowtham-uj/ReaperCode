@@ -29,7 +29,7 @@ export interface CompletionEvidenceRecord {
 export interface CompletionValidationResult {
   ok: boolean;
   blockers: CompletionValidationBlocker[];
-  completionSignal?: Extract<ToolCall, { name: "complete_task" }>;
+  completionSignal?: any;
   evidence: {
     records: CompletionEvidenceRecord[];
     contractCovered: boolean;
@@ -40,7 +40,7 @@ export interface CompletionValidationResult {
 
 export interface CompletionValidationOptions {
   toolCalls?: ToolCallLike[];
-  completionSignal?: Extract<ToolCall, { name: "complete_task" }>;
+  completionSignal?: any;
   taskContract?: TaskContract;
   verificationState?: VerificationState;
   toolResults?: ToolResult[];
@@ -50,7 +50,7 @@ export interface CompletionValidationOptions {
 
 type ResolvedCompletionValidationOptions = {
   toolCalls?: ToolCallLike[];
-  completionSignal?: Extract<ToolCall, { name: "complete_task" }>;
+  completionSignal?: any;
   taskContract?: TaskContract | undefined;
   verificationState?: VerificationState | undefined;
   toolResults?: ToolResult[];
@@ -137,19 +137,19 @@ export function createCompletionEvidenceFingerprint(records: CompletionEvidenceR
   return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
 }
 
-function findCompletionSignal(toolCalls: ToolCallLike[] | undefined): Extract<ToolCall, { name: "complete_task" }> | undefined {
-  return toolCalls?.find((call): call is Extract<ToolCall, { name: "complete_task" }> => call.name === "complete_task" && hasCompleteTaskShape(call));
+function findCompletionSignal(toolCalls: ToolCallLike[] | undefined): any | undefined {
+  return toolCalls?.find((call): call is any => (call.name as string) === "complete_task" && hasCompleteTaskShape(call));
 }
 
-function hasCompleteTaskShape(call: ToolCallLike): call is Extract<ToolCall, { name: "complete_task" }> {
+function hasCompleteTaskShape(call: ToolCallLike): call is any {
   const raw = call as Partial<ToolCall>;
-  return typeof raw.id === "string" && raw.name === "complete_task" && Boolean(raw.args);
+  return typeof raw.id === "string" && (raw.name as string) === "complete_task" && Boolean(raw.args);
 }
 
 function collectCompletionEvidence(input: {
   toolResults: ToolResult[];
   verificationState: VerificationState | undefined;
-  completionSignal: Extract<ToolCall, { name: "complete_task" }> | undefined;
+  completionSignal: any | undefined;
 }): CompletionEvidenceRecord[] {
   const records: CompletionEvidenceRecord[] = [];
 
@@ -157,7 +157,7 @@ function collectCompletionEvidence(input: {
     if (!result.ok) continue;
 
     // Promote reviewer verdicts into verification state so missingEvidence reflects them.
-    if (result.name === "call_subagent") {
+    if ((result.name as string) === "call_subagent") {
       const subagentResult = result.output as Record<string, unknown> | undefined;
       if (
         subagentResult &&

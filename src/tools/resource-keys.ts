@@ -63,12 +63,6 @@ export function declaredResourcesForToolCall(call: ToolCall): ResourceKeys {
       return kind === "shell_non_barrier" ? EMPTY_RESOURCE_KEYS : { declared: false, keys: ["shell:barrier"] };
     }
 
-    case "update_plan":
-      return { declared: false, keys: ["plan"] };
-    case "update_todo":
-      return { declared: false, keys: ["todo"] };
-    case "complete_task":
-    case "advance_step":
       return EMPTY_RESOURCE_KEYS;
 
     default:
