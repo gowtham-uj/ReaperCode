@@ -1,5 +1,6 @@
 // @ts-nocheck — stale tool surface cleanup in progress; will be removed once all refs are cleaned
 import { createHash, randomUUID } from "node:crypto";
+import { shakeConversation } from "../context/shake.js";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdir,  readFile,  writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -1020,6 +1021,28 @@ export class RuntimeEngine {
           }
           if (scheduled.aborted) {
             break;
+          }
+          // Shake: prune stale tool results from context when approaching
+          // the context window threshold. Ported from oh-my-pi's shake
+          // technique — mechanically replaces old/stale tool results with
+          // short placeholders. No LLM call needed. Triggers only when
+          // context exceeds 50% of the model's context window, not every turn.
+          const contextWindow = getBoot().state.tokenBudget?.softCap ?? 200_000;
+          const shakeResult = shakeConversation(liveConversation as any[], contextWindow);
+          if (shakeResult.performed) {
+            await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
+            await this.trajectoryLogger.write({
+              event_id: randomUUID(),
+              run_id: getBoot().state.runId,
+              session_id: getBoot().state.sessionId,
+              trace_id: getBoot().state.runId,
+              timestamp: new Date().toISOString(),
+              log_schema_version: 1,
+              kind: "context_shake",
+              level: getBoot().state.logLevel,
+              shaken_results: shakeResult.shaken,
+              saved_chars: shakeResult.savedChars,
+            });
           }
           continue;
         }

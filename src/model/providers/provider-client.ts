@@ -11,6 +11,7 @@ import { AnthropicClient } from "./anthropic.js";
 import { CerebrasClient } from "./cerebras.js";
 import { DeepSeekClient } from "./deepseek.js";
 import { LiteLLMProviderClient, type LiteLLMGatewayOptions } from "./litellm-gateway.js";
+import { CodexResponsesClient } from "./codex-responses.js";
 import {
   bindProvidersToFamily,
   registerFamily,
@@ -44,12 +45,14 @@ export class ProviderMultiplexerClient implements ProviderModelClient {
   private readonly cerebras: CerebrasClient;
   private readonly anthropic: AnthropicClient;
   private readonly openAiCompatible: LiteLLMProviderClient;
+  private readonly codexResponses: CodexResponsesClient;
 
   constructor(options: ProviderClientOptions = {}) {
     this.deepseek = options.deepseek ?? new DeepSeekClient();
     this.cerebras = options.cerebras ?? new CerebrasClient();
     this.anthropic = options.anthropic ?? new AnthropicClient();
     this.openAiCompatible = options.openAiCompatible ?? new LiteLLMProviderClient(options);
+    this.codexResponses = new CodexResponsesClient();
 
     // Phase T3.15: register built-in families and provider-name
     // bindings. Re-registration is safe (it replaces the prior
@@ -59,6 +62,7 @@ export class ProviderMultiplexerClient implements ProviderModelClient {
     // identical.
     registerFamily("anthropic-messages", () => this.anthropic);
     registerFamily("openai-chat", () => this.openAiCompatible);
+    registerFamily("codex-responses", () => this.codexResponses);
     bindProvidersToFamily(
       [
         "anthropic",
@@ -84,6 +88,7 @@ export class ProviderMultiplexerClient implements ProviderModelClient {
     // These bindings override the broad openai-chat binding above.
     bindProvidersToFamily(["deepseek"], "deepseek-direct");
     bindProvidersToFamily(["cerebras"], "cerebras-direct");
+    bindProvidersToFamily(["openai-codex"], "codex-responses");
     registerFamily("deepseek-direct", () => this.deepseek);
     registerFamily("cerebras-direct", () => this.cerebras);
     // Anthropic speaks the native Anthropic Messages wire, not the
@@ -111,6 +116,7 @@ export class ProviderMultiplexerClient implements ProviderModelClient {
       this.cerebras,
       this.anthropic,
       this.openAiCompatible,
+      this.codexResponses,
     ];
     await Promise.all([...new Set(clients)].map((client) => client.dispose?.()));
   }

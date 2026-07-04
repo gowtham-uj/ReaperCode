@@ -94,6 +94,29 @@ export const PROVIDER_CATALOG: ProviderDescriptor[] = [
     authScheme: "bearer",
   },
 
+  // ── OpenAI Codex (ChatGPT OAuth backend) ───────────────────────
+  {
+    id: "openai-codex",
+    label: "OpenAI Codex (ChatGPT OAuth)",
+    sdkFamily: "openai-chat",
+    baseUrl: "https://chatgpt.com/backend-api/codex",
+    envVar: "OPENAI_CODEX_ACCESS_TOKEN",
+    keyHint: "OAuth access token copied from Hermes auth openai-codex credential pool; do not persist it in repo files",
+    defaultModel: "gpt-5.4",
+    models: ["gpt-5.4", "gpt-5", "gpt-5-codex", "gpt-5.5", "gpt-5.5-codex"],
+    capabilities: {
+      streaming: true,
+      toolCalling: true,
+      jsonMode: true,
+      structuredOutput: true,
+      embeddings: false,
+      maxContextTokens: 200_000,
+      maxOutputTokens: 32_000,
+    },
+    supportsReasoning: true,
+    authScheme: "bearer",
+  },
+
   // ── NuralWatt / NeuralWatt (sdkFamily: openai-chat) ────────────
   {
     id: "nuralwatt",
