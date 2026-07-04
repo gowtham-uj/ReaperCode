@@ -39,6 +39,78 @@ export interface ViewWindow {
 
 const DEFAULT_WINDOW = 50;
 
+type PatternCandidate = { pattern: string; caseInsensitive: boolean };
+type PatternMatch = { line: number; pattern: string; caseInsensitive: boolean };
+
+function uniqueNonEmpty(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of values) {
+    const value = raw.trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
+}
+
+function unquotePattern(pattern: string): string {
+  const trimmed = pattern.trim();
+  if (trimmed.length >= 2) {
+    const first = trimmed[0];
+    const last = trimmed[trimmed.length - 1];
+    if ((first === '"' && last === '"') || (first === "'" && last === "'") || (first === "`" && last === "`")) {
+      return trimmed.slice(1, -1).trim();
+    }
+  }
+  return trimmed;
+}
+
+function singularPluralVariants(pattern: string): string[] {
+  const variants = [pattern];
+  if (pattern.endsWith("ies") && pattern.length > 3) {
+    variants.push(`${pattern.slice(0, -3)}y`);
+  }
+  if (pattern.endsWith("s") && pattern.length > 1) {
+    variants.push(pattern.slice(0, -1));
+  } else if (pattern.length > 0) {
+    variants.push(`${pattern}s`);
+  }
+  return variants;
+}
+
+function candidatePatterns(pattern: string): PatternCandidate[] {
+  const stripped = unquotePattern(pattern);
+  const exact = uniqueNonEmpty([
+    pattern,
+    stripped,
+    ...singularPluralVariants(stripped),
+    stripped.replace(/[-_]/g, " "),
+    stripped.replace(/\s+/g, "_"),
+    stripped.replace(/\s+/g, "-"),
+  ]);
+  return [
+    ...exact.map((p) => ({ pattern: p, caseInsensitive: false })),
+    ...exact.map((p) => ({ pattern: p, caseInsensitive: true })),
+  ];
+}
+
+function findPatternLine(lines: string[], pattern: string, startLine: number): PatternMatch | undefined {
+  const startIdx = Math.max(0, Math.min(lines.length - 1, startLine - 1));
+  const order = [...Array.from({ length: lines.length - startIdx }, (_, i) => startIdx + i), ...Array.from({ length: startIdx }, (_, i) => i)];
+  for (const candidate of candidatePatterns(pattern)) {
+    const needle = candidate.caseInsensitive ? candidate.pattern.toLocaleLowerCase() : candidate.pattern;
+    for (const idx of order) {
+      const line = lines[idx] ?? "";
+      const hay = candidate.caseInsensitive ? line.toLocaleLowerCase() : line;
+      if (hay.includes(needle)) {
+        return { line: idx + 1, pattern: candidate.pattern, caseInsensitive: candidate.caseInsensitive };
+      }
+    }
+  }
+  return undefined;
+}
+
 /** Numbered line shape used by all four viewer tools. */
 export function numberLines(lines: string[], startLine: number): string[] {
   const result: string[] = [];
@@ -169,36 +241,22 @@ export class FileViewerRegistry {
     path: string,
     pattern: string,
     lines: string[],
-  ): { view: FileViewState; matchedLine: number } | undefined {
+  ): { view: FileViewState; matchedLine: number; matchedPattern: string; caseInsensitive: boolean } | undefined {
     if (!lines.length) return undefined;
     const cur = this.states.get(path);
     const totalLines = lines.length;
 
-    const startFrom = cur?.startLine ?? 1;
-    const haystack = lines.join("\n");
-    const idx = haystack.indexOf(pattern, Math.max(0, startFrom - 1));
-    const matchLine = idx < 0
-      ? lines.findIndex((line) => line.includes(pattern)) + 1
-      : (() => {
-          let consumed = 0;
-          for (let i = 0; i < lines.length; i += 1) {
-            const lineLen = (lines[i] ?? "").length + 1;
-            if (consumed + lineLen > idx) return i + 1;
-            consumed += lineLen;
-          }
-          return lines.length;
-        })();
-
-    if (matchLine <= 0) return undefined;
+    const match = findPatternLine(lines, pattern, cur?.startLine ?? 1);
+    if (!match) return undefined;
 
     const halfWindow = Math.floor(DEFAULT_WINDOW / 2);
-    const start = Math.max(1, matchLine - halfWindow);
+    const start = Math.max(1, match.line - halfWindow);
     const end = Math.min(totalLines + 1, start + DEFAULT_WINDOW);
     const finalStart = end - start < DEFAULT_WINDOW ? Math.max(1, end - DEFAULT_WINDOW) : start;
 
     const next: FileViewState = {
       path,
-      anchorLine: matchLine,
+      anchorLine: match.line,
       startLine: finalStart,
       endLine: end,
       totalLines,
@@ -206,7 +264,12 @@ export class FileViewerRegistry {
       mtimeMs: cur?.mtimeMs ?? 0,
     };
     this.states.set(path, next);
-    return { view: next, matchedLine: matchLine };
+    return {
+      view: next,
+      matchedLine: match.line,
+      matchedPattern: match.pattern,
+      caseInsensitive: match.caseInsensitive,
+    };
   }
 
   /** Update the registration after a successful `file_edit`. */

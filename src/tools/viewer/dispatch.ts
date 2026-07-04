@@ -71,6 +71,14 @@ function fail(code: string, message: string, details?: unknown): ToolResultLike 
   };
 }
 
+function countMatches(lines: string[], pattern: string, caseInsensitive: boolean): number {
+  const needle = caseInsensitive ? pattern.toLocaleLowerCase() : pattern;
+  return lines.filter((line) => {
+    const hay = caseInsensitive ? line.toLocaleLowerCase() : line;
+    return hay.includes(needle);
+  }).length;
+}
+
 async function sha256OfPath(absPath: string): Promise<{ sha: string; mtimeMs: number; totalLines: number; content: string } | null> {
   try {
     const [content, st] = await Promise.all([readFile(absPath, "utf8"), stat(absPath)]);
@@ -270,7 +278,9 @@ async function handleFileFind(
       startLine: r.view.startLine,
       endLine: r.view.endLine,
       matchedLine: r.matchedLine,
-      matchCount: lines.filter((line) => line.includes(parsed.data.pattern)).length,
+      matchedPattern: r.matchedPattern,
+      caseInsensitive: r.caseInsensitive,
+      matchCount: countMatches(lines, r.matchedPattern, r.caseInsensitive),
       window: numbered,
     },
     Date.now() - started,
