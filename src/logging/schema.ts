@@ -154,6 +154,12 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
 	    cumulative_call_count: z.number().int().min(0),
 	    source: z.string().min(1).optional(),
 	  }),
+	  CommonLogFieldsSchema.extend({
+	    kind: z.literal("context_shake"),
+	    level: z.enum(["info", "debug", "trace"]),
+	    shaken_results: z.number().int().min(0),
+	    saved_chars: z.number().int().min(0),
+	  }),
 	  // Phase T2.6: structured router-decision telemetry. Emitted once per
 	  // model call by `ConfiguredModelGateway.onRoute` (and any future
 	  // SmartRouter wiring). Captures which profile+strategy the gateway
