@@ -408,15 +408,7 @@ export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   "list_directory",
   "grep_search",        // always-on: cross-file patterns
   "bash",               // always-on: tests, git, installs only
-  "advance_step",
-  // ---- planning tools (on-demand, but kept in CORE for now) ----
-  "task_create",
-  "task_update",
-  "task_list",
   "search_tools",
-  "agent",
-  "agent_swarm",
-  "delegate_to_plan",
 ]);
 
 // Tools that were demoted from CORE_TOOL_NAMES in Phase 4. Kept registered

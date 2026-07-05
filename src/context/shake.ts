@@ -15,6 +15,8 @@
  * 4. Never touch the cockpit message (first user message) or the last assistant turn
  */
 
+import { normalizeToolResult } from "../tools/tool-result.js";
+
 /** Minimum savings (in chars) to justify a shake pass. */
 const MIN_SAVINGS_CHARS = 100;
 
@@ -168,6 +170,11 @@ function findToolNameForCall(
 /**
  * Determine if a tool result is eligible for shaking.
  * Returns the replacement string, or null if the result should be kept.
+ *
+ * The normalized tool-result envelope is the single source of truth for what
+ * is safe to prune and what the replacement text should look like. We fall
+ * back to tool-specific heuristics only for bash (where we want a richer
+ * command-aware placeholder) and for unknown tool names.
  */
 function getShakeReplacement(
   toolName: string,
@@ -175,47 +182,66 @@ function getShakeReplacement(
   args: string,
 ): string | null {
   const size = content.length;
-
-  // write_file / file_edit / replace_in_file acks — always shake even small
-  // ones because there can be 100+ of them and they're pure noise.
-  if (toolName === "write_file" || toolName === "file_edit" || toolName === "replace_in_file") {
-    return buildPlaceholder(toolName, content, args);
+  let parsedArgs: unknown = undefined;
+  try {
+    parsedArgs = args ? JSON.parse(args) : undefined;
+  } catch {
+    parsedArgs = undefined;
   }
 
-  // Too small to bother shaking (for other tools)
+  // bash needs a command-aware placeholder, so it has its own branch below.
+  // For everything else, defer to the envelope.
+  if (toolName !== "bash" && toolName !== "run_shell_command") {
+    // write/file-edit acks (write_file/file_edit/replace_in_file) are always
+    // safe to prune regardless of size; other safe tools only when they are
+    // large enough to be worth a shake.
+    const normalized = normalizeToolResult({
+      ok: true,
+      toolCallId: "shake",
+      name: toolName,
+      args: parsedArgs,
+      output: content,
+      durationMs: 0,
+    });
+    if (normalized.meta?.safeToPrune) {
+      const replacement = normalized.meta.pruneReplacement;
+      if (typeof replacement === "string") return replacement;
+    }
+    return null;
+  }
+
+  // bash: install/build outputs are stale immediately, so prune when small.
   if (size < FENCE_MIN_CHARS) return null;
 
-  // bash: shake install/build outputs (large and stale after the step)
-  if (toolName === "bash" || toolName === "run_shell_command") {
-    if (args) {
-      try {
-        const parsed = JSON.parse(args);
-        const cmd = (parsed.cmd ?? parsed.command ?? "").toLowerCase();
-        if (
-          cmd.includes("install") ||
-          (cmd.includes("pnpm") && !cmd.includes("test")) ||
-          cmd.includes("build") ||
-          cmd.includes("tsc")
-        ) {
-          return buildPlaceholder(toolName, content, args);
-        }
-      } catch {
-        // fall through
-      }
-    }
-    // Shake large bash outputs that aren't tests
-    if (size > 2_000 && !content.includes("[REAPER SEARCH RESULT]")) {
-      // But keep if it contains errors the model might still need
-      if (!content.includes("Error:") && !content.includes("error TS")) {
-        return buildPlaceholder(toolName, content, args);
-      }
+  if (parsedArgs && typeof parsedArgs === "object") {
+    const cmd = ((parsedArgs as Record<string, unknown>).cmd ?? (parsedArgs as Record<string, unknown>).command ?? "") as string;
+    const lower = String(cmd).toLowerCase();
+    const isInstallOrBuild =
+      lower.includes("install") ||
+      lower.includes("build") ||
+      lower.includes("tsc") ||
+      (lower.includes("pnpm") && !lower.includes("test")) ||
+      lower.includes("compile");
+    if (isInstallOrBuild) {
+      return buildPlaceholder(toolName, content, args);
     }
   }
 
-  // file_view: keep if recent (protected by window), shake old large views
-  if (toolName === "file_view" || toolName === "read_file") {
-    if (size > 1_500) {
-      return buildPlaceholder(toolName, content, args);
+  // Generic large bash outputs: keep if errors are visible, else use envelope.
+  if (size > 2_000 && !content.includes("[REAPER SEARCH RESULT]")) {
+    if (content.includes("Error:") || content.includes("error TS")) {
+      return null;
+    }
+    const normalized = normalizeToolResult({
+      ok: true,
+      toolCallId: "shake",
+      name: toolName,
+      args: parsedArgs,
+      output: content,
+      durationMs: 0,
+    });
+    if (normalized.meta?.safeToPrune && typeof normalized.meta.pruneReplacement === "string") {
+      return normalized.meta.pruneReplacement;
     }
   }
 

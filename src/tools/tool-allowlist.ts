@@ -35,17 +35,7 @@ const TOOL_ALLOWED_ARGS: Record<string, readonly string[]> = {
   write_to_process: ["pid", "input"],
   activate_skill: ["name"],
   get_tool_output: ["artifactId"],
-  advance_step: ["summary", "stepId", "evidence"],
-  complete_task: ["summary", "verificationContract", "objectives"],
   web_fetch: ["url", "extractText"],
-  task_create: ["subject", "description", "status"],
-  task_update: ["taskId", "status", "subject", "description"],
-  task_list: ["status"],
-  update_plan: ["markdown", "activePlanMarkdown", "candidate"],
-  update_todo: ["items", "append"],
-  call_subagent: ["type", "task", "context", "mode", "allowedFiles", "forbiddenFiles", "timeoutMs", "outputSchema"],
-  poll_subagent: ["jobId"],
-  cancel_subagent: ["jobId", "reason"],
 };
 
 export const KNOWN_TOOLS: ReadonlySet<string> = new Set(Object.keys(TOOL_ALLOWED_ARGS));
