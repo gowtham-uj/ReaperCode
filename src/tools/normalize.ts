@@ -473,66 +473,15 @@ export function normalizeToolCall(input: unknown): unknown {
           ...(typeof record.name === "string" ? { name: record.name } : {}),
         };
         break;
-      case "complete_task":
-        args = {
-          ...(typeof record.summary === "string" ? { summary: record.summary } : {}),
-          ...(record.verificationContract && typeof record.verificationContract === "object" ? { verificationContract: record.verificationContract } : {}),
-          ...(Array.isArray(record.objectives) ? { objectives: record.objectives } : {}),
-        };
-        break;
-      case "advance_step":
-        args = {
-          ...(typeof record.summary === "string" ? { summary: record.summary } : {}),
-          ...(normalizedStepId ? { stepId: normalizedStepId } : {}),
-          ...(Array.isArray(record.evidence) ? { evidence: record.evidence } : {}),
-        };
-        break;
-      case "delegate_to_plan":
-        args = {
-          ...(Array.isArray(record.plan) ? { plan: record.plan } : {}),
-        };
-        break;
       case "web_fetch":
         args = {
           ...(typeof record.url === "string" ? { url: record.url } : {}),
           ...(typeof record.extractText === "boolean" ? { extractText: record.extractText } : {}),
         };
         break;
-      case "task_create":
-        args = {
-          ...(typeof record.subject === "string" ? { subject: record.subject } : {}),
-          ...(typeof record.description === "string" ? { description: record.description } : {}),
-          ...(typeof record.status === "string" ? { status: record.status } : {}),
-        };
-        break;
-      case "task_update":
-        args = {
-          ...(typeof record.taskId === "string" ? { taskId: record.taskId } : {}),
-          ...(typeof record.status === "string" ? { status: record.status } : {}),
-          ...(typeof record.subject === "string" ? { subject: record.subject } : {}),
-          ...(typeof record.description === "string" ? { description: record.description } : {}),
-        };
-        break;
-      case "task_list":
-        args = {
-          ...(typeof record.status === "string" ? { status: record.status } : {}),
-        };
-        break;
       case "search_tools":
         args = {
           ...(typeof record.query === "string" ? { query: record.query } : {}),
-        };
-        break;
-      case "call_subagent":
-        args = {
-          ...(typeof record.type === "string" ? { type: record.type } : {}),
-          ...(typeof record.task === "string" ? { task: record.task } : {}),
-          ...(typeof record.context === "string" ? { context: record.context } : {}),
-          ...(typeof record.mode === "string" ? { mode: record.mode } : {}),
-          ...(Array.isArray(record.allowedFiles) ? { allowedFiles: record.allowedFiles } : {}),
-          ...(Array.isArray(record.forbiddenFiles) ? { forbiddenFiles: record.forbiddenFiles } : {}),
-          ...(typeof record.timeoutMs === "number" ? { timeoutMs: record.timeoutMs } : {}),
-          ...(typeof record.outputSchema === "string" ? { outputSchema: record.outputSchema } : {}),
         };
         break;
       default:
@@ -724,8 +673,6 @@ function normalizeToolName(rawName: string | undefined, args: unknown): string |
     edit_file: "replace_in_file",
     replace: "replace_in_file",
     delete: "delete_file",
-    finish: "complete_task",
-    complete: "complete_task",
   };
   if (canonical && aliases[canonical]) {
     return aliases[canonical];

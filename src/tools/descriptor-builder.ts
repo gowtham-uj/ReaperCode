@@ -102,20 +102,6 @@ const TOOL_FAMILY: Record<string, ToolFamily> = {
   // Sandbox
   sandbox_service_control: "exec",
 
-  // Stale (still registered for back-compat)
-  complete_task: "diagnostic",
-  advance_step: "diagnostic",
-  delegate_to_plan: "diagnostic",
-  call_subagent: "exec",
-  poll_subagent: "exec",
-  cancel_subagent: "exec",
-  agent: "exec",
-  agent_swarm: "exec",
-  task_create: "memory",
-  task_update: "memory",
-  task_list: "memory",
-  update_plan: "memory",
-  update_todo: "memory",
 };
 
 /** Per-tool capability tier. */
@@ -141,7 +127,6 @@ const TOOL_CAPABILITY: Record<string, CapabilityTier> = {
   get_screen_size: "read",
   get_mouse_position: "read",
   list_hooks: "read",
-  task_list: "read",
 
   // Write tools
   file_edit: "write",
@@ -188,19 +173,6 @@ const TOOL_CAPABILITY: Record<string, CapabilityTier> = {
   uninstall_hook: "write",
   reload_hooks: "exec",
 
-  // Stale
-  complete_task: "write",
-  advance_step: "write",
-  delegate_to_plan: "exec",
-  call_subagent: "exec",
-  poll_subagent: "read",
-  cancel_subagent: "exec",
-  agent: "exec",
-  agent_swarm: "exec",
-  task_create: "write",
-  task_update: "write",
-  update_plan: "write",
-  update_todo: "write",
 };
 
 /** Per-tool concurrency classification. */
@@ -226,7 +198,6 @@ const TOOL_CONCURRENCY: Record<string, ToolConcurrency> = {
   get_screen_size: "shared",
   get_mouse_position: "shared",
   list_hooks: "shared",
-  task_list: "shared",
 
   // Write tools are exclusive within the same path
   file_edit: "exclusive",
@@ -273,19 +244,6 @@ const TOOL_CONCURRENCY: Record<string, ToolConcurrency> = {
   uninstall_hook: "exclusive",
   reload_hooks: "exclusive",
 
-  // Stale
-  complete_task: "exclusive",
-  advance_step: "exclusive",
-  delegate_to_plan: "exclusive",
-  call_subagent: "exclusive",
-  poll_subagent: "shared",
-  cancel_subagent: "exclusive",
-  agent: "exclusive",
-  agent_swarm: "exclusive",
-  task_create: "exclusive",
-  task_update: "exclusive",
-  update_plan: "exclusive",
-  update_todo: "exclusive",
 };
 
 /** Per-tool context cost (rough token estimate of schema + description). */
@@ -354,20 +312,6 @@ const TOOL_CONTEXT_COST: Record<string, ContextCost> = {
   uninstall_hook: "low",
   reload_hooks: "low",
 
-  // Stale
-  complete_task: "medium",
-  advance_step: "low",
-  delegate_to_plan: "low",
-  call_subagent: "medium",
-  poll_subagent: "low",
-  cancel_subagent: "low",
-  agent: "high",
-  agent_swarm: "high",
-  task_create: "medium",
-  task_update: "medium",
-  task_list: "low",
-  update_plan: "medium",
-  update_todo: "medium",
 };
 
 /** Per-tool aliases for BM25 discovery. */
