@@ -7,6 +7,7 @@ import path from "node:path";
 
 
 import { parseReaperConfig, type ReaperConfig } from "../config/model-config.js";
+import { ReaperConfigSearchPaths, loadReaperConfigFromWorkspace } from "../runtime/workspace-config.js";
 import { describeToolResultTarget,  renderStepText,  getToolResultCommand,  isBuildCommand,  isTestCommand,  normalizeVerificationCommand, 
   isVerificationLikeCommand,  hasInlineAssertionOrFailureExit, 
   persistExecutionPlanProgress
@@ -477,7 +478,7 @@ export class RuntimeEngine {
   private trajectoryLogger: TrajectoryLogger;
 
   constructor(private readonly input: RuntimeEngineInput) {
-    this.config = parseReaperConfig(input.config);
+    this.config = parseReaperConfig(mergeWorkspaceConfigSync(input.config, input.workspaceRoot));
     this.trajectoryLogger = new TrajectoryLogger(input.workspaceRoot, this.config.logging);
   }
 
@@ -566,6 +567,7 @@ export class RuntimeEngine {
         config: this.config,
         transport: inferTransport(request.metadata.transport),
         requestEnvelope: request,
+        workspaceRoot: this.input.workspaceRoot,
         userIntentSummary: extractIntentSummary(request),
         runId: runContext.runId,
         sessionId: runContext.sessionId,
@@ -1027,7 +1029,7 @@ export class RuntimeEngine {
           // technique — mechanically replaces old/stale tool results with
           // short placeholders. No LLM call needed. Triggers only when
           // context exceeds 50% of the model's context window, not every turn.
-          const contextWindow = getBoot().state.tokenBudget?.softCap ?? 200_000;
+          const contextWindow = getBoot().state.tokenBudget?.softCap ?? 270_000;
           const shakeResult = shakeConversation(liveConversation as any[], contextWindow);
           if (shakeResult.performed) {
             await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
@@ -5602,6 +5604,36 @@ function getMaxRescueStagnantTurns(): number {
   return 4;
 }
 
+function readJsonIfExistsSync(filePath: string): Record<string, unknown> | undefined {
+  try {
+    const fs = require("node:fs") as typeof import("node:fs");
+    if (!fs.existsSync(filePath)) return undefined;
+    const raw = fs.readFileSync(filePath, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function mergeWorkspaceConfigSync(explicit: unknown, workspaceRoot: string): unknown {
+  let fromDisk: Record<string, unknown> | undefined;
+  for (const candidate of ReaperConfigSearchPaths(workspaceRoot)) {
+    const loaded = readJsonIfExistsSync(candidate);
+    if (loaded) {
+      fromDisk = loaded;
+      break;
+    }
+  }
+  if (!fromDisk) return explicit;
+  if (!explicit || typeof explicit !== "object" || Array.isArray(explicit)) {
+    return fromDisk;
+  }
+  return { ...fromDisk, ...(explicit as Record<string, unknown>) };
+}
 
 export async function resolvePlannerMaxTokensForProfile(
   input: { modelGateway: { resolveRole: (role: ModelRole) => Promise<ResolvedModelProfile> | ResolvedModelProfile } },
