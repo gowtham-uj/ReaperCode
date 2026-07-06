@@ -11,6 +11,8 @@ import { enqueueLlmCall } from "./concurrency.js";
 import { QueryGuard } from "../runtime/query-guard.js";
 import type { Hooks } from "../adaptive/hooks.js";
 import { recordModelCall } from "./observability.js";
+import { getEngineTunables } from "../config/config-tunables.js";
+
 
 const queryGuard = new QueryGuard();
 
@@ -590,7 +592,7 @@ async function generateStructuredJsonInQueue<T>(input: {
 }
 
 function defaultStructuredCallTimeoutMs(): number {
-  const raw = Number(process.env.REAPER_MODEL_CALL_TIMEOUT_MS ?? process.env.REAPER_LIVE_MODEL_TIMEOUT_MS ?? 300_000);
+  const raw = Number(getEngineTunables().modelCallTimeoutMs ?? getEngineTunables().liveModelTimeoutMs ?? 300_000);
   return Number.isFinite(raw) && raw > 0 ? raw : 300_000;
 }
 

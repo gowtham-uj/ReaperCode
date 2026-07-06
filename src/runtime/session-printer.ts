@@ -11,6 +11,8 @@
  */
 
 import { WriteStream } from "node:tty";
+import { getEngineTunables } from "../config/config-tunables.js";
+
 
 export interface SessionPrinterOptions {
   /** Stream to write reasoning to. Defaults to process.stdout. */
@@ -33,8 +35,7 @@ export function enableSessionPrinter(enabled: boolean, out?: NodeJS.WriteStream)
 
 export function isSessionPrinterEnabled(): boolean {
   if (globalReasoningEnabled) return true;
-  const env = process.env.REAPER_PRINT_REASONING;
-  return env === "1" || env === "true";
+  return getEngineTunables().printReasoning === true;
 }
 
 function defaultFormat(text: string): string {

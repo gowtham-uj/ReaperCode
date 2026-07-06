@@ -7,6 +7,7 @@ import path from "node:path";
 
 
 import { parseReaperConfig, type ReaperConfig } from "../config/model-config.js";
+import { applyConfigToTunables } from "../config/config-tunables.js";
 import { ReaperConfigSearchPaths, loadReaperConfigFromWorkspace } from "../runtime/workspace-config.js";
 import { describeToolResultTarget,  renderStepText,  getToolResultCommand,  isBuildCommand,  isTestCommand,  normalizeVerificationCommand, 
   isVerificationLikeCommand,  hasInlineAssertionOrFailureExit, 
@@ -479,6 +480,10 @@ export class RuntimeEngine {
 
   constructor(private readonly input: RuntimeEngineInput) {
     this.config = parseReaperConfig(mergeWorkspaceConfigSync(input.config, input.workspaceRoot));
+    // Apply the config to the runtime-tunables cache so every module
+    // reads from a single source of truth (the config file). No env
+    // fallbacks — the engine rejects if the config is incomplete.
+    applyConfigToTunables(this.config);
     this.trajectoryLogger = new TrajectoryLogger(input.workspaceRoot, this.config.logging);
   }
 
@@ -609,7 +614,7 @@ export class RuntimeEngine {
         traceId: boot.state.runId,
         logLevel: boot.state.logLevel,
         safetyProfile: boot.state.safetyProfile,
-        permissionMode: (process.env.REAPER_PERMISSION_MODE as any) ?? "yolo",
+        permissionMode: (getEngineTunables().permissionMode as any) ?? "yolo",
         recoverySession,
         config: this.config,
         ...(this.input.modelGateway ? { modelGateway: this.input.modelGateway } : {}),
@@ -2258,7 +2263,7 @@ export function buildAutomaticServiceRecoveryCall(
 }
 
 function hasSandboxServiceRuntimeContext(): boolean {
-  return Boolean(process.env.REAPER_TBENCH_CONTAINER_NAME?.trim() || process.env.REAPER_TBENCH_COMPOSE_PROJECT?.trim());
+  return Boolean(getSandboxTunables().tbenchContainerName?.trim() || getSandboxTunables().tbenchComposeProject?.trim());
 }
 function isBareSandboxServiceNetworkProbe(command: string): boolean {
   const normalized = command.replace(/\s+/g, " ").trim();
@@ -3553,7 +3558,7 @@ export function countConsecutiveModelTransportBlockers(blockers: Array<{ source:
 }
 
 export function mainAgentTransportRetryLimit(): number {
-  const parsed = Number(process.env.REAPER_MAIN_AGENT_TRANSPORT_RETRY_LIMIT ?? 3);
+  const parsed = Number(getEngineTunables().mainAgentTransportRetryLimit ?? 3);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 3;
 }
 
@@ -5577,7 +5582,7 @@ async function collectSourceFiles(root: string): Promise<string[]> {
 }
 
 function getGraphRecursionLimit(): number {
-  const raw = process.env.REAPER_LANGGRAPH_RECURSION_LIMIT;
+  const raw = getEngineTunables().langgraphRecursionLimit;
   const parsed = raw ? Number.parseInt(raw, 10) : NaN;
   if (Number.isInteger(parsed) && parsed >= 100) {
     return parsed;
@@ -5587,7 +5592,7 @@ function getGraphRecursionLimit(): number {
 
 
 function getMaxRescueAttemptsPerDiagnostic(): number {
-  const raw = process.env.REAPER_RESCUE_MAX_ATTEMPTS_PER_DIAGNOSTIC;
+  const raw = getEngineTunables().rescueMaxAttemptsPerDiagnostic;
   const parsed = raw ? Number.parseInt(raw, 10) : NaN;
   if (Number.isInteger(parsed) && parsed >= 1) {
     return parsed;
@@ -5596,7 +5601,7 @@ function getMaxRescueAttemptsPerDiagnostic(): number {
 }
 
 function getMaxRescueStagnantTurns(): number {
-  const raw = process.env.REAPER_RESCUE_MAX_STAGNANT_TURNS;
+  const raw = getEngineTunables().rescueMaxStagnantTurns;
   const parsed = raw ? Number.parseInt(raw, 10) : NaN;
   if (Number.isInteger(parsed) && parsed >= 1) {
     return parsed;

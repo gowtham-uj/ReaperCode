@@ -13,6 +13,7 @@ import { resolveProviderBaseUrl, resolveProviderDefaults, resolveProviderModelNa
 import { normalizeLiteLLMStream } from "./stream-normalizer.js";
 import { extractUsage, OpenAIChatResponseSchema, OpenAIEmbeddingsResponseSchema, parseToolArguments } from "./response.js";
 import { composeAbortSignals } from "../../util/abort-signal.js";
+import { getEngineTunables } from "../../config/config-tunables.js";
 import {
   getEffectiveMaxOutputTokens,
   isRetryableProviderStatus,
@@ -134,7 +135,7 @@ export class LiteLLMProviderClient implements ProviderModelClient {
       ...(usage ? { usage: usage as TokenUsage } : {}),
       raw: parsed,
     };
-    if (process.env.REAPER_DEBUG_MAIN_AGENT && request.source === "main_agent") {
+    if (getEngineTunables().swarmDebug && request.source === "main_agent") {
       console.error("[REAPER_DEBUG_MAIN_AGENT] content:", result.content.slice(0, 2000));
       console.error("[REAPER_DEBUG_MAIN_AGENT] toolCalls:", JSON.stringify(result.toolCalls));
     }
@@ -239,7 +240,7 @@ export class LiteLLMProviderClient implements ProviderModelClient {
       ...(usage ? { usage: usage as TokenUsage } : {}),
       raw: { model, finishReason, ...(usageEnvelope ? { usage: usageEnvelope } : {}) },
     };
-    if (process.env.REAPER_DEBUG_MAIN_AGENT && request.source === "main_agent") {
+    if (getEngineTunables().swarmDebug && request.source === "main_agent") {
       console.error("[REAPER_DEBUG_MAIN_AGENT] content:", result.content.slice(0, 2000));
       console.error("[REAPER_DEBUG_MAIN_AGENT] toolCalls:", JSON.stringify(result.toolCalls));
     }
@@ -487,7 +488,7 @@ async function readStreamChunkWithTimeout(
 }
 
 function resolveStreamIdleTimeoutMs(totalTimeoutMs: number): number {
-  const fromEnv = Number(process.env.REAPER_STREAM_IDLE_TIMEOUT_MS);
+  const fromEnv = Number(getEngineTunables().streamIdleTimeoutMs);
   if (Number.isFinite(fromEnv) && fromEnv > 0) {
     return Math.min(totalTimeoutMs, Math.floor(fromEnv));
   }

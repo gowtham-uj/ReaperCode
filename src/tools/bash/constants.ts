@@ -1,8 +1,9 @@
+import { getBashTunables } from "../../config/config-tunables.js";
 export const BASH_INPUT_DEFAULTS = {
-  DEFAULT_TIMEOUT_MS: Number(process.env.REAPER_BASH_DEFAULT_TIMEOUT_MS ?? 60_000),
-  DEFAULT_IDLE_TIMEOUT_MS: Number(process.env.REAPER_BASH_IDLE_TIMEOUT_MS ?? 45_000),
-  PERSIST_THRESHOLD_CHARS: Number(process.env.REAPER_BASH_PERSIST_THRESHOLD_CHARS ?? 30_000),
-  PREVIEW_SIZE_CHARS: Number(process.env.REAPER_BASH_PREVIEW_SIZE_CHARS ?? 1_200),
-  ASSISTANT_BLOCKING_BUDGET_MS: Number(process.env.REAPER_BASH_ASSISTANT_BLOCKING_BUDGET_MS ?? 120_000),
-  MAX_OUTPUT_BYTES: Number(process.env.REAPER_MAX_SHELL_OUTPUT_BYTES ?? 50 * 1024 * 1024),
+  DEFAULT_TIMEOUT_MS: Number(getBashTunables().defaultTimeoutMs ?? 60_000),
+  DEFAULT_IDLE_TIMEOUT_MS: Number(getBashTunables().idleTimeoutMs ?? 45_000),
+  PERSIST_THRESHOLD_CHARS: Number(getBashTunables().persistThresholdChars ?? 30_000),
+  PREVIEW_SIZE_CHARS: Number(getBashTunables().previewSizeChars ?? 1_200),
+  ASSISTANT_BLOCKING_BUDGET_MS: Number(getBashTunables().assistantBlockingBudgetMs ?? 120_000),
+  MAX_OUTPUT_BYTES: Number(getBashTunables().maxOutputBytes ?? 50 * 1024 * 1024),
 } as const;

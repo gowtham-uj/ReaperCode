@@ -1,5 +1,7 @@
 import path from "node:path";
 import { lstatSync, realpathSync } from "node:fs";
+import { getSandboxTunables } from "../config/config-tunables.js";
+
 
 export class PathPolicyError extends Error {
   constructor(message: string) {
@@ -108,11 +110,11 @@ function resolveNewFileRealpath(target: string): string {
 function rewriteWorkspaceAliasPath(root: string, targetPath: string): string {
   if (!path.isAbsolute(targetPath)) return targetPath;
 
-  const aliases = (process.env.REAPER_WORKSPACE_PATH_ALIASES ?? "")
+  const aliases = (getSandboxTunables().workspacePathAliases ?? "")
     .split(path.delimiter)
     .map((item) => item.trim())
     .filter(Boolean);
-  if (process.env.REAPER_TBENCH_CONTAINER_NAME && !aliases.includes("/app")) {
+  if (getSandboxTunables().tbenchContainerName && !aliases.includes("/app")) {
     aliases.unshift("/app");
   }
 

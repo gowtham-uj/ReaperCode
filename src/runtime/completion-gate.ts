@@ -2,6 +2,8 @@ import { existsSync } from "node:fs";
 import { runVerificationCommand, type VerificationCommand } from "../verify/runner.js";
 import { runShellCommandTool, isForegroundShellResult } from "../tools/global/run-shell-command.js";
 import type { ToolCall } from "../tools/types.js";
+import { getEngineTunables } from "../config/config-tunables.js";
+
 
 /**
  * Stricter completion gate for `complete_task`.
@@ -36,9 +38,7 @@ export const COMPLETION_GATE_MAX_VERIFICATION_ATTEMPTS = 3;
  * autonomous runs leave the strict gate enabled (the default).
  */
 export function isStrictCompletionGateEnabled(): boolean {
-  const raw = (process.env.REAPER_STRICT_COMPLETION_GATE ?? "true").trim().toLowerCase();
-  if (raw === "false" || raw === "0" || raw === "no" || raw === "off") return false;
-  return true;
+  return getEngineTunables().strictCompletionGate === true;
 }
 
 export type CompletionConfidence = "low" | "medium" | "high";
@@ -264,7 +264,7 @@ export async function runCompletionVerification(input: {
   workspaceRoot: string;
   completionArgs: Record<string, unknown>;
 }): Promise<CompletionVerificationOutcome> {
-  const caller = process.env.REAPER_EXTERNAL_VERIFICATION_COMMAND?.trim();
+  const caller = getEngineTunables().permissionMode?.trim();
   if (caller) {
     const result = await runVerificationCommand(input.workspaceRoot, { command: caller } as VerificationCommand);
     return buildOutcome(result, "caller_provided", caller);

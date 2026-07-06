@@ -1,5 +1,7 @@
 import type { ToolResult } from "../tools/types.js";
 import { detectSemanticFailureText } from "../verify/semantic-failure.js";
+import { getEngineTunables } from "../config/config-tunables.js";
+
 
 export type VerifiedMilestone = "none" | "build_passed" | "runtime_passed" | "verification_passed";
 
@@ -24,7 +26,7 @@ export function evaluateMilestoneProgress(
 ): MilestoneProgressDecision {
   const failureLimit = options.failureLimit ?? 2;
   const readOnlyLimit = options.readOnlyLimit ?? 10;
-  const progressGuardV2 = process.env.REAPER_PROGRESS_GUARD_V2 !== "0";
+  const progressGuardV2 = getEngineTunables().progressGuardV2 === true;
   const lastMilestoneIndex = findLastIndex(results, isSuccessfulMilestoneResult);
   const milestone = lastMilestoneIndex >= 0 ? classifySuccessfulMilestone(results[lastMilestoneIndex]!) : "none";
   const window = results.slice(lastMilestoneIndex + 1);

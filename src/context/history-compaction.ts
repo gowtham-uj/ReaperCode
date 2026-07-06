@@ -3,6 +3,8 @@ import path from "node:path";
 import { microcompact } from "./compaction/microcompact.js";
 import { reactiveCompact } from "./compaction/reactive-compact.js";
 import { classifyReadFileTrust, classifyToolResultTrust, markTrust } from "./trust.js";
+import { getSandboxTunables } from "../config/config-tunables.js";
+
 
 export interface HistoryCompactionInput {
   maxEntries: number;
@@ -258,8 +260,8 @@ export function renderToolResultForModel(result: ToolResult, options: RenderTool
 }
 
 function collectWorkspacePathAliases(result: ToolResult, renderedOutput: Record<string, unknown> | undefined): Record<string, string> | undefined {
-  const hostRoot = stripTrailingSlashes(process.env.REAPER_TBENCH_HOST_WORKSPACE ?? "");
-  const aliasRoot = (process.env.REAPER_WORKSPACE_PATH_ALIASES ?? "")
+  const hostRoot = stripTrailingSlashes(getSandboxTunables().tbenchHostWorkspace ?? "");
+  const aliasRoot = (getSandboxTunables().workspacePathAliases ?? "")
     .split(/[:;]/)
     .map((item) => stripTrailingSlashes(item.trim()))
     .find((item) => item.startsWith("/"));

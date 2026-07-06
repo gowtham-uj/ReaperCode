@@ -120,8 +120,70 @@ export const VerificationGateConfigSchema = z
     executionConsensusRanking: true,
   });
 
+/**
+ * Context-management knobs (shake, time-MC, full-summarization). All
+ * optional with defaults so existing tests keep passing. Users fill
+ * in the values they want in `.reaper/config.json` to override.
+ */
+export const ContextManagementConfigSchema = z
+  .object({
+    softCap: z.number().int().positive().default(270_000),
+    shakeTriggerPct: z.number().min(1).max(99).default(50),
+    shakeProtectWindowChars: z.number().int().nonnegative().default(12_000),
+    shakeMinSavingsChars: z.number().int().nonnegative().default(100),
+    maxConsecutiveShakeFailures: z.number().int().positive().default(3),
+    ptlRecoveryMaxDrops: z.number().int().nonnegative().default(5),
+    ptlRecoveryMinChars: z.number().int().positive().default(200),
+    spilloverThresholdBytes: z.number().int().positive().default(8_192),
+    spilloverPreviewChars: z.number().int().positive().default(1_200),
+    timeMicrocompactEnabled: z.boolean().default(true),
+    timeMicrocompactGapMs: z.number().int().positive().default(5 * 60 * 1000),
+    timeMicrocompactKeepRecent: z.number().int().nonnegative().default(5),
+    fullSummaryEnabled: z.boolean().default(true),
+    fullSummaryMaxFilesToRestore: z.number().int().nonnegative().default(5),
+    fullSummaryFileTokenBudget: z.number().int().positive().default(50_000),
+    fullSummaryMaxPtlRetries: z.number().int().nonnegative().default(3),
+    fullSummaryMinCharsForPtlDrop: z.number().int().positive().default(200),
+    bashHeadTailEnabled: z.boolean().default(true),
+    bashHeadPreviewChars: z.number().int().positive().default(1_200),
+    bashTailPreviewChars: z.number().int().positive().default(1_200),
+    bashPersistThresholdChars: z.number().int().positive().default(30_000),
+    warningThresholdRatio: z.number().min(0).max(1).default(0.70),
+    errorThresholdRatio: z.number().min(0).max(1).default(0.85),
+    blockingThresholdRatio: z.number().min(0).max(1).default(0.95),
+  })
+  .strict()
+  .optional()
+  .default({
+    softCap: 270_000,
+    shakeTriggerPct: 50,
+    shakeProtectWindowChars: 12_000,
+    shakeMinSavingsChars: 100,
+    maxConsecutiveShakeFailures: 3,
+    ptlRecoveryMaxDrops: 5,
+    ptlRecoveryMinChars: 200,
+    spilloverThresholdBytes: 8_192,
+    spilloverPreviewChars: 1_200,
+    timeMicrocompactEnabled: true,
+    timeMicrocompactGapMs: 5 * 60 * 1000,
+    timeMicrocompactKeepRecent: 5,
+    fullSummaryEnabled: true,
+    fullSummaryMaxFilesToRestore: 5,
+    fullSummaryFileTokenBudget: 50_000,
+    fullSummaryMaxPtlRetries: 3,
+    fullSummaryMinCharsForPtlDrop: 200,
+    bashHeadTailEnabled: true,
+    bashHeadPreviewChars: 1_200,
+    bashTailPreviewChars: 1_200,
+    bashPersistThresholdChars: 30_000,
+    warningThresholdRatio: 0.70,
+    errorThresholdRatio: 0.85,
+    blockingThresholdRatio: 0.95,
+  });
+
 export const ModelRoutingConfigSchema = z
   .object({
+    default_model: ModelRoleInputSchema.default("default_model"),
     mainAgent: ModelRoleInputSchema.default("strong_model"),
     planner: ModelRoleInputSchema.default("main_reasoner"),
     executor: ModelRoleInputSchema.default("fast_reasoner"),
@@ -143,6 +205,95 @@ export const ModelRoutingConfigSchema = z
     summarizer: "fast_reasoner",
     judge: "judge",
   });
+
+/**
+ * Runtime tunables — every REAPER_* env var that previously lived in
+ * the environment now lives in the config file. All fields are
+ * optional with the same defaults the source code previously used as
+ * inline fallbacks. The strict (no-defaults) variant is enforced by
+ * `parseStrictReaperConfig` for users who want to fail-fast on missing
+ * values.
+ */
+export const RuntimeTunablesConfigSchema = z
+  .object({
+    bashAssistantBlockingBudgetMs: z.number().int().nonnegative().default(120_000),
+    bashDefaultTimeoutMs: z.number().int().positive().default(60_000),
+    bashIdleTimeoutMs: z.number().int().positive().default(45_000),
+    bashPersistThresholdChars: z.number().int().nonnegative().default(30_000),
+    bashPreviewSizeChars: z.number().int().nonnegative().default(1_200),
+    maxShellOutputBytes: z.number().int().nonnegative().default(50 * 1024 * 1024),
+    stallWatchdogIntervalMs: z.number().int().nonnegative().default(10_000),
+    stallWatchdogNoOutputMs: z.number().int().nonnegative().default(30_000),
+    bgDescendantTermGraceMs: z.number().int().nonnegative().default(5_000),
+    bgKillGraceMs: z.number().int().nonnegative().default(3_000),
+    bgMaxOutputLines: z.number().int().nonnegative().default(5_000),
+    bgTermGraceMs: z.number().int().nonnegative().default(5_000),
+    browserExecutablePath: z.string().default(""),
+    browserHeadless: z.boolean().default(true),
+    computerAutoApprove: z.boolean().default(false),
+    computerEnableGlobalHook: z.boolean().default(false),
+    queueMaxConcurrency: z.number().int().nonnegative().default(4),
+    tuiNoQueue: z.boolean().default(false),
+    langgraphRecursionLimit: z.number().int().positive().default(50),
+    liveModelTimeoutMs: z.number().int().positive().default(60_000),
+    mainAgentTransportRetryLimit: z.number().int().nonnegative().default(2),
+    modelCallTimeoutMs: z.number().int().positive().default(120_000),
+    modelRouterLlmDecisions: z.boolean().default(false),
+    permissionMode: z.string().default("yolo"),
+    printReasoning: z.boolean().default(false),
+    progressGuardV2: z.boolean().default(true),
+    rescueMaxAttemptsPerDiagnostic: z.number().int().nonnegative().default(1),
+    rescueMaxStagnantTurns: z.number().int().nonnegative().default(8),
+    retryBaseDelayMs: z.number().int().nonnegative().default(500),
+    retryDeadlineHeadroomMs: z.number().int().nonnegative().default(5_000),
+    retryFallbackAfterOverloaded: z.boolean().default(true),
+    retryKeepAliveMs: z.number().int().nonnegative().default(1_500),
+    retryMaxDelayMs: z.number().int().nonnegative().default(8_000),
+    retryMaxRetries: z.number().int().nonnegative().default(3),
+    runDeadlineEpochMs: z.number().int().nonnegative().default(0),
+    streamIdleTimeoutMs: z.number().int().nonnegative().default(30_000),
+    strictCompletionGate: z.boolean().default(true),
+    strictTempCleanup: z.boolean().default(true),
+    swarmDebug: z.boolean().default(false),
+    unattendedRetry: z.boolean().default(true),
+    tbenchComposeProject: z.string().default(""),
+    tbenchContainerName: z.string().default(""),
+    tbenchHostWorkspace: z.string().default(""),
+    workspacePathAliases: z.string().default(""),
+  })
+  .strict()
+  .optional()
+  .default({});
+
+/**
+ * Secrets block — every API credential lives here. Optional with empty
+ * string defaults so existing tests keep passing; users fill in the
+ * values they need in their `.reaper/config.json`.
+ */
+export const SecretsConfigSchema = z
+  .object({
+    anthropicApiKey: z.string().default(""),
+    anthropicAuthToken: z.string().default(""),
+    anthropicBaseUrl: z.string().default("https://api.anthropic.com"),
+    anthropicModel: z.string().default(""),
+    anthropicVersion: z.string().default("2023-06-01"),
+    openaiApiKey: z.string().default(""),
+    openaiBaseUrl: z.string().default("https://api.openai.com/v1"),
+    openaiCodexAccessToken: z.string().default(""),
+    deepseekApiKey: z.string().default(""),
+    minimaxApiKey: z.string().default(""),
+    nuralwattApiKey: z.string().default(""),
+    nuralwattApiKey2: z.string().default(""),
+    openrouterApiKey: z.string().default(""),
+    cerebrasApiKey: z.string().default(""),
+    azureOpenAiApiVersion: z.string().default(""),
+    azureOpenAiBaseUrl: z.string().default(""),
+    serperSearchApiKey: z.string().default(""),
+    mimoSearchApiKey: z.string().default(""),
+  })
+  .strict()
+  .optional()
+  .default({});
 
 export const ReaperConfigSchema = z
   .object({
@@ -171,6 +322,8 @@ export const ReaperConfigSchema = z
     modelRouting: ModelRoutingConfigSchema,
     models: ModelsConfigSchema,
     mcp: McpConfigSchema.optional().default({ enabled: true, maxActiveMCPTools: 6, refreshIntervalTurns: 10, servers: [] }),
+    contextManagement: ContextManagementConfigSchema,
+    runtimeTunables: RuntimeTunablesConfigSchema,
   })
   .strict();
 
