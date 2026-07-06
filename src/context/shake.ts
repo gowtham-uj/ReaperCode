@@ -336,3 +336,67 @@ export function shakeConversation(
 
   return { shaken, savedChars, performed: true };
 }
+export const MAX_CONSECUTIVE_FAILURES = 3;
+
+export interface PTLRecoveryOptions {
+  maxDrops: number;
+}
+
+export interface PTLRecoveryResult {
+  droppedResults: number;
+  savedChars: number;
+  messages: Array<Record<string, unknown>>;
+}
+
+/**
+ * Replace the oldest `maxDrops` oversized tool-result messages with a
+ * `[tool_result: dropped for PTL recovery]` placeholder. Used by the
+ * engine when the provider returns a 413 and we need to shrink the
+ * conversation without losing the overall structure.
+ */
+export function truncateHeadForPTLRecovery(
+  messages: Array<Record<string, unknown>>,
+  optionsOrMin: PTLRecoveryOptions | number,
+): PTLRecoveryResult {
+  const maxDrops = typeof optionsOrMin === "number" ? Math.max(1, optionsOrMin) : optionsOrMin.maxDrops;
+  let dropped = 0;
+  let savedChars = 0;
+  for (let i = 0; i < messages.length && dropped < maxDrops; i += 1) {
+    const m = messages[i]!;
+    if (m["role"] !== "tool" && m["role"] !== "tool_result") continue;
+    const content = typeof m["content"] === "string" ? m["content"] : "";
+    if (content.length < 200) continue;
+    savedChars += content.length;
+    m["content"] = "[tool_result: dropped for PTL recovery]";
+    dropped += 1;
+  }
+  return { messages, droppedResults: dropped, savedChars };
+}
+
+/**
+ * Shake with a circuit breaker. After `MAX_CONSECUTIVE_FAILURES`
+ * consecutive passes that did nothing, returns performed=false and
+ * stops attempting. The breaker resets on any successful pass.
+ *
+ * Returns `{ result, nextFailures }` so callers can thread the
+ * failure counter through their own state without holding a mutable
+ * object.
+ */
+export function shakeConversationWithBreaker(
+  messages: Message[],
+  contextWindowTokens: number,
+  consecutiveFailures: number = 0,
+): {
+  result: ShakeResult & { aborted?: boolean };
+  nextFailures: number;
+} {
+  if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+    return {
+      result: { shaken: 0, savedChars: 0, performed: false, aborted: true },
+      nextFailures: consecutiveFailures,
+    };
+  }
+  const result = shakeConversation(messages, contextWindowTokens);
+  const nextFailures = result.performed ? 0 : consecutiveFailures + 1;
+  return { result, nextFailures };
+}

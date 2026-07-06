@@ -6,6 +6,8 @@ import path from "node:path";
 import { createRequire } from "node:module";
 
 import type { ToolRuntimeMetadata } from "../browser/computer-browser.js";
+import { getComputerTunables } from "../../config/config-tunables.js";
+
 
 export const NATIVE_COMPUTER_TOOL_NAMES = [
   "mouse_move",
@@ -286,7 +288,7 @@ export class NativeComputerController {
   }
 
   private async requestHumanApproval(args: Record<string, unknown>, runtime: ToolRuntimeMetadata): Promise<NativeComputerOutput> {
-    if (process.env.REAPER_COMPUTER_AUTO_APPROVE === "1") {
+    if (getComputerTunables().autoApprove === true) {
       return { success: true, decision: "approved", autoApproved: true };
     }
     await this.startLiveView({}, runtime);
@@ -496,8 +498,8 @@ export class NativeComputerController {
 }
 
 function canStartGlobalKeyboardHook(): boolean {
-  if (process.env.REAPER_COMPUTER_ENABLE_GLOBAL_HOOK === "0") return false;
-  if (process.env.REAPER_COMPUTER_ENABLE_GLOBAL_HOOK === "1") return true;
+  if (getComputerTunables().enableGlobalHook === false) return false;
+  if (getComputerTunables().enableGlobalHook === true) return true;
   if (process.platform !== "linux") return true;
   if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) return false;
   const result = spawnSync("sh", ["-lc", "command -v xrandr >/dev/null 2>&1"], { stdio: "ignore" });

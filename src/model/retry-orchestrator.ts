@@ -21,6 +21,8 @@ import type {
   TokenCountRequest,
 } from "./types.js";
 import { classifyModelError, type ModelErrorKind } from "./error-taxonomy.js";
+import { getEngineTunables, getRetryTunables } from "../config/config-tunables.js";
+
 
 export interface RetryOrchestratorOptions {
   /** Max retries for retryable errors (default 10) */
@@ -77,14 +79,14 @@ function defaultOptions(): {
   onAttempt: ((event: RetryAttemptEvent) => void | Promise<void>) | undefined;
 } {
   return {
-    maxRetries: Number(process.env.REAPER_RETRY_MAX_RETRIES ?? 10),
-    baseDelayMs: Number(process.env.REAPER_RETRY_BASE_DELAY_MS ?? 1000),
-    maxDelayMs: Number(process.env.REAPER_RETRY_MAX_DELAY_MS ?? 32000),
-    fallbackAfterOverloadedCount: Number(process.env.REAPER_RETRY_FALLBACK_AFTER_OVERLOADED ?? 3),
-    persistentRetry: process.env.REAPER_UNATTENDED_RETRY === "1",
-    persistentKeepAliveMs: Number(process.env.REAPER_RETRY_KEEP_ALIVE_MS ?? 30000),
+    maxRetries: Number(getRetryTunables().maxRetries ?? 10),
+    baseDelayMs: Number(getRetryTunables().baseDelayMs ?? 1000),
+    maxDelayMs: Number(getRetryTunables().maxDelayMs ?? 32000),
+    fallbackAfterOverloadedCount: Number(getRetryTunables().fallbackAfterOverloaded ?? 3),
+    persistentRetry: getEngineTunables().unattendedRetry === true,
+    persistentKeepAliveMs: Number(getRetryTunables().keepAliveMs ?? 30000),
     deadlineEpochMs: readDeadlineEpochMs(),
-    deadlineHeadroomMs: Number(process.env.REAPER_RETRY_DEADLINE_HEADROOM_MS ?? 15000),
+    deadlineHeadroomMs: Number(getRetryTunables().deadlineHeadroomMs ?? 15000),
     onAttempt: undefined,
   };
 }
@@ -338,6 +340,6 @@ function sleep(ms: number): Promise<void> {
 }
 
 function readDeadlineEpochMs(): number | undefined {
-  const raw = Number(process.env.REAPER_RUN_DEADLINE_EPOCH_MS);
+  const raw = Number(getRetryTunables().runDeadlineEpochMs);
   return Number.isFinite(raw) && raw > 0 ? raw : undefined;
 }

@@ -11,13 +11,28 @@ export interface ModelFacingResult {
   output: BashOutput;
 }
 
+/** Head+tail options for `buildBashResultOutput`. */
+export interface BashHeadTailOptions {
+  bashHeadTailEnabled?: boolean;
+  bashHeadPreviewChars?: number;
+  bashTailPreviewChars?: number;
+}
+
 export async function buildBashResultOutput(
   input: BashInput,
   base: BashOutput,
   workspaceRoot: string,
+  headTailOptions: BashHeadTailOptions = {},
 ): Promise<ModelFacingResult> {
   let stdout = base.stdout;
   let stderr = base.stderr;
+
+  const headTailEnabled =
+    headTailOptions.bashHeadTailEnabled ?? true;
+  const headChars =
+    headTailOptions.bashHeadPreviewChars ?? 1_200;
+  const tailChars =
+    headTailOptions.bashTailPreviewChars ?? 1_200;
 
   // Only truncate if output was ACTUALLY persisted due to size,
   // not just because a process log file exists.
@@ -25,8 +40,19 @@ export async function buildBashResultOutput(
   // but persisted_output_size > 0 combined with stdout exceeding the
   // PERSIST_THRESHOLD means the output was too large to return inline.
   if (base.persisted_output_path && base.persisted_output_size && base.persisted_output_size > BASH_INPUT_DEFAULTS.PERSIST_THRESHOLD_CHARS && stdout.length > BASH_INPUT_DEFAULTS.PREVIEW_SIZE_CHARS) {
-    stdout = stdout.slice(0, BASH_INPUT_DEFAULTS.PREVIEW_SIZE_CHARS) +
-      `\n\n... output persisted to ${base.persisted_output_path} (${base.persisted_output_size ?? "unknown"} bytes) ...\n`;
+    if (headTailEnabled) {
+      // Keep the first N and last N chars; the middle is persisted to disk.
+      const head = stdout.slice(0, headChars);
+      const tail = stdout.length > headChars + tailChars ? stdout.slice(-tailChars) : "";
+      const middleBytes = base.persisted_output_size - headChars - tail.length;
+      stdout =
+        head +
+        `\n\n... ${middleBytes} chars truncated, full output persisted to ${base.persisted_output_path} ...\n\n` +
+        tail;
+    } else {
+      stdout = stdout.slice(0, BASH_INPUT_DEFAULTS.PREVIEW_SIZE_CHARS) +
+        `\n\n... output persisted to ${base.persisted_output_path} (${base.persisted_output_size ?? "unknown"} bytes) ...\n`;
+    }
     stderr = stderr.slice(0, BASH_INPUT_DEFAULTS.PREVIEW_SIZE_CHARS) || "";
   }
 

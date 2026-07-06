@@ -267,6 +267,8 @@ export async function spillLargeToolResult(
   }
 }
 
+import { getSandboxTunables } from "../config/config-tunables.js";
+
 import {
   FileViewerRegistry,
   LinterRegistry,
@@ -1540,9 +1542,9 @@ export class ToolExecutor {
   }
 
   private async resolveSandboxComposeProject(): Promise<string> {
-    const explicit = process.env.REAPER_TBENCH_COMPOSE_PROJECT?.trim();
+    const explicit = getSandboxTunables().tbenchComposeProject?.trim();
     if (explicit) return explicit;
-    const containerName = process.env.REAPER_TBENCH_CONTAINER_NAME?.trim();
+    const containerName = getSandboxTunables().tbenchContainerName?.trim();
     if (!containerName) {
       throw new Error("sandbox_service_control is unavailable: no sandbox container context is configured.");
     }
@@ -1555,7 +1557,8 @@ export class ToolExecutor {
     if (!project || project === "<no value>") {
       throw new Error(`sandbox_service_control could not determine compose project for container '${containerName}'.`);
     }
-    process.env.REAPER_TBENCH_COMPOSE_PROJECT = project;
+    // Compose project is derived at runtime, not stored in config.
+    // Caller is responsible for using the returned value.
     return project;
   }
 
@@ -1572,7 +1575,7 @@ export class ToolExecutor {
       5_000,
       1024 * 1024,
     );
-    const client = process.env.REAPER_TBENCH_CONTAINER_NAME?.trim();
+    const client = getSandboxTunables().tbenchContainerName?.trim();
     return result.stdout
       .split(/\r?\n/)
       .map((line) => line.trim())
@@ -1717,7 +1720,7 @@ export class ToolExecutor {
         }
       }
       if (probeCommand?.trim()) {
-        const probeContainer = process.env.REAPER_TBENCH_CONTAINER_NAME?.trim() || service;
+        const probeContainer = getSandboxTunables().tbenchContainerName?.trim() || service;
         const probe = await this.dockerOutput(["exec", probeContainer, "bash", "-lc", probeCommand], Math.min(interval * 2, 10_000), 1024 * 1024, {
           allowNonZero: true,
         });
@@ -2503,7 +2506,7 @@ function findExecUsesOnlyReadOnlyCommands(part: string): boolean {
 }
 
 function hasSandboxServiceContext(): boolean {
-  return Boolean(process.env.REAPER_TBENCH_CONTAINER_NAME?.trim() || process.env.REAPER_TBENCH_COMPOSE_PROJECT?.trim());
+  return Boolean(getSandboxTunables().tbenchContainerName?.trim() || getSandboxTunables().tbenchComposeProject?.trim());
 }
 
 function isDockerCliCommand(command: string): boolean {

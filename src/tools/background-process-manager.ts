@@ -27,6 +27,8 @@ import path from "node:path";
 import treeKill from "tree-kill";
 
 import { getReaperScratchpadPaths } from "../workspace/scratchpad.js";
+import { getBgTunables } from "../config/config-tunables.js";
+
 
 // ---------------------------------------------------------------------------
 // Types
@@ -67,19 +69,19 @@ interface PersistedManifest {
 // ---------------------------------------------------------------------------
 
 function getTermGraceMs(): number {
-  const raw = Number(process.env.REAPER_BG_TERM_GRACE_MS ?? 1_500);
+  const raw = Number(getBgTunables().termGraceMs ?? 1_500);
   return Number.isFinite(raw) && raw >= 100 ? raw : 1_500;
 }
 function getKillGraceMs(): number {
-  const raw = Number(process.env.REAPER_BG_KILL_GRACE_MS ?? 1_000);
+  const raw = Number(getBgTunables().killGraceMs ?? 1_000);
   return Number.isFinite(raw) && raw >= 100 ? raw : 1_000;
 }
 function getDescendantTermGraceMs(): number {
-  const raw = Number(process.env.REAPER_BG_DESCENDANT_TERM_GRACE_MS ?? 1_500);
+  const raw = Number(getBgTunables().descendantTermGraceMs ?? 1_500);
   return Number.isFinite(raw) && raw >= 100 ? raw : 1_500;
 }
 function getMaxOutputLines(): number {
-  const raw = Number(process.env.REAPER_BG_MAX_OUTPUT_LINES ?? 5_000);
+  const raw = Number(getBgTunables().maxOutputLines ?? 5_000);
   return Number.isFinite(raw) && raw >= 100 ? raw : 5_000;
 }
 

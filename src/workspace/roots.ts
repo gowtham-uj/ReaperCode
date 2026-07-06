@@ -1,6 +1,8 @@
 import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { readFile } from "node:fs/promises";
+import { getSandboxTunables } from "../config/config-tunables.js";
+
 
 export async function countFileLines(
   workspaceRoot: string,
@@ -67,11 +69,11 @@ export function findOwningRoot(roots: string[], targetPath: string): string {
 function rewriteWorkspaceAliasPath(root: string, targetPath: string): string {
   if (!path.isAbsolute(targetPath)) return targetPath;
 
-  const aliases = (process.env.REAPER_WORKSPACE_PATH_ALIASES ?? "")
+  const aliases = (getSandboxTunables().workspacePathAliases ?? "")
     .split(path.delimiter)
     .map((item) => item.trim())
     .filter(Boolean);
-  if (process.env.REAPER_TBENCH_CONTAINER_NAME && !aliases.includes("/app")) {
+  if (getSandboxTunables().tbenchContainerName && !aliases.includes("/app")) {
     aliases.unshift("/app");
   }
 

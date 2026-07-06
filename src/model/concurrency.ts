@@ -39,6 +39,8 @@
  */
 
 import PQueue from "p-queue";
+import { getConcurrencyTunables } from "../config/config-tunables.js";
+
 
 type Task<T> = () => Promise<T>;
 
@@ -143,7 +145,7 @@ function clamp(n: number, min: number, max: number): number {
 }
 
 function readMaxConcurrency(): number {
-  const raw = Number(process.env.REAPER_QUEUE_MAX_CONCURRENCY ?? 5);
+  const raw = Number(getConcurrencyTunables().queueMaxConcurrency ?? 5);
   return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 5;
 }
 
@@ -160,7 +162,7 @@ export const globalLlmQueue = new AdaptiveConcurrencyQueue();
  * Read once at module load — set the env var before the TUI process
  * starts.
  */
-const TUI_NO_QUEUE = process.env.REAPER_TUI_NO_QUEUE === "1";
+const TUI_NO_QUEUE = getConcurrencyTunables().tuiNoQueue === true;
 
 /**
  * Convenience wrapper used by `json-response.ts` etc. Honors the

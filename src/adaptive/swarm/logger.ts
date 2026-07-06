@@ -1,3 +1,4 @@
+import { getEngineTunables } from "../../config/config-tunables.js";
 /**
  * Lightweight structured logger for the swarm module.
  *
@@ -20,7 +21,7 @@ export type SwarmLogEvent =
 export type SwarmLogSink = (event: SwarmLogEvent) => void;
 
 let activeSink: SwarmLogSink = (e) => {
-  if (process.env.REAPER_SWARM_DEBUG === "1") {
+  if (getEngineTunables().swarmDebug === true) {
     // eslint-disable-next-line no-console
     console.debug(`[swarm] ${e.kind}`, e);
   }
