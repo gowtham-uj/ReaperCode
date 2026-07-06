@@ -3,6 +3,8 @@ import path from "node:path";
 import { chromium, type Browser, type BrowserContext, type LaunchOptions, type Locator, type Page } from "playwright";
 
 import type { BrowserControlArgs, ComputerControlArgs } from "../types.js";
+import { getBrowserTunables } from "../../config/config-tunables.js";
+
 
 export interface ToolRuntimeMetadata {
   runId: string;
@@ -252,7 +254,7 @@ export class ComputerBrowserController {
   }
 
   private async ensurePage(options: PageOptions): Promise<Page> {
-    const requestedHeadless = options.headless ?? process.env.REAPER_BROWSER_HEADLESS !== "0";
+    const requestedHeadless = options.headless ?? getBrowserTunables().headless === true;
     if (this.browser && this.headless !== requestedHeadless) {
       await this.close();
     }
@@ -261,8 +263,8 @@ export class ComputerBrowserController {
         headless: requestedHeadless,
         args: ["--no-sandbox", "--disable-dev-shm-usage"],
       };
-      if (process.env.REAPER_BROWSER_EXECUTABLE_PATH) {
-        launchOptions.executablePath = process.env.REAPER_BROWSER_EXECUTABLE_PATH;
+      if (getBrowserTunables().executablePath) {
+        launchOptions.executablePath = getBrowserTunables().executablePath;
       }
       this.browser = await chromium.launch(launchOptions);
       this.headless = requestedHeadless;

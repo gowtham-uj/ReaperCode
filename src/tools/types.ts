@@ -39,6 +39,14 @@ export const SearchToolsArgsSchema = z.object({
   query: z.string().min(1).describe("Keywords describing the capability you need, or select:tool_name for direct selection (e.g. 'background process', 'web search', 'symbol rename', 'select:read_background_output')"),
 }).strict();
 
+export const SearchMemoryArgsSchema = z.object({
+  query: z.string().describe("Natural-language query to match against prior session summaries."),
+  max_hits: z.number().int().positive().optional().describe("Cap on number of results (default 20)."),
+  include_body: z.boolean().optional().describe("Include the summary body in the response, not just metadata (default true)."),
+  session_id: z.string().optional().describe("Limit to summaries from this named session."),
+  since: z.string().optional().describe("Limit to summaries at or after this ISO-8601 timestamp."),
+}).strict();
+
 export const ReadFileArgsSchema = z
   .object({
     path: z.string().min(1),
@@ -501,6 +509,7 @@ export const ToolCallSchema = z.discriminatedUnion("name", [
   z.object({ id: z.string().min(1), name: z.literal("get_tool_output"), args: GetToolOutputArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("web_fetch"), args: WebFetchArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("search_tools"), args: SearchToolsArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("search_memory"), args: SearchMemoryArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("create_skill"), args: CreateSkillArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("test_skill"), args: TestSkillArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("approve_skill"), args: ApproveSkillArgsSchema }).strict(),

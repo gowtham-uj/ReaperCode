@@ -6,6 +6,8 @@ import path from "node:path";
 import { TrajectoryLogger } from "../logging/trajectory.js";
 import { ShadowCheckpoint } from "./checkpoint.js";
 import { MergeConflictError, WriteAheadLog } from "./wal.js";
+import { getEngineTunables } from "../config/config-tunables.js";
+
 
 export interface RecoverySessionOptions {
   workspaceRoot: string;
@@ -163,7 +165,7 @@ async function removeTempRootWithRetry(targetPath: string): Promise<void> {
     }
   }
   await rm(targetPath, { recursive: true, force: true }).catch(() => undefined);
-  if (lastError && process.env.REAPER_STRICT_TEMP_CLEANUP === "1") {
+  if (lastError && getEngineTunables().strictTempCleanup === true) {
     throw lastError;
   }
 }

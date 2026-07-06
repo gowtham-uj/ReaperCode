@@ -8,15 +8,17 @@ import { evaluateCommandPolicy, type SafetyProfile } from "../../policy/rules.js
 import type { RuleEvaluationContext } from "../../policy/rules.js";
 import { getReaperScratchpadPaths } from "../../workspace/scratchpad.js";
 import { PathPolicyError, normalizeWorkspacePath } from "../../policy/paths.js";
+import { getBashTunables } from "../../config/config-tunables.js";
+
 
 function getStallWatchdogIntervalMs(): number {
-  return Number(process.env.REAPER_STALL_WATCHDOG_INTERVAL_MS ?? 5_000);
+  return Number(getBashTunables().stallWatchdogIntervalMs ?? 5_000);
 }
 function getStallWatchdogNoOutputThresholdMs(): number {
-  return Number(process.env.REAPER_STALL_WATCHDOG_NO_OUTPUT_MS ?? 45_000);
+  return Number(getBashTunables().stallWatchdogNoOutputMs ?? 45_000);
 }
 function getSizeWatchdogMaxBytes(): number {
-  return Number(process.env.REAPER_MAX_SHELL_OUTPUT_BYTES ?? 50 * 1024 * 1024);
+  return Number(getBashTunables().maxOutputBytes ?? 50 * 1024 * 1024);
 }
 const INTERACTIVE_PROMPT_RE = /\(\s*y\s*\/\s*n\s*\)|press\s+enter|password\s*:|continue\?|confirm\s*\?|type\s+\'yes\'|type\s+\"yes\"/i;
 

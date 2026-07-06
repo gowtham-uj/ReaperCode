@@ -17,6 +17,8 @@ import type {
 } from "./types.js";
 import type { ProviderModelClient } from "./gateway.js";
 import { classifyModelError, type ModelErrorKind } from "./error-taxonomy.js";
+import { getEngineTunables } from "../config/config-tunables.js";
+
 
 interface RouterStats {
   attempts: number;
@@ -59,7 +61,7 @@ export class SmartModelRouterGateway implements ModelGateway {
     this.latencySloMs = options.latencySloMs ?? readPositiveIntEnv("REAPER_MODEL_ROUTER_LATENCY_SLO_MS", 60_000);
     this.hedgeDelayMs = options.hedgeDelayMs ?? readPositiveIntEnv("REAPER_MODEL_ROUTER_HEDGE_DELAY_MS", this.latencySloMs);
     this.llmDecisionTimeoutMs = options.llmDecisionTimeoutMs ?? readPositiveIntEnv("REAPER_MODEL_ROUTER_LLM_DECISION_TIMEOUT_MS", 10_000);
-    this.enableLlmDecision = options.enableLlmDecision ?? process.env.REAPER_MODEL_ROUTER_LLM_DECISIONS !== "0";
+    this.enableLlmDecision = options.enableLlmDecision ?? getEngineTunables().modelRouterLlmDecisions === true;
   }
 
   async resolveRole(role: ModelRole): Promise<ResolvedModelProfile> {

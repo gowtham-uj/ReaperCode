@@ -3,6 +3,8 @@ import { normalizeToolCall } from "../tools/normalize.js";
 import { ToolCallSchema, type ToolCall } from "../tools/types.js";
 import { dim } from "./session-printer.js";
 import { validateToolCallBatch, type ToolValidationBlocker } from "./tool-validation.js";
+import { getEngineTunables } from "../config/config-tunables.js";
+
 
 export interface MainAgentCallInput {
   modelGateway: ModelGateway;
@@ -39,7 +41,7 @@ export async function callMainAgent(input: MainAgentCallInput): Promise<MainAgen
   const response = input.tools && input.tools.length > 0
     ? await streamMainAgentResponse(input.modelGateway, request)
     : await input.modelGateway.generate(request);
-  if (process.env.REAPER_DEBUG_MAIN_AGENT) {
+  if (getEngineTunables().swarmDebug) {
     console.error("[REAPER_DEBUG_MAIN_AGENT] SYSTEM:\n", input.system.slice(0, 4000));
     console.error("[REAPER_DEBUG_MAIN_AGENT] COCKPIT:\n", input.cockpit.slice(0, 4000));
     console.error("[REAPER_DEBUG_MAIN_AGENT] TOOLS:\n", JSON.stringify(input.tools?.map((t: any) => t.name), null, 2));
