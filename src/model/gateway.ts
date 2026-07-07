@@ -241,6 +241,13 @@ export class ConfiguredModelGateway implements ModelGateway {
       for (const event of tail) yield event;
       return;
     } catch (error) {
+      // DEBUG: log the actual streaming error so the failure is visible
+      // in the trajectory, not swallowed by the fallback message.
+      process.stderr.write(
+        `[gateway:stream] primary provider '${primaryProfile.provider}' stream failed: ` +
+          (error instanceof Error ? `${error.message.slice(0, 500)}` : String(error)) +
+          `\n[gateway:stream] env OPENAI_API_KEY length at failure: ${(process.env.OPENAI_API_KEY ?? "").length}\n`,
+      );
       // The primary stream failed before completion. If we already
       // delivered events, we cannot transparently retry; surface the
       // error inline. If we never delivered an event, try the fallback

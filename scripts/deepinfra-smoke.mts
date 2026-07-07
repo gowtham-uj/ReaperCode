@@ -4,7 +4,7 @@ async function main() {
   const { gateway } = createLiveReaperGateway("deepinfra-smoke", "deepinfra", process.env.DEEPINFRA_MODEL || "Qwen/Qwen2.5-7B-Instruct");
   const startedAt = Date.now();
   const r = await gateway.generate({
-    role: "main_reasoner",
+    role: "secondary_model",
     messages: [{ role: "user", content: "Reply with the single word PONG and nothing else." }],
     maxTokens: 256,
   });

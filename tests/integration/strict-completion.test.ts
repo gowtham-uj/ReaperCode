@@ -137,8 +137,8 @@ class StaticJsonGateway implements ModelGateway {
 
   async embed(request: EmbeddingRequest): Promise<EmbeddingResult> {
     return {
-      role: "embedder",
-      profileName: "embedder",
+      role: "default_model",
+      profileName: "default_model",
       provider: "test",
       model: "static-json",
       vectors: (Array.isArray(request.input) ? request.input : [request.input]).map(() => [0]),

@@ -170,11 +170,9 @@ export class SmartModelRouterGateway implements ModelGateway {
     if (primary.fallbackProfile && primary.fallbackProfile !== primary.profileName) {
       profiles.push(resolveModelRole(this.config, primary.fallbackProfile));
     }
-    if (primary.role === "default_model" || primary.role === "main_reasoner" || primary.role === "judge") {
-      for (const role of ["fast_reasoner", "skim_model"] as const) {
-        if (this.config.models[role] && role !== primary.profileName) {
-          profiles.push(resolveModelRole(this.config, role));
-        }
+    if (primary.role === "default_model" || primary.role === "secondary_model" || primary.role === "judge") {
+      if (this.config.models["fast_reasoner"] && "fast_reasoner" !== primary.profileName) {
+        profiles.push(resolveModelRole(this.config, "fast_reasoner"));
       }
     }
     return uniqueProfiles(profiles);
@@ -207,63 +205,20 @@ export class SmartModelRouterGateway implements ModelGateway {
     fallbacks: ResolvedModelProfile[],
   ): Promise<ResolvedModelProfile | "primary" | undefined> {
     const promptText = request.messages.map((m) => m.content).join(" ");
-    // Very conservative fast-path: only for extremely short interactive prompts, never for main reasoner implementation.
-    if (promptText.length < 50 && request.role !== "main_reasoner") {
+    // Very conservative fast-path: only for extremely short interactive prompts, never for the high-context secondary model implementation.
+    if (promptText.length < 50 && request.role !== "secondary_model") {
       return fallbacks.find((f) => f.role === "fast_reasoner") ?? "primary";
     }
 
-    if (!this.enableLlmDecision || !this.config.models.cheap_router || isLatencyFirstRole(request.role)) {
+    if (!this.enableLlmDecision || isLatencyFirstRole(request.role)) {
       return undefined;
     }
-    const router = resolveModelRole(this.config, "cheap_router");
-    if (sameModel(router, primary) && fallbacks.every((fallback) => sameModel(router, fallback))) {
-      return undefined;
-    }
-    const prompt = request.messages.map((message) => `${message.role}: ${message.content}`).join("\n").slice(0, 4000);
-    const routerProfile = { ...router, timeoutMs: Math.min(router.timeoutMs ?? this.llmDecisionTimeoutMs, this.llmDecisionTimeoutMs) };
-    const choices = [
-      `primary (${primary.profileName}, ${primary.model})`,
-      ...fallbacks.map((fallback) => `${fallback.profileName} (${fallback.model})`),
-    ].join(", ");
-    try {
-      const result = await this.client.generate(
-        {
-          role: "cheap_router",
-          messages: [
-            {
-              role: "user",
-              content:
-                `Act as a high-performance model router for a coding agent. ` +
-                `Evaluate the following request and select the most efficient model route. ` +
-                `Return exactly one route id from: ${choices}. ` +
-                `Criteria: ` +
-                `- Prefer the primary route for complex architecture, multi-file implementation, heavy debugging, or turns likely to produce large outputs (> 4k tokens). ` +
-                `- Prefer lower-latency configured fallback routes for rapid execution, simple edits, boilerplate, status checks, or exploratory context gathering. ` +
-                `Request Role: ${request.role}. \nRequest Context Summary:\n${prompt}`,
-            },
-          ],
-          maxTokens: 10,
-          temperature: 0,
-        },
-        routerProfile,
-      );
-      if (result.reasoningContent && this.enableLlmDecision) {
-        await this.reportRoute({
-          role: "cheap_router",
-          selectedProfile: "cheap_router",
-          selectedModel: router.model,
-          strategy: "primary",
-          reason: `Router reasoning: ${result.reasoningContent.substring(0, 200)}`,
-        });
-      }
-      const decision = result.content.trim().toLowerCase();
-      if (decision.includes("primary")) {
-        return "primary";
-      }
-      return fallbacks.find((fallback) => decision.includes(fallback.profileName.toLowerCase()) || decision.includes(fallback.model.toLowerCase()));
-    } catch {
-      return undefined;
-    }
+    // The historical "cheap_router" role was a separate model used
+    // for LLM-driven route decisions. It was removed in v0.2; this
+    // method now returns undefined (no LLM-routed fallback) unless
+    // the fast-path above already picked one. We keep the original
+    // method signature so callers stay stable.
+    return undefined;
   }
 
   private async callWithHedge(
@@ -453,7 +408,7 @@ export class SmartModelRouterGateway implements ModelGateway {
 }
 
 function isLatencyFirstRole(role: ModelRole): boolean {
-  return role === "fast_reasoner" || role === "cheap_router" || role === "skim_model";
+  return role === "fast_reasoner";
 }
 
 function isSlow(stats: RouterStats, latencySloMs: number): boolean {

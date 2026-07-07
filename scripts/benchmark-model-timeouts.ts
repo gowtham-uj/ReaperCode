@@ -54,7 +54,7 @@ async function main() {
   config.models.skim_model = { ...config.models.default_model, maxRetries: 0, timeoutMs };
   config.models.cheap_router = { ...config.models.default_model, maxRetries: 0, timeoutMs };
 
-  const profile = await gateway.resolveRole("main_reasoner");
+  const profile = await gateway.resolveRole("secondary_model");
   const results: SampleResult[] = [];
   console.log(JSON.stringify({ event: "benchmark_start", provider: profile.provider, model: profile.model, timeoutMs, repeats }));
 
@@ -62,7 +62,7 @@ async function main() {
     for (let index = 0; index < repeats; index += 1) {
       results.push(await measure(`${testCase.label}#${index + 1}`, "generate", async () => {
         const result = await gateway.generate({
-          role: "main_reasoner",
+          role: "secondary_model",
           messages: [{ role: "user", content: testCase.prompt }],
           maxTokens: testCase.maxTokens,
         });
@@ -72,7 +72,7 @@ async function main() {
       results.push(await measure(`${testCase.label}#${index + 1}`, "structured", async () => {
         const result = await generateStructuredJson({
           modelGateway: gateway,
-          role: "main_reasoner",
+          role: "secondary_model",
           maxTokens: testCase.maxTokens,
           messages: [{ role: "user", content: testCase.prompt }],
           parse(value) {

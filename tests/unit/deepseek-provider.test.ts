@@ -33,7 +33,7 @@ test("DeepSeek generate preserves stable system prefix and exposes cache usage",
     const client = new DeepSeekClient({ fetchImpl });
     const result = await client.generate(
       {
-        role: "main_reasoner",
+        role: "secondary_model",
         system: "stable system prefix ".repeat(20),
         messages: [{ role: "user", content: "dynamic request" }],
         maxTokens: 64,
@@ -84,7 +84,7 @@ test("DeepSeek stream includes usage so cache hit rate can be audited", async ()
     const events = [];
     for await (const event of client.stream(
       {
-        role: "main_reasoner",
+        role: "secondary_model",
         system: "stable system prefix ".repeat(20),
         messages: [{ role: "user", content: "dynamic request" }],
       },
@@ -108,7 +108,7 @@ function profile(): ResolvedModelProfile {
     provider: "deepseek",
     model: "deepseek-v4-pro",
     profileName: "default_model",
-    role: "main_reasoner",
+    role: "secondary_model",
     capabilities: {
       streaming: true,
       toolCalling: true,

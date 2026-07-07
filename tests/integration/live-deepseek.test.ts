@@ -16,7 +16,7 @@ test(
   async () => {
     const { gateway } = createLiveDeepSeekGateway("live DeepSeek generate call works with config-only provider selection");
     const result = await gateway.generate({
-      role: "main_reasoner",
+      role: "secondary_model",
       messages: [{ role: "user", content: "Reply with exactly the word: ok" }],
       maxTokens: 512,
     });
@@ -36,7 +36,7 @@ test(
     let content = "";
 
     for await (const event of gateway.stream({
-      role: "main_reasoner",
+      role: "secondary_model",
       messages: [{ role: "user", content: "Reply with exactly the word: ok" }],
       maxTokens: 512,
     })) {
@@ -77,7 +77,7 @@ test(
         "live DeepSeek fallback works when primary model is invalid and fallback role is configured",
       );
       const result = await gateway.generate({
-        role: "main_reasoner",
+        role: "secondary_model",
         messages: [{ role: "user", content: "Reply with exactly the word: fallback" }],
         maxTokens: 512,
       });

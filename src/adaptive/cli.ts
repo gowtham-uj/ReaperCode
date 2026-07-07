@@ -458,7 +458,26 @@ export class ReaperCLI {
       return { exitCode: 2, stdout: "", stderr: `exec subcommand required (run); got "${sub ?? ""}"` };
     }
     const flags = parseFlags(args);
-    const prompt = flags["prompt"] ?? args.filter((a) => !a.startsWith("--")).join(" ").trim();
+    const promptFile = typeof flags["prompt-file"] === "string" ? flags["prompt-file"] : undefined;
+    let prompt = flags["prompt"] ?? "";
+    if (!prompt && promptFile) {
+      // Read the prompt file and inline its content as the actual prompt.
+      // Without this the model sees only the literal path string and has
+      // to figure out to read the file itself.
+      try {
+        const { readFileSync } = await import("node:fs");
+        prompt = readFileSync(promptFile, "utf8");
+      } catch (error) {
+        return {
+          exitCode: 2,
+          stdout: "",
+          stderr: `--prompt-file unreadable: ${promptFile} (${error instanceof Error ? error.message : String(error)})`,
+        };
+      }
+    }
+    if (!prompt) {
+      prompt = args.filter((a) => !a.startsWith("--")).join(" ").trim();
+    }
     if (!prompt) {
       return { exitCode: 2, stdout: "", stderr: "exec run --prompt <text> required (or pass the prompt positionally)" };
     }

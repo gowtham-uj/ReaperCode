@@ -1,29 +1,61 @@
 import { z } from "zod";
 
+/**
+ * Model role identifiers (the canonical role name used in
+ * `config.models.<role>` and `config.modelRouting.<route>`).
+ *
+ * History: Reaper's "main" coding model was historically called
+ * `main_reasoner` and aliased to `strong_model`. As of v0.2 the
+ * canonical role is `secondary_model` — same semantics (a
+ * higher-context/larger-context alternative to `default_model`
+ * that the OMP-promote-context-model layer can swap into
+ * `modelRouting.mainAgent` when the conversation overflows).
+ *
+ * Backward compatibility: `resolveModelRoleAlias` and
+ * `ModelRoleInputSchema` still accept the legacy string
+ * `main_reasoner` (and the alias `strong_model`) and translate
+ * them to `secondary_model`. New configs should use
+ * `secondary_model` directly.
+ */
 export const modelRoleValues = [
   "default_model",
-  "main_reasoner",
+  "secondary_model",
   "fast_reasoner",
+  "summarizer",
   "judge",
-  "embedder",
-  "cheap_router",
-  "skim_model",
-  "planner",
+  "completion_gate",
 ] as const;
 
 export const ModelRoleSchema = z.enum(modelRoleValues);
 export type ModelRole = z.infer<typeof ModelRoleSchema>;
-export const modelProfileAliases = {
-  main_reasoner: "strong_model",
-  fast_reasoner: "fast_model",
-} as const satisfies Partial<Record<ModelRole, string>>;
 
-const modelProfileAliasToRole = {
-  ...Object.fromEntries(
-  Object.entries(modelProfileAliases).map(([role, alias]) => [alias, role]),
-  ),
-  main_agent: "main_reasoner",
-} as Record<string, ModelRole>;
+/**
+ * Profile display names. `secondary_model` is the canonical role
+ * for the larger-context sibling profile. We keep the
+ * `strong_model` alias for backward compatibility with older
+ * configs and as a friendly display name (printed in logs).
+ */
+export const modelProfileAliases = {
+  secondary_model: "secondary_model",
+  fast_reasoner: "fast_model",
+  /**
+   * Legacy aliases — these are NOT in `modelRoleValues` but
+   * `getLegacyModelRole` resolves them to `secondary_model` for
+   * backward compatibility with configs written before the rename.
+   */
+} as const;
+
+/**
+ * Backward-compatibility alias table for legacy role/alias names
+ * that may appear in older on-disk configs. Both keys resolve to
+ * the canonical `secondary_model` role.
+ */
+const modelProfileAliasToRole: Record<string, ModelRole> = {
+  strong_model: "secondary_model",
+  main_agent: "secondary_model",
+  main_reasoner: "secondary_model",
+  secondary_model: "secondary_model",
+};
 
 export function getModelProfileName(role: ModelRole): string {
   return (modelProfileAliases as Partial<Record<ModelRole, string>>)[role] ?? role;
@@ -39,11 +71,8 @@ export function profileFromLegacyRole(roleOrProfile: string): string {
 }
 
 export function getLegacyModelRole(roleOrAlias: string): ModelRole | undefined {
-  if (Object.prototype.hasOwnProperty.call(modelProfileAliases, roleOrAlias)) {
-    return roleOrAlias as ModelRole;
-  }
   if (Object.prototype.hasOwnProperty.call(modelProfileAliasToRole, roleOrAlias)) {
-    return modelProfileAliasToRole[roleOrAlias as keyof typeof modelProfileAliasToRole];
+    return modelProfileAliasToRole[roleOrAlias]!;
   }
   return undefined;
 }

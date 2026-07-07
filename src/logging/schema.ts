@@ -160,6 +160,71 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
 	    shaken_results: z.number().int().min(0),
 	    saved_chars: z.number().int().min(0),
 	  }),
+	  // Bash head+tail: emitted by the context-engineering wiring's
+	  // onAfterToolResult hook when a bash tool result had been truncated
+	  // by the executor's persist+head-tail path. Reports the original
+	  // size, preview size, and bytes saved.
+	  CommonLogFieldsSchema.extend({
+	    kind: z.literal("bash_head_tail"),
+	    level: z.enum(["info", "debug", "trace"]),
+	    tool_name: z.string().min(1).optional(),
+	    original_chars: z.number().int().min(0).optional(),
+	    preview_chars: z.number().int().min(0).optional(),
+	    saved_chars: z.number().int().min(0).optional(),
+	  }),
+	  // Time-based microcompact: emitted by onAfterModelCall when the time
+	  // gap between the last tool result and the current model call exceeds
+	  // the configured threshold and we evict stale tool contents.
+	  CommonLogFieldsSchema.extend({
+	    kind: z.literal("time_microcompact"),
+	    level: z.enum(["info", "debug", "trace"]),
+	    cleared_messages: z.number().int().min(0).optional(),
+	    saved_chars: z.number().int().min(0).optional(),
+	    messages_before: z.number().int().min(0).optional(),
+	    messages_after: z.number().int().min(0).optional(),
+	  }),
+	  // PTL recovery: emitted when a 400/413 from the provider triggers
+	  // the onProviderTokenLimitError hook to shrink the conversation.
+	  CommonLogFieldsSchema.extend({
+	    kind: z.literal("ptl_recovery"),
+	    level: z.enum(["info", "debug", "trace"]),
+	    saved_chars: z.number().int().min(0).optional(),
+	    remaining_messages: z.number().int().min(0).optional(),
+	  }),
+	  // Full summarization: emitted when onBeforeModelCall invoked
+	  // tryFullSummarization and replaced the conversation with a
+	  // long-form summary.
+	  CommonLogFieldsSchema.extend({
+	    kind: z.literal("full_summary"),
+	    level: z.enum(["info", "debug", "trace"]),
+	    summary_chars: z.number().int().min(0).optional(),
+	    kept_messages: z.number().int().min(0).optional(),
+	    ptl_drops: z.number().int().min(0).optional(),
+	    saved_chars: z.number().int().min(0).optional(),
+	    }),
+	    // #21 Promote Context Model: emitted by the wiring when tokens/softCap
+	    // crosses modelPromotionThresholdRatio AND a sibling profile with a
+	    // strictly larger context window exists. The engine reads this to
+	    // decide whether to apply a model swap before full-summary fires.
+	    // OMP #21 Promote-Context-Model: the wiring writes this when
+	    // the conversation is getting large AND there is a sibling
+	    // profile with a strictly larger `capabilities.maxContextTokens`.
+	    // The engine reads the most recent event for this run and swaps
+	    // the active mainAgent role to the promoted sibling.
+	    // `from_role` and `to_role` are the canonical role names (e.g.
+	    // "default_model" → "secondary_model"); `from_profile` and
+	    // `to_profile` are the model ids for diagnostic display.
+	    CommonLogFieldsSchema.extend({
+	      kind: z.literal("promoted_context_model"),
+	      level: z.enum(["info", "debug", "trace"]),
+	      from_role: z.string().min(1),
+	      from_profile: z.string().min(1),
+	      from_context_tokens: z.number().int().min(0),
+	      to_role: z.string().min(1),
+	      to_profile: z.string().min(1),
+	      to_context_tokens: z.number().int().min(0),
+	      ratio_trigger: z.number().min(0).max(10),
+	    }),
 	  // Phase T2.6: structured router-decision telemetry. Emitted once per
 	  // model call by `ConfiguredModelGateway.onRoute` (and any future
 	  // SmartRouter wiring). Captures which profile+strategy the gateway

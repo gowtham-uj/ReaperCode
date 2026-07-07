@@ -23,7 +23,7 @@ test(
       "claude-sonnet-4-6",
     );
     const result = await gateway.generate({
-      role: "main_reasoner",
+      role: "secondary_model",
       messages: [{ role: "user", content: "Reply with exactly the word: ok" }],
       maxTokens: 128,
     });

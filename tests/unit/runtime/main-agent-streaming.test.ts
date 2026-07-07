@@ -51,7 +51,7 @@ class FakeStreamingGateway implements ModelGateway {
 test("streamMainAgentResponse accumulates streamed tool calls into GenerateResult", async () => {
   const gateway = new FakeStreamingGateway();
   const result = await streamMainAgentResponse(gateway, {
-    role: "main_reasoner",
+    role: "secondary_model",
     source: "main_agent",
     messages: [{ role: "user", content: "build" }],
     tools: [{ name: "write_file" }],
@@ -114,7 +114,7 @@ class FakeStreamingToolDeltaGateway implements ModelGateway {
 test("streamMainAgentResponse returns completed tool calls without dispatching them", async () => {
   const gateway = new FakeStreamingToolDeltaGateway();
   const result = await streamMainAgentResponse(gateway, {
-    role: "main_reasoner",
+    role: "secondary_model",
     source: "main_agent",
     messages: [{ role: "user", content: "build" }],
     tools: [{ name: "write" }],

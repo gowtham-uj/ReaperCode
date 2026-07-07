@@ -33,9 +33,9 @@ test("ExtensionLifecycleEventBus dispatches session/model/tool/compaction/projec
   await bus.emit({ type: "session_start", reason: "new" });
   await bus.emit({
     type: "before_model_request",
-    role: "main_reasoner",
+    role: "secondary_model",
     source: "main_agent",
-    request: { role: "main_reasoner", source: "main_agent", messages: [] },
+    request: { role: "secondary_model", source: "main_agent", messages: [] },
   });
   await bus.emit({ type: "after_tool_call", toolName: "read_file", result: { ok: true } });
   await bus.emit({ type: "after_compaction", summary: "summary" });

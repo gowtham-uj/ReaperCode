@@ -28,7 +28,7 @@ export interface MainAgentCallResult {
 
 export async function callMainAgent(input: MainAgentCallInput): Promise<MainAgentCallResult> {
   const request: GenerateRequest = {
-    role: input.role ?? "main_reasoner",
+    role: input.role ?? "secondary_model",
     source: "main_agent",
     system: input.system,
     messages: [{ role: "user", content: input.cockpit }],

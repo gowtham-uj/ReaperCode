@@ -17,8 +17,8 @@ function makeGateway(provider: string, model: string): { modelGateway: { resolve
   return {
     modelGateway: {
       resolveRole: async (): Promise<ResolvedModelProfile> => ({
-        role: "planner",
-        profileName: "planner",
+        role: "secondary_model",
+        profileName: "secondary_model",
         provider,
         model,
         capabilities: {
