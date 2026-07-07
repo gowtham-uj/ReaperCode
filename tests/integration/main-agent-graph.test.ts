@@ -55,7 +55,7 @@ test("main-agent graph completes after shell evidence and natural stop", async (
 
   const mainAgentRequests = gateway.requests.filter((item) => item.source === "main_agent");
   assert.ok(mainAgentRequests.length >= 1);
-  assert.equal(mainAgentRequests.every((item) => item.role === "main_reasoner"), true);
+  assert.equal(mainAgentRequests.every((item) => item.role === "secondary_model"), true);
 
   // Natural stop: the model's final assistant_message (empty tool_calls) IS
   // the run's final summary. No complete_task tool call was made.
@@ -199,8 +199,8 @@ class ThrowingGateway implements ModelGateway {
 
   async embed(request: EmbeddingRequest): Promise<EmbeddingResult> {
     return {
-      role: "embedder",
-      profileName: "embedder",
+      role: "default_model",
+      profileName: "default_model",
       provider: "test",
       model: "throwing",
       vectors: (Array.isArray(request.input) ? request.input : [request.input]).map(() => [0]),
@@ -270,8 +270,8 @@ class StreamingJsonGateway implements ModelGateway {
 
   async embed(request: EmbeddingRequest): Promise<EmbeddingResult> {
     return {
-      role: "embedder",
-      profileName: "embedder",
+      role: "default_model",
+      profileName: "default_model",
       provider: "test",
       model: "static-json",
       vectors: (Array.isArray(request.input) ? request.input : [request.input]).map(() => [0]),

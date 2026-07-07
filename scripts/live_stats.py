@@ -5,7 +5,7 @@ from collections import defaultdict
 from pathlib import Path
 
 LEGACY_PROFILE_ALIASES = {
-    "main_reasoner": "strong_model",
+    "secondary_model": "strong_model",
     "fast_reasoner": "fast_model",
 }
 

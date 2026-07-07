@@ -17,9 +17,9 @@ for (const provider of providers) {
   const startedAt = Date.now();
   try {
     const { gateway, config } = createLiveReaperGateway(`provider-smoke:${provider}`, provider);
-    const roleProfile = config.models.main_reasoner ?? config.models.default_model;
+    const roleProfile = config.models.secondary_model ?? config.models.default_model;
     const result = await gateway.generate({
-      role: "main_reasoner",
+      role: "secondary_model",
       messages: [{ role: "user", content: "Return exactly this JSON object and nothing else: {\"ok\":true}" }],
       maxTokens: 64,
       responseFormat: "json",

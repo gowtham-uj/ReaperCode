@@ -10,11 +10,11 @@ process.env.REAPER_MODEL_CALL_TIMEOUT_MS = "45000";
 const provider = process.argv[2] ?? "deepinfra";
 const model = process.argv[3];
 const { gateway, config } = createLiveReaperGateway(`structured-smoke:${provider}`, provider, model);
-const profile = config.models.main_reasoner ?? config.models.default_model;
+const profile = config.models.secondary_model ?? config.models.default_model;
 console.log(`[structured-smoke] provider=${provider} profile=${profile.provider}/${profile.model} timeout=${profile.timeoutMs ?? "none"}`);
 const result = await generateStructuredJson({
   modelGateway: gateway,
-  role: "main_reasoner",
+  role: "secondary_model",
   messages: [{ role: "user", content: "Return {\"ok\":true,\"message\":\"pong\"}." }],
   maxTokens: 512,
   parse(value) {

@@ -14,7 +14,7 @@ async function main() {
   const startedAt = Date.now();
   const result = await generateStructuredJson({
     modelGateway: gateway,
-    role: "main_reasoner",
+    role: "secondary_model",
     messages: [{ role: "user", content: "Return a Reaper executor JSON envelope saying pong with no tool calls." }],
     parse: parseEnvelope,
     maxTokens: 768,

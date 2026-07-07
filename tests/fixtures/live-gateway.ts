@@ -207,16 +207,13 @@ function createLiveConfigFromDefaults(defaults: LiveProviderDefaults) {
   }
   delete config.models.fast_reasoner.fallbackProfile;
 
-  const skimBase = sameProviderFastModel ? config.models.fast_reasoner : config.models.default_model;
-  config.models.skim_model = {
-    ...skimBase,
-    maxRetries: Number(process.env.REAPER_LIVE_FLASH_MODEL_MAX_RETRIES ?? maxRetries),
-  };
-  delete config.models.skim_model.fallbackProfile;
+  // `skim_model` and `cheap_router` roles were removed in v0.2.
+  // The wiring no longer references them; we keep just the
+  // `secondary_model` sibling for OMP #21 promote-context-model.
+  // (see src/runtime/context-engineering-wiring.ts modelPromotion)
 
   if (fallbackDefaults[nextFallbackIndex]) {
-    config.models.fast_reasoner.fallbackProfile = "cheap_router";
-    config.models.cheap_router = makeLiveProfileFromDefaults(
+    config.models.secondary_model = makeLiveProfileFromDefaults(
       config.models.default_model,
       fallbackDefaults[nextFallbackIndex]!,
       timeoutMs,
@@ -225,26 +222,11 @@ function createLiveConfigFromDefaults(defaults: LiveProviderDefaults) {
     );
     nextFallbackIndex += 1;
   } else {
-    config.models.cheap_router = {
+    config.models.secondary_model = {
       ...config.models.fast_reasoner,
     };
   }
-  delete config.models.cheap_router.fallbackProfile;
-
-  if (!sameProviderFastModel && fallbackDefaults[nextFallbackIndex]) {
-    config.models.cheap_router.fallbackProfile = "skim_model";
-    config.models.skim_model = makeLiveProfileFromDefaults(
-      config.models.default_model,
-      fallbackDefaults[nextFallbackIndex]!,
-      timeoutMs,
-      Number(process.env.REAPER_LIVE_FLASH_MODEL_MAX_RETRIES ?? maxRetries),
-      resolveFallbackMaxTokens(fallbackDefaults[nextFallbackIndex]!),
-    );
-  }
-
-  config.models.main_reasoner = {
-    ...config.models.default_model,
-  };
+  delete config.models.secondary_model.fallbackProfile;
 
   return config;
 }

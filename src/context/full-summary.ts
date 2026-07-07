@@ -4,13 +4,13 @@
  * Mirrors cc-haha's `compactConversation` (splitless, full-replace) ported
  * to Reaper's GraphState. Algorithm:
  *
- *   1. Build a summarisation prompt from BASE_COMPACT_PROMPT (9 sections
+ *   1. Build a summarization prompt from BASE_COMPACT_PROMPT (9 sections
  *      covering intent, concepts, files, errors, problem-solving,
  *      user messages, pending tasks, current work, optional next step).
- *   2. If a fork is available, ask a child agent to summarise while
+ *   2. If a fork is available, ask a child agent to summarize while
  *      sharing the parent's prompt cache (cacheSafeParams). Otherwise
- *      summarise inline with the same prompt.
- *   3. On PTL during the summarise call, truncate the input by removing
+ *      summarize inline with the same prompt.
+ *   3. On PTL during the summarize call, truncate the input by removing
  *      oldest API-round groups and retry up to MAX_PTL_RETRIES times.
  *   4. On success, replace the conversation with:
  *        [boundary, summary, attachments...]
@@ -38,7 +38,7 @@ export interface FullSummaryOptions {
   maxFilesToRestore?: number;
   /** Token budget for re-attached files (default 50_000). */
   postCompactFileTokenBudget?: number;
-  /** Max PTL retries during summarise (default 3). */
+  /** Max PTL retries during summarize (default 3). */
   maxPtlRetries?: number;
   /** Minimum chars before a tool result is eligible for head/tail drop. */
   minCharsForPtlDrop?: number;
@@ -153,8 +153,8 @@ function truncateHeadForPTL(messages: Array<{ role: string; content?: string; to
 }
 
 /**
- * The summariser call. We do not have a child-agent fork in Reaper's
- * `mainAgent` path yet, so we summarise inline. The summariser prompt is
+ * The summarizer call. We do not have a child-agent fork in Reaper's
+ * `mainAgent` path yet, so we summarize inline. The summarizer prompt is
  * built from `BASE_COMPACT_PROMPT` plus the actual conversation
  * serialized as a JSONL of role+content. The summary must be returned
  * wrapped in <summary>…</summary> blocks.
@@ -164,7 +164,7 @@ function truncateHeadForPTL(messages: Array<{ role: string; content?: string; to
  * completion API.
  */
 export interface SummariserInput {
-  /** Serialised conversation to summarise. */
+  /** Serialised conversation to summarize. */
   conversation: string;
   /** Previous attempts (for retry prompts). */
   previousSummary?: string;
@@ -172,7 +172,7 @@ export interface SummariserInput {
   retryMarker?: string;
   /** Model-inference callback returning a single text completion. */
   infer: (prompt: string) => Promise<string>;
-  /** Max output tokens for the summariser. */
+  /** Max output tokens for the summarizer. */
   maxOutputTokens?: number;
 }
 
@@ -182,7 +182,7 @@ export async function runSummariser(input: SummariserInput): Promise<{ text: str
     "",
     BASE_COMPACT_PROMPT,
     "",
-    "## Conversation to summarise",
+    "## Conversation to summarize",
     "",
     "```jsonl",
     input.conversation,
@@ -300,7 +300,7 @@ function reattachDeferredTools(): Array<{ role: "user"; content: string }> {
 /**
  * Try full summarization on `liveConversation`. If the conversation
  * exceeds `thresholdTokens` (50% of `softCap` by default) and the
- * summariser succeeds, return the new compact conversation. Otherwise
+ * summarizer succeeds, return the new compact conversation. Otherwise
  * return null.
  *
  * This is the "auto-compact" path; the caller (engine) decides when to
@@ -323,7 +323,7 @@ export async function tryFullSummarization(
   const preTokens = Math.ceil(preChars / 4);
   if (preTokens < threshold) return null;
 
-  // Run summariser (with PTL retry loop).
+  // Run summarizer (with PTL retry loop).
   let ptlDrops = 0;
   let savedCharsFromPtl = 0;
   let working = [...liveConversation];
@@ -393,21 +393,65 @@ export async function tryFullSummarization(
 
 /**
  * Convenience: build the new conversation from a summary result without
- * re-running the summariser. Used when the caller already has a summary
+ * re-running the summarizer. Used when the caller already has a summary
  * in hand and just wants the post-compact message list.
+ */
+/**
+ * Build the post-compact conversation, placed AFTER the system prompt
+ * and BEFORE the model's next turn.
+ *
+ * Placed (in order):
+ *   1. Boundary marker  — tells the model that context was compacted.
+ *      Without this marker the model can't tell whether the summary
+ *      is "prior work" or "the entire conversation", which leads to
+ *      it re-deriving things from scratch or ignoring the summary.
+ *   2. Summary           — the 9-section LLM-generated summary.
+ *      Carries user intent, work history, files touched, errors hit,
+ *      and the precise next step so the model can pick up without
+ *      re-deriving anything.
+ *   3. Re-anchored files — paths touched in the prior turn (read with
+ *      file_view). If the model needs current contents it can re-read
+ *      them with `file_view`. We list PATHS only, not full contents,
+ *      to keep the post-compact budget bounded.
+ *   4. Last user request — preserved verbatim. This is critical: the
+ *      summary replaces all EARLIER user messages and ALL prior tool
+ *      calls, but the LAST user message is the model's current task
+ *      and must remain so the model knows what to actually do. We
+ *      detect it as the most recent user-role message in `priorConv`
+ *      and re-inject it.
+ *   5. Deferred-tool delta — re-emit deferred-tools ring so the model
+ *      remembers which tool families it can pull in on demand.
+ *
+ * The engine caller passes only the live-conversation USER + TOOL
+ * messages (not the system prompt, which it injects separately), so
+ * the result is correctly positioned AFTER `turnRequest.system` in
+ * the model's request envelope and only contains content that lives
+ * inside the `messages` array.
  */
 export function buildPostCompactMessages(
   summary: string,
   liveConversation: Array<{ role: string; content?: string; tool_call_id?: string; name?: string; tool_calls?: Array<{ function: { name: string; arguments: string } }> }>,
   options: FullSummaryOptions,
-): Array<{ role: string; content?: string }> {
+): Array<{ role: string; content?: string; tool_call_id?: string; tool_calls?: Array<{ function: { name: string; arguments: string } }> }> {
   const reattached = reattachRecentFiles(liveConversation, options.maxFilesToRestore ?? DEFAULT_MAX_FILES);
   const deferred = reattachDeferredTools();
+  // Preserve the most recent user-role message — it's the model's
+  // current task and survives the summary replacing all earlier user
+  // messages + tool calls.
+  let lastUserTask: { role: "user"; content?: string } | undefined;
+  for (let i = liveConversation.length - 1; i >= 0; i -= 1) {
+    const m = liveConversation[i]!;
+    if (m.role === "user" && typeof m.content === "string" && m.content.length > 0) {
+      lastUserTask = { role: "user", content: m.content };
+      break;
+    }
+  }
   return [
     { role: "user", content: buildBoundaryMarker(liveConversation.length, summary.length) },
     { role: "user", content: `Summary of prior context:\n\n${summary}` },
     ...reattached,
     ...deferred,
+    ...(lastUserTask ? [lastUserTask] : []),
   ];
 }
 

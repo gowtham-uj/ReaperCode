@@ -127,8 +127,8 @@ async function runShell(cmd: string, cwd: string): Promise<{ exitCode: number; s
 }
 
 const MOCK_PROFILE: ResolvedModelProfile = {
-  role: "main_reasoner",
-  profileName: "main_reasoner",
+  role: "secondary_model",
+  profileName: "secondary_model",
   provider: "mock",
   model: "mock",
   capabilities: {
@@ -151,8 +151,8 @@ export class ScriptedCodingAgentGateway implements ModelGateway {
   }
 
   async generate(request: GenerateRequest): Promise<GenerateResult> {
-    const role = request.role ?? "main_reasoner";
-    if (role !== "main_reasoner") {
+    const role = request.role ?? "secondary_model";
+    if (role !== "secondary_model") {
       return {
         role,
         profileName: role,
@@ -184,7 +184,7 @@ export class ScriptedCodingAgentGateway implements ModelGateway {
   }
 
   async embed(_req: EmbeddingRequest): Promise<EmbeddingResult> {
-    return { role: "embedder", profileName: "embedder", provider: "mock", model: "mock", vectors: [], raw: {} };
+    return { role: "default_model", profileName: "default_model", provider: "mock", model: "mock", vectors: [], raw: {} };
   }
 
   async *stream(_req: GenerateRequest): AsyncGenerator<StreamEvent> {
@@ -197,8 +197,8 @@ export class ScriptedCodingAgentGateway implements ModelGateway {
 
   private mockResult(content: string, toolCalls: unknown[]): GenerateResult {
     return {
-      role: "main_reasoner",
-      profileName: "main_reasoner",
+      role: "secondary_model",
+      profileName: "secondary_model",
       provider: "mock",
       model: "mock",
       content,

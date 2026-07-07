@@ -30,18 +30,18 @@ test("findProviderDescriptor returns descriptors for the two supported families"
 });
 
 test("buildProvider throws for unknown provider ids", () => {
-  assert.throws(() => buildProvider({ providerId: "not-a-provider", role: "main_reasoner" }), /unknown provider/);
+  assert.throws(() => buildProvider({ providerId: "not-a-provider", role: "secondary_model" }), /unknown provider/);
 });
 
 test("buildProvider throws for model not in catalogue", () => {
   assert.throws(
-    () => buildProvider({ providerId: "openai", modelId: "gpt-none", role: "main_reasoner" }),
+    () => buildProvider({ providerId: "openai", modelId: "gpt-none", role: "secondary_model" }),
     /not in the openai catalogue/,
   );
 });
 
 test("resolveModelFromCatalog defaults to catalogue default model", () => {
-  const model = resolveModelFromCatalog({ providerId: "anthropic", role: "main_reasoner" });
+  const model = resolveModelFromCatalog({ providerId: "anthropic", role: "secondary_model" });
   assert.equal(model.providerId, "anthropic");
   assert.equal(model.modelId, "claude-opus-4-8");
 });

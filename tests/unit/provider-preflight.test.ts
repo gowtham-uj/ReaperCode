@@ -6,8 +6,8 @@ import type { ResolvedModelProfile } from "../../src/model/types.js";
 import { ConfiguredModelGateway } from "../../src/model/gateway.js";
 
 const profile: ResolvedModelProfile = {
-  profileName: "main_reasoner",
-  role: "main_reasoner",
+  profileName: "secondary_model",
+  role: "secondary_model",
   provider: "test-provider",
   model: "test-model",
   apiKeyEnv: "TEST_PROVIDER_KEY",

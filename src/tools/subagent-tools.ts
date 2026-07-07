@@ -143,8 +143,11 @@ export function executeCancelSubagentTool(args: any, deps: {toolCallId: string; 
   };
 }
 
-function roleForSubagent(type: SubagentType): ModelRole {
-  return type === "planner" ? "planner" : "main_reasoner";
+// The `planner` subagent previously routed to a "planner" model
+// role, but that role was removed in v0.2. The planner now uses the
+// same `secondary_model` role as the other subagents.
+function roleForSubagent(_type: SubagentType): ModelRole {
+  return "secondary_model";
 }
 
 function parseStrictJson(content: string): unknown {

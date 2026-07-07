@@ -7,7 +7,7 @@ import path from "node:path";
 
 
 import { parseReaperConfig, type ReaperConfig } from "../config/model-config.js";
-import { applyConfigToTunables } from "../config/config-tunables.js";
+import { applyConfigToTunables, getEngineTunables, getSandboxTunables } from "../config/config-tunables.js";
 import { ReaperConfigSearchPaths, loadReaperConfigFromWorkspace } from "../runtime/workspace-config.js";
 import { describeToolResultTarget,  renderStepText,  getToolResultCommand,  isBuildCommand,  isTestCommand,  normalizeVerificationCommand, 
   isVerificationLikeCommand,  hasInlineAssertionOrFailureExit, 
@@ -474,6 +474,7 @@ async function persistLiveConversationSnapshot(runDir: string, messages: Generat
   );
 }
 
+console.error("engine.ts loaded; typeof getEngineTunables =", typeof getEngineTunables);
 export class RuntimeEngine {
   private readonly config: ReaperConfig;
   private trajectoryLogger: TrajectoryLogger;
@@ -777,6 +778,44 @@ export class RuntimeEngine {
     };
 
     const mainAgentNode = async (state: GraphState) => {
+      // Context-engineering wiring: boot, before-model-call, after-model-call,
+      // after-tool-result, provider-token-limit-error, run-complete.
+      //
+      // Build the LLM-based inference callback used by full-summarization.
+      // The wiring calls this with the canonical 9-section summarization
+      // prompt; we route it through the SAME gateway the engine uses for
+      // the main agent, with `stream: false`, the "summarizer" role, and
+      // a high maxTokens ceiling (so the LLM can produce the full summary
+      // without hitting the per-turn cap).
+      const { createContextEngineeringHooks } = await import("./context-engineering-wiring.js");
+      let ctxHooks = (this as any).ctxHooks as ReturnType<typeof createContextEngineeringHooks> | undefined;
+      if (!ctxHooks) {
+        // The full-summarizer runs OUT-OF-BAND via `fetch` against the
+        // summarizer-profile endpoint. It does NOT touch the engine's
+        // stream buffer, so there's zero recursion risk. See
+        // `context/full-summary-inference.ts` for the design.
+        const { inferFullSummary } = await import("../context/full-summary-inference.js");
+        const inferSummariser = async (prompt: string): Promise<string> => {
+          return await inferFullSummary(prompt, {
+            config: this.config,
+            workspaceRoot: this.input.workspaceRoot,
+            runId: getBoot().state.runId,
+            summaryTimeoutMs: 240_000, // 4-minute ceiling per spec
+          });
+        };
+        ctxHooks = createContextEngineeringHooks({
+          infer: inferSummariser,
+          config: this.config as { models?: unknown } as any,
+        });
+        (this as any).ctxHooks = ctxHooks;
+      }
+
+      await ctxHooks.onBoot({
+        workspaceRoot: this.input.workspaceRoot,
+        runId: getBoot().state.runId,
+        sessionId: getBoot().state.sessionId,
+        namedSession: getBoot().state.namedSession,
+      }).catch(() => undefined);
       if (subagentPool) {
         const injection = await injectBackgroundSubagentResults(state, subagentPool);
         if (injection.results.length) {
@@ -880,11 +919,165 @@ export class RuntimeEngine {
             content: `[resume] restored ${resumedConversation.length} live conversation message(s) from prior run snapshot`,
           });
         }
+
+        // ─── Context-engineering: APPLY STASHED FULL-SUMMARY ─────────────
+        // OMP port: when a background full-summary completes during the
+        // run, the wiring stashes the post-compact messages on a
+        // per-runId slot. Apply them here BEFORE the first model call
+        // (or after resume) so the summary actually replaces the older
+        // context — same effect as OMP's `replaceMessages()` after a
+        // compaction. Without this, the wiring would compute the
+        // replacement and never use it.
+        const SUMMARY_STALE_MS = 30_000;
+        const appliedSlot = (globalThis as any)[`${runContext.runId}::full-summary-applied`];
+        if (appliedSlot && appliedSlot.messages && Array.isArray(appliedSlot.messages) && appliedSlot.messages.length > 0) {
+          const ageMs = Date.now() - (appliedSlot.appliedAt ?? 0);
+          if (ageMs <= SUMMARY_STALE_MS) {
+            await this.trajectoryLogger.write({
+              event_id: randomUUID(),
+              run_id: runContext.runId,
+              session_id: getBoot().state.sessionId,
+              trace_id: runContext.runId,
+              timestamp: new Date().toISOString(),
+              log_schema_version: 1,
+              kind: "state_transition",
+              level: getBoot().state.logLevel,
+              from_step: "Content Prep",
+              to_step: "Summary Replaced",
+            });
+            liveConversation.length = 0;
+            liveConversation.push(...(appliedSlot.messages as any[]));
+            delete (globalThis as any)[`${runContext.runId}::full-summary-applied`];
+            await this.trajectoryLogger.write({
+              event_id: randomUUID(),
+              run_id: runContext.runId,
+              session_id: getBoot().state.sessionId,
+              trace_id: runContext.runId,
+              timestamp: new Date().toISOString(),
+              log_schema_version: 1,
+              kind: "assistant_message",
+              level: getBoot().state.logLevel,
+              content: `[summary-applied] replaced ${appliedSlot.messages.length} post-compact message(s) at start of run (age=${ageMs}ms)`,
+            });
+          } else {
+            // Stale: drop without applying.
+            delete (globalThis as any)[`${runContext.runId}::full-summary-applied`];
+          }
+        }
         await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
+
+        // ─── Context-engineering: BEFORE-MODEL-CALL ──────────────────────
+        const softCap = getBoot().state.tokenBudget?.softCap ?? 270_000;
+        const ctxCallStartedAt = Date.now();
+        try {
+          const beforeMc = await ctxHooks.onBeforeModelCall({
+            workspaceRoot: this.input.workspaceRoot,
+            runId: getBoot().state.runId,
+            sessionId: getBoot().state.sessionId,
+            traceId: getBoot().state.runId,
+            messages: liveConversation,
+            softCap,
+            trajectoryLogger: this.trajectoryLogger,
+          });
+          // Apply messages (shake/summary may have replaced them in place)
+          if (Array.isArray(beforeMc.messages)) {
+            liveConversation.length = 0;
+            liveConversation.push(...(beforeMc.messages as any[]));
+          }
+        } catch { /* swallow */ }
+
         while (true) {
           loopGuard += 1;
+
+          // ─── Context-engineering: BEFORE-MODEL-CALL (per-iteration) ───
+          // Re-evaluate shake/summary/time-MC thresholds on every model
+          // call. Tool messages appended since the previous iteration may
+          // have grown the conversation past the softCap — only an
+          // inner-loop check has up-to-date state.
+          try {
+            const liveSoftCap = softCap;
+            const beforeMcInner = await ctxHooks.onBeforeModelCall({
+              workspaceRoot: this.input.workspaceRoot,
+              runId: getBoot().state.runId,
+              sessionId: getBoot().state.sessionId,
+              traceId: getBoot().state.runId,
+              messages: liveConversation,
+              softCap: liveSoftCap,
+              trajectoryLogger: this.trajectoryLogger,
+            });
+            if (Array.isArray(beforeMcInner.messages)) {
+              liveConversation.length = 0;
+              liveConversation.push(...(beforeMcInner.messages as any[]));
+            }
+          } catch { /* swallow */ }
+
+          // ─── OMP port: detect #21 promote-context-model and swap
+          //   the active mainAgent role to a sibling with strictly
+          //   larger context. OMP's runAutoCompaction does this BEFORE
+          //   compacting — a long-running loop that would otherwise
+          //   compact the history gets a fresh window instead. The
+          //   wiring records promotions via `recordPromotion(workspaceRoot, {toRole, toProfile, ...})`.
+          //   We use `p.toRole` (canonical role name) directly to swap
+          //   the `turnRequest.role` — this works even when both
+          //   profiles use the same model id (the previous lookup by
+          //   `model === toProfile` failed in that case).
+          let effectiveMainAgentRole = modelRoute(this.config, "mainAgent");
+          try {
+            // Cache the module so the dynamic import resolves cleanly.
+            // (A parenthesized `(await import(...)).readRecentPromotions(...)`
+            // pattern has been observed to evaluate to `undefined` under
+            // tsx's ESM-transpile path on some runtimes. Use destructuring
+            // which works consistently with both the engine and wiring.)
+            const { readRecentPromotionsSync: readProms } = await import("../context/promotions.js");
+            const promotions = readProms(
+              this.input.workspaceRoot,
+              getBoot().state.runId,
+              1,
+            );
+            if (promotions.length > 0) {
+              const p = promotions[0]!;
+              // Validate the role against the schema's accepted set.
+              // Legacy role names like "main_reasoner" are accepted
+              // by ModelRoleInputSchema and resolved to canonical.
+              const { ModelRoleInputSchema } = await import("../model/types.js");
+              const targetRole = ModelRoleInputSchema.safeParse(p.toRole);
+              if (
+                targetRole.success &&
+                typeof targetRole.data === "string" &&
+                (modelRoute(this.config, "mainAgent") as string) !== targetRole.data
+              ) {
+                effectiveMainAgentRole = targetRole.data as any;
+                await this.trajectoryLogger.write({
+                  event_id: randomUUID(),
+                  run_id: getBoot().state.runId,
+                  session_id: getBoot().state.sessionId,
+                  trace_id: getBoot().state.runId,
+                  timestamp: new Date().toISOString(),
+                  log_schema_version: 1,
+                  kind: "state_transition",
+                  level: getBoot().state.logLevel,
+                  from_step: "Content Prep",
+                  to_step: `Promoted: role=${targetRole.data} (${p.toContextTokens} ctx, from=${p.fromRole})`,
+                });
+              } else if (!targetRole.success) {
+                await this.trajectoryLogger.write({
+                  event_id: randomUUID(),
+                  run_id: getBoot().state.runId,
+                  session_id: getBoot().state.sessionId,
+                  trace_id: getBoot().state.runId,
+                  timestamp: new Date().toISOString(),
+                  log_schema_version: 1,
+                  kind: "state_transition",
+                  level: getBoot().state.logLevel,
+                  from_step: "Content Prep",
+                  to_step: `Promoted (no role match): ${p.toProfile} (${p.toContextTokens} ctx) — toRole='${p.toRole}' not a valid ModelRole`,
+                });
+              }
+            }
+          } catch { /* best-effort */ }
+
           const turnRequest: GenerateRequest = {
-            role: modelRoute(this.config, "mainAgent"),
+            role: effectiveMainAgentRole,
             source: "main_agent",
             system,
             messages: liveConversation,
@@ -913,7 +1106,25 @@ export class RuntimeEngine {
             this.input.modelGateway,
             turnRequest,
             this.trajectoryLogger,
+            ctxHooks,
+            softCap,
           );
+          // ─── Context-engineering: AFTER-MODEL-CALL ───────────────────────
+          try {
+            await ctxHooks.onAfterModelCall({
+              workspaceRoot: this.input.workspaceRoot,
+              runId: getBoot().state.runId,
+              sessionId: getBoot().state.sessionId,
+              traceId: getBoot().state.runId,
+              messages: liveConversation,
+              modelResponse: (turn as any).raw ?? turn,
+              startedAt: ctxCallStartedAt,
+              finishedAt: Date.now(),
+              softCap,
+              trajectoryLogger: this.trajectoryLogger,
+            });
+          } catch { /* swallow */ }
+
           const tc = (turn.toolCalls ?? []) as ToolCall[];
           if (turn.content) {
             lastAssistantMessage = turn.content;
@@ -996,6 +1207,50 @@ export class RuntimeEngine {
               if (!result.toolCallId) result = { ...result, toolCallId: id };
             }
             liveToolResults.push(result);
+
+            // ─── Context-engineering: AFTER-TOOL-RESULT ─────────────────
+            // Run the wiring hook for normalized envelope / spillover on
+            // each tool result. The hook may replace `result.output`
+            // with a head+tail preview and write bash_head_tail trajectory
+            // events when truncation was observed.
+            try {
+              const outputObj = (result as any).output;
+              // ForegroundShellResult uses `logPath` (not
+              // `persisted_output_path`). BashOutput uses the latter.
+              // Try both — different layers expose different shapes.
+              const persistedPath = outputObj?.persisted_output_path ?? outputObj?.logPath;
+              let persistedSize = outputObj?.persisted_output_size;
+              // If persisted_output_size is not on the result object, stat
+              // the persisted_output_path file (the bash executor writes
+              // the full output to disk when persist threshold is crossed).
+              if (typeof persistedSize !== "number" && persistedPath) {
+                try {
+                  const fsModule = await import("node:fs");
+                  if (fsModule.existsSync(persistedPath)) {
+                    const stat = fsModule.statSync(persistedPath);
+                    persistedSize = stat.size;
+                  }
+                } catch { /* best-effort */ }
+              }
+              const outputString = typeof outputObj === "string"
+                ? outputObj
+                : JSON.stringify(outputObj ?? "");
+              const afterTr = await ctxHooks.onAfterToolResult({
+                workspaceRoot: this.input.workspaceRoot,
+                runId: getBoot().state.runId,
+                sessionId: getBoot().state.sessionId,
+                traceId: getBoot().state.runId,
+                toolCallId: id,
+                toolName: call.name,
+                output: outputString,
+                trajectoryLogger: this.trajectoryLogger,
+                persistedOutputSize: typeof persistedSize === "number" ? persistedSize : undefined,
+              } as any);
+              if ((afterTr as any)?.output && (afterTr as any).output !== result.output) {
+                (result as any).output = (afterTr as any).output;
+              }
+            } catch { /* swallow */ }
+
             liveConversation.push({
               role: "tool",
               tool_call_id: id,
@@ -1005,7 +1260,8 @@ export class RuntimeEngine {
                 : (result.error?.message
                     ? `Error: ${result.error.message}${result.error.code ? ` (code=${result.error.code})` : ""}`
                     : "Error: tool returned a non-ok result"),
-            });
+              timestamp: Date.now(),
+            } as any);
             await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
             await this.trajectoryLogger.write({
               event_id: randomUUID(),
@@ -2006,6 +2262,28 @@ export class RuntimeEngine {
         ...(finalState.explicitVerification ? { verification: finalState.explicitVerification } : {}),
       };
       const finalStatus = classifyRunFinalStatus(finalState as unknown as Parameters<typeof classifyRunFinalStatus>[0]);
+
+      // ─── Context-engineering: RUN-COMPLETE ───────────────────────────────
+      try {
+        const ctxHooks = (this as any).ctxHooks;
+        if (ctxHooks) {
+          const usedChars = JSON.stringify(finalState.toolResults ?? []).length
+            + (finalState.assistantMessage ?? "").length;
+          await ctxHooks.onRunComplete({
+            workspaceRoot: this.input.workspaceRoot,
+            runId: finalBoot.state.runId,
+            sessionId: finalBoot.state.sessionId,
+            traceId: finalBoot.state.runId,
+            namedSession: finalBoot.state.namedSession,
+            assistantMessage: finalState.assistantMessage ?? "",
+            trajectoryLogger: this.trajectoryLogger,
+            success: finalStatus === "succeeded",
+            softCap: finalBoot.state.tokenBudget?.softCap ?? 270_000,
+            usedChars,
+          });
+        }
+      } catch { /* swallow */ }
+
       await persistExecutionPlanProgress(this.input.workspaceRoot, finalBoot.state.runId, {
         currentStepIndex: finalState.currentStepIndex,
         completedStepIds: finalState.completedStepIds,
@@ -3473,6 +3751,41 @@ export function classifyMainAgentTransportError(error: unknown):
 }
 
 /**
+ * Detect a Provider-Token-Limit (PTL) error: the request body was too large
+ * for the provider's context window. Distinct from a transport error: the
+ * connection succeeded but the server rejected the request as too large.
+ *
+ * Used by `streamMainAgentResponseWithTransportRetry` to decide whether
+ * to invoke the PTL-recovery hook (shrink the conversation) before
+ * giving up.
+ */
+export function isProviderTokenLimitError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const lower = message.toLowerCase();
+  const status = typeof (error as { status?: unknown })?.status === "number"
+    ? (error as { status: number }).status
+    : undefined;
+  // Common PTL signals: HTTP 413, HTTP 400 with "too many tokens" /
+  // "context length" / "max tokens" / "context_length" in the body,
+  // or a body that contains a 400 with bad_request_error and the
+  // 2013 / 2014 error codes from the minimax API.
+  if (status === 413) return true;
+  if (status === 400 && (
+    lower.includes("chat content is empty") ||
+    lower.includes("context length") ||
+    lower.includes("context_length") ||
+    lower.includes("max tokens") ||
+    lower.includes("max_tokens") ||
+    lower.includes("tokens exceed") ||
+    lower.includes("too many tokens") ||
+    lower.includes("too long") ||
+    lower.includes("2013") ||
+    lower.includes("2014")
+  )) return true;
+  return false;
+}
+
+/**
  * Wraps a main-agent model call with a small transport-aware retry.
  *
  * - On transient provider failures (rate limit / 5xx / timeout / network),
@@ -3492,6 +3805,8 @@ export async function streamMainAgentResponseWithTransportRetry(
   modelGateway: ModelGateway,
   request: GenerateRequest,
   trajectoryLogger: TrajectoryLogger,
+  ctxHooks?: { onProviderTokenLimitError?: (p: { messages: unknown[]; softCap: number }) => Promise<{ messages: unknown[]; savedChars: number }> },
+  softCap?: number,
 ): Promise<Awaited<ReturnType<typeof streamMainAgentResponse>>> {
   const backoffsMs = [0, 1_000, 3_000, 9_000];
   let lastError: unknown;
@@ -3503,6 +3818,38 @@ export async function streamMainAgentResponseWithTransportRetry(
       return await streamMainAgentResponse(modelGateway, request);
     } catch (error) {
       lastError = error;
+      // Detect PTL (provider token limit exceeded) and attempt recovery:
+      // drop the oldest tool result, then retry. The "max tokens" 400
+      // is a class of transport error that IS recoverable by shrinking
+      // the conversation, distinct from a network 5xx.
+      const isPtl = isProviderTokenLimitError(error);
+      if (isPtl && ctxHooks?.onProviderTokenLimitError) {
+        try {
+          const softCapValue = softCap ?? 270_000;
+          const result = await ctxHooks.onProviderTokenLimitError({
+            messages: request.messages as unknown[],
+            softCap: softCapValue,
+          });
+          if (Array.isArray(result?.messages) && result.messages.length > 0) {
+            request = { ...request, messages: result.messages as any };
+            try {
+              await trajectoryLogger.write({
+                event_id: randomUUID(),
+                run_id: (request as { runId?: string }).runId ?? "unknown",
+                session_id: (request as { sessionId?: string }).sessionId ?? "unknown",
+                trace_id: (request as { traceId?: string }).traceId ?? (request as { runId?: string }).runId ?? "unknown",
+                timestamp: new Date().toISOString(),
+                log_schema_version: 1,
+                kind: "ptl_recovery",
+                level: "info",
+                saved_chars: result.savedChars,
+                remaining_messages: result.messages.length,
+              } as any);
+            } catch { /* swallow */ }
+            continue; // retry with the shrunken messages
+          }
+        } catch { /* swallow PTL recovery errors */ }
+      }
       if (!classifyMainAgentTransportError(error)) {
         throw error;
       }
@@ -5611,15 +5958,29 @@ function getMaxRescueStagnantTurns(): number {
 
 function readJsonIfExistsSync(filePath: string): Record<string, unknown> | undefined {
   try {
-    const fs = require("node:fs") as typeof import("node:fs");
-    if (!fs.existsSync(filePath)) return undefined;
-    const raw = fs.readFileSync(filePath, "utf8");
+    // Use the already-imported `node:fs`/`node:path` modules at the top
+    // of this file. The previous `require("node:fs")` is undefined in
+    // ESM (tsx mode) and silently failed, causing the engine's
+    // local mergeWorkspaceConfigSync to drop the on-disk config.
+    if (!existsSync(filePath)) {
+      if (process.env.REAPER_DEBUG_CONFIG_MERGE) {
+        process.stderr.write(`[readJson:debug] existsSync=false for ${filePath}\n`);
+      }
+      return undefined;
+    }
+    const raw = readFileSync(filePath, "utf8");
     const parsed = JSON.parse(raw) as unknown;
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      if (process.env.REAPER_DEBUG_CONFIG_MERGE) {
+        process.stderr.write(`[readJson:debug] read OK, keys=${Object.keys(parsed as any).join(",")}\n`);
+      }
       return parsed as Record<string, unknown>;
     }
     return undefined;
-  } catch {
+  } catch (e: any) {
+    if (process.env.REAPER_DEBUG_CONFIG_MERGE) {
+      process.stderr.write(`[readJson:debug] catch: ${e?.message ?? String(e)}\n`);
+    }
     return undefined;
   }
 }
@@ -5633,11 +5994,40 @@ function mergeWorkspaceConfigSync(explicit: unknown, workspaceRoot: string): unk
       break;
     }
   }
+  if (process.env.REAPER_DEBUG_CONFIG_MERGE) {
+    process.stderr.write(`[engine-merge:debug] workspaceRoot=${workspaceRoot} candidates=${JSON.stringify(ReaperConfigSearchPaths(workspaceRoot))} fromDisk=${fromDisk ? Object.keys(fromDisk).join(",") : "<none>"} explicit=${explicit && typeof explicit === "object" ? Object.keys((explicit as any)).join(",") : "<none>"}\n`);
+  }
   if (!fromDisk) return explicit;
   if (!explicit || typeof explicit !== "object" || Array.isArray(explicit)) {
     return fromDisk;
   }
-  return { ...fromDisk, ...(explicit as Record<string, unknown>) };
+  // Deep merge to preserve sibling profiles (e.g. secondary_model alongside
+  // default_model). OMP port: #21 Promote-Context-Model layer reads sibling
+  // profiles from the parsed config.
+  const merged: Record<string, unknown> = deepMerge(fromDisk, explicit as Record<string, unknown>);
+  // Strip legacy `tokenBudget` top-level field. It is consumed by
+  // `resolveSoftCapFromWorkspaceConfig` (workspace-aware) BEFORE the
+  // engine constructor runs, and is not part of the strict
+  // ReaperConfigSchema. Removing it avoids the strict-mode
+  // "unrecognized_keys" rejection.
+  delete merged.tokenBudget;
+  if (process.env.REAPER_DEBUG_CONFIG_MERGE) {
+    process.stderr.write(`[engine-merge:debug] merged.models=${Object.keys((merged as any).models || {}).length}\n`);
+  }
+  return merged;
+}
+
+function deepMerge(base: Record<string, unknown>, override: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(override)) {
+    const existing = out[key];
+    if (existing && typeof existing === "object" && !Array.isArray(existing) && value && typeof value === "object" && !Array.isArray(value)) {
+      out[key] = deepMerge(existing as Record<string, unknown>, value as Record<string, unknown>);
+    } else if (value !== undefined) {
+      out[key] = value;
+    }
+  }
+  return out;
 }
 
 export async function resolvePlannerMaxTokensForProfile(

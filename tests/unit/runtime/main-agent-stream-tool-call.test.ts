@@ -28,7 +28,7 @@ test("streamMainAgentResponse preserves bash timeout from single-shot tool_call 
   };
 
   const turn = await streamMainAgentResponse(gateway as any, {
-    role: "main_reasoner",
+    role: "secondary_model",
     source: "main_agent",
     system: "",
     messages: [],

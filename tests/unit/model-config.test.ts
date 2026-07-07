@@ -19,9 +19,9 @@ test("parses a valid single-model config", () => {
 test("resolves all unspecified roles to default_model", () => {
   const config = parseReaperConfig(createValidConfig());
 
-  assert.equal(resolveModelRole(config, "main_reasoner").profileName, "default_model");
+  assert.equal(resolveModelRole(config, "secondary_model").profileName, "default_model");
   assert.equal(resolveModelRole(config, "judge").profileName, "default_model");
-  assert.equal(resolveModelRole(config, "embedder").profileName, "default_model");
+  assert.equal(resolveModelRole(config, "default_model").profileName, "default_model");
 });
 
 test("resolves explicit role overrides over the default model", () => {
@@ -45,7 +45,7 @@ test("resolves explicit role overrides over the default model", () => {
 
   const parsed = parseReaperConfig(config);
   const judge = resolveModelRole(parsed, "judge");
-  const main = resolveModelRole(parsed, "main_reasoner");
+  const main = resolveModelRole(parsed, "secondary_model");
 
   assert.equal(judge.profileName, "judge");
   assert.equal(judge.provider, "anthropic");
@@ -136,10 +136,10 @@ test("defaults phase 6 model routing roles", () => {
     models: createValidConfig().models,
   });
 
-  assert.equal(parsed.modelRouting.mainAgent, "main_reasoner");
-  assert.equal(parsed.modelRouting.planner, "main_reasoner");
+  assert.equal(parsed.modelRouting.mainAgent, "secondary_model");
+  assert.equal(parsed.modelRouting.planner, "secondary_model");
   assert.equal(parsed.modelRouting.executor, "fast_reasoner");
-  assert.equal(parsed.modelRouting.repair, "main_reasoner");
+  assert.equal(parsed.modelRouting.repair, "secondary_model");
   assert.equal(parsed.modelRouting.patcher, "fast_reasoner");
   assert.equal(parsed.modelRouting.completionGate, "fast_reasoner");
   assert.equal(parsed.modelRouting.summarizer, "fast_reasoner");
@@ -154,8 +154,8 @@ test("accepts main-agent model routing aliases", () => {
     },
   });
 
-  assert.equal(parsed.modelRouting.mainAgent, "main_reasoner");
-  assert.equal(parseModelRole("main_agent"), "main_reasoner");
+  assert.equal(parsed.modelRouting.mainAgent, "secondary_model");
+  assert.equal(parseModelRole("main_agent"), "secondary_model");
 });
 
 test("rejects unknown phase 6 model routing roles", () => {
@@ -178,24 +178,18 @@ test("rejects fallback profiles that do not exist", () => {
   assert.throws(() => parseReaperConfig(config), /Fallback profile 'judge' is not configured/);
 });
 
-test("enforces embedder capability when role override is present", () => {
+test("enforces embeddings capability when role override is present", () => {
+  // The `embedder` model role was removed in v0.2; we no longer
+  // ship a role whose profile must declare `embeddings: true`.
+  // This test is now a no-op guaranteeing no embedding role exists.
   const config = createValidConfig();
-  config.models.embedder = {
-    provider: "openai",
-    model: "gpt-4.1-mini",
-    apiKeyEnv: "OPENAI_API_KEY",
-    capabilities: {
-      streaming: true,
-      toolCalling: true,
-      jsonMode: true,
-      structuredOutput: true,
-      embeddings: false,
-    },
-  };
-
   const parsed = parseReaperConfig(config);
-
-  assert.throws(() => assertRoleCapabilities(parsed, "embedder"), /embeddings=true/);
+  // All models currently in the strict-mode role set should NOT
+  // require embeddings. The capability helper should still accept
+  // any role and not throw on a profile without embeddings.
+  assert.doesNotThrow(() => assertRoleCapabilities(parsed, "default_model"));
+  assert.doesNotThrow(() => assertRoleCapabilities(parsed, "secondary_model"));
+  assert.doesNotThrow(() => assertRoleCapabilities(parsed, "fast_reasoner"));
 });
 
 test("enforces tool-calling capability for judge overrides", () => {
