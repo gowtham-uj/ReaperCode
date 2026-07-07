@@ -10,7 +10,7 @@ import { getDefaultDeepSeekModel } from "../fixtures/live-models.js";
 
 const baseProfile = {
   profileName: "default_model" as const,
-  role: "main_reasoner" as const,
+  role: "secondary_model" as const,
   provider: "deepseek",
   model: getDefaultDeepSeekModel(),
   capabilities: {

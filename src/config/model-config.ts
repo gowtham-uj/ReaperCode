@@ -127,6 +127,7 @@ export const VerificationGateConfigSchema = z
  */
 export const ContextManagementConfigSchema = z
   .object({
+    shakeEnabled: z.boolean().default(true),
     softCap: z.number().int().positive().default(270_000),
     shakeTriggerPct: z.number().min(1).max(99).default(50),
     shakeProtectWindowChars: z.number().int().nonnegative().default(12_000),
@@ -148,6 +149,39 @@ export const ContextManagementConfigSchema = z
     bashHeadPreviewChars: z.number().int().positive().default(1_200),
     bashTailPreviewChars: z.number().int().positive().default(1_200),
     bashPersistThresholdChars: z.number().int().positive().default(30_000),
+    /**
+     * Promote Context Model (#21, OMP port):
+     * Before triggering full-summary, check if the active mainAgent
+     * profile has a sibling profile with a strictly larger
+     * `capabilities.maxContextTokens`. If so, recommend a model swap
+     * (written to trajectory as `promoted_context_model`). The engine
+     * reads the recommendation and applies the swap, avoiding a
+     * wasteful compaction.
+     */
+    modelPromotionEnabled: z.boolean().default(true),
+    /**
+     * Threshold (token ratio) at which promotion is considered. When
+     * `tokensAfterShake / softCap >= modelPromotionThresholdRatio`,
+     * the wiring inspects sibling profiles and recommends a swap.
+     *
+     * Defaults to 0.5 — fires before the `blockingThresholdRatio`
+     * (0.95) so we never waste a compaction on a profile that could
+     * just be swapped to a larger-context sibling.
+     */
+    modelPromotionThresholdRatio: z.number().min(0).max(1).default(0.5),
+    /**
+     * The role name to promote INTO when the conversation overflows.
+     * Defaults to `"secondary_model"` (the canonical name in
+     * `ModelRoleValues`). Users can override to a different role
+     * registered in `config.models`. The wiring picks the sibling
+     * with the largest `capabilities.maxContextTokens` ≥ the
+     * active profile's. Set to `null` to disable the auto-pick and
+     * only emit the `promoted_context_model` trajectory event
+     * without changing the active profile.
+     */
+    modelPromotionTargetRole: z
+      .union([ModelRoleInputSchema, z.null()])
+      .default("secondary_model"),
     warningThresholdRatio: z.number().min(0).max(1).default(0.70),
     errorThresholdRatio: z.number().min(0).max(1).default(0.85),
     blockingThresholdRatio: z.number().min(0).max(1).default(0.95),
@@ -184,10 +218,10 @@ export const ContextManagementConfigSchema = z
 export const ModelRoutingConfigSchema = z
   .object({
     default_model: ModelRoleInputSchema.default("default_model"),
-    mainAgent: ModelRoleInputSchema.default("strong_model"),
-    planner: ModelRoleInputSchema.default("main_reasoner"),
+    mainAgent: ModelRoleInputSchema.default("secondary_model"),
+    planner: ModelRoleInputSchema.default("secondary_model"),
     executor: ModelRoleInputSchema.default("fast_reasoner"),
-    repair: ModelRoleInputSchema.default("main_reasoner"),
+    repair: ModelRoleInputSchema.default("secondary_model"),
     patcher: ModelRoleInputSchema.default("fast_reasoner"),
     completionGate: ModelRoleInputSchema.default("fast_reasoner"),
     summarizer: ModelRoleInputSchema.default("fast_reasoner"),
@@ -196,10 +230,10 @@ export const ModelRoutingConfigSchema = z
   .strict()
   .optional()
   .default({
-    mainAgent: "strong_model",
-    planner: "main_reasoner",
+    mainAgent: "secondary_model",
+    planner: "secondary_model",
     executor: "fast_reasoner",
-    repair: "main_reasoner",
+    repair: "secondary_model",
     patcher: "fast_reasoner",
     completionGate: "fast_reasoner",
     summarizer: "fast_reasoner",
@@ -330,6 +364,9 @@ export const ReaperConfigSchema = z
 export type ReaperConfig = z.infer<typeof ReaperConfigSchema>;
 
 export function parseReaperConfig(input: unknown): ReaperConfig {
+  if (process.env.REAPER_DEBUG_CONFIG_MERGE) {
+    process.stderr.write(`[parse:debug] called with keys: ${Object.keys((input as any) || {}).join(',')}\n`);
+  }
   return ReaperConfigSchema.parse(input);
 }
 
@@ -350,8 +387,11 @@ export function resolveModelRole(config: ReaperConfig, role: ModelRole): Resolve
 export function assertRoleCapabilities(config: ReaperConfig, role: ModelRole): void {
   const profile = resolveModelRole(config, role);
   const capabilities = profile.capabilities;
-
-  if (role === "embedder" && !capabilities.embeddings) {
+  // The `embedder` role was historically part of the role enum but
+  // was removed in v0.2 when embeddings moved out-of-scope. Kept as
+  // no-op for legacy callers that still pass `embedder` through the
+  // role alias machinery (which maps it to "default_model").
+  if (role === ("embedder" as unknown as ModelRole) && !capabilities.embeddings) {
     throw new Error(`Role '${role}' requires a profile with embeddings=true`);
   }
 }

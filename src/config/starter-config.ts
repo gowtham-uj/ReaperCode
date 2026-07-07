@@ -66,10 +66,10 @@ export function buildStarterConfig(input: { defaultModel?: string; defaultProvid
     // ── Model routing per role ─────────────────────────────────────
     modelRouting: {
       "default_model": "default_model",
-      mainAgent: "main_reasoner",
+      mainAgent: "secondary_model",
       executor: "fast_reasoner",
-      repair: "main_reasoner",
-      planner: "main_reasoner",
+      repair: "secondary_model",
+      planner: "secondary_model",
       patcher: "fast_reasoner",
       completionGate: "fast_reasoner",
       summarizer: "fast_reasoner",

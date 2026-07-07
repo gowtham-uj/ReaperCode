@@ -5,7 +5,7 @@ async function main() {
   console.log("PROFILE_NAME:", gateway.constructor.name);
   const startedAt = Date.now();
   const r = await (gateway as { generate: (req: unknown) => Promise<unknown> }).generate({
-    role: "main_reasoner",
+    role: "secondary_model",
     messages: [
       { role: "user", content: "Reply with the single word PONG and nothing else." },
     ],

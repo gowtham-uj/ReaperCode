@@ -85,7 +85,7 @@ test("tryFullSummarization retries on PTL by truncating head", async () => {
   assert.ok((result?.ptlDrops ?? 0) >= 1, `expected at least 1 PTL drop, got ${result?.ptlDrops}`);
 });
 
-test("tryFullSummarization returns performed=false when summariser keeps failing", async () => {
+test("tryFullSummarization returns performed=false when summarizer keeps failing", async () => {
   const longConversation: Array<{ role: string; content?: string; tool_call_id?: string; name?: string; tool_calls?: Array<{ function: { name: string; arguments: string } }> }> = [];
   for (let i = 0; i < 100; i += 1) {
     longConversation.push({ role: "tool", tool_call_id: `t-${i}`, name: "file_view", content: "x".repeat(2000) });
@@ -114,18 +114,21 @@ test("runSummariser builds a prompt that contains BASE_COMPACT_PROMPT and the co
   assert.match(capturedPrompt, /Primary Request and Intent/);
   assert.match(capturedPrompt, /All user messages/);
   assert.match(capturedPrompt, /Respond with text only/);
-  assert.match(capturedPrompt, /Conversation to summarise/);
+  assert.match(capturedPrompt, /Conversation to summarize/);
 });
 
-test("buildPostCompactMessages produces boundary + summary + re-anchor + deferred-tools", () => {
+test("buildPostCompactMessages produces boundary + summary + re-anchor + deferred-tools + last-user-task", () => {
   const messages = buildPostCompactMessages("summary text", [
     { role: "user", content: "old prompt" },
     { role: "assistant", tool_calls: [{ function: { name: "file_view", arguments: JSON.stringify({ path: "src/a.ts" }) } }] },
     { role: "tool", tool_call_id: "t1", name: "file_view", content: "abc" },
   ], { softCap: 1000 });
-  assert.equal(messages.length, 4);
+  // Post-compact shape: [boundary, summary, re-anchor, deferred, last-user-task]
+  assert.equal(messages.length, 5);
   assert.match(messages[0]?.content ?? "", /\[Reaper context boundary\]/);
   assert.match(messages[1]?.content ?? "", /summary text/);
   assert.match(messages[2]?.content ?? "", /Post-compact re-anchor/);
   assert.match(messages[3]?.content ?? "", /deferred tools/i);
+  // The last user-msg from the input is preserved (current task).
+  assert.equal(messages[4]?.content, "old prompt");
 });

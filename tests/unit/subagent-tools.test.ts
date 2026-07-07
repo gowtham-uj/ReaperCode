@@ -134,9 +134,12 @@ class StaticJsonGateway implements ModelGateway {
   async *stream(_request: GenerateRequest): AsyncIterable<StreamEvent> {}
 
   async embed(request: EmbeddingRequest): Promise<EmbeddingResult> {
+    // `role` is "default_model" since the `embedder` role was
+    // removed in v0.2; the embeddings capability now lives on the
+    // default profile.
     return {
-      role: "embedder",
-      profileName: "embedder",
+      role: "default_model",
+      profileName: "default_model",
       provider: "test",
       model: "static-json",
       vectors: (Array.isArray(request.input) ? request.input : [request.input]).map(() => [0]),

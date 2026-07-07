@@ -50,7 +50,7 @@ async function main(): Promise<void> {
   }
 
   function roleForSubagent(type: SubagentJob["type"]): any {
-    return type === "planner" ? "planner" : "main_reasoner";
+    return type === "planner" ? "planner" : "secondary_model";
   }
 
   function sendComplete(id: string, result: unknown) {

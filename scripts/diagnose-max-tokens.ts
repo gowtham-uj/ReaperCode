@@ -15,8 +15,8 @@ async function diagnoseMaxTokens() {
     const profile: ResolvedModelProfile = {
       provider: "deepinfra",
       model,
-      profileName: "main_reasoner",
-      role: "main_reasoner",
+      profileName: "secondary_model",
+      role: "secondary_model",
       apiKeyEnv: "DEEPINFRA_API_KEY",
       capabilities: { streaming: false, toolCalling: true, jsonMode: true, structuredOutput: true, embeddings: false },
     };
@@ -24,7 +24,7 @@ async function diagnoseMaxTokens() {
     const start = Date.now();
     try {
       const result = await client.generate({
-        role: "main_reasoner",
+        role: "secondary_model",
         messages: [{ role: "user", content: "Provide a JSON object with a 'story' key containing a very long story about a robot, at least 1000 words." }],
         maxTokens: 4096,
         responseFormat: "json"

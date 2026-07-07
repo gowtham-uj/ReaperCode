@@ -8,7 +8,7 @@ function makeProfile(provider = "minimax", model = "MiniMax-M3"): ResolvedModelP
   return {
     provider,
     model,
-    role: "main_reasoner",
+    role: "secondary_model",
     profileName: "default_model",
     apiKeyEnv: "MINIMAX_API_KEY",
     apiBase: "https://api.minimax.io/v1",
@@ -29,7 +29,7 @@ function makeProfile(provider = "minimax", model = "MiniMax-M3"): ResolvedModelP
 
 function makeRequest(responseFormat?: "json"): GenerateRequest {
   return {
-    role: "main_reasoner",
+    role: "secondary_model",
     messages: [{ role: "user", content: "Return JSON." }],
     maxTokens: 128,
     ...(responseFormat ? { responseFormat } : {}),

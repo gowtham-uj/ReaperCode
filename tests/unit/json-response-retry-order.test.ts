@@ -32,8 +32,8 @@ test("generateStructuredJson: mixed stop parse failure + length truncation uses 
   const profile: ResolvedModelProfile = {
     provider: "minimax",
     model: "MiniMax-M3",
-    profileName: "main_reasoner",
-    role: "main_reasoner",
+    profileName: "secondary_model",
+    role: "secondary_model",
     defaultParams: { maxTokens: 8192 },
     capabilities: {
       streaming: true,
@@ -104,7 +104,7 @@ test("generateStructuredJson: mixed stop parse failure + length truncation uses 
 
   const result = await generateStructuredJson({
     modelGateway: gateway,
-    role: "main_reasoner",
+    role: "secondary_model",
     messages: [{ role: "user", content: "build app" }],
     parse: parseEnvelope,
   });

@@ -17,10 +17,10 @@ function summarizeError(err: unknown): string {
 const startedAt = Date.now();
 try {
   const { gateway, config } = createLiveReaperGateway(`provider-smoke:${provider}`, provider);
-  const profile = config.models.main_reasoner ?? config.models.default_model;
+  const profile = config.models.secondary_model ?? config.models.default_model;
   console.error(`[provider-smoke] ${provider}: profile provider=${profile.provider} model=${profile.model} timeout=${profile.timeoutMs ?? "none"}`);
   const result = await gateway.generate({
-    role: "main_reasoner",
+    role: "secondary_model",
     messages: [{ role: "user", content: "Return exactly this JSON object and nothing else: {\"ok\":true}" }],
     maxTokens: 64,
     responseFormat: "json",

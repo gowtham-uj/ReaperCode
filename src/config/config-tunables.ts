@@ -25,6 +25,67 @@ interface TunablesCache {
     stallWatchdogIntervalMs: number;
     stallWatchdogNoOutputMs: number;
   };
+  contextManagement: {
+    /** Master switch for shake (default true). */
+    shakeEnabled: boolean;
+    /** Soft cap in tokens; if unset defaults to provider profile's maxOutputTokens. */
+    softCap: number;
+    /** When to fire shake (default 50% of softCap). */
+    shakeTriggerPct: number;
+    /** Protect the most-recent N chars from shake (default 12_000). */
+    shakeProtectWindowChars: number;
+    /** Min savings to actually run shake (default 100 chars). */
+    shakeMinSavingsChars: number;
+    /** Circuit breaker caps consecutive failures (default 3). */
+    maxConsecutiveShakeFailures: number;
+    /** PTL recovery: how many tool results to drop (default 5). */
+    ptlRecoveryMaxDrops: number;
+    /** PTL recovery: min content size to be drop-target (default 200). */
+    ptlRecoveryMinChars: number;
+    /** Spillover: outputs > this many bytes get persisted (default 8K). */
+    spilloverThresholdBytes: number;
+    /** Spillover: preview size to keep inline (default 1.2K). */
+    spilloverPreviewChars: number;
+    /** Time microcompact enabled (default true). */
+    timeMicrocompactEnabled: boolean;
+    /** Time microcompact gap in ms (default 5min production, 30s stress). */
+    timeMicrocompactGapMs: number;
+    /** Time microcompact keep-recent messages (default 5). */
+    timeMicrocompactKeepRecent: number;
+    /** Full summarization enabled (default true). */
+    fullSummaryEnabled: boolean;
+    /** Max recent files to re-anchor after summarization (default 5). */
+    fullSummaryMaxFilesToRestore: number;
+    /** Token budget for re-anchored files (default 50K). */
+    fullSummaryFileTokenBudget: number;
+    /** Max PTL retries during summarization (default 3). */
+    fullSummaryMaxPtlRetries: number;
+    /** Min chars before a tool result can be PTL-dropped during summary (default 200). */
+    fullSummaryMinCharsForPtlDrop: number;
+    /** Bash head+tail enabled (default true). */
+    bashHeadTailEnabled: boolean;
+    /** Bash preview size (default 1.2K head). */
+    bashHeadPreviewChars: number;
+    /** Bash tail preview size (default 1.2K tail). */
+    bashTailPreviewChars: number;
+    /** When outputs > this many chars they get persisted to disk (default 30K). */
+    bashPersistThresholdChars: number;
+    /** Threshold ratios for context-warning-state telemetry. */
+    warningThresholdRatio: number;
+    errorThresholdRatio: number;
+    blockingThresholdRatio: number;
+    /** #21 Promote Context Model: enabled (default true). */
+    modelPromotionEnabled: boolean;
+    /** #21 Promote threshold ratio. */
+    modelPromotionThresholdRatio: number;
+    /**
+     * #21 Promote target role name. The wiring promotes to this
+     * role (if registered in `config.models` and strictly larger
+     * context than the active profile). Set to `null` to disable
+     * the auto-pick and only emit the trajectory event.
+     */
+    modelPromotionTargetRole: string | null;
+  };
   bg: {
     descendantTermGraceMs: number;
     killGraceMs: number;
@@ -88,6 +149,36 @@ const DEFAULTS: TunablesCache = {
     stallWatchdogIntervalMs: 10_000,
     stallWatchdogNoOutputMs: 30_000,
   },
+  contextManagement: {
+    shakeEnabled: true,
+    softCap: 270_000,
+    shakeTriggerPct: 50,
+    shakeProtectWindowChars: 12_000,
+    shakeMinSavingsChars: 100,
+    maxConsecutiveShakeFailures: 3,
+    ptlRecoveryMaxDrops: 5,
+    ptlRecoveryMinChars: 200,
+    spilloverThresholdBytes: 8_192,
+    spilloverPreviewChars: 1_200,
+    timeMicrocompactEnabled: true,
+    timeMicrocompactGapMs: 5 * 60 * 1000,
+    timeMicrocompactKeepRecent: 5,
+    fullSummaryEnabled: true,
+    fullSummaryMaxFilesToRestore: 5,
+    fullSummaryFileTokenBudget: 50_000,
+    fullSummaryMaxPtlRetries: 3,
+    fullSummaryMinCharsForPtlDrop: 200,
+    bashHeadTailEnabled: true,
+    bashHeadPreviewChars: 1_200,
+    bashTailPreviewChars: 1_200,
+    bashPersistThresholdChars: 30_000,
+    modelPromotionEnabled: true,
+    modelPromotionThresholdRatio: 0.5,
+    modelPromotionTargetRole: "secondary_model" as string | null,
+    warningThresholdRatio: 0.70,
+    errorThresholdRatio: 0.85,
+    blockingThresholdRatio: 0.95,
+  },
   bg: {
     descendantTermGraceMs: 5_000,
     killGraceMs: 3_000,
@@ -135,6 +226,7 @@ let CACHE: TunablesCache = structuredClone(DEFAULTS);
 
 export function applyConfigToTunables(config: ReaperConfig): TunablesCache {
   const rt = config.runtimeTunables;
+  const cm = (config as { contextManagement?: Record<string, number | boolean | string | null> }).contextManagement ?? {};
   CACHE = {
     bash: {
       defaultTimeoutMs: rt.bashDefaultTimeoutMs,
@@ -145,6 +237,42 @@ export function applyConfigToTunables(config: ReaperConfig): TunablesCache {
       maxOutputBytes: rt.maxShellOutputBytes,
       stallWatchdogIntervalMs: rt.stallWatchdogIntervalMs,
       stallWatchdogNoOutputMs: rt.stallWatchdogNoOutputMs,
+    },
+    contextManagement: {
+      shakeEnabled: Boolean(cm.shakeEnabled ?? true),
+      softCap: Number(cm.softCap ?? 270_000),
+      shakeTriggerPct: Number(cm.shakeTriggerPct ?? 50),
+      shakeProtectWindowChars: Number(cm.shakeProtectWindowChars ?? 12_000),
+      shakeMinSavingsChars: Number(cm.shakeMinSavingsChars ?? 100),
+      maxConsecutiveShakeFailures: Number(cm.maxConsecutiveShakeFailures ?? 3),
+      ptlRecoveryMaxDrops: Number(cm.ptlRecoveryMaxDrops ?? 5),
+      ptlRecoveryMinChars: Number(cm.ptlRecoveryMinChars ?? 200),
+      spilloverThresholdBytes: Number(cm.spilloverThresholdBytes ?? 8_192),
+      spilloverPreviewChars: Number(cm.spilloverPreviewChars ?? 1_200),
+      timeMicrocompactEnabled: Boolean(cm.timeMicrocompactEnabled ?? true),
+      timeMicrocompactGapMs: Number(cm.timeMicrocompactGapMs ?? 5 * 60 * 1000),
+      timeMicrocompactKeepRecent: Number(cm.timeMicrocompactKeepRecent ?? 5),
+      fullSummaryEnabled: Boolean(cm.fullSummaryEnabled ?? true),
+      fullSummaryMaxFilesToRestore: Number(cm.fullSummaryMaxFilesToRestore ?? 5),
+      fullSummaryFileTokenBudget: Number(cm.fullSummaryFileTokenBudget ?? 50_000),
+      fullSummaryMaxPtlRetries: Number(cm.fullSummaryMaxPtlRetries ?? 3),
+      fullSummaryMinCharsForPtlDrop: Number(cm.fullSummaryMinCharsForPtlDrop ?? 200),
+      bashHeadTailEnabled: Boolean(cm.bashHeadTailEnabled ?? true),
+      bashHeadPreviewChars: Number(cm.bashHeadPreviewChars ?? 1_200),
+      bashTailPreviewChars: Number(cm.bashTailPreviewChars ?? 1_200),
+      bashPersistThresholdChars: Number(cm.bashPersistThresholdChars ?? 30_000),
+      modelPromotionEnabled: Boolean(cm.modelPromotionEnabled ?? true),
+      modelPromotionThresholdRatio: Number(cm.modelPromotionThresholdRatio ?? 0.5),
+      modelPromotionTargetRole: ((): string | null => {
+        const raw = (cm as any).modelPromotionTargetRole;
+        if (raw === null || raw === undefined) {
+          return raw === null ? null : "secondary_model";
+        }
+        return String(raw);
+      })(),
+      warningThresholdRatio: Number(cm.warningThresholdRatio ?? 0.70),
+      errorThresholdRatio: Number(cm.errorThresholdRatio ?? 0.85),
+      blockingThresholdRatio: Number(cm.blockingThresholdRatio ?? 0.95),
     },
     bg: {
       descendantTermGraceMs: rt.bgDescendantTermGraceMs,
@@ -197,6 +325,10 @@ export function getTunables(): Readonly<TunablesCache> {
 
 export function getBashTunables(): Readonly<TunablesCache["bash"]> {
   return CACHE.bash;
+}
+
+export function getContextTunables(): Readonly<TunablesCache["contextManagement"]> {
+  return CACHE.contextManagement;
 }
 
 export function getBgTunables(): Readonly<TunablesCache["bg"]> {

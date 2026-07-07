@@ -13,7 +13,7 @@ import {
 test("prompt cache can be enabled explicitly for stable prompt prefixes", () => {
   const payload = mapGenerateRequestToLiteLLM(
     {
-      role: "main_reasoner",
+      role: "secondary_model",
       system: "x".repeat(300),
       messages: [{ role: "user", content: "dynamic user request" }],
     },
@@ -29,7 +29,7 @@ test("prompt cache can be enabled explicitly for stable prompt prefixes", () => 
 test("prompt cache can be disabled per profile", () => {
   const payload = mapGenerateRequestToLiteLLM(
     {
-      role: "main_reasoner",
+      role: "secondary_model",
       system: "x".repeat(300),
       messages: [{ role: "user", content: "dynamic user request" }],
     },
@@ -44,7 +44,7 @@ test("Azure OpenAI payload omits model because deployment is in the URL", () => 
   delete process.env.AZURE_OPENAI_API_VERSION;
   const payload = mapGenerateRequestToLiteLLM(
     {
-      role: "main_reasoner",
+      role: "secondary_model",
       messages: [{ role: "user", content: "hello" }],
     },
     { ...profile("azure"), apiBase: "https://example.openai.azure.com" },
@@ -60,7 +60,7 @@ test("Azure OpenAI v1 payload keeps model because endpoint is OpenAI-compatible"
   process.env.AZURE_OPENAI_API_VERSION = "v1";
   const payload = mapGenerateRequestToLiteLLM(
     {
-      role: "main_reasoner",
+      role: "secondary_model",
       messages: [{ role: "user", content: "hello" }],
     },
     { ...profile("azure"), apiBase: "https://example.openai.azure.com/openai" },
@@ -75,7 +75,7 @@ test("Azure OpenAI v1 payload keeps model because endpoint is OpenAI-compatible"
 test("OpenAI-compatible mapper preserves assistant tool calls in standard function shape", () => {
   const payload = mapGenerateRequestToLiteLLM(
     {
-      role: "main_reasoner",
+      role: "secondary_model",
       messages: [
         { role: "user", content: "list files" },
         {
@@ -112,25 +112,35 @@ test("OpenAI-compatible mapper preserves assistant tool calls in standard functi
 });
 
 test("model profile naming aliases map legacy roles to tier labels", () => {
-  assert.equal(getModelProfileName("main_reasoner"), "strong_model");
+  // `secondary_model` is the canonical role name (formerly
+  // `secondary_model`). Its display name is the role itself; legacy
+  // profile aliases (`strong_model`) still resolve to `secondary_model`.
+  assert.equal(getModelProfileName("secondary_model"), "secondary_model");
   assert.equal(getModelProfileName("fast_reasoner"), "fast_model");
   assert.equal(getModelProfileName("judge"), "judge");
-  assert.equal(profileFromLegacyRole("main_reasoner"), "strong_model");
-  assert.equal(displayModelProfile("strong_model"), "strong_model");
+  assert.equal(profileFromLegacyRole("secondary_model"), "secondary_model");
+  assert.equal(displayModelProfile("secondary_model"), "secondary_model");
+  assert.equal(displayModelProfile("strong_model"), "secondary_model");
+  // Legacy inputs still resolve cleanly.
+  assert.equal(displayModelProfile("secondary_model"), "secondary_model");
   assert.equal(displayModelProfile("custom_profile"), "custom_profile");
 });
 
 test("model role alias helper resolves strong/fast profile names", () => {
-  assert.equal(resolveModelRoleAlias("strong_model"), "main_reasoner");
+  // `strong_model`, `secondary_model`, `main_agent`, and
+  // `secondary_model` all resolve to the canonical `secondary_model`.
+  assert.equal(resolveModelRoleAlias("strong_model"), "secondary_model");
+  assert.equal(resolveModelRoleAlias("secondary_model"), "secondary_model");
+  assert.equal(resolveModelRoleAlias("main_agent"), "secondary_model");
   assert.equal(resolveModelRoleAlias("fast_model"), "fast_reasoner");
-  assert.equal(resolveModelRoleAlias("main_reasoner"), "main_reasoner");
+  assert.equal(resolveModelRoleAlias("secondary_model"), "secondary_model");
   assert.equal(resolveModelRoleAlias("unknown_profile"), undefined);
 });
 
 test("OpenAI-compatible mapper converts internal tool schemas and omits JSON mode when tools are present", () => {
   const payload = mapGenerateRequestToLiteLLM(
     {
-      role: "main_reasoner",
+      role: "secondary_model",
       messages: [{ role: "user", content: "read a file" }],
       responseFormat: "json",
       tools: [
@@ -173,7 +183,7 @@ function profile(provider: string, promptCache?: { enabled: boolean; minContentC
     provider,
     model: "model",
     profileName: "default_model",
-    role: "main_reasoner",
+    role: "secondary_model",
     capabilities: {
       streaming: true,
       toolCalling: true,

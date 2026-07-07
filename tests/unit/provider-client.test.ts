@@ -30,7 +30,7 @@ class RecordingClient implements ProviderModelClient {
 }
 
 const baseProfile: ResolvedModelProfile = {
-  role: "main_reasoner",
+  role: "secondary_model",
   profileName: "default_model",
   provider: "deepseek",
   model: "model",
@@ -48,7 +48,7 @@ test("provider multiplexer dispatches official DeepSeek to DeepSeek client", asy
   const openAiCompatible = new RecordingClient("openai-compatible");
   const client = new ProviderMultiplexerClient({ deepseek: deepseek as any, openAiCompatible: openAiCompatible as any });
 
-  const result = await client.generate({ role: "main_reasoner", messages: [] }, baseProfile);
+  const result = await client.generate({ role: "secondary_model", messages: [] }, baseProfile);
 
   assert.equal(result.provider, "deepseek");
   assert.equal(deepseek.calls, 1);
@@ -60,7 +60,7 @@ test("provider multiplexer dispatches Cerebras to Cerebras client", async () => 
   const openAiCompatible = new RecordingClient("openai-compatible");
   const client = new ProviderMultiplexerClient({ cerebras: cerebras as any, openAiCompatible: openAiCompatible as any });
 
-  const result = await client.generate({ role: "main_reasoner", messages: [] }, { ...baseProfile, provider: "cerebras" });
+  const result = await client.generate({ role: "secondary_model", messages: [] }, { ...baseProfile, provider: "cerebras" });
 
   assert.equal(result.provider, "cerebras");
   assert.equal(cerebras.calls, 1);
@@ -72,7 +72,7 @@ test("provider multiplexer dispatches OpenAI-compatible providers to generic cli
   const client = new ProviderMultiplexerClient({ openAiCompatible: openAiCompatible as any });
 
   for (const provider of ["openai", "openrouter", "azure"] as const) {
-    const result = await client.generate({ role: "main_reasoner", messages: [] }, { ...baseProfile, provider });
+    const result = await client.generate({ role: "secondary_model", messages: [] }, { ...baseProfile, provider });
     assert.equal(result.provider, "openai-compatible");
   }
 
@@ -84,7 +84,7 @@ test("provider multiplexer dispatches Anthropic to official Anthropic client", a
   const openAiCompatible = new RecordingClient("openai-compatible");
   const client = new ProviderMultiplexerClient({ anthropic: anthropic as any, openAiCompatible: openAiCompatible as any });
 
-  const result = await client.generate({ role: "main_reasoner", messages: [] }, { ...baseProfile, provider: "anthropic" });
+  const result = await client.generate({ role: "secondary_model", messages: [] }, { ...baseProfile, provider: "anthropic" });
 
   assert.equal(result.provider, "anthropic");
   assert.equal(anthropic.calls, 1);

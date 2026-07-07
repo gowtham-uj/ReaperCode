@@ -25,7 +25,7 @@ test("recordModelCall writes a generation event with prompt and response to the 
   try {
     await recordModelCall(
       {
-        role: "main_reasoner",
+        role: "secondary_model",
         source: "planner_subagent",
         provider: "minimax",
         model: "MiniMax-M3",
@@ -55,8 +55,8 @@ test("recordModelCall writes a generation event with prompt and response to the 
   const event = JSON.parse(contents.trim().split("\n").pop()!);
   assert.equal(event.metadata.source, "planner_subagent");
   assert.equal(event.metadata.profile, "strong_model");
-  assert.equal(event.metadata.legacyRole, "main_reasoner");
-  assert.equal(event.metadata.role, "main_reasoner");
+  assert.equal(event.metadata.legacyRole, "secondary_model");
+  assert.equal(event.metadata.role, "secondary_model");
   assert.equal(event.metadata.durationMs, 1000);
   assert.equal(event.metadata.promptChars, 12000);
   assert.equal(event.metadata.systemChars, "# stable system prefix".length);
@@ -109,7 +109,7 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
 events = [
-    {"metadata": {"role": "main_reasoner", "provider": "p", "model": "m", "promptChars": 10, "durationMs": 20}},
+    {"metadata": {"role": "secondary_model", "provider": "p", "model": "m", "promptChars": 10, "durationMs": 20}},
     {"metadata": {"source": "executor", "profile": "fast_model", "legacyRole": "fast_reasoner", "provider": "p", "model": "m2", "promptChars": 5}},
 ]
 buf = io.StringIO()
@@ -117,7 +117,7 @@ with contextlib.redirect_stdout(buf):
     mod.print_model_request_breakdown(events)
 out = buf.getvalue()
 assert "source=unknown_source calls=1" in out
-assert "profile=strong_model legacyRole=main_reasoner" in out
+assert "profile=strong_model legacyRole=secondary_model" in out
 assert "source=executor calls=1" in out
 assert "profile=fast_model legacyRole=fast_reasoner" in out
 `;
