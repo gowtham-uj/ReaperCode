@@ -94,10 +94,6 @@ export async function runUnifiedEval(options: UnifiedEvalOptions): Promise<Unifi
         bashHeadTailEnabled: true,
         bashPersistThresholdChars: bashThreshold,
       };
-      (config as any).tokenBudget = {
-        ...((config as any).tokenBudget ?? {}),
-        softCap: task.softCap,
-      };
     }
     applyConfigToTunables(config as any);
 
@@ -265,10 +261,6 @@ async function writeTaskSoftCap(workspaceRoot: string, task: EvalTask): Promise<
     fullSummaryEnabled: true,
     bashHeadTailEnabled: true,
     bashPersistThresholdChars: bashThreshold,
-  };
-  existing.tokenBudget = {
-    ...((existing.tokenBudget as object) ?? {}),
-    softCap: task.softCap,
   };
   await writeFile(configPath, JSON.stringify(existing, null, 2), "utf8");
 }
