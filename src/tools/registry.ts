@@ -36,6 +36,10 @@ import {
   ActivateSkillArgsSchema,
   WebFetchArgsSchema,
   SearchToolsArgsSchema,
+  ScratchpadArgsSchema,
+  SearchMemoryArgsSchema,
+  CallSubagentArgsSchema,
+  PollSubagentArgsSchema,
 } from "./types.js";
 import {
   FileViewArgsSchema,
@@ -273,6 +277,25 @@ export const toolRegistry = {
     description:
       "Search available tools by keyword or direct select:<tool_name>. Call this when you need a capability not shown in the current tool list (e.g. background processes, web fetching, symbol rename). Returns matching tool names and descriptions, and promotes them to full-schema rendering on subsequent turns.",
     argsSchema: SearchToolsArgsSchema,
+  },
+  scratchpad: {
+    description:
+      "Append, read, or clear durable working notes at `.reaper/memory/scratch.md`. Use append for intermediate decisions that must survive context compaction; read to recall them later; clear when the notes are obsolete.",
+    argsSchema: ScratchpadArgsSchema,
+  },
+  search_memory: {
+    description:
+      "Search prior session summaries persisted under `.reaper/summaries/`. Use after compaction or on resume to recall what the agent was doing earlier.",
+    argsSchema: SearchMemoryArgsSchema,
+  },
+  call_subagent: {
+    description:
+      "Invoke an advisory subagent (planner/reviewer/repair/tester/researcher) that returns structured JSON. Use for parallel scouting or specialized review. Does not recurse into tools. Prefer blocking mode unless the task is long-running.",
+    argsSchema: CallSubagentArgsSchema,
+  },
+  poll_subagent: {
+    description: "Poll a background call_subagent job by jobId.",
+    argsSchema: PollSubagentArgsSchema,
   },
   /* ----- Skill authoring (5) ----- */
   create_skill: {

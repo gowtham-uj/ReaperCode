@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { shakeConversationWithBreaker, truncateHeadForPTLRecovery } from "../context/shake.js";
 import { maybeTimeBasedMicrocompact } from "../context/time-microcompact.js";
 import { compactToolHistory } from "../context/history-compaction.js";
+import { pruneSupersededToolResults } from "../context/supersede-prune.js";
 import { getContextTunables } from "../config/config-tunables.js";
 import { tokenUsageFromResponse } from "../context/token-budget.js";
 import { TrajectoryLogger } from "../logging/trajectory.js";
@@ -16,6 +17,12 @@ export interface ContextEngineeringHooksOptions {
   infer?: (prompt: string) => Promise<string>;
   /** Token-counting function. Defaults to chars/4 heuristic. */
   countTokens?: (messages: unknown[]) => number;
+  /**
+   * When true (default), await full-summary before returning from onBeforeModelCall
+   * so the compacted messages are applied on the same turn (OMP semantics).
+   * Set false to restore the legacy fire-and-forget async path.
+   */
+  blockingFullSummary?: boolean;
   /**
    * Reaper config — used by #21 model-promotion to read sibling profiles.
    */
@@ -89,7 +96,17 @@ export interface ContextEngineeringHooks {
 }
 
 interface ShakeBreakerState { consecutiveFailures: number; }
-const SHAKE_BREAKER_STATE: ShakeBreakerState = { consecutiveFailures: 0 };
+/** Per-run shake circuit breaker — never process-global across concurrent runs. */
+const SHAKE_BREAKER_BY_RUN = new Map<string, ShakeBreakerState>();
+
+function getShakeBreaker(runId: string): ShakeBreakerState {
+  let state = SHAKE_BREAKER_BY_RUN.get(runId);
+  if (!state) {
+    state = { consecutiveFailures: 0 };
+    SHAKE_BREAKER_BY_RUN.set(runId, state);
+  }
+  return state;
+}
 
 function estimateLiveConversationChars(messages: unknown): number {
   if (!Array.isArray(messages)) return 0;
@@ -130,9 +147,41 @@ export function createContextEngineeringHooks(
   const countTokens = options.countTokens ?? ((msgs) => Math.ceil(estimateLiveConversationChars(msgs) / 4));
 
   return {
-    async onBoot({ workspaceRoot: _w, runId: _r, sessionId: _s, namedSession: _ns }) {
-      // No-op boot for now; engine owns session/journal lifecycle.
-      return;
+    async onBoot({ workspaceRoot, runId, sessionId, namedSession }) {
+      // Soft-context continuity: init journal (when named) and stash a
+      // session-resume payload for the engine to prepend. Signature stays
+      // Promise<void>; resume data lives on globalThis.
+      try {
+        if (namedSession) {
+          const { initJournal, journalExists, isValidSessionName } = await import(
+            "../context/session-journal.js"
+          );
+          if (isValidSessionName(namedSession) && !journalExists(workspaceRoot, namedSession)) {
+            await initJournal({
+              name: namedSession,
+              workspaceRoot,
+              cwd: workspaceRoot,
+            }).catch(() => undefined);
+          }
+        }
+
+        const { loadAllSummaries } = await import("../context/persistent-summary.js");
+        const summaries = loadAllSummaries(workspaceRoot);
+        if (namedSession || summaries.length > 0) {
+          const { buildSessionResumeWithBody } = await import("../context/session-resume.js");
+          const resume = await buildSessionResumeWithBody(workspaceRoot, {
+            ...(sessionId ? { sessionId } : {}),
+          });
+          (globalThis as Record<string, unknown>)[`${runId}::session-resume`] = {
+            resume,
+            namedSession: namedSession ?? null,
+            sessionId,
+            stashedAt: Date.now(),
+          };
+        }
+      } catch {
+        /* best-effort — boot must not fail the run */
+      }
     },
 
     async onBeforeModelCall({ workspaceRoot, runId, sessionId, traceId, messages, softCap, trajectoryLogger }) {
@@ -264,24 +313,38 @@ export function createContextEngineeringHooks(
         }
       }
 
-      // #6, #7: Shake (cheapest, no LLM)
+      // #5b: Supersede prune (cheaper than shake for read-heavy loops)
+      let superseded = 0;
+      let supersedeSaved = 0;
+      try {
+        const pruneResult = pruneSupersededToolResults(working as Array<Record<string, unknown>>, {
+          warmPrefixCount: 1,
+        });
+        superseded = pruneResult.pruned;
+        supersedeSaved = pruneResult.savedChars;
+      } catch {
+        /* best-effort */
+      }
+
+      // #6, #7: Shake (cheapest LLM-free pass after supersede)
       const tokensBeforeShake = countTokens(working);
       let shaken = 0;
       let savedChars = 0;
+      const breaker = getShakeBreaker(runId);
       if (cmTunablesBefore.shakeEnabled) {
         try {
           const { result, nextFailures } = shakeConversationWithBreaker(
             working as any,
             softCap,
-            SHAKE_BREAKER_STATE.consecutiveFailures,
+            breaker.consecutiveFailures,
           );
-          SHAKE_BREAKER_STATE.consecutiveFailures = nextFailures;
+          breaker.consecutiveFailures = nextFailures;
           if (result.performed && result.shaken > 0) {
             shaken = result.shaken;
             savedChars = result.savedChars;
           }
         } catch {
-          SHAKE_BREAKER_STATE.consecutiveFailures += 1;
+          breaker.consecutiveFailures += 1;
         }
       }
 
@@ -302,86 +365,111 @@ export function createContextEngineeringHooks(
             shaken_results: shaken,
             saved_chars: savedChars,
             saved_tokens: tokensSavedByShake,
-            consecutive_failures: SHAKE_BREAKER_STATE.consecutiveFailures,
+            consecutive_failures: breaker.consecutiveFailures,
+            superseded_results: superseded,
+            supersede_saved_chars: supersedeSaved,
           } as any).catch(() => undefined);
         } catch {
           /* best-effort */
         }
       }
 
-      // #10: Full summarization (LLM only, fires when tokensAfterShake
-      // exceeds the OMP-aligned threshold = softCap - reserve). The
-      // reserve falls back to max(1, softCap * 0.15) for tiny windows.
-      // This is the same gate OMP's runAutoCompaction uses, so a
-      // long-running conversation crosses the same threshold in
-      // reaper as in OMP.
+      // #10: Full summarization (LLM). When blockingFullSummary is true
+      // (default), await and apply post-compact messages on THIS call —
+      // OMP `runAutoCompaction` semantics. Legacy async path remains
+      // available via options.blockingFullSummary === false.
+      // T1/T2: also force-compact when idle-compaction or incomplete-
+      // recovery slots are set, even if the natural threshold isn't crossed.
+      // T3: optional handoff prompt for smaller-context summaries.
       const fullSummaryEnabledConfig = cmTunablesBefore.fullSummaryEnabled;
       const { shouldCompact } = await import("../context/should-compact.js");
-      // T1/T2 force: when idle-compaction or incomplete-recovery
-      // triggered, force-compact even if the natural threshold isn't
-      // crossed. OMP equivalent: the `runAutoCompaction` post-event.
       const fireFullSummary =
         (shouldCompact(tokensAfterShake, softCap) || forceCompactFromIdleOrIncomplete) &&
         fullSummaryEnabledConfig;
+      let fullSummarized = false;
+      const blockingFullSummary = options.blockingFullSummary !== false;
+      const useHandoff = cmTunablesBefore.handoffEnabled === true;
       if (fireFullSummary && infer) {
         const inflightKey = `${runId}::full-summary`;
-        if (!(globalThis as any)[inflightKey]) {
-          // T3 Handoff: when enabled, use the smaller-context
-          // handoff prompt and emit a `handoff_summary` trajectory
-          // event. The post-compact shape is the same as
-          // full-summary (buildPostCompactMessages); the only
-          // difference is which prompt template the LLM receives.
-          const useHandoff = cmTunablesBefore.handoffEnabled === true;
+        const runInfer = async (jsonl: string): Promise<string> => {
+          if (!useHandoff) return infer(jsonl);
+          const { HANDOFF_SUMMARY_SYSTEM_PROMPT, HANDOFF_SUMMARY_USER_PROMPT_INSTRUCTIONS } = await import("../context/handoff.js");
+          return infer(`${HANDOFF_SUMMARY_SYSTEM_PROMPT}\n\n---\n\n${HANDOFF_SUMMARY_USER_PROMPT_INSTRUCTIONS}\n\n---\n\n${jsonl}`);
+        };
+        const applySummary = async (summaryText: string): Promise<void> => {
+          const { persistSummary } = await import("../context/persistent-summary.js");
+          const { buildPostCompactMessages } = await import("../context/full-summary.js");
+          const preChars = estimateLiveConversationChars(working);
+          const newMsgs = buildPostCompactMessages(summaryText, working as any, { softCap } as any);
+          const postChars = estimateLiveConversationChars(newMsgs as unknown[]);
+          working = newMsgs as unknown[];
+          fullSummarized = true;
+          (globalThis as any)[`${runId}::full-summary-applied`] = {
+            messages: newMsgs,
+            summaryText,
+            appliedAt: Date.now(),
+          };
+          await persistSummary(workspaceRoot, {
+            sessionId: sessionId,
+            runId: runId,
+            preChars,
+            postChars,
+            savedChars: preChars - postChars,
+            ptlDrops: 0,
+            reattachedFiles: 0,
+            body: summaryText,
+          } as any).catch(() => undefined);
+          await (trajectoryLogger as TrajectoryLogger).write({
+            event_id: randomUUID(),
+            run_id: runId,
+            session_id: sessionId,
+            trace_id: traceId ?? runId,
+            timestamp: new Date().toISOString(),
+            log_schema_version: 1,
+            kind: useHandoff ? "handoff_summary" : "full_summary",
+            level: "info",
+            summary_chars: summaryText.length,
+            kept_messages: newMsgs.length,
+            ptl_drops: 0,
+            saved_chars: Math.max(0, preChars - postChars),
+            blocking: blockingFullSummary,
+            ...(useHandoff ? { handoff_kind: "omp-4-section" } : {}),
+          } as any).catch(() => undefined);
+        };
+
+        if (blockingFullSummary) {
+          try {
+            const existing = (globalThis as any)[inflightKey];
+            let summaryText: string;
+            if (existing?.promise && typeof existing.promise.then === "function") {
+              summaryText = await existing.promise;
+            } else {
+              const jsonl = JSON.stringify(working);
+              const inflightRef = { promise: runInfer(jsonl) };
+              (globalThis as any)[inflightKey] = inflightRef;
+              try {
+                summaryText = await inflightRef.promise;
+              } finally {
+                if ((globalThis as any)[inflightKey] === inflightRef) {
+                  (globalThis as any)[inflightKey] = undefined;
+                }
+              }
+            }
+            if (typeof summaryText === "string" && summaryText.length > 0) {
+              await applySummary(summaryText);
+            }
+          } catch {
+            /* best-effort — fall through with unshaken working set */
+          }
+        } else if (!(globalThis as any)[inflightKey]) {
           const jsonl = JSON.stringify(working);
           const inflightRef: { promise: Promise<string> } = (globalThis as any)[inflightKey] = {
-            promise: (async () => {
-              if (!useHandoff) return infer(jsonl);
-              // Prepend the handoff system prompt to give the
-              // smaller-context template context.
-              const { HANDOFF_SUMMARY_SYSTEM_PROMPT, HANDOFF_SUMMARY_USER_PROMPT_INSTRUCTIONS } = await import("../context/handoff.js");
-              return infer(`${HANDOFF_SUMMARY_SYSTEM_PROMPT}\n\n---\n\n${HANDOFF_SUMMARY_USER_PROMPT_INSTRUCTIONS}\n\n---\n\n${jsonl}`);
-            })(),
+            promise: runInfer(jsonl),
           };
           inflightRef.promise
             .then(async (summaryText: string) => {
               try {
-                const { persistSummary } = await import("../context/persistent-summary.js");
-                const { buildPostCompactMessages } = await import("../context/full-summary.js");
-                const preChars = estimateLiveConversationChars(working);
-                const newMsgs = buildPostCompactMessages(summaryText, working as any, { softCap } as any);
-                const postChars = estimateLiveConversationChars(newMsgs as unknown[]);
-                (globalThis as any)[`${runId}::full-summary-applied`] = {
-                  messages: newMsgs,
-                  summaryText,
-                  appliedAt: Date.now(),
-                };
-                await persistSummary(workspaceRoot, {
-                  sessionId: sessionId,
-                  runId: runId,
-                  preChars,
-                  postChars,
-                  savedChars: preChars - postChars,
-                  ptlDrops: 0,
-                  reattachedFiles: 0,
-                  body: summaryText,
-                } as any).catch(() => undefined);
-                // T3: emit handoff_summary vs full_summary depending
-                // on which template the LLM received.
-                await (trajectoryLogger as TrajectoryLogger).write({
-                  event_id: randomUUID(),
-                  run_id: runId,
-                  session_id: sessionId,
-                  trace_id: traceId ?? runId,
-                  timestamp: new Date().toISOString(),
-                  log_schema_version: 1,
-                  kind: useHandoff ? "handoff_summary" : "full_summary",
-                  level: "info",
-                  summary_chars: summaryText.length,
-                  kept_messages: newMsgs.length,
-                  ptl_drops: 0,
-                  saved_chars: Math.max(0, preChars - postChars),
-                  ...(useHandoff ? { handoff_kind: "omp-4-section" } : {}),
-                } as any).catch(() => undefined);
+                await applySummary(summaryText);
               } catch {
                 /* best-effort */
               }
@@ -473,12 +561,12 @@ export function createContextEngineeringHooks(
       return {
         messages: working,
         shaken,
-        savedChars,
+        savedChars: savedChars + supersedeSaved,
         savedTokens: tokensSavedByShake,
-        fullSummarized: false,
+        fullSummarized,
         ptlDrops: 0,
         toolHistoryCompacted,
-        shakeBreakerTrips: SHAKE_BREAKER_STATE.consecutiveFailures,
+        shakeBreakerTrips: breaker.consecutiveFailures,
       };
     },
 

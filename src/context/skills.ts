@@ -90,6 +90,7 @@ export function discoverSkills(workspaceRoot: string): Skill[] {
   const skillDirs = [
     join(workspaceRoot, ".opencode", "skills"),
     join(workspaceRoot, ".reaper", "skills"),
+    join(workspaceRoot, ".pi", "skills"),
     join(workspaceRoot, "skills"),
   ];
 
