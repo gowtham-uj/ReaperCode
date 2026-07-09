@@ -166,3 +166,24 @@ test("full_summary accepts blocking flag and context_shake accepts wiring extras
   assert.equal((shake as { saved_tokens?: number }).saved_tokens, 2);
 });
 
+test("premature_stop_nudge and tool_call_parse_error are accepted", () => {
+  const nudge = parseTrajectoryEntry({
+    ...baseLogFields(),
+    kind: "premature_stop_nudge",
+    level: "info",
+    assistant_excerpt: "Writing f10-f14 now.",
+    nudge_count: 1,
+    reason: "non_final_summary",
+  });
+  assert.equal(nudge.kind, "premature_stop_nudge");
+
+  const parseErr = parseTrajectoryEntry({
+    ...baseLogFields(),
+    event_id: "event-parse",
+    kind: "tool_call_parse_error",
+    level: "info",
+    dropped: [{ name: "scratchpad", error: "invalid args" }],
+  });
+  assert.equal(parseErr.kind, "tool_call_parse_error");
+});
+

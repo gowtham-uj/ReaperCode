@@ -75,7 +75,11 @@ import { classifyShellCommandSemantics } from "../tools/command-semantics.js";
 import { loadMcpServersFromFile } from "../tools/mcp/config.js";
 import { MergedToolRegistry } from "../tools/mcp/registry.js";
 import { ToolCallSchema, type ToolCall, type ToolResult } from "../tools/types.js";
-import { streamMainAgentResponse, isFinalAssistantSummary } from "./main-agent-node.js";
+import {
+  streamMainAgentResponse,
+  isFinalAssistantSummary,
+  containsEmbeddedToolCallMarkup,
+} from "./main-agent-node.js";
 import type { GenerateRequest } from "../model/types.js";
 import { batchNeedsMutationCheckpoint, createCheckpoint } from "./checkpoints.js";
 import { getGitDiffState, getGitStatusState, summarizeGitDiffState } from "./diff-state.js";
@@ -1242,21 +1246,33 @@ export class RuntimeEngine {
               await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
             }
             // Premature-stop nudge: model announced next actions in text but
-            // emitted no tool_calls (e.g. "Writing f10-f14 now"). Push once so
-            // it continues instead of treating the announcement as completion.
-            const prematureStopNudgeKey = `${getBoot().state.runId}::premature-stop-nudge`;
-            const alreadyNudged = Boolean((globalThis as any)[prematureStopNudgeKey]);
-            if (
-              !alreadyNudged &&
-              typeof turn.content === "string" &&
-              turn.content.trim().length > 0 &&
-              !isFinalAssistantSummary(turn.content)
-            ) {
-              (globalThis as any)[prematureStopNudgeKey] = true;
-              const nudge =
-                "Your last turn had no tool_calls, but the message does not look like a verified final summary. " +
-                "If work remains, emit concrete tool_calls now (write_file / file_edit / bash / scratchpad). " +
-                "Only finish with a final assistant_message and empty tool_calls after the required verification has actually passed.";
+            // emitted no tool_calls (e.g. "Writing f10-f14 now" or fake
+            // `<tool_call>` markup). Keep nudging while the turn is clearly
+            // non-final; only accept a stop after a verified final summary
+            // (and required verification evidence when configured).
+            const prematureStopNudgeKey = `${getBoot().state.runId}::premature-stop-nudge-count`;
+            const nudgeCount = Number((globalThis as any)[prematureStopNudgeKey] ?? 0);
+            const contentText = typeof turn.content === "string" ? turn.content : "";
+            const looksFinal = contentText.trim().length > 0 && isFinalAssistantSummary(contentText);
+            const hasFakeToolMarkup = containsEmbeddedToolCallMarkup(contentText);
+            const requiredVerificationPending = hasExplicitVerificationRequest(getRequest())
+              && !hasSuccessfulVerificationEvidence([...((state.toolResults ?? []) as ToolResult[]), ...liveToolResults], getRequest());
+            const shouldNudge =
+              contentText.trim().length > 0 &&
+              (!looksFinal || hasFakeToolMarkup || requiredVerificationPending) &&
+              nudgeCount < 3;
+            if (shouldNudge) {
+              (globalThis as any)[prematureStopNudgeKey] = nudgeCount + 1;
+              const nudge = hasFakeToolMarkup
+                ? "Your last turn embedded tool intent as text (`<tool_call>...`) instead of structured tool_calls, so nothing executed. " +
+                  "Re-emit the same actions as real tool_calls (write_file / file_edit / bash / scratchpad / file_view). " +
+                  "Do not claim tools already ran."
+                : requiredVerificationPending
+                  ? "Your last turn had no tool_calls, but the required verification command has not succeeded yet. " +
+                    "Run the verification (e.g. npm test / the task's verification command) via bash and only then finish with a final summary."
+                  : "Your last turn had no tool_calls, but the message does not look like a verified final summary. " +
+                    "If work remains, emit concrete tool_calls now (write_file / file_edit / bash / scratchpad). " +
+                    "Only finish with a final assistant_message and empty tool_calls after the required verification has actually passed.";
               liveConversation.push({ role: "user", content: nudge });
               await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
               await this.trajectoryLogger
@@ -1269,7 +1285,13 @@ export class RuntimeEngine {
                   log_schema_version: 1,
                   kind: "premature_stop_nudge",
                   level: getBoot().state.logLevel,
-                  assistant_excerpt: turn.content.slice(0, 400),
+                  assistant_excerpt: contentText.slice(0, 400),
+                  nudge_count: nudgeCount + 1,
+                  reason: hasFakeToolMarkup
+                    ? "embedded_tool_markup"
+                    : requiredVerificationPending
+                      ? "verification_pending"
+                      : "non_final_summary",
                 } as any)
                 .catch(() => undefined);
               continue;
@@ -1307,18 +1329,22 @@ export class RuntimeEngine {
                 }
               } catch { /* fall through to break */ }
             }
-            // The model emits its own final assistant turn (with or
-            // without text, but no tool calls) when it is done. The
-            // runtime never force-stops on time, iterations, or token
-            // budgets — only on the model's own no-tool-calls turn or
-            // an external abort signal.
+            // Accept a natural stop when the turn looks final (or empty) and
+            // required verification is not pending. After the nudge budget is
+            // exhausted, break anyway to avoid an infinite live-loop.
             if (
-              !turn.finishReason ||
-              turn.finishReason === "stop" ||
-              turn.finishReason === "length" ||
-              turn.finishReason === "end_turn"
+              ((!contentText.trim() || looksFinal) && !requiredVerificationPending) ||
+              nudgeCount >= 3
             ) {
-              break;
+              if (
+                !turn.finishReason ||
+                turn.finishReason === "stop" ||
+                turn.finishReason === "length" ||
+                turn.finishReason === "end_turn" ||
+                nudgeCount >= 3
+              ) {
+                break;
+              }
             }
             continue;
           }
@@ -2210,15 +2236,30 @@ export class RuntimeEngine {
 	      const taskCompleted = state.events.some((event) => event.message_type === "task_completed");
 	      const transportRetryExhausted = countConsecutiveModelTransportBlockers(state.runtimeBlockers) >= mainAgentTransportRetryLimit();
 	      const lowConfidenceCompletionBlocked = state.runtimeBlockers.at(-1)?.code === "low_confidence_completion_blocked";
+	      // Never report verified_completion/solved when an explicit verification
+	      // command was requested but never succeeded. The live loop may still
+	      // emit task_completed on a natural no-tool stop; metrics must not lie.
+	      const verificationRequired = hasExplicitVerificationRequest(getRequest());
+	      const verificationSucceeded = state.explicitVerification?.ok === true
+	        || hasSuccessfulVerificationEvidence(state.toolResults ?? [], getRequest());
+	      const verifiedCompletion = Boolean(
+	        taskCompleted &&
+	          (verificationRequired
+	            ? verificationSucceeded
+	            : state.explicitVerification?.ok !== false),
+	      );
 	      const sessionMetrics = buildSessionMetricsSummary({
 	        toolResults: state.toolResults,
 	        completionGateAttempts: state.completionGateAttempts,
 	        taskCompleted,
-	        verifiedCompletion: taskCompleted && state.explicitVerification?.ok !== false,
+	        verifiedCompletion,
 	        stuckTripped: false,
 	        gateExhausted: state.completionGateExhausted,
 	        ...(transportRetryExhausted ? { stopReasonOverride: "infra_failed" as const } : {}),
 	        ...(lowConfidenceCompletionBlocked ? { stopReasonOverride: "error" as const } : {}),
+	        ...(verificationRequired && taskCompleted && !verifiedCompletion
+	          ? { stopReasonOverride: "error" as const }
+	          : {}),
 	      });
 	      const metrics = buildTrajectoryEfficiencyMetrics({
 	        startedAt,
@@ -4088,6 +4129,39 @@ export function selectRecentStrictVerificationEvidence(results: ToolResult[]): {
 function hasExplicitVerificationRequest(request: AgentRequestEnvelope): boolean {
   const verification = request.payload.verification;
   return Boolean(verification && typeof verification === "object" && typeof (verification as { command?: unknown }).command === "string");
+}
+
+/**
+ * True when tool results already include a successful run of the request's
+ * required verification command (exact match or command substring).
+ */
+function hasSuccessfulVerificationEvidence(
+  toolResults: ToolResult[],
+  request: AgentRequestEnvelope,
+): boolean {
+  const verification = request.payload.verification;
+  const command =
+    verification && typeof verification === "object"
+      ? (verification as { command?: unknown }).command
+      : undefined;
+  if (typeof command !== "string" || !command.trim()) return false;
+  const wanted = command.trim();
+  for (const result of toolResults) {
+    if (!result.ok) continue;
+    if (result.name !== "bash" && result.name !== "run_shell_command") continue;
+    const args = (result.args ?? {}) as Record<string, unknown>;
+    const cmd = typeof args.cmd === "string" ? args.cmd : typeof args.command === "string" ? args.command : "";
+    if (!cmd) continue;
+    if (cmd.trim() === wanted || cmd.includes(wanted)) {
+      const output = result.output;
+      if (output && typeof output === "object") {
+        const exitCode = (output as { exitCode?: unknown }).exitCode;
+        if (typeof exitCode === "number" && exitCode !== 0) continue;
+      }
+      return true;
+    }
+  }
+  return false;
 }
 
 function shouldRunVerificationForCompletion(

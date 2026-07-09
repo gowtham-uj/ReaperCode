@@ -194,6 +194,7 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
 	    level: z.enum(["info", "debug", "trace"]),
 	    saved_chars: z.number().int().min(0).optional(),
 	    remaining_messages: z.number().int().min(0).optional(),
+	    reason: z.string().min(1).optional(),
 	  }),
 	  // Full summarization: emitted when onBeforeModelCall invoked
 	    // tryFullSummarization and replaced the conversation with a
@@ -306,6 +307,18 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
 	    reason: z.string().min(1),
 	    latency_ms: z.number().int().min(0).optional(),
 	    resolved_on_primary: z.boolean(),
+	  }),
+	  CommonLogFieldsSchema.extend({
+	    kind: z.literal("premature_stop_nudge"),
+	    level: z.enum(["info", "debug", "trace"]),
+	    assistant_excerpt: z.string().optional(),
+	    nudge_count: z.number().int().min(1).optional(),
+	    reason: z.string().min(1).optional(),
+	  }),
+	  CommonLogFieldsSchema.extend({
+	    kind: z.literal("tool_call_parse_error"),
+	    level: z.enum(["info", "debug", "trace"]),
+	    dropped: z.unknown().optional(),
 	  }),
 	  ]);
 

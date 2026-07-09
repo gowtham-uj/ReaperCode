@@ -218,6 +218,24 @@ export async function streamMainAgentResponse(
     }
   }
 
+  // Some providers (notably MiniMax) occasionally emit tool intent as
+  // textual `<tool_call>{...}</tool_call>` markup instead of structured
+  // tool_calls. Recover those into real ToolCall objects so the live
+  // loop executes them instead of treating the turn as a no-tool stop.
+  let recoveredEmbeddedToolCalls = false;
+  if (accumulatedToolCalls.length === 0 && content.trim()) {
+    const recovered = recoverEmbeddedToolCallsFromText(content);
+    for (const call of recovered.calls) {
+      if (!accumulatedToolCalls.some((c) => c.id === call.id)) {
+        accumulatedToolCalls.push(call);
+        recoveredEmbeddedToolCalls = true;
+      }
+    }
+    for (const err of recovered.parseErrors) {
+      droppedToolCalls.push({ id: "embedded", error: err });
+    }
+  }
+
   return {
     role,
     profileName: role,
@@ -233,6 +251,7 @@ export async function streamMainAgentResponse(
       toolCalls: accumulatedToolCalls,
       finishReason,
       ...(droppedToolCalls.length ? { droppedToolCalls } : {}),
+      ...(recoveredEmbeddedToolCalls ? { recoveredEmbeddedToolCalls: true } : {}),
     },
   };
 }
@@ -282,6 +301,10 @@ export function isFinalAssistantSummary(message: string): boolean {
   const visible = stripThinkingBlocks(message).replace(/\s+/g, " ").trim();
   if (!visible) return false;
 
+  // Textual tool-call markup is never a final summary — the model still
+  // intends to act, even if the provider failed to emit structured tools.
+  if (containsEmbeddedToolCallMarkup(message)) return false;
+
   const actionIntent = /\b(?:i(?:'|’)ll|i will|i am going to|i'm going to|let me|i need to|i should|i'll now|i will now|next,? i(?:'|’)ll|now i(?:'|’)ll|i can proceed|let's)\b/i.test(visible);
   const weakCompletion = /\b(?:done|complete|completed|implemented|created|updated|fixed|verified)\b/i.test(visible);
   const strongCompletion = /\b(?:tests? pass(?:ed|es)?|all checks pass(?:ed)?|npm test pass(?:ed)?|verification pass(?:ed)?|task (?:is )?complete|all (?:required )?(?:files|deliverables) (?:are )?(?:done|complete)|status:\s*success)\b/i.test(visible);
@@ -294,6 +317,137 @@ export function isFinalAssistantSummary(message: string): boolean {
   if (futureAction && !strongCompletion) return false;
   if (!weakCompletion && !strongCompletion) return false;
   return strongCompletion || (weakCompletion && !futureAction && !midBatchAnnounce && !actionIntent);
+}
+
+/**
+ * True when assistant text contains provider-escaped tool-call markup
+ * (e.g. `<tool_call>{...}</tool_call>` or bare JSON tool envelopes) that
+ * should have been structured tool_calls.
+ */
+export function containsEmbeddedToolCallMarkup(message: string): boolean {
+  if (!message) return false;
+  if (/<\s*tool_call\b/i.test(message)) return true;
+  if (/<\/\s*tool_call\s*>/i.test(message)) return true;
+  // Escaped JSON tool envelopes MiniMax sometimes dumps into content.
+  if (/\{\\*"name\\*"\s*:\s*\\*"[a-zA-Z_][\w-]*\\*"\s*,\s*\\*"(?:parameters|arguments|args)\\*"\s*:/i.test(message)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Recover ToolCall objects from textual `<tool_call>...</tool_call>`
+ * markup or adjacent JSON tool envelopes embedded in assistant content.
+ */
+export function recoverEmbeddedToolCallsFromText(
+  message: string,
+): { calls: ToolCall[]; parseErrors: string[] } {
+  const calls: ToolCall[] = [];
+  const parseErrors: string[] = [];
+  if (!message?.trim()) return { calls, parseErrors };
+
+  const blocks: string[] = [];
+  const tagged = message.matchAll(/<\s*tool_call\b[^>]*>([\s\S]*?)<\/\s*tool_call\s*>/gi);
+  for (const match of tagged) {
+    const body = (match[1] ?? "").trim();
+    if (body) blocks.push(body);
+  }
+  // Also accept a trailing bare JSON object/array after a <tool_call> opener
+  // when the model forgets the closing tag.
+  if (blocks.length === 0 && /<\s*tool_call\b/i.test(message)) {
+    const after = message.split(/<\s*tool_call\b[^>]*>/i).slice(1).join("\n");
+    if (after.trim()) blocks.push(after.trim());
+  }
+
+  for (const block of blocks) {
+    const payloads = splitEmbeddedToolPayloads(block);
+    for (const payload of payloads) {
+      try {
+        const parsed = JSON.parse(payload) as unknown;
+        const candidates = Array.isArray(parsed) ? parsed : [parsed];
+        for (const candidate of candidates) {
+          const normalized = normalizeToolCall(normalizeEmbeddedToolCandidate(candidate));
+          const result = ToolCallSchema.safeParse(normalized);
+          if (result.success) {
+            if (!calls.some((c) => c.id === result.data.id && c.name === result.data.name)) {
+              calls.push(result.data);
+            }
+          } else {
+            parseErrors.push(
+              `embedded tool_call: ${result.error.issues
+                .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+                .join("; ")}`,
+            );
+          }
+        }
+      } catch (error) {
+        parseErrors.push(
+          `embedded tool_call JSON: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  }
+
+  return { calls: calls.slice(0, 32), parseErrors };
+}
+
+function splitEmbeddedToolPayloads(block: string): string[] {
+  const trimmed = block.trim();
+  if (!trimmed) return [];
+  // MiniMax often dumps escaped JSON into content:
+  //   {\"name\": \"bash\", \"parameters\": {...}}\n{\"name\": \"file_view\", ...}
+  // Normalize common escape sequences before splitting objects.
+  let normalized = trimmed;
+  if (normalized.includes('\\"') || normalized.includes("\\n")) {
+    normalized = normalized
+      .replace(/\\"/g, '"')
+      .replace(/\\n/g, "\n")
+      .replace(/\\t/g, "\t");
+  }
+  if (normalized.startsWith("[")) return [normalized];
+  const parts: string[] = [];
+  let depth = 0;
+  let start = -1;
+  for (let i = 0; i < normalized.length; i += 1) {
+    const ch = normalized[i];
+    if (ch === "{") {
+      if (depth === 0) start = i;
+      depth += 1;
+    } else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        parts.push(normalized.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+  return parts.length > 0 ? parts : [normalized];
+}
+
+function normalizeEmbeddedToolCandidate(input: unknown): unknown {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+  const raw = input as Record<string, unknown>;
+  // Anthropic/MiniMax text form: { name, parameters } or { name, arguments }
+  if (typeof raw.name === "string") {
+    const args =
+      raw.parameters !== undefined
+        ? raw.parameters
+        : raw.arguments !== undefined
+          ? raw.arguments
+          : raw.args !== undefined
+            ? raw.args
+            : {};
+    return {
+      id: typeof raw.id === "string" ? raw.id : undefined,
+      name: raw.name,
+      args,
+    };
+  }
+  // OpenAI-ish: { function: { name, arguments } }
+  if (raw.function && typeof raw.function === "object") {
+    return raw;
+  }
+  return input;
 }
 
 function stripThinkingBlocks(message: string): string {
