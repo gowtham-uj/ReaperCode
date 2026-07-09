@@ -36,6 +36,7 @@ import {
   ActivateSkillArgsSchema,
   WebFetchArgsSchema,
   SearchToolsArgsSchema,
+  ScratchpadArgsSchema,
 } from "./types.js";
 import {
   FileViewArgsSchema,
@@ -273,6 +274,11 @@ export const toolRegistry = {
     description:
       "Search available tools by keyword or direct select:<tool_name>. Call this when you need a capability not shown in the current tool list (e.g. background processes, web fetching, symbol rename). Returns matching tool names and descriptions, and promotes them to full-schema rendering on subsequent turns.",
     argsSchema: SearchToolsArgsSchema,
+  },
+  scratchpad: {
+    description:
+      "Append, read, or clear durable working notes at `.reaper/memory/scratch.md`. Use append for intermediate decisions that must survive context compaction; read to recall them later; clear when the notes are obsolete.",
+    argsSchema: ScratchpadArgsSchema,
   },
   /* ----- Skill authoring (5) ----- */
   create_skill: {

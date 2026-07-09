@@ -71,3 +71,51 @@ test("prioritizes project .reaper/context.md over AGENTS.md and CLAUDE.md", asyn
   assert.equal(names[1], "AGENTS.md");
   assert.equal(names[2], "CLAUDE.md");
 });
+
+test("walks ancestor dirs for AGENTS.md with content-hash dedup", async () => {
+  const parent = await tempDir("reaper-context-parent-");
+  // Ceiling so we do not walk past the fixture into the host filesystem.
+  await mkdir(path.join(parent, ".git"), { recursive: true });
+  const workspaceRoot = path.join(parent, "pkg");
+  await mkdir(workspaceRoot, { recursive: true });
+  await writeFile(path.join(parent, "AGENTS.md"), "shared monorepo rules");
+  await writeFile(path.join(workspaceRoot, "AGENTS.md"), "shared monorepo rules");
+  await writeFile(path.join(workspaceRoot, "REAPER.md"), "local reaper rules");
+  await writeFile(path.join(parent, ".cursorrules"), "cursor rules");
+
+  const result = await loadContextFiles({ workspaceRoot, trusted: true });
+  const sources = result.files.map((f) => f.source);
+  // Duplicate AGENTS.md content: only first (workspace) kept.
+  assert.equal(sources.filter((s) => s === "AGENTS.md" || s.endsWith("AGENTS.md")).length, 1);
+  assert.ok(sources.includes("REAPER.md"));
+  assert.ok(sources.some((s) => s.includes(".cursorrules")));
+  assert.ok(result.diagnostics.some((d) => d.includes("duplicate")));
+});
+
+test("defaults allow larger project-rule budgets (8KB/32KB)", async () => {
+  const workspaceRoot = await tempDir("reaper-context-");
+  const body = "y".repeat(5000);
+  await writeFile(path.join(workspaceRoot, "AGENTS.md"), body);
+  const result = await loadContextFiles({ workspaceRoot, trusted: true });
+  const agents = result.files.find((f) => f.source === "AGENTS.md");
+  assert.ok(agents);
+  assert.equal(agents!.truncated, false);
+  assert.ok(agents!.content.length >= 5000);
+});
+
+test("prefer project rules over user when total budget is tight", async () => {
+  const workspaceRoot = await tempDir("reaper-context-");
+  const userHome = await tempDir("reaper-user-");
+  await mkdir(path.join(userHome, ".config/reaper"), { recursive: true });
+  await writeFile(path.join(workspaceRoot, "AGENTS.md"), "PROJECT_RULES");
+  await writeFile(path.join(userHome, ".config/reaper/context.md"), "USER_RULES_SHOULD_DROP");
+  const result = await loadContextFiles({
+    workspaceRoot,
+    userHome,
+    trusted: true,
+    maxTotalBytes: 120,
+  });
+  assert.ok(result.combined.includes("PROJECT_RULES"));
+  assert.ok(!result.combined.includes("USER_RULES_SHOULD_DROP"));
+  assert.ok(result.diagnostics.some((d) => d.includes("truncated")));
+});

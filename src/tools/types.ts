@@ -47,6 +47,24 @@ export const SearchMemoryArgsSchema = z.object({
   since: z.string().optional().describe("Limit to summaries at or after this ISO-8601 timestamp."),
 }).strict();
 
+export const ScratchpadArgsSchema = z
+  .object({
+    action: z
+      .enum(["append", "read", "clear"])
+      .describe("append a note, read the scratch file, or clear it"),
+    note: z
+      .string()
+      .min(1)
+      .optional()
+      .describe("Note text to append (required for action=append)"),
+    label: z
+      .string()
+      .min(1)
+      .optional()
+      .describe("Optional short label for the appended note heading"),
+  })
+  .strict();
+
 export const ReadFileArgsSchema = z
   .object({
     path: z.string().min(1),
@@ -510,6 +528,7 @@ export const ToolCallSchema = z.discriminatedUnion("name", [
   z.object({ id: z.string().min(1), name: z.literal("web_fetch"), args: WebFetchArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("search_tools"), args: SearchToolsArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("search_memory"), args: SearchMemoryArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("scratchpad"), args: ScratchpadArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("create_skill"), args: CreateSkillArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("test_skill"), args: TestSkillArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("approve_skill"), args: ApproveSkillArgsSchema }).strict(),

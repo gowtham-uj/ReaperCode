@@ -43,6 +43,7 @@ import { executeEval } from "./eval.js";
 import { executeJob } from "./job.js";
 import { executeAstGrep, executeDiagnostics } from "./ast-grep.js";
 import { webFetchTool } from "./read/web-fetch.js";
+import { executeScratchpad } from "./memory/scratchpad.js";
 import type { Hooks } from "../adaptive/hooks.js";
 import { ToolCallSchema, type ToolCall, type ToolResult } from "./types.js";
 import { countFileLines } from "../workspace/roots.js";
@@ -1312,6 +1313,10 @@ export class ToolExecutor {
       case "search_tools": {
         const searchArgs = toolRegistry.search_tools.argsSchema.parse(call.args);
         return executeSearchTools(searchArgs.query, this.options.runId);
+      }
+      case "scratchpad": {
+        const scratchArgs = toolRegistry.scratchpad.argsSchema.parse(call.args);
+        return executeScratchpad(scratchArgs, { workspaceRoot: this.options.workspaceRoot });
       }
       case "apply_patch_edit": {
         const patchArgs = toolRegistry.apply_patch_edit.argsSchema.parse(call.args);
