@@ -94,6 +94,7 @@ export async function streamMainAgentResponse(
   let finishReason: string | undefined;
   let usage: TokenUsage | undefined;
   const accumulatedToolCalls: ToolCall[] = [];
+  const droppedToolCalls: Array<{ id: string; name?: string; error: string }> = [];
   // Buffered raw tool-call accumulators keyed by either their index in a
   // single response, or by OpenAI's per-call id. The provider may emit
   // deltas with no id (some compat gateways) so we synthesise one.
@@ -179,7 +180,25 @@ export async function streamMainAgentResponse(
           function: { name: buf.name, arguments: buf.argsText },
         });
         const validated = ToolCallSchema.safeParse(normalized);
-        if (!validated.success) continue;
+        if (!validated.success) {
+          // Never silently drop: the model will retry forever thinking the
+          // tool never ran (seen with scratchpad when normalize wiped args).
+          const issueSummary = validated.error.issues
+            .slice(0, 5)
+            .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+            .join("; ");
+          droppedToolCalls.push({
+            id: idFinal || id,
+            name: buf.name,
+            error: issueSummary,
+          });
+          if (getEngineTunables().swarmDebug) {
+            console.error(
+              `[REAPER_DEBUG_MAIN_AGENT] dropped tool_call name=${buf.name} id=${idFinal || id}: ${issueSummary}`,
+            );
+          }
+          continue;
+        }
         if (accumulatedToolCalls.some((c) => c.id === validated.data.id)) continue;
         accumulatedToolCalls.push(validated.data);
       }
@@ -209,7 +228,12 @@ export async function streamMainAgentResponse(
     ...(accumulatedToolCalls.length ? { toolCalls: accumulatedToolCalls } : {}),
     ...(finishReason ? { finishReason } : {}),
     ...(usage ? { usage } : {}),
-    raw: { streamed: true, toolCalls: accumulatedToolCalls, finishReason },
+    raw: {
+      streamed: true,
+      toolCalls: accumulatedToolCalls,
+      finishReason,
+      ...(droppedToolCalls.length ? { droppedToolCalls } : {}),
+    },
   };
 }
 
@@ -259,12 +283,17 @@ export function isFinalAssistantSummary(message: string): boolean {
   if (!visible) return false;
 
   const actionIntent = /\b(?:i(?:'|’)ll|i will|i am going to|i'm going to|let me|i need to|i should|i'll now|i will now|next,? i(?:'|’)ll|now i(?:'|’)ll|i can proceed|let's)\b/i.test(visible);
-  const completionSignal = /\b(?:done|complete|completed|implemented|created|updated|fixed|verified|tests? pass(?:ed|es)?|all checks pass(?:ed)?|npm test pass(?:ed)?)\b/i.test(visible);
-  const futureAction = /\b(?:will|going to|need to|should|next|proceed|create|write|run|check|inspect|verify)\b/i.test(visible);
+  const weakCompletion = /\b(?:done|complete|completed|implemented|created|updated|fixed|verified)\b/i.test(visible);
+  const strongCompletion = /\b(?:tests? pass(?:ed|es)?|all checks pass(?:ed)?|npm test pass(?:ed)?|verification pass(?:ed)?|task (?:is )?complete|all (?:required )?(?:files|deliverables) (?:are )?(?:done|complete)|status:\s*success)\b/i.test(visible);
+  const futureAction = /\b(?:will|going to|need to|should|next|proceed|create|writ(?:e|ing)|run(?:ning)?|check(?:ing)?|inspect(?:ing)?|verif(?:y|ying)|append(?:ing)?)\b/i.test(visible);
+  // Mid-batch announcements like "Writing f10-f14 now." / "creating the next batch".
+  const midBatchAnnounce = /\b(?:writing|creating|editing|appending|continuing)\b.{0,100}\b(?:now|next|then|batch|remaining|rest)\b/i.test(visible);
 
-  if (actionIntent && !completionSignal) return false;
-  if (!completionSignal && futureAction) return false;
-  return completionSignal;
+  if (midBatchAnnounce && !strongCompletion) return false;
+  if (actionIntent && !strongCompletion) return false;
+  if (futureAction && !strongCompletion) return false;
+  if (!weakCompletion && !strongCompletion) return false;
+  return strongCompletion || (weakCompletion && !futureAction && !midBatchAnnounce && !actionIntent);
 }
 
 function stripThinkingBlocks(message: string): string {

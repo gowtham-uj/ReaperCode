@@ -141,6 +141,7 @@ export async function activateSkillTool(workspaceRoot: string, args: { name: str
   const skillDirs = [
     path.join(workspaceRoot, ".opencode", "skills"),
     path.join(workspaceRoot, ".reaper", "skills"),
+    path.join(workspaceRoot, ".pi", "skills"),
     path.join(workspaceRoot, "skills"),
   ];
 

@@ -1,0 +1,25 @@
+{
+  "id": "ca-multi-file-refactor",
+  "title": "Extract shared util and update call sites",
+  "suite": "coding-agent",
+  "difficulty": "medium",
+  "language": "javascript",
+  "prompt": "This repo has duplicated slugify logic in `src/posts.js` and `src/users.js`. Extract a shared `slugify(text)` into `src/slugify.js`, update both modules to import it, and make `npm test` pass. Do not change test expectations. Prefer file_view/file_edit/write_file over dumping whole files via bash.\n\nIMPORTANT: Plans written in assistant_message are NOT applied. You MUST call write_file / file_edit tools to create and edit files, then run `npm test` via bash before finishing.",
+  "projectFiles": {
+    "package.json": "{\n  \"name\": \"ca-multi-file-refactor\",\n  \"version\": \"1.0.0\",\n  \"type\": \"module\",\n  \"scripts\": { \"test\": \"node --test test/*.test.js\" }\n}\n",
+    "src/posts.js": "export function postSlug(title) {\n  return String(title)\n    .toLowerCase()\n    .trim()\n    .replace(/[^a-z0-9]+/g, \"-\")\n    .replace(/^-|-$/g, \"\");\n}\n\nexport function formatPost(title) {\n  return { title, slug: postSlug(title) };\n}\n",
+    "src/users.js": "export function userSlug(name) {\n  return String(name)\n    .toLowerCase()\n    .trim()\n    .replace(/[^a-z0-9]+/g, \"-\")\n    .replace(/^-|-$/g, \"\");\n}\n\nexport function formatUser(name) {\n  return { name, slug: userSlug(name) };\n}\n",
+    "test/slug.test.js": "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { formatPost } from \"../src/posts.js\";\nimport { formatUser } from \"../src/users.js\";\nimport { slugify } from \"../src/slugify.js\";\n\ntest(\"shared slugify exists\", () => {\n  assert.equal(slugify(\"Hello World!\"), \"hello-world\");\n});\n\ntest(\"posts use shared behavior\", () => {\n  assert.equal(formatPost(\"Hello World!\").slug, \"hello-world\");\n});\n\ntest(\"users use shared behavior\", () => {\n  assert.equal(formatUser(\"Ada Lovelace\").slug, \"ada-lovelace\");\n});\n"
+  },
+  "verification": {
+    "command": "npm test",
+    "maxIterations": 12
+  },
+  "gates": [
+    { "type": "verification_exit_0" },
+    { "type": "file_exists", "path": "src/slugify.js" },
+    { "type": "file_contains", "path": "src/posts.js", "contains": "slugify" },
+    { "type": "file_contains", "path": "src/users.js", "contains": "slugify" },
+    { "type": "model_calls_min", "minCount": 1 }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "id": "ca-fix-failing-tests",
+  "title": "Fix a small module so tests pass",
+  "suite": "coding-agent",
+  "difficulty": "easy",
+  "language": "javascript",
+  "prompt": "You are in a tiny JavaScript project. `src/math.js` exports `clamp(n, min, max)` but the implementation is wrong and tests fail.\n\nREQUIRED ORDER:\n1. FIRST tool call: scratchpad with action=append, note your diagnosis (must mention the word clamp).\n2. Then fix `src/math.js` so `npm test` passes.\n3. Do not weaken or edit the tests.\n\nThe scratchpad tool is in your tool list — call it by name `scratchpad`.",
+  "projectFiles": {
+    "package.json": "{\n  \"name\": \"ca-fix-failing-tests\",\n  \"version\": \"1.0.0\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"test\": \"node --test src/math.test.js\"\n  }\n}\n",
+    "src/math.js": "/** Clamp n into [min, max]. BUG: currently ignores max. */\nexport function clamp(n, min, max) {\n  if (n < min) return min;\n  return n; // BUG: should also cap at max\n}\n",
+    "src/math.test.js": "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { clamp } from \"./math.js\";\n\ntest(\"clamp below min\", () => {\n  assert.equal(clamp(-5, 0, 10), 0);\n});\n\ntest(\"clamp above max\", () => {\n  assert.equal(clamp(50, 0, 10), 10);\n});\n\ntest(\"clamp inside range\", () => {\n  assert.equal(clamp(5, 0, 10), 5);\n});\n"
+  },
+  "verification": {
+    "command": "npm test",
+    "maxIterations": 10
+  },
+  "gates": [
+    { "type": "verification_exit_0" },
+    { "type": "file_contains", "path": "src/math.js", "contains": "max" },
+    { "type": "scratchpad_contains", "contains": "clamp" },
+    { "type": "model_calls_min", "minCount": 1 }
+  ],
+  "notes": "Real coding loop: read failing test → diagnose → edit → re-test. Scratchpad gate checks working-notes continuity."
+}

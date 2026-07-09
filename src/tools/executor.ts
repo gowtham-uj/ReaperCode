@@ -43,6 +43,7 @@ import { executeEval } from "./eval.js";
 import { executeJob } from "./job.js";
 import { executeAstGrep, executeDiagnostics } from "./ast-grep.js";
 import { webFetchTool } from "./read/web-fetch.js";
+import { executeScratchpad } from "./memory/scratchpad.js";
 import type { Hooks } from "../adaptive/hooks.js";
 import { ToolCallSchema, type ToolCall, type ToolResult } from "./types.js";
 import { countFileLines } from "../workspace/roots.js";
@@ -1312,6 +1313,39 @@ export class ToolExecutor {
       case "search_tools": {
         const searchArgs = toolRegistry.search_tools.argsSchema.parse(call.args);
         return executeSearchTools(searchArgs.query, this.options.runId);
+      }
+      case "scratchpad": {
+        const scratchArgs = toolRegistry.scratchpad.argsSchema.parse(call.args);
+        const normalized: {
+          action: "append" | "read" | "clear";
+          note?: string;
+          label?: string;
+        } = { action: scratchArgs.action };
+        if (typeof scratchArgs.note === "string") normalized.note = scratchArgs.note;
+        if (typeof scratchArgs.label === "string") normalized.label = scratchArgs.label;
+        return executeScratchpad(normalized, { workspaceRoot: this.options.workspaceRoot });
+      }
+      case "search_memory": {
+        const memArgs = toolRegistry.search_memory.argsSchema.parse(call.args);
+        const { executeSearchMemory } = await import("./memory-search-tool.js");
+        return executeSearchMemory(memArgs, { workspaceRoot: this.options.workspaceRoot });
+      }
+      case "call_subagent": {
+        if (!this.options.modelGateway) {
+          throw new Error("call_subagent requires a model gateway for this run");
+        }
+        const subArgs = toolRegistry.call_subagent.argsSchema.parse(call.args);
+        const { executeSubagentTool } = await import("./subagent-tools.js");
+        return executeSubagentTool(subArgs, {
+          modelGateway: this.options.modelGateway,
+          toolCallId: call.id,
+          pool: this.options.subagentPool,
+        });
+      }
+      case "poll_subagent": {
+        const pollArgs = toolRegistry.poll_subagent.argsSchema.parse(call.args);
+        const { executePollSubagentTool } = await import("./subagent-tools.js");
+        return executePollSubagentTool(pollArgs, call.id);
       }
       case "apply_patch_edit": {
         const patchArgs = toolRegistry.apply_patch_edit.argsSchema.parse(call.args);
