@@ -13,6 +13,10 @@
  */
 
 import type { ReaperConfig } from "./model-config.js";
+import {
+  clampSoftCapTokens,
+  REAPER_DEFAULT_SOFT_CAP_TOKENS,
+} from "./context-hard-cap.js";
 
 interface TunablesCache {
   bash: {
@@ -185,7 +189,7 @@ const DEFAULTS: TunablesCache = {
   },
   contextManagement: {
     shakeEnabled: true,
-    softCap: 100_000,
+    softCap: REAPER_DEFAULT_SOFT_CAP_TOKENS,
     shakeTriggerPct: 60,
     shakeProtectWindowChars: 20_000,
     shakeMinSavingsChars: 100,
@@ -286,7 +290,7 @@ export function applyConfigToTunables(config: ReaperConfig): TunablesCache {
     },
     contextManagement: {
       shakeEnabled: Boolean(cm.shakeEnabled ?? true),
-      softCap: Number(cm.softCap ?? 100_000),
+      softCap: clampSoftCapTokens(Number(cm.softCap ?? REAPER_DEFAULT_SOFT_CAP_TOKENS)),
       shakeTriggerPct: Number(cm.shakeTriggerPct ?? 60),
       shakeProtectWindowChars: Number(cm.shakeProtectWindowChars ?? 20_000),
       shakeMinSavingsChars: Number(cm.shakeMinSavingsChars ?? 100),

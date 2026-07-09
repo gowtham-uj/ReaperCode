@@ -92,7 +92,7 @@ export function createValidConfig(): ReaperConfig {
     },
     contextManagement: {
       shakeEnabled: true,
-      softCap: 100_000,
+      softCap: 270_000,
       shakeTriggerPct: 60,
       shakeProtectWindowChars: 20_000,
       shakeMinSavingsChars: 100,

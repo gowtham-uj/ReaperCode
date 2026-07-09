@@ -2,11 +2,15 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { parseAgentRequestEnvelope, type TransportKind } from "../connection/schemas.js";
+import {
+  clampSoftCapTokens,
+  REAPER_DEFAULT_SOFT_CAP_TOKENS,
+} from "../config/context-hard-cap.js";
 import { parseReaperConfig, type ReaperConfig } from "../config/model-config.js";
 import { RuntimeStateSchema, type RuntimeRepoInspection, type RuntimeState } from "./state.js";
 
-/** Prefer contextManagement.softCap; fall back to legacy tokenBudget.softCap; then 100K. */
-const DEFAULT_SOFT_CAP_TOKENS = 100_000;
+/** Prefer contextManagement.softCap; fall back to legacy tokenBudget.softCap; then 270K hard cap. */
+const DEFAULT_SOFT_CAP_TOKENS = REAPER_DEFAULT_SOFT_CAP_TOKENS;
 
 function resolveSoftCapFromWorkspaceConfig(workspaceRoot: string | undefined): number {
   if (!workspaceRoot) return DEFAULT_SOFT_CAP_TOKENS;
@@ -23,7 +27,7 @@ function resolveSoftCapFromWorkspaceConfig(workspaceRoot: string | undefined): n
     if (contextManagement && typeof contextManagement === "object" && !Array.isArray(contextManagement)) {
       const softCap = (contextManagement as Record<string, unknown>).softCap;
       if (typeof softCap === "number" && Number.isFinite(softCap) && softCap > 0) {
-        return Math.floor(softCap);
+        return clampSoftCapTokens(softCap);
       }
     }
 
@@ -32,7 +36,7 @@ function resolveSoftCapFromWorkspaceConfig(workspaceRoot: string | undefined): n
     if (tokenBudget && typeof tokenBudget === "object" && !Array.isArray(tokenBudget)) {
       const softCap = (tokenBudget as Record<string, unknown>).softCap;
       if (typeof softCap === "number" && Number.isFinite(softCap) && softCap > 0) {
-        return Math.floor(softCap);
+        return clampSoftCapTokens(softCap);
       }
     }
 
@@ -45,6 +49,7 @@ function resolveSoftCapFromWorkspaceConfig(workspaceRoot: string | undefined): n
 /**
  * Resolve the softCap used by the live agent loop.
  * Prefer an already-parsed ReaperConfig.contextManagement.softCap when available.
+ * Always clamped to {@link REAPER_DEFAULT_SOFT_CAP_TOKENS} / hard cap (270k).
  */
 export function resolveSoftCap(options: {
   workspaceRoot?: string;
@@ -52,7 +57,7 @@ export function resolveSoftCap(options: {
 }): number {
   const fromConfig = options.config?.contextManagement?.softCap;
   if (typeof fromConfig === "number" && Number.isFinite(fromConfig) && fromConfig > 0) {
-    return Math.floor(fromConfig);
+    return clampSoftCapTokens(fromConfig);
   }
   return resolveSoftCapFromWorkspaceConfig(options.workspaceRoot);
 }

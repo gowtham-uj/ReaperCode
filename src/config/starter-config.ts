@@ -115,7 +115,7 @@ export function buildStarterConfig(input: { defaultModel?: string; defaultProvid
     },
     // ── Context management (shake, time-MC, full summary, etc.) ───
     contextManagement: {
-      softCap: 100_000,
+      softCap: 270_000,
       shakeTriggerPct: 60,
       shakeProtectWindowChars: 20_000,
       shakeMinSavingsChars: 100,

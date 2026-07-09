@@ -2,6 +2,10 @@ import { z } from "zod";
 
 import { ConnectionPoliciesSchema } from "../connection/policies.js";
 import {
+  REAPER_CONTEXT_HARD_CAP_TOKENS,
+  REAPER_DEFAULT_SOFT_CAP_TOKENS,
+} from "./context-hard-cap.js";
+import {
   ModelCapabilitiesSchema,
   ModelRoleInputSchema,
   ModelProfileSchema,
@@ -129,12 +133,20 @@ export const ContextManagementConfigSchema = z
   .object({
     shakeEnabled: z.boolean().default(true),
     /**
-     * Soft token budget for compaction layers. Default 100k fits
-     * MiniMax-class ~128k windows with headroom for system/tools.
+     * Soft token budget for compaction layers. Default and hard max
+     * are 270k — even when a model advertises 1M context, Reaper only
+     * budgets up to {@link REAPER_CONTEXT_HARD_CAP_TOKENS}. Values
+     * above the hard cap are clamped (not rejected) so older configs
+     * keep loading.
      * Do not set this below the post-compact rebuild size (cockpit +
      * summary + re-anchor) or full_summary will thrash every turn.
      */
-    softCap: z.number().int().positive().default(100_000),
+    softCap: z
+      .number()
+      .int()
+      .positive()
+      .default(REAPER_DEFAULT_SOFT_CAP_TOKENS)
+      .transform((v) => Math.min(v, REAPER_CONTEXT_HARD_CAP_TOKENS)),
     /** Fire shake around mid-budget so cheap prune runs before summary. */
     shakeTriggerPct: z.number().min(1).max(99).default(60),
     /** Keep recent tool evidence (KEY harvests, writes) through shake. */
@@ -267,7 +279,7 @@ export const ContextManagementConfigSchema = z
   .strict()
   .optional()
   .default({
-    softCap: 100_000,
+    softCap: REAPER_DEFAULT_SOFT_CAP_TOKENS,
     shakeTriggerPct: 60,
     shakeProtectWindowChars: 20_000,
     shakeMinSavingsChars: 100,
