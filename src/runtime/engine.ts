@@ -31,7 +31,7 @@ import { logLangfuseEvent } from "../logging/langfuse.js";
 import { TrajectoryLogger } from "../logging/trajectory.js";
 import { generateFinalSummary, summarizeExplicitToolRun } from "./final-summary.js";
 import { classifyRunFinalStatus, persistRunFailure } from "./run-finalize.js";
-import { buildGeneralAgentTools, type AgentToolDescriptor } from "./agent-tools.js";
+import { buildGeneralAgentTools, buildAgentToolDescriptor, userPromptRequestsScratchpad, type AgentToolDescriptor } from "./agent-tools.js";
 import {
   escapeRegExp, 
   hasSourceMutationShellFragment, 
@@ -2179,7 +2179,9 @@ export class RuntimeEngine {
 	        toolResults: state.toolResults,
 	        completionGateAttempts: state.completionGateAttempts,
 	        taskCompleted,
-	        verifiedCompletion: taskCompleted && state.explicitVerification?.ok !== false,
+	        // Only true when verification explicitly succeeded. A natural
+	        // no-tool stop must not report verified_completion/solved.
+	        verifiedCompletion: Boolean(taskCompleted && state.explicitVerification?.ok === true),
 	        stuckTripped: false,
 	        gateExhausted: state.completionGateExhausted,
 	        ...(transportRetryExhausted ? { stopReasonOverride: "infra_failed" as const } : {}),
@@ -2436,7 +2438,16 @@ export function selectGeneralAgentToolsForTurn(input: {
   state: Pick<GraphState, "toolResults">;
   tools: AgentToolDescriptor[];
 }): AgentToolDescriptor[] {
-  if (!detectBuildLikeTask(input.request)) return input.tools;
+  // Scratchpad is on-demand. Promote it onto the wire only when the user
+  // prompt explicitly asks for it (eval/stress tasks). Otherwise the model
+  // can still discover it via search_tools.
+  let tools = input.tools;
+  if (userPromptRequestsScratchpad(input.request) && !tools.some((t) => t.name === "scratchpad")) {
+    const scratch = buildAgentToolDescriptor("scratchpad");
+    if (scratch) tools = [...tools, scratch];
+  }
+
+  if (!detectBuildLikeTask(input.request)) return tools;
 
   const writeCount = input.state.toolResults.filter((result) =>
     result.ok && ["write_file", "file_edit", "edit_file", "replace_symbol", "delete_file"].includes(result.name),
@@ -2447,14 +2458,14 @@ export function selectGeneralAgentToolsForTurn(input: {
   // `file_scroll`, `file_find`, and `file_edit` directly — no legacy aliases or
   // short-name renames (`read`/`edit`/`write`).
   if (writeCount < 20) {
-    return toCanonicalBuildFastStartTools(input.tools);
+    return toCanonicalBuildFastStartTools(tools);
   }
-  return input.tools;
+  return tools;
 }
 
 function toCanonicalBuildFastStartTools(tools: AgentToolDescriptor[]): AgentToolDescriptor[] {
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
-  return [
+  const base = [
     byName.get("write_file"),
     byName.get("file_edit"),
     byName.get("bash"),
@@ -2463,11 +2474,11 @@ function toCanonicalBuildFastStartTools(tools: AgentToolDescriptor[]): AgentTool
     byName.get("file_find"),
     byName.get("list_directory"),
     byName.get("grep_search"),
-    // Keep continuity + discovery tools on the wire for build-like tasks so
-    // days-long / eval prompts that require scratchpad or search_tools work.
-    byName.get("scratchpad"),
     byName.get("search_tools"),
   ].filter((tool): tool is AgentToolDescriptor => Boolean(tool));
+  // Include scratchpad only when already promoted (user prompt requested it).
+  const scratch = byName.get("scratchpad");
+  return scratch ? [...base, scratch] : base;
 }
 
 export function selectMainAgentMaxTokensForTurn(input: {

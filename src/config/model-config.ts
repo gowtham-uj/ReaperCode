@@ -128,9 +128,17 @@ export const VerificationGateConfigSchema = z
 export const ContextManagementConfigSchema = z
   .object({
     shakeEnabled: z.boolean().default(true),
-    softCap: z.number().int().positive().default(270_000),
-    shakeTriggerPct: z.number().min(1).max(99).default(50),
-    shakeProtectWindowChars: z.number().int().nonnegative().default(12_000),
+    /**
+     * Soft token budget for compaction layers. Default 100k fits
+     * MiniMax-class ~128k windows with headroom for system/tools.
+     * Do not set this below the post-compact rebuild size (cockpit +
+     * summary + re-anchor) or full_summary will thrash every turn.
+     */
+    softCap: z.number().int().positive().default(100_000),
+    /** Fire shake around mid-budget so cheap prune runs before summary. */
+    shakeTriggerPct: z.number().min(1).max(99).default(60),
+    /** Keep recent tool evidence (KEY harvests, writes) through shake. */
+    shakeProtectWindowChars: z.number().int().nonnegative().default(20_000),
     shakeMinSavingsChars: z.number().int().nonnegative().default(100),
     maxConsecutiveShakeFailures: z.number().int().positive().default(3),
     ptlRecoveryMaxDrops: z.number().int().nonnegative().default(5),
@@ -145,10 +153,21 @@ export const ContextManagementConfigSchema = z
     fullSummaryFileTokenBudget: z.number().int().positive().default(50_000),
     fullSummaryMaxPtlRetries: z.number().int().nonnegative().default(3),
     fullSummaryMinCharsForPtlDrop: z.number().int().positive().default(200),
+    /**
+     * After a full_summary, suppress another until at least this many
+     * tool batches complete (or token growth clears the cooldown).
+     * Prevents summary thrash when post-compact rebuild is still large.
+     */
+    fullSummaryCooldownMinToolBatches: z.number().int().nonnegative().default(2),
+    /**
+     * After a full_summary, suppress another until tokens grow by this
+     * many past the post-summary baseline. 0 = derive as 8% of softCap.
+     */
+    fullSummaryCooldownMinTokenGrowth: z.number().int().nonnegative().default(0),
     bashHeadTailEnabled: z.boolean().default(true),
     bashHeadPreviewChars: z.number().int().positive().default(1_200),
     bashTailPreviewChars: z.number().int().positive().default(1_200),
-    bashPersistThresholdChars: z.number().int().positive().default(30_000),
+    bashPersistThresholdChars: z.number().int().positive().default(25_000),
     /**
      * Promote Context Model (#21, OMP port):
      * Before triggering full-summary, check if the active mainAgent
@@ -248,9 +267,9 @@ export const ContextManagementConfigSchema = z
   .strict()
   .optional()
   .default({
-    softCap: 270_000,
-    shakeTriggerPct: 50,
-    shakeProtectWindowChars: 12_000,
+    softCap: 100_000,
+    shakeTriggerPct: 60,
+    shakeProtectWindowChars: 20_000,
     shakeMinSavingsChars: 100,
     maxConsecutiveShakeFailures: 3,
     ptlRecoveryMaxDrops: 5,
@@ -265,10 +284,12 @@ export const ContextManagementConfigSchema = z
     fullSummaryFileTokenBudget: 50_000,
     fullSummaryMaxPtlRetries: 3,
     fullSummaryMinCharsForPtlDrop: 200,
+    fullSummaryCooldownMinToolBatches: 2,
+    fullSummaryCooldownMinTokenGrowth: 0,
     bashHeadTailEnabled: true,
     bashHeadPreviewChars: 1_200,
     bashTailPreviewChars: 1_200,
-    bashPersistThresholdChars: 30_000,
+    bashPersistThresholdChars: 25_000,
     modelPromotionEnabled: true,
     modelPromotionThresholdRatio: 0.5,
     modelPromotionTargetRole: "secondary_model",

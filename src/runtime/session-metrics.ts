@@ -24,7 +24,11 @@ export interface BuildSessionMetricsSummaryInput {
 
 export function buildSessionMetricsSummary(input: BuildSessionMetricsSummaryInput): SessionMetricsSummary {
   const noProgressTrips = countNoProgressTrips(input.toolResults);
-  const verifiedCompletion = Boolean(input.taskCompleted && input.verifiedCompletion);
+  // Natural no-tool stop marks taskCompleted, but that is not the same as
+  // verified success. Only report verified_completion/solved when the
+  // caller explicitly affirms verification (ok === true), not merely
+  // "verification was not false".
+  const verifiedCompletion = Boolean(input.taskCompleted && input.verifiedCompletion === true);
   return {
     total_tool_calls: input.toolResults.length,
     max_action_repeat: computeMaxActionRepeat(input.toolResults),
@@ -85,6 +89,8 @@ function inferStopReason(input: {
 }): SessionStopReason {
   if (input.stopReasonOverride) return input.stopReasonOverride;
   if (input.taskCompleted && input.verifiedCompletion) return "solved";
+  // Natural stop without verified success is not "solved".
+  if (input.taskCompleted && !input.verifiedCompletion) return "error";
   if (input.noProgressTrips > 0 || input.stuckTripped) return "no_progress_stop";
   if (input.gateExhausted || input.completionGateAttempts > 0) return "gate_exhausted";
   return "error";

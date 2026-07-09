@@ -85,16 +85,20 @@ export async function runUnifiedEval(options: UnifiedEvalOptions): Promise<Unifi
     // Stress tasks also tighten bash head/tail so large tool output is
     // compacted under the same pressure window.
     if (typeof task.softCap === "number") {
-      const bashThreshold = Math.min(30_000, Math.max(4_000, Math.floor(task.softCap * 0.4)));
+      // Stress calibration: fire layers without thrashing. Keep softCap
+      // large enough that post-compact rebuild (cockpit+summary) fits
+      // under threshold; use mid-window shake + summary cooldown.
+      const bashThreshold = Math.min(12_000, Math.max(4_000, Math.floor(task.softCap * 0.2)));
       (config as any).contextManagement = {
         ...((config as any).contextManagement ?? {}),
         softCap: task.softCap,
         shakeEnabled: true,
-        // Fire shake early; shrink protect window so older tool results are eligible.
-        shakeTriggerPct: 10,
-        shakeProtectWindowChars: Math.min(2_000, Math.max(400, Math.floor(task.softCap * 0.25))),
+        shakeTriggerPct: 45,
+        shakeProtectWindowChars: Math.min(8_000, Math.max(2_000, Math.floor(task.softCap * 0.2))),
         shakeMinSavingsChars: 50,
         fullSummaryEnabled: true,
+        fullSummaryCooldownMinToolBatches: 2,
+        fullSummaryCooldownMinTokenGrowth: Math.max(1_500, Math.floor(task.softCap * 0.08)),
         bashHeadTailEnabled: true,
         bashPersistThresholdChars: bashThreshold,
       };
@@ -257,15 +261,17 @@ async function writeTaskSoftCap(workspaceRoot: string, task: EvalTask): Promise<
       existing = {};
     }
   }
-  const bashThreshold = Math.min(30_000, Math.max(4_000, Math.floor(task.softCap * 0.4)));
+  const bashThreshold = Math.min(12_000, Math.max(4_000, Math.floor(task.softCap * 0.2)));
   existing.contextManagement = {
     ...((existing.contextManagement as object) ?? {}),
     softCap: task.softCap,
     shakeEnabled: true,
-    shakeTriggerPct: 10,
-    shakeProtectWindowChars: Math.min(2_000, Math.max(400, Math.floor(task.softCap * 0.25))),
+    shakeTriggerPct: 45,
+    shakeProtectWindowChars: Math.min(8_000, Math.max(2_000, Math.floor(task.softCap * 0.2))),
     shakeMinSavingsChars: 50,
     fullSummaryEnabled: true,
+    fullSummaryCooldownMinToolBatches: 2,
+    fullSummaryCooldownMinTokenGrowth: Math.max(1_500, Math.floor(task.softCap * 0.08)),
     bashHeadTailEnabled: true,
     bashPersistThresholdChars: bashThreshold,
   };

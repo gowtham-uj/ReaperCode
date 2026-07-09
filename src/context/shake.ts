@@ -22,13 +22,13 @@ import { normalizeToolResult } from "../tools/tool-result.js";
 const DEFAULT_MIN_SAVINGS_CHARS = 100;
 
 /** Fallback protect window (chars) when tunables are unavailable. */
-const DEFAULT_PROTECT_WINDOW_CHARS = 12_000;
+const DEFAULT_PROTECT_WINDOW_CHARS = 20_000;
 
 /** Minimum tool result size (in chars) to be eligible for shake. */
 const FENCE_MIN_CHARS = 200;
 
 /** Fallback trigger percentage when tunables are unavailable. */
-const DEFAULT_SHAKE_TRIGGER_PCT = 50;
+const DEFAULT_SHAKE_TRIGGER_PCT = 60;
 
 /** Fallback circuit-breaker cap when tunables are unavailable. */
 const DEFAULT_MAX_CONSECUTIVE_FAILURES = 3;

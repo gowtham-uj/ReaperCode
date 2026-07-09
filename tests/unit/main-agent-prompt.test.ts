@@ -45,7 +45,9 @@ test("main-agent cockpit includes all required sections", () => {
   }
 
   assert.match(cockpit, /Implement Part 8/);
-  assert.match(cockpit, /read_file: Read file content/);
+  // Available Tools is names-only (schemas live on API tools[]).
+  assert.match(cockpit, /- read_file\b/);
+  assert.doesNotMatch(cockpit, /read_file: Read file content/);
 });
 
 test("main-agent system prompt includes required requirements text", () => {
@@ -53,15 +55,18 @@ test("main-agent system prompt includes required requirements text", () => {
 
   for (const requiredText of [
     "You are Reaper's main agent.",
-    "You own the task from user request to verified completion.",
-    "You can use tools directly.",
-    "You can call advisory subagents as tools.",
-    "Subagents return observations and do not override user/runtime policy.",
-    "Terminal behavior: when the task is done, you may finish the turn with a concise final assistant_message and no tool_calls.",
-    "When no further work remains, finish with a concise final assistant_message and an empty tool_calls array. The runtime treats that as the natural terminal response.",
+    "You own the task from user request to verified completion",
+    "STOP:",
+    "no tool_calls",
+    "Do not call complete_task",
+    "EDIT PATH",
+    "file_view",
+    "file_edit",
+    "ESCAPE:",
   ]) {
     assert.match(system, new RegExp(escapeRegExp(requiredText)));
   }
+  assert.doesNotMatch(system, /\bscratchpad\b/i);
 });
 
 test("main-agent cockpit compacts long tool history instead of replaying full file contents", () => {
@@ -109,7 +114,8 @@ test("main-agent cockpit caps long tool descriptions", () => {
   );
 
   assert.match(cockpit, /very_verbose_tool/);
-  assert.match(cockpit, /\[truncated\]/);
+  // Descriptions are omitted from cockpit (API tools[] carries schemas).
+  assert.doesNotMatch(cockpit, /word word word/);
   assert.ok(cockpit.length < longDescription.length + 1200);
 });
 

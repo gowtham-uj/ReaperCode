@@ -4,7 +4,7 @@
   "suite": "context-days",
   "difficulty": "stress",
   "language": "javascript",
-  "softCap": 3500,
+  "softCap": 32000,
   "prompt": "MEGA CONTEXT-ENGINEERING STRESS (MiniMax)\n\nCRITICAL USER NOTE: release token is STRESS-TOKEN-991. Store it in scratchpad FIRST (action=append, label=user-note).\n\nRequired sequence:\n1. scratchpad append STRESS-TOKEN-991.\n2. bash ONLY: `cat big/logdump.txt` with NO head/tail pipes (full cat).\n3. file_view docs/alpha.md and docs/beta.md; collect KEY= from each.\n4. Create noise/n00.txt .. noise/n14.txt (15 files) with short unique content.\n5. MUST write RESULT.json as {\"alpha\":\"...\",\"beta\":\"...\",\"token\":\"STRESS-TOKEN-991\"} with real keys.\n6. MUST write DONE.md containing STRESS-TOKEN-991 and both keys.\n7. Run `npm test` until exit 0.\n8. Only then final summary with no tool_calls.\n\nHard rules: do not claim RESULT/DONE exist until write_file succeeded; re-read docs if context was shaken/summarized.\n",
   "projectFiles": {
     "package.json": "{\n  \"name\": \"cd-mega-context-layers\",\n  \"version\": \"1.0.0\",\n  \"type\": \"module\",\n  \"scripts\": { \"test\": \"node scripts/verify.mjs\" }\n}\n",
@@ -55,5 +55,5 @@
       "minCount": 3
     }
   ],
-  "notes": "softCap=3.5k + full bash cat. Primary stress evidence: bash_head_tail + full_summary trajectory events (schema must accept blocking/extras). Scratchpad survival required. RESULT.json/npm test are secondary completion checks \u2014 MiniMax-M2.7 sometimes stalls before writing RESULT after compaction. context_shake may stay 0 when tool results are already head/tailed below shake eligibility."
+  "notes": "softCap=32k calibrated so layers fire without summary thrash: bash_head_tail early, shake mid-window, full_summary late with cooldown. Scratchpad survival required. RESULT.json/npm test are completion checks. context_shake may stay 0 when tool results are already head/tailed below shake eligibility."
 }

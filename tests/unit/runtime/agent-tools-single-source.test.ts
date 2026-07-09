@@ -29,9 +29,7 @@ test("model-facing core surface does not expose complete_task", () => {
   const descriptors = buildGeneralAgentTools();
   assert.ok(!descriptors.some((tool) => tool.name === "complete_task"));
   assert.ok(!CORE_TOOL_NAMES.has("complete_task"));
-  // Back-compat execution can keep the registry entry, but the model-facing
-  // core surface must derive from CORE_TOOL_NAMES and exclude it.
-  assert.ok("complete_task" in toolRegistry);
+  // Live loop stops on no tool_calls; complete_task is not a model-facing tool.
 });
 
 test("bash model-facing schema requires timeout in seconds from registry schema", () => {

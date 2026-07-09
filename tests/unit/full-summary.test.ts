@@ -126,9 +126,28 @@ test("buildPostCompactMessages produces boundary + summary + re-anchor + deferre
   // Post-compact shape: [boundary, summary, re-anchor, deferred, last-user-task]
   assert.equal(messages.length, 5);
   assert.match(messages[0]?.content ?? "", /\[Reaper context boundary\]/);
+  assert.doesNotMatch(messages[0]?.content ?? "", /\bscratchpad\b/i);
   assert.match(messages[1]?.content ?? "", /summary text/);
-  assert.match(messages[2]?.content ?? "", /Post-compact re-anchor/);
+  assert.match(messages[2]?.content ?? "", /Post-compact (?:progress|re-anchor)/);
+  assert.doesNotMatch(messages[2]?.content ?? "", /\bscratchpad\b/i);
   assert.match(messages[3]?.content ?? "", /deferred tools/i);
   // The last user-msg from the input is preserved (current task).
   assert.equal(messages[4]?.content, "old prompt");
+});
+
+test("extractPostCompactProgressHints resumes without scratchpad nudges", async () => {
+  const { extractPostCompactProgressHints } = await import("../../src/context/full-summary.js");
+  const hints = extractPostCompactProgressHints([
+    {
+      role: "assistant",
+      tool_calls: [
+        { function: { name: "scratchpad", arguments: JSON.stringify({ action: "append", note: "TOKEN" }) } },
+        { function: { name: "bash", arguments: JSON.stringify({ cmd: "cat big/logdump.txt" }) } },
+        { function: { name: "write_file", arguments: JSON.stringify({ path: "RESULT.json" }) } },
+      ],
+    },
+  ]);
+  assert.ok(hints.some((h) => /bash cat already ran/i.test(h)));
+  assert.ok(hints.some((h) => /already wrote: RESULT\.json/i.test(h)));
+  assert.ok(!hints.some((h) => /\bscratchpad\b/i.test(h)));
 });

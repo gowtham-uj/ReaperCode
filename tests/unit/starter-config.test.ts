@@ -67,6 +67,6 @@ test("writeStarterConfig writes a complete JSON file", async () => {
   // We import the parser lazily to avoid pulling in the full graph.
   const { parseReaperConfig } = await import("../../src/config/model-config.js");
   const parsed = parseReaperConfig(obj);
-  assert.equal(parsed.contextManagement.softCap, 270_000);
+  assert.equal(parsed.contextManagement.softCap, 100_000);
   assert.equal(parsed.runtimeTunables.bashDefaultTimeoutMs, 600_000);
 });

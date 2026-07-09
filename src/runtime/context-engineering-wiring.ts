@@ -381,11 +381,29 @@ export function createContextEngineeringHooks(
       // T1/T2: also force-compact when idle-compaction or incomplete-
       // recovery slots are set, even if the natural threshold isn't crossed.
       // T3: optional handoff prompt for smaller-context summaries.
+      // Cooldown: after a summary, suppress re-fire until enough tool
+      // batches / token growth so post-compact rebuild cannot thrash.
       const fullSummaryEnabledConfig = cmTunablesBefore.fullSummaryEnabled;
       const { shouldCompact } = await import("../context/should-compact.js");
+      const cooldownSlotKey = `${runId}::full-summary-cooldown`;
+      const cooldown = (globalThis as any)[cooldownSlotKey] as
+        | { baselineTokens: number; toolBatchesSince: number; appliedAt: number }
+        | undefined;
+      const minBatches = Math.max(0, cmTunablesBefore.fullSummaryCooldownMinToolBatches ?? 2);
+      const minGrowthConfigured = cmTunablesBefore.fullSummaryCooldownMinTokenGrowth ?? 0;
+      const minGrowth =
+        minGrowthConfigured > 0
+          ? minGrowthConfigured
+          : Math.max(1_000, Math.floor(softCap * 0.08));
+      const cooldownActive = Boolean(
+        cooldown &&
+          cooldown.toolBatchesSince < minBatches &&
+          tokensAfterShake < cooldown.baselineTokens + minGrowth,
+      );
+      const overThreshold = shouldCompact(tokensAfterShake, softCap);
       const fireFullSummary =
-        (shouldCompact(tokensAfterShake, softCap) || forceCompactFromIdleOrIncomplete) &&
-        fullSummaryEnabledConfig;
+        fullSummaryEnabledConfig &&
+        (forceCompactFromIdleOrIncomplete || (overThreshold && !cooldownActive));
       let fullSummarized = false;
       const blockingFullSummary = options.blockingFullSummary !== false;
       const useHandoff = cmTunablesBefore.handoffEnabled === true;
@@ -404,9 +422,15 @@ export function createContextEngineeringHooks(
           const postChars = estimateLiveConversationChars(newMsgs as unknown[]);
           working = newMsgs as unknown[];
           fullSummarized = true;
+          const postTokens = countTokens(working);
           (globalThis as any)[`${runId}::full-summary-applied`] = {
             messages: newMsgs,
             summaryText,
+            appliedAt: Date.now(),
+          };
+          (globalThis as any)[cooldownSlotKey] = {
+            baselineTokens: postTokens,
+            toolBatchesSince: 0,
             appliedAt: Date.now(),
           };
           await persistSummary(workspaceRoot, {
@@ -573,6 +597,13 @@ export function createContextEngineeringHooks(
     async onAfterToolResult({
       workspaceRoot: _w, runId, sessionId, traceId, toolCallId: _tcid, toolName, output, trajectoryLogger, persistedOutputSize,
     }) {
+      // Advance full-summary cooldown with every tool result so the
+      // model can do real work before another expensive compact.
+      const cooldownKey = `${runId}::full-summary-cooldown`;
+      const cooldownState = (globalThis as any)[cooldownKey];
+      if (cooldownState && typeof cooldownState === "object") {
+        cooldownState.toolBatchesSince = Number(cooldownState.toolBatchesSince ?? 0) + 1;
+      }
       const cm = getContextTunables();
       if (!cm.bashHeadTailEnabled) return { savedChars: 0 };
       if (toolName !== "bash" && toolName !== "run_shell_command") {

@@ -5,8 +5,8 @@ import { parseAgentRequestEnvelope, type TransportKind } from "../connection/sch
 import { parseReaperConfig, type ReaperConfig } from "../config/model-config.js";
 import { RuntimeStateSchema, type RuntimeRepoInspection, type RuntimeState } from "./state.js";
 
-/** Prefer contextManagement.softCap; fall back to legacy tokenBudget.softCap; then 200K. */
-const DEFAULT_SOFT_CAP_TOKENS = 200_000;
+/** Prefer contextManagement.softCap; fall back to legacy tokenBudget.softCap; then 100K. */
+const DEFAULT_SOFT_CAP_TOKENS = 100_000;
 
 function resolveSoftCapFromWorkspaceConfig(workspaceRoot: string | undefined): number {
   if (!workspaceRoot) return DEFAULT_SOFT_CAP_TOKENS;
