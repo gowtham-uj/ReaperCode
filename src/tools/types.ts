@@ -65,6 +65,27 @@ export const ScratchpadArgsSchema = z
   })
   .strict();
 
+export const CallSubagentArgsSchema = z
+  .object({
+    type: z
+      .enum(["planner", "reviewer", "repair", "tester", "researcher"])
+      .describe("Subagent role to invoke"),
+    task: z.string().min(1).describe("Task for the subagent to complete"),
+    context: z.string().optional().describe("Optional extra context for the subagent"),
+    mode: z
+      .enum(["blocking", "background"])
+      .optional()
+      .describe("blocking (default) waits for JSON result; background returns a jobId to poll"),
+    timeoutMs: z.number().int().positive().optional().describe("Optional timeout in milliseconds"),
+  })
+  .strict();
+
+export const PollSubagentArgsSchema = z
+  .object({
+    jobId: z.string().min(1).describe("Background subagent job id from call_subagent"),
+  })
+  .strict();
+
 export const ReadFileArgsSchema = z
   .object({
     path: z.string().min(1),
@@ -529,6 +550,8 @@ export const ToolCallSchema = z.discriminatedUnion("name", [
   z.object({ id: z.string().min(1), name: z.literal("search_tools"), args: SearchToolsArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("search_memory"), args: SearchMemoryArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("scratchpad"), args: ScratchpadArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("call_subagent"), args: CallSubagentArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("poll_subagent"), args: PollSubagentArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("create_skill"), args: CreateSkillArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("test_skill"), args: TestSkillArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("approve_skill"), args: ApproveSkillArgsSchema }).strict(),

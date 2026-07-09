@@ -1318,6 +1318,28 @@ export class ToolExecutor {
         const scratchArgs = toolRegistry.scratchpad.argsSchema.parse(call.args);
         return executeScratchpad(scratchArgs, { workspaceRoot: this.options.workspaceRoot });
       }
+      case "search_memory": {
+        const memArgs = toolRegistry.search_memory.argsSchema.parse(call.args);
+        const { executeSearchMemory } = await import("./memory-search-tool.js");
+        return executeSearchMemory(memArgs, { workspaceRoot: this.options.workspaceRoot });
+      }
+      case "call_subagent": {
+        if (!this.options.modelGateway) {
+          throw new Error("call_subagent requires a model gateway for this run");
+        }
+        const subArgs = toolRegistry.call_subagent.argsSchema.parse(call.args);
+        const { executeSubagentTool } = await import("./subagent-tools.js");
+        return executeSubagentTool(subArgs, {
+          modelGateway: this.options.modelGateway,
+          toolCallId: call.id,
+          pool: this.options.subagentPool,
+        });
+      }
+      case "poll_subagent": {
+        const pollArgs = toolRegistry.poll_subagent.argsSchema.parse(call.args);
+        const { executePollSubagentTool } = await import("./subagent-tools.js");
+        return executePollSubagentTool(pollArgs, call.id);
+      }
       case "apply_patch_edit": {
         const patchArgs = toolRegistry.apply_patch_edit.argsSchema.parse(call.args);
         return executeApplyPatch(patchArgs.patch, this.options.workspaceRoot, patchArgs.dry_run ?? false);

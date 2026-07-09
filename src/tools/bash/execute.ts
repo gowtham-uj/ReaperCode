@@ -150,7 +150,9 @@ export async function executeBashCommand(
       stderr: persisted.stderr,
       persisted_output_path: persisted.persistedOutputPath,
       persisted_output_size: persisted.persistedOutputSize,
-    };
+      head_available: persisted.headAvailable,
+      tail_available: persisted.tailAvailable,
+    } as BashOutput;
   }
 
   if (partialAccumulator) {
