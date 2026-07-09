@@ -90,8 +90,10 @@ export async function runUnifiedEval(options: UnifiedEvalOptions): Promise<Unifi
         ...((config as any).contextManagement ?? {}),
         softCap: task.softCap,
         shakeEnabled: true,
-        // Fire shake earlier under stress so layers trip before the model finishes.
-        shakeTriggerPct: 25,
+        // Fire shake early; shrink protect window so older tool results are eligible.
+        shakeTriggerPct: 10,
+        shakeProtectWindowChars: Math.min(2_000, Math.max(400, Math.floor(task.softCap * 0.25))),
+        shakeMinSavingsChars: 50,
         fullSummaryEnabled: true,
         bashHeadTailEnabled: true,
         bashPersistThresholdChars: bashThreshold,
