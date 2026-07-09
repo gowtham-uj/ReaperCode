@@ -303,8 +303,8 @@ export function isFinalAssistantSummary(message: string): boolean {
 /**
  * True when assistant text contains tool-call markup that is NOT a
  * structured OpenAI-compatible tool_calls payload (e.g. `<tool_call>{...}</tool_call>`).
- * Used only to reject such turns as final summaries / trigger a nudge —
- * never to invent executable tool calls from text.
+ * Detection only — never invents executable tool calls from text, and the
+ * live loop does not use this to force continuation.
  */
 export function containsEmbeddedToolCallMarkup(message: string): boolean {
   if (!message) return false;
