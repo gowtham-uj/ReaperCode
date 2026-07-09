@@ -1,4 +1,4 @@
-# Context Engineering Research — AI Coding Agents
+# Context Engineering Research — Context Engineering
 
 > Researched 2026-07-03 from local source code in `/workspace/focus_sources/`.
 > 5 agents analyzed: Aider, Claude Code (cc-haha), pi-mono/oh-my-pi, OpenHands SDK.

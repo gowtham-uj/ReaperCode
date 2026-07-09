@@ -78,7 +78,7 @@
   },
   "name": "reaper",
   "version": "0.1.42",
-  "description": "Reaper coding agent runtime.",
+  "description": "Reaper agent runtime.",
   "main": "vite.config.js",
   "directories": {
     "doc": "docs",

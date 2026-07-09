@@ -82,9 +82,20 @@ export async function runUnifiedEval(options: UnifiedEvalOptions): Promise<Unifi
     (config as any).verification = undefined;
     delete (config as any).verification;
     // Apply softCap into contextManagement so shake/full-summary use it.
+    // Stress tasks also tighten bash head/tail so large tool output is
+    // compacted under the same pressure window.
     if (typeof task.softCap === "number") {
+      const bashThreshold = Math.min(30_000, Math.max(4_000, Math.floor(task.softCap * 0.4)));
       (config as any).contextManagement = {
         ...((config as any).contextManagement ?? {}),
+        softCap: task.softCap,
+        shakeEnabled: true,
+        fullSummaryEnabled: true,
+        bashHeadTailEnabled: true,
+        bashPersistThresholdChars: bashThreshold,
+      };
+      (config as any).tokenBudget = {
+        ...((config as any).tokenBudget ?? {}),
         softCap: task.softCap,
       };
     }
@@ -246,9 +257,14 @@ async function writeTaskSoftCap(workspaceRoot: string, task: EvalTask): Promise<
       existing = {};
     }
   }
+  const bashThreshold = Math.min(30_000, Math.max(4_000, Math.floor(task.softCap * 0.4)));
   existing.contextManagement = {
     ...((existing.contextManagement as object) ?? {}),
     softCap: task.softCap,
+    shakeEnabled: true,
+    fullSummaryEnabled: true,
+    bashHeadTailEnabled: true,
+    bashPersistThresholdChars: bashThreshold,
   };
   existing.tokenBudget = {
     ...((existing.tokenBudget as object) ?? {}),

@@ -1,5 +1,5 @@
 /**
- * Sandbox policy for the general coding agent.
+ * Sandbox policy for the Reaper runtime.
  *
  * Inspired by Codex CLI / Claude Code / Aider, Reaper exposes a small,
  * explicit set of permission modes that constrain which tools and shell

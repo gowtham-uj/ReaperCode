@@ -47,7 +47,7 @@ export async function generateFinalSummary(input: FinalSummaryInput): Promise<st
         role: "user",
         content: [
           "You are Reaper's final completion summarizer.",
-          "Write the final user-facing completion summary in first person as the coding agent.",
+          "Write the final user-facing completion summary in first person as the main agent.",
           "Do not invent success. If verification failed or is missing, state the blocker concisely and what remains.",
           "Return ONLY JSON: {\"assistant_message\":\"...\"}",
           "",

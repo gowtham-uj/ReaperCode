@@ -3,7 +3,7 @@
 **Workspace:** `/workspace`
 **TUI source root:** `/workspace/src/tui/`
 **Current task state:** Phase 3 completed; Phase 4 in_progress; Phase 5 in_progress; Verification pending.
-**Document purpose:** Single ordered, file-level delivery plan that lets a coding agent execute phases 3, 4, and 5 in sequence without mid-flight churn.
+**Document purpose:** Single ordered, file-level delivery plan that lets an implementer execute phases 3, 4, and 5 in sequence without mid-flight churn.
 
 ---
 

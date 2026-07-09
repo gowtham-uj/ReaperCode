@@ -1,6 +1,6 @@
 # Reaper Improvement Journey
 
-Living docs that record the work done to make the Reaper coding agent as reliable as the reference
+Living docs that record the work done to make Reaper as reliable as the reference
 `cc-haha` agent (located at `/workspace/focus_sources/claude-repos/claude-extracted/cc-haha-main/`).
 
 The goal: port cc-haha's task decomposition + tracking, port its progressive tool discovery

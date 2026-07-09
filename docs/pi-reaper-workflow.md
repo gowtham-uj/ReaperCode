@@ -1,6 +1,6 @@
 # Pi Reaper Development Cockpit
 
-This repository is configured so Pi Coding Agent can act as a development cockpit for Reaper. The setup turns short prompts into a professional loop: scout, plan, implement, test, review, and security review when needed.
+This repository is configured so Pi can act as a development cockpit for Reaper. The setup turns short prompts into a professional loop: scout, plan, implement, test, review, and security review when needed.
 
 ## Repository Shape
 

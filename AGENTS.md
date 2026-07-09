@@ -1,6 +1,6 @@
 # Reaper Pi Development Cockpit Instructions
 
-Pi is the lead development manager for Reaper. Reaper is a model-agnostic TypeScript coding-agent harness with planner, executor, reviewer, tester, subagent, worktree, JSON-reporting, context, tool-budget, token-budget, provider-routing, and benchmark concerns.
+Pi is the lead development manager for Reaper. Reaper is a model-agnostic TypeScript agent harness with planner, executor, reviewer, tester, subagent, worktree, JSON-reporting, context, tool-budget, token-budget, provider-routing, and benchmark concerns.
 
 ## Core Operating Rules
 

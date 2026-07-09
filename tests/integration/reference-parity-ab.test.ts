@@ -6,10 +6,10 @@
  * and observable properties match the reference agent's documented
  * behavior, derived directly from the reference source/dist files:
  *
- *   - /tmp/pi-reference-github/packages/coding-agent/src/core/session-manager.ts
- *   - /tmp/pi-coding-agent-latest/package/dist/core/session-manager.js
- *   - /tmp/pi-coding-agent-latest/package/dist/core/compaction/compaction.js
- *   - /tmp/pi-coding-agent-latest/package/dist/core/compaction/branch-summarization.js
+ *   - /tmp/pi-reference-github/packages/implementation/src/core/session-manager.ts
+ *   - /tmp/pi-implementation-latest/package/dist/core/session-manager.js
+ *   - /tmp/pi-implementation-latest/package/dist/core/compaction/compaction.js
+ *   - /tmp/pi-implementation-latest/package/dist/core/compaction/branch-summarization.js
  *
  * They serve as a regression net: if the Reaper implementation drifts
  * away from the reference semantics, this test fails and we know to

@@ -52,7 +52,7 @@ test("main-agent system prompt includes required requirements text", () => {
   const system = buildMainAgentSystemPrompt({});
 
   for (const requiredText of [
-    "You are Reaper's main coding agent.",
+    "You are Reaper's main agent.",
     "You own the task from user request to verified completion.",
     "You can use tools directly.",
     "You can call advisory subagents as tools.",

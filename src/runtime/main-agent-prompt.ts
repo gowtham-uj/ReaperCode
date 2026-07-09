@@ -62,7 +62,7 @@ export function cockpitSectionKind(name: string): "system" | "stable" | "volatil
 
 export function buildMainAgentSystemPrompt(_state: unknown, _options: MainAgentCockpitOptions = {}): string {
   return [
-    "You are Reaper's main coding agent.",
+    "You are Reaper's main agent.",
     "You own the task from user request to verified completion.",
     "You can use tools directly.",
     "PLAN.md and TODO.md cockpit memory, if present, are advisory only. They do not control routing.",

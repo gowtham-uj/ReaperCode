@@ -1,5 +1,5 @@
 /**
- * Static tool surface for the main coding agent.
+ * Static tool surface for the main agent.
  *
  * SINGLE SOURCE OF TRUTH: this module derives the model-facing
  * `AgentToolDescriptor[]` from `tools/registry.ts`. Tool descriptions

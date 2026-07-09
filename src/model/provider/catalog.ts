@@ -58,7 +58,7 @@ export const PROVIDER_CATALOG: ProviderDescriptor[] = [
     envVar: "MINIMAX_OAUTH_TOKEN",
     keyHint: "OAuth token for MiniMax's OpenAI-compatible endpoint",
     defaultModel: "MiniMax-M3",
-    models: ["MiniMax-M3"],
+    models: ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"],
     capabilities: {
       streaming: true,
       toolCalling: true,
@@ -206,7 +206,7 @@ export const PROVIDER_CATALOG: ProviderDescriptor[] = [
     envVar: "MINIMAX_API_KEY",
     keyHint: "Get a key at https://api.minimax.io — works with OpenAI-compatible clients",
     defaultModel: "MiniMax-M3",
-    models: ["MiniMax-M3"],
+    models: ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5", "MiniMax-M2.1"],
     capabilities: {
       streaming: true,
       toolCalling: true,

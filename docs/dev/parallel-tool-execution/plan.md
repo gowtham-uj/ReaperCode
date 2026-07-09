@@ -29,11 +29,11 @@ The user asked: **let the model indicate parallel execution of tool calls in the
 
 ## 2. Reference-agent evidence
 
-### 2.1 Pi (Pi Coding Agent)
+### 2.1 Pi (Pi)
 
 `/workspace/focus_sources/pi-mono-main/pi-mono-main/packages/agent/src/agent-loop.ts` and the tool-definition wrapper:
 
-- Pi classifies tools with a `ToolExecutionMode` field on the tool definition itself (`packages/coding-agent/src/core/extensions/types.ts:452`):
+- Pi classifies tools with a `ToolExecutionMode` field on the tool definition itself (`packages/implementation/src/core/extensions/types.ts:452`):
   ```ts
   /** Default execution mode. If omitted, "sequential". */
   executionMode?: ToolExecutionMode;  // "parallel" | "sequential"
@@ -50,7 +50,7 @@ The user asked: **let the model indicate parallel execution of tool calls in the
   ```
 - Pi does **not** let the model mark individual calls. The signal is **tool-side metadata**, not model intent.
 
-Citation: `packages/agent/src/agent-loop.ts:338-353`, `packages/coding-agent/src/core/extensions/types.ts:449-452`.
+Citation: `packages/agent/src/agent-loop.ts:338-353`, `packages/implementation/src/core/extensions/types.ts:449-452`.
 
 ### 2.2 Claude Code (cc-haha)
 
@@ -240,7 +240,7 @@ The interesting question is **not** "did the model say these are parallel?" but 
 
 - **No provider supports it natively.** Anthropic Messages API has no such field on `tool_use`; OpenAI Chat Completions / Responses APIs have no such field on `tool_call`. The only existing flag is the request-level OpenAI `parallel_tool_calls: true` (a hint **to** the model), not a model-emitted group id. Adding `parallel_group` to Reaper would be a Reaper-only contract invisible to the SDKs we already use.
 - **Reliability.** Model-side "I want these parallel" is a hint, not a guarantee. The runtime still has to validate — e.g. the model could mark two `write_file` to the same path as `parallel_group: "g1"` even though the writes conflict. The runtime has to enforce ordering **regardless** of model intent whenever tool/argument metadata signals a conflict (same file, same terminal session, same git index). So the model-intent signal is at best advisory and never load-bearing.
-- **Pi / Claude Code / OpenHands all reject this design.** Aligning with them is cheaper, keeps Reaper's "mainstream coding-agent terminology" rule, and is what real users expect.
+- **Pi / Claude Code / OpenHands all reject this design.** Aligning with them is cheaper, keeps Reaper's "mainstream agent-harness terminology" rule, and is what real users expect.
 - **The empirical win is zero.** Pi's same-prompt baseline does 722 tool calls vs Reaper's 268 — the 2.7× gap is from runtime partitioning (Pi runs read pools in parallel by default), not from any model-intent signal. Pi's model is the same OpenAI-compatible model Reaper uses; it just gets better parallelism because the runtime is more aggressive.
 
 **When Option B would make sense:** if a future model adds a first-class "parallel group" field to its schema (e.g. Anthropic's rumored `parallel_group_id` on `tool_use`, OpenAI's hypothetical `tool_calls[].group_id`). Until then, Option A is the right move.
@@ -359,12 +359,12 @@ The savings are **wall-clock only**, not token, not call, not quality.
 - **Reaper observation-compression context planning**: `/root/.hermes/skills/software-development/reaper-orchestrator/references/observation-compression-context-planning.md:14-17` (Anthropic parallel-tool-use docs).
 - **Reaper session-summary fix**: `src/context/session-summary.ts` (related LLM-only summarization work; the same pattern of "heuristic decisions on boundaries, LLM on content" applies here).
 
-### Pi Coding Agent (focus source)
+### Pi (focus source)
 
 - `packages/agent/src/types.ts:36, 193-201, 320-330` — `ToolExecutionMode = "sequential" | "parallel"` and per-tool override.
 - `packages/agent/src/agent-loop.ts:338-471` — `executeToolCalls` partitioning logic.
 - `packages/agent/README.md:104-115` — "any sequential tool forces the whole batch to run sequential."
-- `packages/coding-agent/docs/extensions.md:640-707, 820-838` — parallel-mode preflight + ordering rules.
+- `packages/implementation/docs/extensions.md:640-707, 820-838` — parallel-mode preflight + ordering rules.
 - `packages/ai/src/providers/openai-codex-responses.ts:80, 332` — Pi's OpenAI provider always sends `parallel_tool_calls: true`.
 
 ### Claude Code (focus source)

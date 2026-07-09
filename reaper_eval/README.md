@@ -9,19 +9,19 @@ A single eval entrypoint that:
 3. Scores **explicit success gates** (tests, file contents, scratchpad, trajectory events)
 4. Packages **everything the model saw and said** as readable text under an output dir
 
-## Quick start (MiniMax-M3)
+## Quick start (MiniMax-M2.7)
 
 ```bash
 export MINIMAX_API_KEY='…'
 
-# Coding-agent suite (real fix/refactor/debug/implement tasks)
-npx tsx scripts/run-unified-eval.ts --suite coding-agent --provider minimax --model MiniMax-M3
+# Implementation suite (real fix/refactor/debug/implement tasks)
+npx tsx scripts/run-unified-eval.ts --suite implementation --provider minimax --model MiniMax-M2.7
 
 # Days-long context-engineering suite (softCap pressure + user-note survival)
-npx tsx scripts/run-unified-eval.ts --suite context-days --provider minimax --model MiniMax-M3
+npx tsx scripts/run-unified-eval.ts --suite context-days --provider minimax --model MiniMax-M2.7
 
 # One task
-npx tsx scripts/run-unified-eval.ts --task reaper_eval/suites/coding-agent/ca-fix-failing-tests.json
+npx tsx scripts/run-unified-eval.ts --task reaper_eval/suites/implementation/ca-fix-failing-tests.json
 ```
 
 Artifacts default to `/tmp/reaper-eval-out/<taskId>-<timestamp>/`.
@@ -53,7 +53,7 @@ See `reaper_eval/runtime/task-schema.ts`. Important fields:
 
 ## Suites
 
-### `coding-agent`
+### `implementation`
 
 Real coding loops (not toy string replaces only):
 

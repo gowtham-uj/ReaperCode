@@ -35,7 +35,7 @@ const cases = [
     maxTokens: 1024,
     prompt: [
       "Return ONLY JSON.",
-      "Create a concise coding-agent plan for building a tiny todo API.",
+      "Create a concise implementation plan for building a tiny todo API.",
       "Schema: {\"steps\":[{\"id\":\"string\",\"title\":\"string\",\"instructions\":\"string\",\"tool_calls\":[]}],\"testGuidance\":\"string\"}",
     ].join("\n"),
   },

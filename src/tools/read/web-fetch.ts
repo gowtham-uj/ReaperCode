@@ -18,7 +18,7 @@ export async function webFetchTool(args: WebFetchArgs): Promise<{
 
   const res = await fetch(url, {
     headers: {
-      "User-Agent": "Reaper/0.1 (Coding Agent; +https://github.com/reaper-agent)",
+      "User-Agent": "Reaper/0.1 (Reaper; +https://github.com/reaper-agent)",
       Accept: "text/html,application/json,text/plain,*/*",
     },
     signal: AbortSignal.timeout(30_000),

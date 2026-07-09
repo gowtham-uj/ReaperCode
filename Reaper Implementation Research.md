@@ -186,7 +186,7 @@ Reaper's registry is currently too flat. A new metadata layer should be added ar
 OMP defines default essential tools and discoverable tools.
 
 Relevant file:
-- `packages/coding-agent/src/tools/index.ts`
+- `packages/implementation/src/tools/index.ts`
 
 OMP default essential tools:
 - `read`
@@ -242,7 +242,7 @@ Adopt the scheduling and result normalization ideas. Do not adopt blocking hooks
 OMP's `search_tool_bm25` searches discoverable tools and activates matches.
 
 Relevant file:
-- `packages/coding-agent/src/tools/search-tool-bm25.ts`
+- `packages/implementation/src/tools/search-tool-bm25.ts`
 
 Lesson for Reaper:
 Replace Reaper's simple keyword scoring with an indexed search over:
@@ -263,7 +263,7 @@ Discovery should remain advisory and model-driven.
 OMP's edit tool supports multiple modes, including patch-style and grammar-constrained forms.
 
 Relevant file:
-- `packages/coding-agent/src/edit/index.ts`
+- `packages/implementation/src/edit/index.ts`
 
 High-value ideas:
 - `apply_patch` custom wire name.
@@ -287,7 +287,7 @@ OMP's bash tool has:
 - Non-zero exit represented as a completed error result.
 
 Relevant file:
-- `packages/coding-agent/src/tools/bash.ts`
+- `packages/implementation/src/tools/bash.ts`
 
 Adaptation for Reaper:
 Reaper already has a good shell implementation. Port result-shaping, concurrency metadata, and job integration ideas, not blocking approval behavior.
@@ -297,7 +297,7 @@ Reaper already has a good shell implementation. Port result-shaping, concurrency
 OMP's `job` tool gives a single interface for async job listing, polling, and cancellation.
 
 Relevant file:
-- `packages/coding-agent/src/tools/job.ts`
+- `packages/implementation/src/tools/job.ts`
 
 Adaptation for Reaper:
 Add a `job` facade over:
@@ -315,8 +315,8 @@ Keep existing process tools for backward compatibility and discoverability.
 OMP has approval and resolve protocols.
 
 Relevant files:
-- `packages/coding-agent/src/tools/approval.ts`
-- `packages/coding-agent/src/tools/resolve.ts`
+- `packages/implementation/src/tools/approval.ts`
+- `packages/implementation/src/tools/resolve.ts`
 
 These are useful to understand, but should not be copied directly into Reaper because they conflict with the required Reaper design rule.
 
@@ -461,7 +461,7 @@ Reaper already has the hard part. Add a `job` facade rather than replacing inter
 
 ### Keep Checkpoints
 
-Reaper's checkpoint system is already aligned with coding-agent safety and recovery. Do not redesign it in the first pass.
+Reaper's checkpoint system is already aligned with implementation safety and recovery. Do not redesign it in the first pass.
 
 ## What Needs Redesign From Scratch
 

@@ -135,7 +135,7 @@ function parseResponsesSse(text: string): any {
 export class CodexResponsesClient implements ProviderModelClient {
   async generate(request: GenerateRequest, profile: ResolvedModelProfile): Promise<GenerateResult> {
     const rid = requestId(profile);
-    const instructions = request.system ?? "You are Reaper's coding agent.";
+    const instructions = request.system ?? "You are Reaper's main agent.";
     const tools = toResponsesTools(request.tools);
     const body: Record<string, unknown> = {
       model: profile.model,

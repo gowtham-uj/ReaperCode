@@ -1866,7 +1866,7 @@ export class RuntimeEngine {
         ? [completionBlocker]
         : [];
       // Legacy hidden patcher routing is removed. Failed steps stay
-      // with the main coding agent and advisory subagents only.
+      // with the main agent and advisory subagents only.
       const readOnlyBatchFeedback =
         state.mode === "autonomous" &&
         Boolean(step) &&
@@ -5127,7 +5127,7 @@ export function renderToolCallContract(runId?: string): string {
     "- search_tools keyword: {\"id\":\"search-1\",\"name\":\"search_tools\",\"args\":{\"query\":\"background process\"}}",
     "- search_tools direct select: {\"id\":\"search-2\",\"name\":\"search_tools\",\"args\":{\"query\":\"select:read_background_output,signal_process\"}}",
     "To finish the run, emit complete_task exactly once with the final summary in args.summary, then no more tool calls are needed.",
-    "Executor rule: normal planned implementation and repair both stay on the main coding agent path. Use advisory subagents only for extra analysis; they do not own routing or edits.",
+    "Executor rule: normal planned implementation and repair both stay on the main agent path. Use advisory subagents only for extra analysis; they do not own routing or edits.",
   );
 
   // Deferred tools section

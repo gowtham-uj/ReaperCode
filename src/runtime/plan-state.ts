@@ -1,5 +1,5 @@
 /**
- * Plan + Todo state for the general coding agent.
+ * Plan + Todo state for the Reaper runtime.
  *
  * `PlanState` holds the agent's long-form plan markdown plus any
  * candidate plans the prep pipeline generated for it. The agent accepts
