@@ -22,7 +22,7 @@ function message(input: {
 
 test("buildCompactionSystemPrompt stays neutral when no previous summary exists", () => {
   const prompt = buildCompactionSystemPrompt({});
-  assert.match(prompt, /summarizing a coding-agent session/i);
+  assert.match(prompt, /summarizing a Reaper session/i);
   assert.doesNotMatch(prompt, /Previous summary/);
 });
 

@@ -39,3 +39,25 @@ test("buildSessionMetricsSummary reports error for low-confidence clarification 
   });
   assert.equal(summary.stop_reason, "error");
 });
+
+test("natural stop without explicit verification is not solved", () => {
+  const summary = buildSessionMetricsSummary({
+    toolResults: [],
+    completionGateAttempts: 0,
+    taskCompleted: true,
+    verifiedCompletion: false,
+  });
+  assert.equal(summary.verified_completion, false);
+  assert.equal(summary.stop_reason, "error");
+});
+
+test("verified completion reports solved only when verification is true", () => {
+  const summary = buildSessionMetricsSummary({
+    toolResults: [],
+    completionGateAttempts: 0,
+    taskCompleted: true,
+    verifiedCompletion: true,
+  });
+  assert.equal(summary.verified_completion, true);
+  assert.equal(summary.stop_reason, "solved");
+});

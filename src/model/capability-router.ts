@@ -1,5 +1,5 @@
 /**
- * Provider capability routing for the general coding agent.
+ * Provider capability routing for the Reaper runtime.
  *
  * Different models support different combinations of:
  *

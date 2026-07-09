@@ -13,6 +13,10 @@
  */
 
 import type { ReaperConfig } from "./model-config.js";
+import {
+  clampSoftCapTokens,
+  REAPER_DEFAULT_SOFT_CAP_TOKENS,
+} from "./context-hard-cap.js";
 
 interface TunablesCache {
   bash: {
@@ -28,11 +32,11 @@ interface TunablesCache {
   contextManagement: {
     /** Master switch for shake (default true). */
     shakeEnabled: boolean;
-    /** Soft cap in tokens; if unset defaults to provider profile's maxOutputTokens. */
+    /** Soft cap in tokens; default 100k for MiniMax-class windows. */
     softCap: number;
-    /** When to fire shake (default 50% of softCap). */
+    /** When to fire shake (default 60% of softCap). */
     shakeTriggerPct: number;
-    /** Protect the most-recent N chars from shake (default 12_000). */
+    /** Protect the most-recent N chars from shake (default 20_000). */
     shakeProtectWindowChars: number;
     /** Min savings to actually run shake (default 100 chars). */
     shakeMinSavingsChars: number;
@@ -62,6 +66,13 @@ interface TunablesCache {
     fullSummaryMaxPtlRetries: number;
     /** Min chars before a tool result can be PTL-dropped during summary (default 200). */
     fullSummaryMinCharsForPtlDrop: number;
+    /** Min tool batches after a full_summary before another may fire (default 2). */
+    fullSummaryCooldownMinToolBatches: number;
+    /**
+     * Min token growth after a full_summary before another may fire.
+     * 0 means derive as 8% of softCap at runtime.
+     */
+    fullSummaryCooldownMinTokenGrowth: number;
     /** Bash head+tail enabled (default true). */
     bashHeadTailEnabled: boolean;
     /** Bash preview size (default 1.2K head). */
@@ -92,7 +103,7 @@ interface TunablesCache {
      * equivalent of `event-controller.ts:#scheduleIdleCompaction`.
      */
     idleEnabled: boolean;
-    /** T1 Idle threshold: token-count that triggers idle compaction. */
+    /** T1 Idle threshold: token-count that triggers idle compaction (OMP default 200k). */
     idleThresholdTokens: number;
     /**
      * T1 Idle timeout (clamped to [60, 3600] seconds per OMP).
@@ -178,10 +189,10 @@ const DEFAULTS: TunablesCache = {
   },
   contextManagement: {
     shakeEnabled: true,
-    softCap: 270_000,
-    shakeTriggerPct: 50,
-    shakeProtectWindowChars: 12_000,
-    shakeMinSavingsChars: 100,
+    softCap: REAPER_DEFAULT_SOFT_CAP_TOKENS,
+    shakeTriggerPct: 60,
+    shakeProtectWindowChars: 64_000,
+    shakeMinSavingsChars: 16_000,
     maxConsecutiveShakeFailures: 3,
     ptlRecoveryMaxDrops: 5,
     ptlRecoveryMinChars: 200,
@@ -195,16 +206,18 @@ const DEFAULTS: TunablesCache = {
     fullSummaryFileTokenBudget: 50_000,
     fullSummaryMaxPtlRetries: 3,
     fullSummaryMinCharsForPtlDrop: 200,
+    fullSummaryCooldownMinToolBatches: 2,
+    fullSummaryCooldownMinTokenGrowth: 0,
     bashHeadTailEnabled: true,
     bashHeadPreviewChars: 1_200,
     bashTailPreviewChars: 1_200,
-    bashPersistThresholdChars: 30_000,
+    bashPersistThresholdChars: 25_000,
     modelPromotionEnabled: true,
     modelPromotionThresholdRatio: 0.5,
     modelPromotionTargetRole: "secondary_model" as string | null,
     // T1 Idle Compaction (defaults match OMP — disabled until user opts in).
     idleEnabled: false,
-    idleThresholdTokens: 0,
+    idleThresholdTokens: 200_000,
     idleTimeoutSeconds: 300,
     // T2 Incomplete (length-stop) recovery — on by default.
     incompleteRecoveryEnabled: true,
@@ -277,10 +290,10 @@ export function applyConfigToTunables(config: ReaperConfig): TunablesCache {
     },
     contextManagement: {
       shakeEnabled: Boolean(cm.shakeEnabled ?? true),
-      softCap: Number(cm.softCap ?? 270_000),
-      shakeTriggerPct: Number(cm.shakeTriggerPct ?? 50),
-      shakeProtectWindowChars: Number(cm.shakeProtectWindowChars ?? 12_000),
-      shakeMinSavingsChars: Number(cm.shakeMinSavingsChars ?? 100),
+      softCap: clampSoftCapTokens(Number(cm.softCap ?? REAPER_DEFAULT_SOFT_CAP_TOKENS)),
+      shakeTriggerPct: Number(cm.shakeTriggerPct ?? 60),
+      shakeProtectWindowChars: Number(cm.shakeProtectWindowChars ?? 64_000),
+      shakeMinSavingsChars: Number(cm.shakeMinSavingsChars ?? 16_000),
       maxConsecutiveShakeFailures: Number(cm.maxConsecutiveShakeFailures ?? 3),
       ptlRecoveryMaxDrops: Number(cm.ptlRecoveryMaxDrops ?? 5),
       ptlRecoveryMinChars: Number(cm.ptlRecoveryMinChars ?? 200),
@@ -294,10 +307,12 @@ export function applyConfigToTunables(config: ReaperConfig): TunablesCache {
       fullSummaryFileTokenBudget: Number(cm.fullSummaryFileTokenBudget ?? 50_000),
       fullSummaryMaxPtlRetries: Number(cm.fullSummaryMaxPtlRetries ?? 3),
       fullSummaryMinCharsForPtlDrop: Number(cm.fullSummaryMinCharsForPtlDrop ?? 200),
+      fullSummaryCooldownMinToolBatches: Number(cm.fullSummaryCooldownMinToolBatches ?? 2),
+      fullSummaryCooldownMinTokenGrowth: Number(cm.fullSummaryCooldownMinTokenGrowth ?? 0),
       bashHeadTailEnabled: Boolean(cm.bashHeadTailEnabled ?? true),
       bashHeadPreviewChars: Number(cm.bashHeadPreviewChars ?? 1_200),
       bashTailPreviewChars: Number(cm.bashTailPreviewChars ?? 1_200),
-      bashPersistThresholdChars: Number(cm.bashPersistThresholdChars ?? 30_000),
+      bashPersistThresholdChars: Number(cm.bashPersistThresholdChars ?? 25_000),
       modelPromotionEnabled: Boolean(cm.modelPromotionEnabled ?? true),
       modelPromotionThresholdRatio: Number(cm.modelPromotionThresholdRatio ?? 0.5),
       modelPromotionTargetRole: ((): string | null => {
@@ -309,7 +324,7 @@ export function applyConfigToTunables(config: ReaperConfig): TunablesCache {
       })(),
       // T1 Idle Compaction (OMP port).
       idleEnabled: Boolean((cm as any).idleEnabled ?? false),
-      idleThresholdTokens: Number((cm as any).idleThresholdTokens ?? 0),
+      idleThresholdTokens: Number((cm as any).idleThresholdTokens ?? 200_000),
       idleTimeoutSeconds: Math.max(60, Math.min(3600, Number((cm as any).idleTimeoutSeconds ?? 300))),
       // T2 Incomplete (length-stop) recovery.
       incompleteRecoveryEnabled: Boolean((cm as any).incompleteRecoveryEnabled ?? true),

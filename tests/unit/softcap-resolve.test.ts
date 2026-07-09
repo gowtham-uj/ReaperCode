@@ -48,7 +48,31 @@ test("resolveSoftCap falls back to legacy tokenBudget.softCap", () => {
 test("resolveSoftCap defaults when no config present", () => {
   const root = mkdtempSync(path.join(tmpdir(), "reaper-softcap-default-"));
   try {
-    assert.equal(resolveSoftCap({ workspaceRoot: root }), 200_000);
+    assert.equal(resolveSoftCap({ workspaceRoot: root }), 270_000);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resolveSoftCap clamps values above the 270k hard cap", () => {
+  assert.equal(
+    resolveSoftCap({
+      config: { contextManagement: { softCap: 1_000_000 } } as any,
+    }),
+    270_000,
+  );
+});
+
+test("resolveSoftCap clamps workspace softCap above the 270k hard cap", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "reaper-softcap-clamp-"));
+  try {
+    mkdirSync(path.join(root, ".reaper"), { recursive: true });
+    writeFileSync(
+      path.join(root, ".reaper", "config.json"),
+      JSON.stringify({ contextManagement: { softCap: 1_000_000 } }),
+      "utf8",
+    );
+    assert.equal(resolveSoftCap({ workspaceRoot: root }), 270_000);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

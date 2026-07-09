@@ -2,6 +2,10 @@ import { z } from "zod";
 
 import { ConnectionPoliciesSchema } from "../connection/policies.js";
 import {
+  REAPER_CONTEXT_HARD_CAP_TOKENS,
+  REAPER_DEFAULT_SOFT_CAP_TOKENS,
+} from "./context-hard-cap.js";
+import {
   ModelCapabilitiesSchema,
   ModelRoleInputSchema,
   ModelProfileSchema,
@@ -128,10 +132,27 @@ export const VerificationGateConfigSchema = z
 export const ContextManagementConfigSchema = z
   .object({
     shakeEnabled: z.boolean().default(true),
-    softCap: z.number().int().positive().default(270_000),
-    shakeTriggerPct: z.number().min(1).max(99).default(50),
-    shakeProtectWindowChars: z.number().int().nonnegative().default(12_000),
-    shakeMinSavingsChars: z.number().int().nonnegative().default(100),
+    /**
+     * Soft token budget for compaction layers. Default and hard max
+     * are 270k — even when a model advertises 1M context, Reaper only
+     * budgets up to {@link REAPER_CONTEXT_HARD_CAP_TOKENS}. Values
+     * above the hard cap are clamped (not rejected) so older configs
+     * keep loading.
+     * Do not set this below the post-compact rebuild size (cockpit +
+     * summary + re-anchor) or full_summary will thrash every turn.
+     */
+    softCap: z
+      .number()
+      .int()
+      .positive()
+      .default(REAPER_DEFAULT_SOFT_CAP_TOKENS)
+      .transform((v) => Math.min(v, REAPER_CONTEXT_HARD_CAP_TOKENS)),
+    /** Fire shake around mid-budget so cheap prune runs before summary. */
+    shakeTriggerPct: z.number().min(1).max(99).default(60),
+    /** Keep recent tool evidence (KEY harvests, writes) through shake. OMP ~16k tokens. */
+    shakeProtectWindowChars: z.number().int().nonnegative().default(64_000),
+    /** OMP shake minSavings ~4k tokens. */
+    shakeMinSavingsChars: z.number().int().nonnegative().default(16_000),
     maxConsecutiveShakeFailures: z.number().int().positive().default(3),
     ptlRecoveryMaxDrops: z.number().int().nonnegative().default(5),
     ptlRecoveryMinChars: z.number().int().positive().default(200),
@@ -145,10 +166,21 @@ export const ContextManagementConfigSchema = z
     fullSummaryFileTokenBudget: z.number().int().positive().default(50_000),
     fullSummaryMaxPtlRetries: z.number().int().nonnegative().default(3),
     fullSummaryMinCharsForPtlDrop: z.number().int().positive().default(200),
+    /**
+     * After a full_summary, suppress another until at least this many
+     * tool batches complete (or token growth clears the cooldown).
+     * Prevents summary thrash when post-compact rebuild is still large.
+     */
+    fullSummaryCooldownMinToolBatches: z.number().int().nonnegative().default(2),
+    /**
+     * After a full_summary, suppress another until tokens grow by this
+     * many past the post-summary baseline. 0 = derive as 8% of softCap.
+     */
+    fullSummaryCooldownMinTokenGrowth: z.number().int().nonnegative().default(0),
     bashHeadTailEnabled: z.boolean().default(true),
     bashHeadPreviewChars: z.number().int().positive().default(1_200),
     bashTailPreviewChars: z.number().int().positive().default(1_200),
-    bashPersistThresholdChars: z.number().int().positive().default(30_000),
+    bashPersistThresholdChars: z.number().int().positive().default(25_000),
     /**
      * Promote Context Model (#21, OMP port):
      * Before triggering full-summary, check if the active mainAgent
@@ -195,12 +227,11 @@ export const ContextManagementConfigSchema = z
      */
     idleEnabled: z.boolean().default(false),
     /**
-     * Token-count threshold at which idle compaction fires. Default 0
-     * means "only fire if enabled AND tokens exceed the threshold".
-     * Users should set this to a non-zero value (e.g. 100,000) when
-     * enabling `idleEnabled`.
+     * Token-count threshold at which idle compaction fires. Default
+     * 200_000 matches OMP (~74% of Reaper's 270k hard cap). Idle still
+     * requires `idleEnabled: true`.
      */
-    idleThresholdTokens: z.number().int().min(0).default(0),
+    idleThresholdTokens: z.number().int().min(0).default(200_000),
     /**
      * How long the model must be idle before proactive compaction
      * fires. Clamped to [60, 3600] seconds per OMP's `Math.max(60,
@@ -248,10 +279,10 @@ export const ContextManagementConfigSchema = z
   .strict()
   .optional()
   .default({
-    softCap: 270_000,
-    shakeTriggerPct: 50,
-    shakeProtectWindowChars: 12_000,
-    shakeMinSavingsChars: 100,
+    softCap: REAPER_DEFAULT_SOFT_CAP_TOKENS,
+    shakeTriggerPct: 60,
+    shakeProtectWindowChars: 64_000,
+    shakeMinSavingsChars: 16_000,
     maxConsecutiveShakeFailures: 3,
     ptlRecoveryMaxDrops: 5,
     ptlRecoveryMinChars: 200,
@@ -265,15 +296,17 @@ export const ContextManagementConfigSchema = z
     fullSummaryFileTokenBudget: 50_000,
     fullSummaryMaxPtlRetries: 3,
     fullSummaryMinCharsForPtlDrop: 200,
+    fullSummaryCooldownMinToolBatches: 2,
+    fullSummaryCooldownMinTokenGrowth: 0,
     bashHeadTailEnabled: true,
     bashHeadPreviewChars: 1_200,
     bashTailPreviewChars: 1_200,
-    bashPersistThresholdChars: 30_000,
+    bashPersistThresholdChars: 25_000,
     modelPromotionEnabled: true,
     modelPromotionThresholdRatio: 0.5,
     modelPromotionTargetRole: "secondary_model",
     idleEnabled: false,
-    idleThresholdTokens: 0,
+    idleThresholdTokens: 200_000,
     idleTimeoutSeconds: 300,
     incompleteRecoveryEnabled: true,
     handoffEnabled: false,

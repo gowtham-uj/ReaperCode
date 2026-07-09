@@ -32,7 +32,7 @@ export async function runVerificationJudge(input: {
       {
         role: "user",
         content:
-          `You are the verification judge for a coding agent. ` +
+          `You are the verification judge for Reaper. ` +
           `Return strict JSON with shape {"feedback": string, "negativeConstraints": string[], "toolCalls": ToolCall[]}. ` +
           `Available tool names: read_file, list_directory, grep_search, write_file, replace_in_file, delete_file, run_shell_command. ` +
           `Task prompt: ${input.prompt}. ` +
@@ -82,7 +82,7 @@ export async function runSelfDebugExplanation(input: {
       {
         role: "user",
         content:
-          `You are reviewing whether a coding-agent completion actually satisfies the task. ` +
+          `You are reviewing whether a task completion actually satisfies the task. ` +
           `Return strict JSON with shape {"ok": boolean, "explanation": string, "discrepancies": string[]}. ` +
           `Task prompt: ${input.prompt}. ` +
           `Completion summary: ${input.completionSummary}. ` +

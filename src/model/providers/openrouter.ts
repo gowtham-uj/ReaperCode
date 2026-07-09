@@ -24,7 +24,7 @@ export class OpenRouterClient implements ProviderModelClient {
         "content-type": "application/json",
         "authorization": `Bearer ${apiKey}`,
         "HTTP-Referer": "https://github.com/reaper-agent",
-        "X-Title": "Reaper Coding Agent",
+        "X-Title": "Reaper",
       },
       body: JSON.stringify(body),
     });

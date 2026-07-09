@@ -8,6 +8,8 @@ import { shakeConversationWithBreaker, truncateHeadForPTLRecovery } from "../con
 import { maybeTimeBasedMicrocompact } from "../context/time-microcompact.js";
 import { compactToolHistory } from "../context/history-compaction.js";
 import { pruneSupersededToolResults } from "../context/supersede-prune.js";
+import { pruneToolOutputs } from "../context/tool-output-prune.js";
+import { compactionContextTokens } from "../config/context-budget.js";
 import { getContextTunables } from "../config/config-tunables.js";
 import { tokenUsageFromResponse } from "../context/token-budget.js";
 import { TrajectoryLogger } from "../logging/trajectory.js";
@@ -326,6 +328,20 @@ export function createContextEngineeringHooks(
         /* best-effort */
       }
 
+      // OMP pruneToolOutputs: age-based truncate outside protect window
+      // before shake / full-summary so cheap reclaim happens first.
+      let toolOutputsPruned = 0;
+      let toolOutputSaved = 0;
+      try {
+        const out = pruneToolOutputs(working as Array<Record<string, unknown>>, {
+          warmPrefixCount: 1,
+        });
+        toolOutputsPruned = out.pruned;
+        toolOutputSaved = out.savedChars;
+      } catch {
+        /* best-effort */
+      }
+
       // #6, #7: Shake (cheapest LLM-free pass after supersede)
       const tokensBeforeShake = countTokens(working);
       let shaken = 0;
@@ -351,6 +367,19 @@ export function createContextEngineeringHooks(
       const tokensAfterShake = countTokens(working);
       const tokensSavedByShake = Math.max(0, tokensBeforeShake - tokensAfterShake);
 
+      // OMP compactionContextTokens: floor local estimate with last provider
+      // input tokens so compressed wire payloads cannot under-trigger.
+      let providerInputTokens = 0;
+      try {
+        const stashed = (globalThis as any)[`${runId}::last-input-tokens`];
+        if (typeof stashed === "number" && Number.isFinite(stashed) && stashed > 0) {
+          providerInputTokens = stashed;
+        }
+      } catch {
+        /* best-effort */
+      }
+      const tokensForCompactGate = compactionContextTokens(providerInputTokens, tokensAfterShake);
+
       if (cmTunablesBefore.shakeEnabled && shaken > 0) {
         try {
           await (trajectoryLogger as TrajectoryLogger).write({
@@ -368,6 +397,8 @@ export function createContextEngineeringHooks(
             consecutive_failures: breaker.consecutiveFailures,
             superseded_results: superseded,
             supersede_saved_chars: supersedeSaved,
+            tool_outputs_pruned: toolOutputsPruned,
+            tool_output_saved_chars: toolOutputSaved,
           } as any).catch(() => undefined);
         } catch {
           /* best-effort */
@@ -381,11 +412,29 @@ export function createContextEngineeringHooks(
       // T1/T2: also force-compact when idle-compaction or incomplete-
       // recovery slots are set, even if the natural threshold isn't crossed.
       // T3: optional handoff prompt for smaller-context summaries.
+      // Cooldown: after a summary, suppress re-fire until enough tool
+      // batches / token growth so post-compact rebuild cannot thrash.
       const fullSummaryEnabledConfig = cmTunablesBefore.fullSummaryEnabled;
       const { shouldCompact } = await import("../context/should-compact.js");
+      const cooldownSlotKey = `${runId}::full-summary-cooldown`;
+      const cooldown = (globalThis as any)[cooldownSlotKey] as
+        | { baselineTokens: number; toolBatchesSince: number; appliedAt: number }
+        | undefined;
+      const minBatches = Math.max(0, cmTunablesBefore.fullSummaryCooldownMinToolBatches ?? 2);
+      const minGrowthConfigured = cmTunablesBefore.fullSummaryCooldownMinTokenGrowth ?? 0;
+      const minGrowth =
+        minGrowthConfigured > 0
+          ? minGrowthConfigured
+          : Math.max(1_000, Math.floor(softCap * 0.08));
+      const cooldownActive = Boolean(
+        cooldown &&
+          cooldown.toolBatchesSince < minBatches &&
+          tokensAfterShake < cooldown.baselineTokens + minGrowth,
+      );
+      const overThreshold = shouldCompact(tokensForCompactGate, softCap);
       const fireFullSummary =
-        (shouldCompact(tokensAfterShake, softCap) || forceCompactFromIdleOrIncomplete) &&
-        fullSummaryEnabledConfig;
+        fullSummaryEnabledConfig &&
+        (forceCompactFromIdleOrIncomplete || (overThreshold && !cooldownActive));
       let fullSummarized = false;
       const blockingFullSummary = options.blockingFullSummary !== false;
       const useHandoff = cmTunablesBefore.handoffEnabled === true;
@@ -404,9 +453,15 @@ export function createContextEngineeringHooks(
           const postChars = estimateLiveConversationChars(newMsgs as unknown[]);
           working = newMsgs as unknown[];
           fullSummarized = true;
+          const postTokens = countTokens(working);
           (globalThis as any)[`${runId}::full-summary-applied`] = {
             messages: newMsgs,
             summaryText,
+            appliedAt: Date.now(),
+          };
+          (globalThis as any)[cooldownSlotKey] = {
+            baselineTokens: postTokens,
+            toolBatchesSince: 0,
             appliedAt: Date.now(),
           };
           await persistSummary(workspaceRoot, {
@@ -561,7 +616,7 @@ export function createContextEngineeringHooks(
       return {
         messages: working,
         shaken,
-        savedChars: savedChars + supersedeSaved,
+        savedChars: savedChars + supersedeSaved + toolOutputSaved,
         savedTokens: tokensSavedByShake,
         fullSummarized,
         ptlDrops: 0,
@@ -573,6 +628,13 @@ export function createContextEngineeringHooks(
     async onAfterToolResult({
       workspaceRoot: _w, runId, sessionId, traceId, toolCallId: _tcid, toolName, output, trajectoryLogger, persistedOutputSize,
     }) {
+      // Advance full-summary cooldown with every tool result so the
+      // model can do real work before another expensive compact.
+      const cooldownKey = `${runId}::full-summary-cooldown`;
+      const cooldownState = (globalThis as any)[cooldownKey];
+      if (cooldownState && typeof cooldownState === "object") {
+        cooldownState.toolBatchesSince = Number(cooldownState.toolBatchesSince ?? 0) + 1;
+      }
       const cm = getContextTunables();
       if (!cm.bashHeadTailEnabled) return { savedChars: 0 };
       if (toolName !== "bash" && toolName !== "run_shell_command") {

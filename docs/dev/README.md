@@ -6,7 +6,7 @@ appropriate for end users.
 | File | What it covers |
 |---|---|
 | `adding-tools.md` | The full checklist for adding a new tool to Reaper's main-agent surface. Lists every file that has to know the tool name, the silent failure modes we have already hit, and a verification recipe. |
-| `coding-agent-context-audit.md` | Audit of Reaper vs Pi/OMP-style coding agents: context engineering gaps, unwired modules, and a prioritized improvement roadmap. |
+| `context-engineering-audit.md` | Audit of Reaper vs Pi/OMP-style agent harnesses: context engineering gaps, unwired modules, and a prioritized improvement roadmap. |
 | `context-engineering-research.md` | Comparative research across Aider, Claude Code, Pi/OMP, OpenHands. |
 | `context-engineering-layer-audit.md` | Trigger map for Reaper's 21 context-engineering layers vs OMP. |
 | `roadmap-v0.1.4-omp-tool-port.md` | OMP tool-architecture port phases. |

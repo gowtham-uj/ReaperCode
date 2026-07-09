@@ -188,7 +188,7 @@ function toPrompt(context: Context): string {
   const toolContract = tools?.length ? buildUniversalToolContract(tools) : "Answer the request directly.";
 
   return [
-    "You are operating as Pi coding agent. Continue the conversation below and help complete the user's coding task.",
+    "You are operating as Pi main agent. Continue the conversation below and help complete the user's coding task.",
     context.systemPrompt?.trim() && (!context.tools?.length || process.env.HYPERAGENT_PI_FORWARD_SYSTEM_PROMPT === "1")
       ? `<system>\n${context.systemPrompt.trim()}\n</system>`
       : "Answer from the provided conversation. Do not claim to inspect or change files that were not provided.",

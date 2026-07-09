@@ -1,5 +1,5 @@
 /**
- * Probe MiniMax-M3 to capture the exact raw response shape so we can
+ * Probe MiniMax-M2.7 to capture the exact raw response shape so we can
  * design a parser fix.
  */
 import { createLiveReaperGateway } from "../tests/fixtures/live-gateway.js";
@@ -9,7 +9,7 @@ async function main(): Promise<void> {
   const profile = await gateway.resolveRole("executor");
   const r = await gateway.generate({
     role: "executor",
-    system: "You are a coding agent. Return only JSON: {\"assistant_message\":\"...\",\"tool_calls\":[]}",
+    system: "You are a main agent. Return only JSON: {\"assistant_message\":\"...\",\"tool_calls\":[]}",
     messages: [
       {
         role: "user",

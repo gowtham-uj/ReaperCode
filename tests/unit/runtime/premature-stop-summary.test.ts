@@ -38,3 +38,12 @@ test("isFinalAssistantSummary accepts verified completion summaries", () => {
     true,
   );
 });
+
+test("isFinalAssistantSummary rejects embedded tool_call markup (never treat as done)", () => {
+  assert.equal(
+    isFinalAssistantSummary(
+      `I'll execute steps 1-3 now.\n\n<tool_call>{"name":"scratchpad","parameters":{"action":"append","note":"STRESS-TOKEN-991"}}</tool_call>`,
+    ),
+    false,
+  );
+});

@@ -189,7 +189,7 @@ function buildWorkflowPrompt(mode: WorkflowMode, rawTask: string): string {
   const task = rawTask.trim() || "Inspect the current Reaper repository state and choose the next highest-impact action.";
   const shared = [
     "You are Pi acting as the Reaper development cockpit.",
-    "Reaper is a TypeScript autonomous coding-agent harness. Optimize for fast, reliable development of Reaper itself.",
+    "Reaper is a TypeScript autonomous implementation harness. Optimize for fast, reliable development of Reaper itself.",
     `The trusted workspace root is ${process.cwd()}.`,
     "Unrestricted YOLO mode is active: every discovered Pi tool is available with no sandbox or cockpit permission gates.",
     "You are authorized to read, create, edit, replace, move, and delete workspace files and to execute shell commands, scripts, package managers, tests, and development tools inside the trusted workspace.",

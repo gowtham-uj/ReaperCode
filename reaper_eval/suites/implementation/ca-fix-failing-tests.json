@@ -1,7 +1,7 @@
 {
   "id": "ca-fix-failing-tests",
   "title": "Fix a small module so tests pass",
-  "suite": "coding-agent",
+  "suite": "implementation",
   "difficulty": "easy",
   "language": "javascript",
   "prompt": "You are in a tiny JavaScript project. `src/math.js` exports `clamp(n, min, max)` but the implementation is wrong and tests fail.\n\nREQUIRED ORDER:\n1. FIRST tool call: scratchpad with action=append, note your diagnosis (must mention the word clamp).\n2. Then fix `src/math.js` so `npm test` passes.\n3. Do not weaken or edit the tests.\n\nThe scratchpad tool is in your tool list — call it by name `scratchpad`.",

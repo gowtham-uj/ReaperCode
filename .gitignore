@@ -65,3 +65,8 @@ scratchpad/
 *.webp
 *.pdf
 *.docx
+
+# Local reference checkouts (never push)
+source_codes/
+pi-mono-main
+oh-my-pi/

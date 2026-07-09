@@ -169,7 +169,7 @@ export class PermissionClassifier {
   async llmClassify(cmd: string, generateFn: (prompt: string) => Promise<string>): Promise<PermissionClassification> {
     try {
       const response = await generateFn(
-        `Classify this shell command as SAFE or DANGEROUS for an automated coding agent. ` +
+        `Classify this shell command as SAFE or DANGEROUS for Reaper. ` +
         `Reply with only one word: SAFE or DANGEROUS.\n\nCommand: ${cmd}\n\n` +
         `SAFE = read-only, installs packages, creates files, runs tests, builds code. ` +
         `DANGEROUS = deletes files outside workspace, modifies system config, accesses network services, ` +

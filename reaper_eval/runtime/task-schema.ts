@@ -1,7 +1,7 @@
 /**
  * reaper_eval/runtime/task-schema.ts — EvalTask v1 schema.
  *
- * Unified task shape for coding-agent benches and context-engineering
+ * Unified task shape for implementation benches and context-engineering
  * stress. Success is always gate-based (shell exit, file markers,
  * trajectory events, scratchpad/memory presence).
  */
@@ -93,7 +93,7 @@ export const EvalTaskSchema = z
   .object({
     id: z.string().min(1),
     title: z.string().min(1),
-    suite: z.enum(["coding-agent", "context-days", "legacy", "custom"]).default("custom"),
+    suite: z.enum(["implementation", "context-days", "legacy", "custom"]).default("custom"),
     difficulty: z.enum(["easy", "medium", "hard", "stress"]).default("medium"),
     language: z.string().default("javascript"),
     /** User prompt sent to the agent. */

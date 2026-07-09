@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildMainAgentCockpit } from "../../src/runtime/main-agent-prompt.js";
+import { buildMainAgentCockpit, buildMainAgentSystemPrompt } from "../../src/runtime/main-agent-prompt.js";
 import { composeAbortSignals } from "../../src/util/abort-signal.js";
 
-test("main-agent cockpit surfaces prepared context, tool shortlist, and skills sections", () => {
+test("main-agent cockpit surfaces prepared context and skills sections", () => {
   const cockpit = buildMainAgentCockpit(
     {
       contentPrep: {
@@ -35,33 +35,24 @@ test("main-agent cockpit surfaces prepared context, tool shortlist, and skills s
   );
 
   assert.match(cockpit, /## Prepared Context/);
-  assert.match(cockpit, /## Tool Shortlist/);
   assert.match(cockpit, /## Skills \/ Mentions/);
   assert.match(cockpit, /fp-123/);
-  assert.match(cockpit, /read_file/);
   assert.match(cockpit, /RuntimeEngine/);
   assert.match(cockpit, /Use compact summary mode/);
+  assert.doesNotMatch(cockpit, /## Tool Shortlist/);
+  assert.doesNotMatch(cockpit, /## Available Tools/);
 });
 
-test("main-agent cockpit available-tools list matches the provider tool list", () => {
+test("main-agent system prompt tool inventory matches the provider tool list", () => {
   const tools = [
     { name: "read_file", description: "Read a file" },
     { name: "replace_in_file", description: "Patch a file" },
   ];
-  const cockpit = buildMainAgentCockpit(
-    { recentToolResults: [] },
-    { payload: { prompt: "use read_file" } },
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    { availableTools: tools },
-  );
-  // Only the provided tools appear, not the entire registry.
-  assert.match(cockpit, /read_file/);
-  assert.match(cockpit, /replace_in_file/);
-  // The default registry is large — verify one rare tool does not leak in.
-  assert.doesNotMatch(cockpit, /browser_control/);
+  const system = buildMainAgentSystemPrompt({}, { availableTools: tools });
+  assert.match(system, /# Tool inventory/);
+  assert.match(system, /- read_file\b/);
+  assert.match(system, /- replace_in_file\b/);
+  assert.doesNotMatch(system, /browser_control/);
 });
 
 test("composeAbortSignals returns undefined when no signals are provided", () => {

@@ -5,7 +5,7 @@ description: Turn short Reaper development prompts into a scout, plan, implement
 
 # Reaper Development Loop
 
-Use this skill when the user asks to improve, fix, review, speed up, clean up, or ship work in the Reaper coding-agent harness.
+Use this skill when the user asks to improve, fix, review, speed up, clean up, or ship work in the Reaper implementation harness.
 
 ## Workflow
 

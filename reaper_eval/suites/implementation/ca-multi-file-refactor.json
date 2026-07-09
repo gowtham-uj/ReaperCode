@@ -1,7 +1,7 @@
 {
   "id": "ca-multi-file-refactor",
   "title": "Extract shared util and update call sites",
-  "suite": "coding-agent",
+  "suite": "implementation",
   "difficulty": "medium",
   "language": "javascript",
   "prompt": "This repo has duplicated slugify logic in `src/posts.js` and `src/users.js`. Extract a shared `slugify(text)` into `src/slugify.js`, update both modules to import it, and make `npm test` pass. Do not change test expectations. Prefer file_view/file_edit/write_file over dumping whole files via bash.\n\nIMPORTANT: Plans written in assistant_message are NOT applied. You MUST call write_file / file_edit tools to create and edit files, then run `npm test` via bash before finishing.",

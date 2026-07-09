@@ -282,6 +282,10 @@ export function isFinalAssistantSummary(message: string): boolean {
   const visible = stripThinkingBlocks(message).replace(/\s+/g, " ").trim();
   if (!visible) return false;
 
+  // Textual tool-call markup is never a final summary — the model still
+  // intends to act, even if the provider failed to emit structured tools.
+  if (containsEmbeddedToolCallMarkup(message)) return false;
+
   const actionIntent = /\b(?:i(?:'|’)ll|i will|i am going to|i'm going to|let me|i need to|i should|i'll now|i will now|next,? i(?:'|’)ll|now i(?:'|’)ll|i can proceed|let's)\b/i.test(visible);
   const weakCompletion = /\b(?:done|complete|completed|implemented|created|updated|fixed|verified)\b/i.test(visible);
   const strongCompletion = /\b(?:tests? pass(?:ed|es)?|all checks pass(?:ed)?|npm test pass(?:ed)?|verification pass(?:ed)?|task (?:is )?complete|all (?:required )?(?:files|deliverables) (?:are )?(?:done|complete)|status:\s*success)\b/i.test(visible);
@@ -294,6 +298,22 @@ export function isFinalAssistantSummary(message: string): boolean {
   if (futureAction && !strongCompletion) return false;
   if (!weakCompletion && !strongCompletion) return false;
   return strongCompletion || (weakCompletion && !futureAction && !midBatchAnnounce && !actionIntent);
+}
+
+/**
+ * True when assistant text contains tool-call markup that is NOT a
+ * structured OpenAI-compatible tool_calls payload (e.g. `<tool_call>{...}</tool_call>`).
+ * Detection only — never invents executable tool calls from text, and the
+ * live loop does not use this to force continuation.
+ */
+export function containsEmbeddedToolCallMarkup(message: string): boolean {
+  if (!message) return false;
+  if (/<\s*tool_call\b/i.test(message)) return true;
+  if (/<\/\s*tool_call\s*>/i.test(message)) return true;
+  if (/\{\\*"name\\*"\s*:\s*\\*"[a-zA-Z_][\w-]*\\*"\s*,\s*\\*"(?:parameters|arguments|args)\\*"\s*:/i.test(message)) {
+    return true;
+  }
+  return false;
 }
 
 function stripThinkingBlocks(message: string): string {

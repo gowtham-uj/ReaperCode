@@ -1,5 +1,5 @@
 /**
- * The main coding agent's default tool surface should prioritize executable
+ * The main agent's default tool surface should prioritize executable
  * coding actions, not bookkeeping/control-plane tools. A live A/B showed the
  * model burned its first 9 requests on update_plan/update_todo before writing
  * any files. Those tools are still parseable internally for legacy/control
