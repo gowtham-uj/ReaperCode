@@ -1,7 +1,7 @@
 {
   "id": "ca-debug-from-logs",
   "title": "Find root cause from a failing integration log",
-  "suite": "coding-agent",
+  "suite": "implementation",
   "difficulty": "medium",
   "language": "javascript",
   "prompt": "A service writes orders to `data/orders.jsonl` but the verifier fails. Read `logs/run.log` and the source under `src/` to find the bug, fix it, and make `npm test` pass. The bug is a real coding mistake (wrong field name), not a missing dependency. Record the root cause in the scratchpad before fixing.",

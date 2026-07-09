@@ -280,7 +280,7 @@ export const toolRegistry = {
   },
   scratchpad: {
     description:
-      "Append, read, or clear durable working notes at `.reaper/memory/scratch.md`. Use append for intermediate decisions that must survive context compaction; read to recall them later; clear when the notes are obsolete.",
+      "Append, read, or clear notes at `.reaper/memory/scratch.md`. Available when needed; follow the user request for when to use it.",
     argsSchema: ScratchpadArgsSchema,
   },
   search_memory: {
@@ -432,7 +432,9 @@ export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   "grep_search",        // always-on: cross-file patterns
   "bash",               // always-on: tests, git, installs only
   "search_tools",
-  "scratchpad",         // durable working notes across compaction / days-long runs
+  // scratchpad is on-demand: promote via search_tools or when the user
+  // prompt mentions it (selectGeneralAgentToolsForTurn). Do not nudge
+  // scratchpad from the system prompt — user request owns that.
 ]);
 
 // Tools that were demoted from CORE_TOOL_NAMES in Phase 4. Kept registered

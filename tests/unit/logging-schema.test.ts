@@ -126,3 +126,64 @@ test("parses phase 0 audit event kinds", () => {
     assert.equal(entry.kind, kind);
   }
 });
+
+test("full_summary accepts blocking flag and context_shake accepts wiring extras", () => {
+  const summary = parseTrajectoryEntry({
+    event_id: "11111111-1111-4111-8111-111111111111",
+    run_id: "run-1",
+    session_id: "session-1",
+    trace_id: "trace-1",
+    timestamp: "2026-01-01T00:00:00.000Z",
+    log_schema_version: 1,
+    kind: "full_summary",
+    level: "info",
+    summary_chars: 12,
+    kept_messages: 2,
+    ptl_drops: 0,
+    saved_chars: 5,
+    blocking: true,
+  });
+  assert.equal(summary.kind, "full_summary");
+  assert.equal((summary as { blocking?: boolean }).blocking, true);
+
+  const shake = parseTrajectoryEntry({
+    event_id: "22222222-2222-4222-8222-222222222222",
+    run_id: "run-1",
+    session_id: "session-1",
+    trace_id: "trace-1",
+    timestamp: "2026-01-01T00:00:00.000Z",
+    log_schema_version: 1,
+    kind: "context_shake",
+    level: "info",
+    shaken_results: 1,
+    saved_chars: 10,
+    saved_tokens: 2,
+    consecutive_failures: 0,
+    superseded_results: 0,
+    supersede_saved_chars: 0,
+  });
+  assert.equal(shake.kind, "context_shake");
+  assert.equal((shake as { saved_tokens?: number }).saved_tokens, 2);
+});
+
+test("premature_stop_nudge and tool_call_parse_error are accepted", () => {
+  const nudge = parseTrajectoryEntry({
+    ...baseLogFields(),
+    kind: "premature_stop_nudge",
+    level: "info",
+    assistant_excerpt: "Writing f10-f14 now.",
+    nudge_count: 1,
+    reason: "non_final_summary",
+  });
+  assert.equal(nudge.kind, "premature_stop_nudge");
+
+  const parseErr = parseTrajectoryEntry({
+    ...baseLogFields(),
+    event_id: "event-parse",
+    kind: "tool_call_parse_error",
+    level: "info",
+    dropped: [{ name: "scratchpad", error: "invalid args" }],
+  });
+  assert.equal(parseErr.kind, "tool_call_parse_error");
+});
+

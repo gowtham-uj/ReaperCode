@@ -82,10 +82,25 @@ export async function runUnifiedEval(options: UnifiedEvalOptions): Promise<Unifi
     (config as any).verification = undefined;
     delete (config as any).verification;
     // Apply softCap into contextManagement so shake/full-summary use it.
+    // Stress tasks also tighten bash head/tail so large tool output is
+    // compacted under the same pressure window.
     if (typeof task.softCap === "number") {
+      // Stress calibration: fire layers without thrashing. Keep softCap
+      // large enough that post-compact rebuild (cockpit+summary) fits
+      // under threshold; use mid-window shake + summary cooldown.
+      const bashThreshold = Math.min(12_000, Math.max(4_000, Math.floor(task.softCap * 0.2)));
       (config as any).contextManagement = {
         ...((config as any).contextManagement ?? {}),
         softCap: task.softCap,
+        shakeEnabled: true,
+        shakeTriggerPct: 45,
+        shakeProtectWindowChars: Math.min(8_000, Math.max(2_000, Math.floor(task.softCap * 0.2))),
+        shakeMinSavingsChars: 50,
+        fullSummaryEnabled: true,
+        fullSummaryCooldownMinToolBatches: 2,
+        fullSummaryCooldownMinTokenGrowth: Math.max(1_500, Math.floor(task.softCap * 0.08)),
+        bashHeadTailEnabled: true,
+        bashPersistThresholdChars: bashThreshold,
       };
     }
     applyConfigToTunables(config as any);
@@ -246,13 +261,19 @@ async function writeTaskSoftCap(workspaceRoot: string, task: EvalTask): Promise<
       existing = {};
     }
   }
+  const bashThreshold = Math.min(12_000, Math.max(4_000, Math.floor(task.softCap * 0.2)));
   existing.contextManagement = {
     ...((existing.contextManagement as object) ?? {}),
     softCap: task.softCap,
-  };
-  existing.tokenBudget = {
-    ...((existing.tokenBudget as object) ?? {}),
-    softCap: task.softCap,
+    shakeEnabled: true,
+    shakeTriggerPct: 45,
+    shakeProtectWindowChars: Math.min(8_000, Math.max(2_000, Math.floor(task.softCap * 0.2))),
+    shakeMinSavingsChars: 50,
+    fullSummaryEnabled: true,
+    fullSummaryCooldownMinToolBatches: 2,
+    fullSummaryCooldownMinTokenGrowth: Math.max(1_500, Math.floor(task.softCap * 0.08)),
+    bashHeadTailEnabled: true,
+    bashPersistThresholdChars: bashThreshold,
   };
   await writeFile(configPath, JSON.stringify(existing, null, 2), "utf8");
 }

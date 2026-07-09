@@ -184,13 +184,17 @@ test("onBoot: initializes with namedSession", async () => {
 });
 
 test("the wiring file imports all 21 layer modules", async () => {
-  const source = await import("node:fs").then((fs) =>
-    fs.readFileSync("/workspace/reapercode-main/src/runtime/context-engineering-wiring.ts", "utf8"),
-  );
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const wiringPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../src/runtime/context-engineering-wiring.ts");
+  const source = fs.readFileSync(wiringPath, "utf8");
   const expectedModules = [
     "shake.js",
     "time-microcompact.js",
     "history-compaction.js",
+    "tool-output-prune.js",
+    "context-budget.js",
   ];
   for (const m of expectedModules) {
     assert.ok(source.includes(m), `wiring should import ${m}`);

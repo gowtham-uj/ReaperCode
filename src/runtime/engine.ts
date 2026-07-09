@@ -31,7 +31,7 @@ import { logLangfuseEvent } from "../logging/langfuse.js";
 import { TrajectoryLogger } from "../logging/trajectory.js";
 import { generateFinalSummary, summarizeExplicitToolRun } from "./final-summary.js";
 import { classifyRunFinalStatus, persistRunFailure } from "./run-finalize.js";
-import { buildGeneralAgentTools, type AgentToolDescriptor } from "./agent-tools.js";
+import { buildGeneralAgentTools, buildAgentToolDescriptor, userPromptRequestsScratchpad, type AgentToolDescriptor } from "./agent-tools.js";
 import {
   escapeRegExp, 
   hasSourceMutationShellFragment, 
@@ -75,7 +75,7 @@ import { classifyShellCommandSemantics } from "../tools/command-semantics.js";
 import { loadMcpServersFromFile } from "../tools/mcp/config.js";
 import { MergedToolRegistry } from "../tools/mcp/registry.js";
 import { ToolCallSchema, type ToolCall, type ToolResult } from "../tools/types.js";
-import { streamMainAgentResponse, isFinalAssistantSummary } from "./main-agent-node.js";
+import { streamMainAgentResponse } from "./main-agent-node.js";
 import type { GenerateRequest } from "../model/types.js";
 import { batchNeedsMutationCheckpoint, createCheckpoint } from "./checkpoints.js";
 import { getGitDiffState, getGitStatusState, summarizeGitDiffState } from "./diff-state.js";
@@ -858,12 +858,14 @@ export class RuntimeEngine {
       }
       state = mutableState;
 
-      const system = buildMainAgentSystemPrompt(state);
       const allGeneralAgentTools = buildGeneralAgentTools();
       const generalAgentTools = selectGeneralAgentToolsForTurn({
         request: getRequest(),
         state,
         tools: allGeneralAgentTools,
+      });
+      const system = buildMainAgentSystemPrompt(state, {
+        availableTools: generalAgentTools,
       });
       const cockpit = buildMainAgentCockpit(
         {
@@ -924,6 +926,10 @@ export class RuntimeEngine {
         let lastAssistantMessage = "";
         let loopGuard = 0;
         let incompleteRecoveryAttempts = 0;
+        let emptyStopRetries = 0;
+        let unexpectedStopRetries = 0;
+        const EMPTY_STOP_MAX_RETRIES = 3;
+        const UNEXPECTED_STOP_MAX_RETRIES = 3;
         const resumedConversation = await loadLiveConversationSnapshot(runContext.runDir);
         const liveConversation: GenerateRequest["messages"] = resumedConversation ?? [
           { role: "user", content: cockpit },
@@ -1237,27 +1243,25 @@ export class RuntimeEngine {
             continue;
           }
           if (tc.length === 0) {
-            if (turn.content) {
-              liveConversation.push({ role: "assistant", content: turn.content });
-              await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
-            }
-            // Premature-stop nudge: model announced next actions in text but
-            // emitted no tool_calls (e.g. "Writing f10-f14 now"). Push once so
-            // it continues instead of treating the announcement as completion.
-            const prematureStopNudgeKey = `${getBoot().state.runId}::premature-stop-nudge`;
-            const alreadyNudged = Boolean((globalThis as any)[prematureStopNudgeKey]);
+            const assistantText = typeof turn.content === "string" ? turn.content.trim() : "";
+            // OMP #handleEmptyAssistantStop: empty stop is a harness glitch —
+            // retry a few times. Non-empty text-only stop is model-owned.
             if (
-              !alreadyNudged &&
-              typeof turn.content === "string" &&
-              turn.content.trim().length > 0 &&
-              !isFinalAssistantSummary(turn.content)
+              !assistantText &&
+              emptyStopRetries < EMPTY_STOP_MAX_RETRIES &&
+              (!turn.finishReason ||
+                turn.finishReason === "stop" ||
+                turn.finishReason === "end_turn" ||
+                turn.finishReason === "toolUse")
             ) {
-              (globalThis as any)[prematureStopNudgeKey] = true;
-              const nudge =
-                "Your last turn had no tool_calls, but the message does not look like a verified final summary. " +
-                "If work remains, emit concrete tool_calls now (write_file / file_edit / bash / scratchpad). " +
-                "Only finish with a final assistant_message and empty tool_calls after the required verification has actually passed.";
-              liveConversation.push({ role: "user", content: nudge });
+              emptyStopRetries += 1;
+              liveConversation.push({
+                role: "user",
+                content:
+                  "Your previous turn returned no tool_calls and an empty assistant_message. " +
+                  "Either take the next concrete action with structured tool_calls, or emit a " +
+                  "short final summary and stop. Do not return empty again.",
+              });
               await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
               await this.trajectoryLogger
                 .write({
@@ -1267,9 +1271,54 @@ export class RuntimeEngine {
                   trace_id: getBoot().state.runId,
                   timestamp: new Date().toISOString(),
                   log_schema_version: 1,
-                  kind: "premature_stop_nudge",
+                  kind: "empty_stop_retry",
                   level: getBoot().state.logLevel,
-                  assistant_excerpt: turn.content.slice(0, 400),
+                  attempt: emptyStopRetries,
+                  max_attempts: EMPTY_STOP_MAX_RETRIES,
+                } as any)
+                .catch(() => undefined);
+              continue;
+            }
+            if (turn.content) {
+              liveConversation.push({ role: "assistant", content: turn.content });
+              await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
+            }
+            // OMP unexpected-stop (lightweight): text-only stop while required
+            // deliverables are still missing is mid-plan chatter, not completion.
+            // Nudge and continue a few times; do not force forever.
+            if (
+              assistantText &&
+              unexpectedStopRetries < UNEXPECTED_STOP_MAX_RETRIES &&
+              (!turn.finishReason ||
+                turn.finishReason === "stop" ||
+                turn.finishReason === "end_turn") &&
+              looksLikeUnexpectedMidPlanStop({
+                assistantText,
+                workspaceRoot: this.input.workspaceRoot,
+              })
+            ) {
+              unexpectedStopRetries += 1;
+              liveConversation.push({
+                role: "user",
+                content:
+                  "You stopped with assistant text and no tool_calls, but required deliverables " +
+                  "are still missing (e.g. RESULT.json / verification). Continue with the next " +
+                  "concrete structured tool_calls now (small batch). Do not stop until the " +
+                  "required verification command succeeds.",
+              });
+              await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
+              await this.trajectoryLogger
+                .write({
+                  event_id: randomUUID(),
+                  run_id: getBoot().state.runId,
+                  session_id: getBoot().state.sessionId,
+                  trace_id: getBoot().state.runId,
+                  timestamp: new Date().toISOString(),
+                  log_schema_version: 1,
+                  kind: "unexpected_stop_retry",
+                  level: getBoot().state.logLevel,
+                  attempt: unexpectedStopRetries,
+                  max_attempts: UNEXPECTED_STOP_MAX_RETRIES,
                 } as any)
                 .catch(() => undefined);
               continue;
@@ -1307,11 +1356,8 @@ export class RuntimeEngine {
                 }
               } catch { /* fall through to break */ }
             }
-            // The model emits its own final assistant turn (with or
-            // without text, but no tool calls) when it is done. The
-            // runtime never force-stops on time, iterations, or token
-            // budgets — only on the model's own no-tool-calls turn or
-            // an external abort signal.
+            // The model owns the stop. A turn with no structured tool_calls
+            // and non-empty text (or exhausted empty-stop retries) is terminal.
             if (
               !turn.finishReason ||
               turn.finishReason === "stop" ||
@@ -1866,7 +1912,7 @@ export class RuntimeEngine {
         ? [completionBlocker]
         : [];
       // Legacy hidden patcher routing is removed. Failed steps stay
-      // with the main coding agent and advisory subagents only.
+      // with the main agent and advisory subagents only.
       const readOnlyBatchFeedback =
         state.mode === "autonomous" &&
         Boolean(step) &&
@@ -2214,7 +2260,9 @@ export class RuntimeEngine {
 	        toolResults: state.toolResults,
 	        completionGateAttempts: state.completionGateAttempts,
 	        taskCompleted,
-	        verifiedCompletion: taskCompleted && state.explicitVerification?.ok !== false,
+	        // Only true when verification explicitly succeeded. A natural
+	        // no-tool stop must not report verified_completion/solved.
+	        verifiedCompletion: Boolean(taskCompleted && state.explicitVerification?.ok === true),
 	        stuckTripped: false,
 	        gateExhausted: state.completionGateExhausted,
 	        ...(transportRetryExhausted ? { stopReasonOverride: "infra_failed" as const } : {}),
@@ -2273,28 +2321,24 @@ export class RuntimeEngine {
       return "summarize";
     };
     const routeAfterToolValidation = (state: GraphState) => {
-      // The model owns the loop. We only run validation when the model
-      // asked for tools; otherwise we summarize.
-      if (state.runtimeBlockers.length > 0 && !(state.plannedToolCalls?.length)) return "main_agent";
-      // Model returned final text and chose to stop. Do not force another turn.
-      if (state.plannedToolCalls?.length === 0 && state.assistantMessage?.trim()) return "summarize";
-      if (state.split?.completionSignal && (state.split.executableToolCalls.length ?? 0) === 0) return "main_agent";
+      // Model owns the loop. Never force another main_agent turn after a
+      // text-only stop — blockers are advisory in the cockpit only.
+      if (state.plannedToolCalls?.length === 0) return "summarize";
       if ((state.split?.executableToolCalls.length ?? 0) > 0) return "permission_check";
+      // Invalid tool batch with no executable calls: let the model repair
+      // only when it still intended tools (plannedToolCalls non-empty above).
       return "main_agent";
     };
     const routeAfterQueue = (state: GraphState) => {
-      // The model owns the loop. Loop back to main_agent so the model
-      // can decide its next move.
+      // After tools execute, return to main_agent so the model decides next.
       if (state.mode !== "autonomous") return "verify";
       return "main_agent";
     };
     const routeAfterVerify = (state: GraphState) => {
-      // The model owns the loop. If verification ran, hand back to
-      // main_agent (or summarize if it succeeded). Non-autonomous
-      // mode unconditionally summarizes.
+      // Model owns stop. Verification is observational — do not force
+      // another main_agent turn when the model already stopped.
       if (state.mode !== "autonomous") return "summarize";
-      if (state.explicitVerification?.ok) return "summarize";
-      return "main_agent";
+      return "summarize";
     };
 
     type RuntimeNodeName =
@@ -2471,7 +2515,16 @@ export function selectGeneralAgentToolsForTurn(input: {
   state: Pick<GraphState, "toolResults">;
   tools: AgentToolDescriptor[];
 }): AgentToolDescriptor[] {
-  if (!detectBuildLikeTask(input.request)) return input.tools;
+  // Scratchpad is on-demand. Promote it onto the wire only when the user
+  // prompt explicitly asks for it (eval/stress tasks). Otherwise the model
+  // can still discover it via search_tools.
+  let tools = input.tools;
+  if (userPromptRequestsScratchpad(input.request) && !tools.some((t) => t.name === "scratchpad")) {
+    const scratch = buildAgentToolDescriptor("scratchpad");
+    if (scratch) tools = [...tools, scratch];
+  }
+
+  if (!detectBuildLikeTask(input.request)) return tools;
 
   const writeCount = input.state.toolResults.filter((result) =>
     result.ok && ["write_file", "file_edit", "edit_file", "replace_symbol", "delete_file"].includes(result.name),
@@ -2482,14 +2535,14 @@ export function selectGeneralAgentToolsForTurn(input: {
   // `file_scroll`, `file_find`, and `file_edit` directly — no legacy aliases or
   // short-name renames (`read`/`edit`/`write`).
   if (writeCount < 20) {
-    return toCanonicalBuildFastStartTools(input.tools);
+    return toCanonicalBuildFastStartTools(tools);
   }
-  return input.tools;
+  return tools;
 }
 
 function toCanonicalBuildFastStartTools(tools: AgentToolDescriptor[]): AgentToolDescriptor[] {
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
-  return [
+  const base = [
     byName.get("write_file"),
     byName.get("file_edit"),
     byName.get("bash"),
@@ -2498,11 +2551,11 @@ function toCanonicalBuildFastStartTools(tools: AgentToolDescriptor[]): AgentTool
     byName.get("file_find"),
     byName.get("list_directory"),
     byName.get("grep_search"),
-    // Keep continuity + discovery tools on the wire for build-like tasks so
-    // days-long / eval prompts that require scratchpad or search_tools work.
-    byName.get("scratchpad"),
     byName.get("search_tools"),
   ].filter((tool): tool is AgentToolDescriptor => Boolean(tool));
+  // Include scratchpad only when already promoted (user prompt requested it).
+  const scratch = byName.get("scratchpad");
+  return scratch ? [...base, scratch] : base;
 }
 
 export function selectMainAgentMaxTokensForTurn(input: {
@@ -3770,6 +3823,31 @@ function classifyOrchestrationMode(prompt: string, contentPrep: ContentPrepResul
 
 function shouldRunCompaction(input: { prompt: string; toolResults: ToolResult[]; softCap: number }): boolean {
   return calculateContextBudget({ prompt: input.prompt, toolResults: input.toolResults, preparedContextTokens: 0 }).totalTokens >= input.softCap;
+}
+
+/**
+ * OMP-style unexpected mid-plan stop heuristic (no LLM classifier).
+ * True when the assistant emitted planning prose without tools AND a
+ * required deliverable (RESULT.json) is still missing from the workspace.
+ */
+function looksLikeUnexpectedMidPlanStop(input: {
+  assistantText: string;
+  workspaceRoot: string;
+}): boolean {
+  const text = input.assistantText.toLowerCase();
+  const planningCue =
+    /\b(turn\s*\d+|phase\s*[a-d]|next\s+(i'?ll|i will|batch|step)|let me\b|now (i'll|writing|creating)|tool_calls?\b|write_file\b|continue with)\b/i.test(
+      input.assistantText,
+    ) ||
+    /\b(i'll|i will|next)\b.{0,80}\b(write|create|append|run)\b/i.test(input.assistantText);
+  if (!planningCue && text.length < 80) return false;
+  try {
+    const resultPath = path.join(input.workspaceRoot, "RESULT.json");
+    if (!existsSync(resultPath)) return true;
+  } catch {
+    return planningCue;
+  }
+  return false;
 }
 
 function calculateContextBudget(input: {
@@ -5127,7 +5205,7 @@ export function renderToolCallContract(runId?: string): string {
     "- search_tools keyword: {\"id\":\"search-1\",\"name\":\"search_tools\",\"args\":{\"query\":\"background process\"}}",
     "- search_tools direct select: {\"id\":\"search-2\",\"name\":\"search_tools\",\"args\":{\"query\":\"select:read_background_output,signal_process\"}}",
     "To finish the run, emit complete_task exactly once with the final summary in args.summary, then no more tool calls are needed.",
-    "Executor rule: normal planned implementation and repair both stay on the main coding agent path. Use advisory subagents only for extra analysis; they do not own routing or edits.",
+    "Executor rule: normal planned implementation and repair both stay on the main agent path. Use advisory subagents only for extra analysis; they do not own routing or edits.",
   );
 
   // Deferred tools section

@@ -4,7 +4,7 @@ Purpose: convert Reaper tasks into concrete implementation plans.
 
 ## Role
 
-You are the planning and design subagent for the Reaper coding-agent harness. Convert user goals and scout findings into a small, testable plan.
+You are the planning and design subagent for the Reaper implementation harness. Convert user goals and scout findings into a small, testable plan.
 
 ## Rules
 

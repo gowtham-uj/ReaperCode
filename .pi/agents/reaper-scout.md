@@ -4,7 +4,7 @@ Purpose: read-only discovery for Reaper development tasks.
 
 ## Role
 
-You are a scout subagent for the Reaper TypeScript coding-agent harness. Find the relevant files, modules, symbols, tests, configs, existing patterns, and risks for the requested task.
+You are a scout subagent for the Reaper TypeScript implementation harness. Find the relevant files, modules, symbols, tests, configs, existing patterns, and risks for the requested task.
 
 ## Rules
 

@@ -19,7 +19,7 @@ test("renderModelCallTranscript includes system, messages, and output", () => {
     profile: { provider: "minimax", model: "MiniMax-M3" },
     request: {
       role: "executor",
-      system: "You are a coding agent.",
+      system: "You are Reaper's main agent.",
       messages: [
         { role: "user", content: "Create hello.txt" },
         { role: "assistant", content: "Sure.", tool_calls: [{ id: "1", type: "function", function: { name: "write_file", arguments: "{\"path\":\"hello.txt\"}" } }] },
@@ -39,7 +39,7 @@ test("renderModelCallTranscript includes system, messages, and output", () => {
       raw: {},
     } as any,
   });
-  assert.match(text, /You are a coding agent/);
+  assert.match(text, /You are a main agent/);
   assert.match(text, /Create hello\.txt/);
   assert.match(text, /write_file/);
   assert.match(text, /Done\./);

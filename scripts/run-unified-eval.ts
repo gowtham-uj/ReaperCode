@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * scripts/run-unified-eval.ts — run coding-agent or context-days suites.
+ * scripts/run-unified-eval.ts — run implementation or context-days suites.
  *
  * Usage:
- *   npx tsx scripts/run-unified-eval.ts --suite coding-agent
+ *   npx tsx scripts/run-unified-eval.ts --suite implementation
  *   npx tsx scripts/run-unified-eval.ts --suite context-days
- *   npx tsx scripts/run-unified-eval.ts --task reaper_eval/suites/coding-agent/ca-fix-failing-tests.json
- *   npx tsx scripts/run-unified-eval.ts --suite coding-agent --provider minimax --model MiniMax-M3
+ *   npx tsx scripts/run-unified-eval.ts --task reaper_eval/suites/implementation/ca-fix-failing-tests.json
+ *   npx tsx scripts/run-unified-eval.ts --suite implementation --provider minimax --model MiniMax-M2.7
  *
  * Requires MINIMAX_API_KEY (or the provider's key env) in the environment.
  * Does NOT push to git. Artifacts land under /tmp/reaper-eval-out/ by default.
@@ -18,7 +18,7 @@ import path from "node:path";
 import { loadEvalTaskFile, runUnifiedEval } from "../reaper_eval/runtime/unified-eval.js";
 
 interface CliOptions {
-  suite?: "coding-agent" | "context-days";
+  suite?: "implementation" | "context-days";
   task?: string;
   provider: string;
   model: string;
@@ -29,7 +29,7 @@ interface CliOptions {
 function parseArgs(argv: string[]): CliOptions {
   const opts: CliOptions = {
     provider: process.env.REAPER_EVAL_PROVIDER ?? "minimax",
-    model: process.env.REAPER_EVAL_MODEL ?? "MiniMax-M3",
+    model: process.env.REAPER_EVAL_MODEL ?? "MiniMax-M2.7",
     outputRoot: process.env.REAPER_EVAL_OUT ?? "/tmp/reaper-eval-out",
     repoRoot: process.cwd(),
   };
@@ -79,7 +79,7 @@ async function main(): Promise<void> {
   } else if (opts.suite) {
     tasks = await listSuiteTasks(opts.suite, opts.repoRoot);
   } else {
-    console.error("Pass --suite coding-agent|context-days or --task <path>");
+    console.error("Pass --suite implementation|context-days or --task <path>");
     process.exit(2);
   }
 

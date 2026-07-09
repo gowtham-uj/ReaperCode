@@ -20,7 +20,7 @@ function envelope() {
   };
 }
 
-function config() {
+function config(overrides: Record<string, unknown> = {}) {
   return {
     models: {
       default_model: {
@@ -29,10 +29,11 @@ function config() {
         capabilities: { streaming: true, toolCalling: true, jsonMode: true, structuredOutput: true, embeddings: false },
       },
     },
+    ...overrides,
   };
 }
 
-test("bootPhase0Runtime defaults softCap to 200K when no workspace config exists", () => {
+test("bootPhase0Runtime defaults softCap to 270K when no workspace config exists", () => {
   const dir = path.join(tmpdir(), "reaper-bootstrap-defaults");
   const boot = bootPhase0Runtime({
     config: config(),
@@ -40,24 +41,27 @@ test("bootPhase0Runtime defaults softCap to 200K when no workspace config exists
     requestEnvelope: envelope(),
     workspaceRoot: dir,
   });
+  assert.equal(boot.state.tokenBudget.softCap, 270_000);
+});
+
+test("bootPhase0Runtime uses softCap from parsed contextManagement config", () => {
+  const boot = bootPhase0Runtime({
+    config: config({ contextManagement: { softCap: 200_000 } }),
+    transport: "http_json",
+    requestEnvelope: envelope(),
+    workspaceRoot: path.join(tmpdir(), "reaper-bootstrap-explicit"),
+  });
   assert.equal(boot.state.tokenBudget.softCap, 200_000);
 });
 
-test("bootPhase0Runtime reads softCap from .reaper/config.json", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "reaper-bootstrap-"));
-  await mkdir(path.join(dir, ".reaper"), { recursive: true });
-  await writeFile(
-    path.join(dir, ".reaper", "config.json"),
-    JSON.stringify({ tokenBudget: { softCap: 270000 } }),
-    "utf8",
-  );
+test("bootPhase0Runtime clamps softCap above hard cap to 270K", () => {
   const boot = bootPhase0Runtime({
-    config: config(),
+    config: config({ contextManagement: { softCap: 1_000_000 } }),
     transport: "http_json",
     requestEnvelope: envelope(),
-    workspaceRoot: dir,
+    workspaceRoot: path.join(tmpdir(), "reaper-bootstrap-clamp"),
   });
-  assert.equal(boot.state.tokenBudget.softCap, 270000);
+  assert.equal(boot.state.tokenBudget.softCap, 270_000);
 });
 
 test("bootPhase0Runtime falls back when .reaper/config.json is malformed", async () => {
@@ -70,5 +74,5 @@ test("bootPhase0Runtime falls back when .reaper/config.json is malformed", async
     requestEnvelope: envelope(),
     workspaceRoot: dir,
   });
-  assert.equal(boot.state.tokenBudget.softCap, 200_000);
+  assert.equal(boot.state.tokenBudget.softCap, 270_000);
 });

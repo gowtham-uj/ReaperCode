@@ -239,6 +239,65 @@ function buildBoundaryMarker(messagesBeforeCut: number, summaryChars: number): s
 }
 
 /**
+ * Extract durable progress hints from the pre-cut conversation so the
+ * model can resume instead of replaying the whole required sequence.
+ */
+export function extractPostCompactProgressHints(
+  messagesBeforeCut: Array<{
+    role: string;
+    content?: string;
+    name?: string;
+    tool_call_id?: string;
+    tool_calls?: Array<{ function: { name: string; arguments: string } }>;
+  }>,
+): string[] {
+  const hints: string[] = [];
+  const seen = new Set<string>();
+  const add = (hint: string) => {
+    if (seen.has(hint)) return;
+    seen.add(hint);
+    hints.push(hint);
+  };
+
+  let sawBashCat = false;
+  const viewed = new Set<string>();
+  const written = new Set<string>();
+
+  for (const m of messagesBeforeCut) {
+    if (m.role === "assistant" && Array.isArray(m.tool_calls)) {
+      for (const tc of m.tool_calls) {
+        const name = tc.function.name;
+        let args: Record<string, unknown> = {};
+        try {
+          args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
+        } catch {
+          args = {};
+        }
+        if (name === "bash") {
+          const cmd = typeof args.cmd === "string" ? args.cmd : typeof args.command === "string" ? args.command : "";
+          if (/\bcat\b/.test(cmd) && !/\|\s*(?:head|tail)\b/.test(cmd)) sawBashCat = true;
+        } else if (name === "file_view" || name === "read_file") {
+          if (typeof args.path === "string" && args.path.trim()) viewed.add(args.path.trim());
+        } else if (name === "write_file") {
+          if (typeof args.path === "string" && args.path.trim()) written.add(args.path.trim());
+        }
+      }
+    }
+  }
+
+  if (sawBashCat) add("large bash cat already ran (output may be head/tailed on disk) — do not re-cat unless needed");
+  if (viewed.size > 0) {
+    const preview = [...viewed].slice(0, 6).join(", ");
+    add(`already viewed: ${preview}${viewed.size > 6 ? ` (+${viewed.size - 6} more)` : ""} — resume from next unfinished step`);
+  }
+  if (written.size > 0) {
+    const preview = [...written].slice(0, 8).join(", ");
+    add(`already wrote: ${preview}${written.size > 8 ? ` (+${written.size - 8} more)` : ""} — do not rewrite unless correcting`);
+  }
+  return hints;
+}
+
+/**
  * Re-attach the N most-recent unique file paths referenced in
  * `messagesBeforeCut`. Each re-attachment is a synthetic user message
  * containing a brief summary marker; the model re-reads the actual file
@@ -272,14 +331,22 @@ function reattachRecentFiles(
     }
   }
   const top = paths.slice(0, maxFiles);
-  if (top.length === 0) return [];
-  return [
-    {
-      role: "user",
-      content: "[Post-compact re-anchor] The following files were touched in the prior turn. Re-read any of them with `file_view` if you need their current contents:\n" +
-        top.map((p, i) => `  ${i + 1}. ${p}`).join("\n"),
-    },
-  ];
+  const progress = extractPostCompactProgressHints(messagesBeforeCut as any);
+  const parts: string[] = [];
+  if (progress.length > 0) {
+    parts.push(
+      "[Post-compact progress] Already done before this cut — resume at the next unfinished step:",
+      ...progress.map((h, i) => `  ${i + 1}. ${h}`),
+    );
+  }
+  if (top.length > 0) {
+    parts.push(
+      "[Post-compact re-anchor] Files touched recently. Re-read with `file_view` only if you still need contents:",
+      ...top.map((p, i) => `  ${i + 1}. ${p}`),
+    );
+  }
+  if (parts.length === 0) return [];
+  return [{ role: "user", content: parts.join("\n") }];
 }
 
 /**

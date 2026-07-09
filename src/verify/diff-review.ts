@@ -54,7 +54,7 @@ export async function runFreshContextDiffReview(input: {
       {
         role: "user",
         content:
-          `You are a fresh-context reviewer for an autonomous coding agent. ` +
+          `You are a fresh-context reviewer for Reaper. ` +
           `Return strict JSON with shape {"ok": boolean, "explanation": string, "discrepancies": string[]}. ` +
           `Review only whether the diff satisfies the task and whether the verification evidence is relevant. ` +
           `Do not request unrelated refactors or style changes. Mark ok=false for missing requested behavior, suspicious hardcoding, edits unrelated to the task, or verification that does not exercise the changed behavior. ` +

@@ -22,7 +22,7 @@ Reaper's runtime is currently **single-branch**:
 
 3. **Schema impact.** Branch-summarization requires a new `branch_entry` trajectory event kind and changes to the persistence layer (`session-store.ts` currently writes a linear stream).
 
-4. **Use case unclear.** The Reaper use case (long-running autonomous coding agent) doesn't typically need parallel branches. The agent's natural mode is sequential tool calls.
+4. **Use case unclear.** The Reaper use case (long-running long-running Reaper run) doesn't typically need parallel branches. The agent's natural mode is sequential tool calls.
 
 ## What porting this would require
 

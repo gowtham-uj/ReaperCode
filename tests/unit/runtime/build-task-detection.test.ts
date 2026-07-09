@@ -118,15 +118,15 @@ test("cockpit renders a 'Shipped so far' block from tool results", () => {
   assert.match(cockpit, /FAILED\s+write_file\s+src\/broken\.ts/);
 });
 
-test("build-task guidance discourages shell file-reading and does not mention Docker", () => {
+test("build-task guidance is lean and does not mention Docker", () => {
   const cockpit = buildMainAgentCockpit(
     { toolResults: [], sessionSummary: null, contentPrep: null },
     { payload: { prompt: "Build a production TypeScript monorepo" } },
     null, null, null, null,
   );
 
-  assert.match(cockpit, /Do NOT use\s+bash cat\/ls\/find/i);
-  assert.match(cockpit, /pnpm install, pnpm dev, pnpm test, pnpm build/);
+  assert.match(cockpit, /BUILD task: ship artifacts/i);
+  assert.match(cockpit, /Prefer write_file \/ file_edit/i);
   assert.doesNotMatch(cockpit, /docker compose up/i);
 });
 

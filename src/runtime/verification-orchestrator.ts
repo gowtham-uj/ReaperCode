@@ -1,5 +1,5 @@
 /**
- * Verification orchestrator for the general coding agent.
+ * Verification orchestrator for the Reaper runtime.
  *
  * Wraps `verification-state.ts` (the underlying typed state) and adds
  * the Codex/Claude-style "completion gate" logic: a tool cannot mark

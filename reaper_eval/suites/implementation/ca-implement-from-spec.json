@@ -1,7 +1,7 @@
 {
   "id": "ca-implement-from-spec",
   "title": "Implement a feature from a short SPEC.md",
-  "suite": "coding-agent",
+  "suite": "implementation",
   "difficulty": "hard",
   "language": "javascript",
   "prompt": "Read SPEC.md and implement the missing `src/rate_limit.js` module so all tests pass. Do not modify SPEC.md or the tests. Use file_view to read the spec and tests before writing code.",

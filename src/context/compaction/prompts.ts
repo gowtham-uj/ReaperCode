@@ -27,7 +27,7 @@ export interface SplitTurnContext {
 /** Build a system prompt for compaction summarization that includes prior context. */
 export function buildCompactionSystemPrompt(input: { previousSummary?: string | undefined }): string {
   const parts = [
-    "You are summarizing a coding-agent session so the next turn can continue safely.",
+    "You are summarizing a Reaper session so the next turn can continue safely.",
     "Return JSON in the form {\"summary\": string} with neutral wording — never mention the reference project name.",
   ];
   if (input.previousSummary && input.previousSummary.trim().length > 0) {

@@ -2,15 +2,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  buildMainAgentCockpitLayout, 
-  cockpitSectionKind} from "../../src/runtime/main-agent-prompt.js";
+  buildMainAgentCockpitLayout,
+  cockpitSectionKind,
+} from "../../src/runtime/main-agent-prompt.js";
 
 test("cockpitSectionKind returns the right tier for every section", () => {
-  assert.equal(cockpitSectionKind("Available Tools"), "stable");
   assert.equal(cockpitSectionKind("Task Contract"), "stable");
   assert.equal(cockpitSectionKind("Repo Snapshot"), "stable");
   assert.equal(cockpitSectionKind("Recent Tool Results"), "volatile");
   assert.equal(cockpitSectionKind("Runtime Blockers"), "volatile");
+  assert.equal(cockpitSectionKind("Available Tools"), undefined);
+  assert.equal(cockpitSectionKind("Verification State"), undefined);
   assert.equal(cockpitSectionKind("NonExistent"), undefined);
 });
 
@@ -34,9 +36,9 @@ test("buildMainAgentCockpitLayout splits sections by cache tier", () => {
   );
 
   assert.ok(layout.stable.includes("Task Contract"), "stable tier should include task contract");
-  assert.ok(layout.stable.includes("Available Tools"), "stable tier should include available tools");
   assert.ok(layout.volatile.includes("Recent Tool Results"), "volatile tier should include tool results");
-  assert.ok(!layout.volatile.includes("Available Tools"), "stable sections must not bleed into volatile");
+  assert.ok(!layout.combined.includes("Available Tools"), "tool inventory lives in system prompt");
+  assert.ok(!layout.combined.includes("Verification State"), "verification is not a cockpit stop gate");
   // Combined should concatenate tiers deterministically.
   const stableStart = layout.combined.indexOf(layout.stable);
   const volatileStart = layout.combined.indexOf(layout.volatile);

@@ -8,7 +8,7 @@
 
 ## Verdict
 
-Reaper already has a **strong OMP-aligned compaction stack** (21 wired layers, shake validated under stress, progressive tool disclosure, ACI file viewer). It is **not yet a great coding agent** because too much of the soft context layer is **built but unwired**, the hot path is concentrated in a 6k-line `@ts-nocheck` engine, and several Pi/OMP techniques that matter most for long autonomous coding runs are missing or incomplete.
+Reaper already has a **strong OMP-aligned compaction stack** (21 wired layers, shake validated under stress, progressive tool disclosure, ACI file viewer). It is **not yet a reliable long-running agent loop** because too much of the soft context layer is **built but unwired**, the hot path is concentrated in a 6k-line `@ts-nocheck` engine, and several Pi/OMP techniques that matter most for long autonomous coding runs are missing or incomplete.
 
 **Bottom line:** Fix wiring and config truth first. Then close the mid-run / supersede / session-resume gaps. Only then reintroduce model-driven swarm + worktrees.
 
@@ -166,7 +166,7 @@ flowchart TB
 14. **Model-facing scratchpad tool**
     - Append/read `.reaper/memory/scratch.md` (or journal labels) for durable working notes across compaction.
 
-### P3 — Agent-loop productization (great coding agent)
+### P3 — Agent-loop productization (reliable long-running agent loop)
 
 15. **Extract `AgentLoop` from `engine.ts`**
     - Move inner `while (true)` stream→tools→append into a dedicated module; peel verification/completion helpers out; remove `@ts-nocheck` in stages.

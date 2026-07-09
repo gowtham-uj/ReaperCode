@@ -159,6 +159,12 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
 	    level: z.enum(["info", "debug", "trace"]),
 	    shaken_results: z.number().int().min(0),
 	    saved_chars: z.number().int().min(0),
+	    saved_tokens: z.number().int().min(0).optional(),
+	    consecutive_failures: z.number().int().min(0).optional(),
+	    superseded_results: z.number().int().min(0).optional(),
+	    supersede_saved_chars: z.number().int().min(0).optional(),
+	    tool_outputs_pruned: z.number().int().min(0).optional(),
+	    tool_output_saved_chars: z.number().int().min(0).optional(),
 	  }),
 	  // Bash head+tail: emitted by the context-engineering wiring's
 	  // onAfterToolResult hook when a bash tool result had been truncated
@@ -190,6 +196,7 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
 	    level: z.enum(["info", "debug", "trace"]),
 	    saved_chars: z.number().int().min(0).optional(),
 	    remaining_messages: z.number().int().min(0).optional(),
+	    reason: z.string().min(1).optional(),
 	  }),
 	  // Full summarization: emitted when onBeforeModelCall invoked
 	    // tryFullSummarization and replaced the conversation with a
@@ -201,6 +208,8 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
 	      kept_messages: z.number().int().min(0).optional(),
 	      ptl_drops: z.number().int().min(0).optional(),
 	      saved_chars: z.number().int().min(0).optional(),
+	      /** True when full-summary blocked the model call (OMP runAutoCompaction). */
+	      blocking: z.boolean().optional(),
 	      }),
 	      // T3 Handoff summary: smaller-context alternative to
 	      // full_summary. Same schema shape, different `kind` so the
@@ -215,6 +224,7 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
 	        ptl_drops: z.number().int().min(0).optional(),
 	        saved_chars: z.number().int().min(0).optional(),
 	        handoff_kind: z.string().optional(),
+	        blocking: z.boolean().optional(),
 	      }),
 	      // T1 Idle compaction: emitted when setTimeout fires after
 	      // `idleTimeoutSeconds` of model-idle time and tokens exceed
@@ -299,6 +309,30 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
 	    reason: z.string().min(1),
 	    latency_ms: z.number().int().min(0).optional(),
 	    resolved_on_primary: z.boolean(),
+	  }),
+	  CommonLogFieldsSchema.extend({
+	    kind: z.literal("empty_stop_retry"),
+	    level: z.enum(["info", "debug", "trace"]),
+	    attempt: z.number().int().min(1).optional(),
+	    max_attempts: z.number().int().min(1).optional(),
+	  }),
+	  CommonLogFieldsSchema.extend({
+	    kind: z.literal("unexpected_stop_retry"),
+	    level: z.enum(["info", "debug", "trace"]),
+	    attempt: z.number().int().min(1).optional(),
+	    max_attempts: z.number().int().min(1).optional(),
+	  }),
+	  CommonLogFieldsSchema.extend({
+	    kind: z.literal("premature_stop_nudge"),
+	    level: z.enum(["info", "debug", "trace"]),
+	    assistant_excerpt: z.string().optional(),
+	    nudge_count: z.number().int().min(1).optional(),
+	    reason: z.string().min(1).optional(),
+	  }),
+	  CommonLogFieldsSchema.extend({
+	    kind: z.literal("tool_call_parse_error"),
+	    level: z.enum(["info", "debug", "trace"]),
+	    dropped: z.unknown().optional(),
 	  }),
 	  ]);
 

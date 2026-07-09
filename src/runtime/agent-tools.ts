@@ -1,5 +1,5 @@
 /**
- * Static tool surface for the main coding agent.
+ * Static tool surface for the main agent.
  *
  * SINGLE SOURCE OF TRUTH: this module derives the model-facing
  * `AgentToolDescriptor[]` from `tools/registry.ts`. Tool descriptions
@@ -25,23 +25,44 @@ export interface AgentToolDescriptor {
   inputSchema: Record<string, unknown>;
 }
 
+function descriptorFor(name: string): AgentToolDescriptor | undefined {
+  if (!Object.prototype.hasOwnProperty.call(toolRegistry, name)) return undefined;
+  const entry = toolRegistry[name as ToolName];
+  if (!entry) return undefined;
+  const inputSchema = zodToJsonSchema(entry.argsSchema, {
+    $refStrategy: "none",
+    target: "jsonSchema7",
+  }) as Record<string, unknown>;
+  return {
+    name,
+    description: entry.description,
+    inputSchema,
+  };
+}
+
 export function buildGeneralAgentTools(): AgentToolDescriptor[] {
   const out: AgentToolDescriptor[] = [];
   for (const name of CORE_TOOL_NAMES) {
-    if (!Object.prototype.hasOwnProperty.call(toolRegistry, name)) continue;
-    const entry = toolRegistry[name as ToolName];
-    if (!entry) continue;
-    // Convert the zod schema to JSON Schema. `toolRegistry[name].argsSchema`
-    // is the single source of truth for what the model must emit.
-    const inputSchema = zodToJsonSchema(entry.argsSchema, {
-      $refStrategy: "none",
-      target: "jsonSchema7",
-    }) as Record<string, unknown>;
-    out.push({
-      name,
-      description: entry.description,
-      inputSchema,
-    });
+    const desc = descriptorFor(name);
+    if (desc) out.push(desc);
   }
   return out;
+}
+
+/** Build a single tool descriptor from the registry (for on-demand promotion). */
+export function buildAgentToolDescriptor(name: string): AgentToolDescriptor | undefined {
+  return descriptorFor(name);
+}
+
+/** True when the user request explicitly mentions scratchpad usage. */
+export function userPromptRequestsScratchpad(request: { payload?: { prompt?: unknown } } | unknown): boolean {
+  const record = request && typeof request === "object" ? (request as Record<string, unknown>) : undefined;
+  const payload = record?.payload && typeof record.payload === "object" ? (record.payload as Record<string, unknown>) : undefined;
+  const prompt =
+    typeof payload?.prompt === "string"
+      ? payload.prompt
+      : typeof record?.prompt === "string"
+        ? record.prompt
+        : "";
+  return /\bscratchpad\b/i.test(prompt);
 }
