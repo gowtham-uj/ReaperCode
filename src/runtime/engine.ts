@@ -927,7 +927,9 @@ export class RuntimeEngine {
         let loopGuard = 0;
         let incompleteRecoveryAttempts = 0;
         let emptyStopRetries = 0;
+        let unexpectedStopRetries = 0;
         const EMPTY_STOP_MAX_RETRIES = 3;
+        const UNEXPECTED_STOP_MAX_RETRIES = 3;
         const resumedConversation = await loadLiveConversationSnapshot(runContext.runDir);
         const liveConversation: GenerateRequest["messages"] = resumedConversation ?? [
           { role: "user", content: cockpit },
@@ -1280,6 +1282,46 @@ export class RuntimeEngine {
             if (turn.content) {
               liveConversation.push({ role: "assistant", content: turn.content });
               await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
+            }
+            // OMP unexpected-stop (lightweight): text-only stop while required
+            // deliverables are still missing is mid-plan chatter, not completion.
+            // Nudge and continue a few times; do not force forever.
+            if (
+              assistantText &&
+              unexpectedStopRetries < UNEXPECTED_STOP_MAX_RETRIES &&
+              (!turn.finishReason ||
+                turn.finishReason === "stop" ||
+                turn.finishReason === "end_turn") &&
+              looksLikeUnexpectedMidPlanStop({
+                assistantText,
+                workspaceRoot: this.input.workspaceRoot,
+              })
+            ) {
+              unexpectedStopRetries += 1;
+              liveConversation.push({
+                role: "user",
+                content:
+                  "You stopped with assistant text and no tool_calls, but required deliverables " +
+                  "are still missing (e.g. RESULT.json / verification). Continue with the next " +
+                  "concrete structured tool_calls now (small batch). Do not stop until the " +
+                  "required verification command succeeds.",
+              });
+              await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
+              await this.trajectoryLogger
+                .write({
+                  event_id: randomUUID(),
+                  run_id: getBoot().state.runId,
+                  session_id: getBoot().state.sessionId,
+                  trace_id: getBoot().state.runId,
+                  timestamp: new Date().toISOString(),
+                  log_schema_version: 1,
+                  kind: "unexpected_stop_retry",
+                  level: getBoot().state.logLevel,
+                  attempt: unexpectedStopRetries,
+                  max_attempts: UNEXPECTED_STOP_MAX_RETRIES,
+                } as any)
+                .catch(() => undefined);
+              continue;
             }
             // Incomplete recovery (OMP): finishReason === "length" means the
             // model hit the output/context ceiling mid-turn. Shrink context
@@ -3781,6 +3823,31 @@ function classifyOrchestrationMode(prompt: string, contentPrep: ContentPrepResul
 
 function shouldRunCompaction(input: { prompt: string; toolResults: ToolResult[]; softCap: number }): boolean {
   return calculateContextBudget({ prompt: input.prompt, toolResults: input.toolResults, preparedContextTokens: 0 }).totalTokens >= input.softCap;
+}
+
+/**
+ * OMP-style unexpected mid-plan stop heuristic (no LLM classifier).
+ * True when the assistant emitted planning prose without tools AND a
+ * required deliverable (RESULT.json) is still missing from the workspace.
+ */
+function looksLikeUnexpectedMidPlanStop(input: {
+  assistantText: string;
+  workspaceRoot: string;
+}): boolean {
+  const text = input.assistantText.toLowerCase();
+  const planningCue =
+    /\b(turn\s*\d+|phase\s*[a-d]|next\s+(i'?ll|i will|batch|step)|let me\b|now (i'll|writing|creating)|tool_calls?\b|write_file\b|continue with)\b/i.test(
+      input.assistantText,
+    ) ||
+    /\b(i'll|i will|next)\b.{0,80}\b(write|create|append|run)\b/i.test(input.assistantText);
+  if (!planningCue && text.length < 80) return false;
+  try {
+    const resultPath = path.join(input.workspaceRoot, "RESULT.json");
+    if (!existsSync(resultPath)) return true;
+  } catch {
+    return planningCue;
+  }
+  return false;
 }
 
 function calculateContextBudget(input: {

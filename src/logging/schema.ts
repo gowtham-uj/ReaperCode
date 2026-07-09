@@ -317,6 +317,12 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
 	    max_attempts: z.number().int().min(1).optional(),
 	  }),
 	  CommonLogFieldsSchema.extend({
+	    kind: z.literal("unexpected_stop_retry"),
+	    level: z.enum(["info", "debug", "trace"]),
+	    attempt: z.number().int().min(1).optional(),
+	    max_attempts: z.number().int().min(1).optional(),
+	  }),
+	  CommonLogFieldsSchema.extend({
 	    kind: z.literal("premature_stop_nudge"),
 	    level: z.enum(["info", "debug", "trace"]),
 	    assistant_excerpt: z.string().optional(),
