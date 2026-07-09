@@ -171,6 +171,18 @@ export function createContextEngineeringHooks(
         }
       }
 
+      // T1 + T2: Consume the idle-compaction or
+      // incomplete-recovery slot. When either is set, force a
+      // full-summary compaction by lowering the threshold so
+      // `shouldCompact` returns true. OMP equivalent: the
+      // `runAutoCompaction` arm that fires post-event-controller
+      // (idle) or post-checkCompaction (incomplete).
+      const idleSlot = (globalThis as any)[`${runId}::idle-compaction`];
+      const incompleteSlot = (globalThis as any)[`${runId}::incomplete-recovery`];
+      const forceCompactFromIdleOrIncomplete = !!(idleSlot || incompleteSlot);
+      if (idleSlot) delete (globalThis as any)[`${runId}::idle-compaction`];
+      if (incompleteSlot) delete (globalThis as any)[`${runId}::incomplete-recovery`];
+
       // #21: Promote Context Model (OMP port).
       if (cmTunablesBefore.modelPromotionEnabled && config?.models) {
         const tokensAfterShakeForPromote = countTokens(working);
@@ -305,13 +317,30 @@ export function createContextEngineeringHooks(
       // reaper as in OMP.
       const fullSummaryEnabledConfig = cmTunablesBefore.fullSummaryEnabled;
       const { shouldCompact } = await import("../context/should-compact.js");
-      const fireFullSummary = shouldCompact(tokensAfterShake, softCap) && fullSummaryEnabledConfig;
+      // T1/T2 force: when idle-compaction or incomplete-recovery
+      // triggered, force-compact even if the natural threshold isn't
+      // crossed. OMP equivalent: the `runAutoCompaction` post-event.
+      const fireFullSummary =
+        (shouldCompact(tokensAfterShake, softCap) || forceCompactFromIdleOrIncomplete) &&
+        fullSummaryEnabledConfig;
       if (fireFullSummary && infer) {
         const inflightKey = `${runId}::full-summary`;
         if (!(globalThis as any)[inflightKey]) {
+          // T3 Handoff: when enabled, use the smaller-context
+          // handoff prompt and emit a `handoff_summary` trajectory
+          // event. The post-compact shape is the same as
+          // full-summary (buildPostCompactMessages); the only
+          // difference is which prompt template the LLM receives.
+          const useHandoff = cmTunablesBefore.handoffEnabled === true;
           const jsonl = JSON.stringify(working);
           const inflightRef: { promise: Promise<string> } = (globalThis as any)[inflightKey] = {
-            promise: (async () => infer(jsonl))(),
+            promise: (async () => {
+              if (!useHandoff) return infer(jsonl);
+              // Prepend the handoff system prompt to give the
+              // smaller-context template context.
+              const { HANDOFF_SUMMARY_SYSTEM_PROMPT, HANDOFF_SUMMARY_USER_PROMPT_INSTRUCTIONS } = await import("../context/handoff.js");
+              return infer(`${HANDOFF_SUMMARY_SYSTEM_PROMPT}\n\n---\n\n${HANDOFF_SUMMARY_USER_PROMPT_INSTRUCTIONS}\n\n---\n\n${jsonl}`);
+            })(),
           };
           inflightRef.promise
             .then(async (summaryText: string) => {
@@ -336,6 +365,8 @@ export function createContextEngineeringHooks(
                   reattachedFiles: 0,
                   body: summaryText,
                 } as any).catch(() => undefined);
+                // T3: emit handoff_summary vs full_summary depending
+                // on which template the LLM received.
                 await (trajectoryLogger as TrajectoryLogger).write({
                   event_id: randomUUID(),
                   run_id: runId,
@@ -343,12 +374,13 @@ export function createContextEngineeringHooks(
                   trace_id: traceId ?? runId,
                   timestamp: new Date().toISOString(),
                   log_schema_version: 1,
-                  kind: "full_summary",
+                  kind: useHandoff ? "handoff_summary" : "full_summary",
                   level: "info",
                   summary_chars: summaryText.length,
                   kept_messages: newMsgs.length,
                   ptl_drops: 0,
                   saved_chars: Math.max(0, preChars - postChars),
+                  ...(useHandoff ? { handoff_kind: "omp-4-section" } : {}),
                 } as any).catch(() => undefined);
               } catch {
                 /* best-effort */
@@ -398,6 +430,44 @@ export function createContextEngineeringHooks(
         }
       } catch {
         /* swallow */
+      }
+
+      // T4: Snapcompact (image-cluster hook). OMP equivalent of
+      // `compaction/snapcompact.ts:maybeSnapcompact`. Inert unless
+      // `cmTunablesBefore.snapcompactEnabled === true` AND the live
+      // conversation contains consecutive image blocks (≥3 by
+      // default). Reaper treats images as opaque text today (no
+      // media channels), so this hook is a no-op for current
+      // models — but the path is wired so future image-aware
+      // providers automatically benefit.
+      let snapcompactedImages = 0;
+      let snapcompactSavedChars = 0;
+      if (cmTunablesBefore.snapcompactEnabled) {
+        try {
+          const { maybeSnapcompact } = await import("../context/snapcompact.js");
+          const beforeCount = Array.isArray(working) ? working.length : 0;
+          const snapResult = maybeSnapcompact(working as Array<Record<string, unknown>>);
+          if (snapResult.performed) {
+            snapcompactedImages = snapResult.collapsedImages;
+            snapcompactSavedChars = snapResult.savedChars;
+            await (trajectoryLogger as TrajectoryLogger).write({
+              event_id: randomUUID(),
+              run_id: runId,
+              session_id: sessionId,
+              trace_id: traceId ?? runId,
+              timestamp: new Date().toISOString(),
+              log_schema_version: 1,
+              kind: "snapcompact",
+              level: "info",
+              collapsed_images: snapResult.collapsedImages,
+              messages_before: beforeCount,
+              messages_after: Array.isArray(working) ? working.length : 0,
+              saved_chars: snapResult.savedChars,
+            } as any).catch(() => undefined);
+          }
+        } catch {
+          /* best-effort */
+        }
       }
 
       return {
@@ -458,6 +528,109 @@ export function createContextEngineeringHooks(
     async onAfterModelCall({ workspaceRoot: _w, runId, sessionId, traceId, modelResponse, messages, softCap, trajectoryLogger }) {
       let timeCompacted = 0;
       const cm = getContextTunables();
+
+      // T2: Incomplete (length-stop) recovery. OMP's
+      // `#checkCompaction("incomplete", assistantMessage)` arm —
+      // when the model emits `stopReason === "length"` (i.e. hit
+      // `max_output_tokens` without producing a usable deliverable),
+      // proactively compact before the next model call so the
+      // retry has room to breathe.
+      if (cm.incompleteRecoveryEnabled) {
+        try {
+          const stopReason = (modelResponse as any)?.stop_reason ?? (modelResponse as any)?.stopReason;
+          if (stopReason === "length") {
+            const tokensUsed = Math.ceil(estimateLiveConversationChars(messages) / 4);
+            const { shouldCompact } = await import("../context/should-compact.js");
+            if (shouldCompact(tokensUsed, softCap)) {
+              // Stash a flag on the global slot so the next
+              // `onBeforeModelCall` triggers a full summary before
+              // the next model call (same pattern as
+              // `full-summary-applied`).
+              (globalThis as any)[`${runId}::incomplete-recovery`] = {
+                triggeredAt: Date.now(),
+                stopReason,
+                tokensUsed,
+              };
+              await (trajectoryLogger as TrajectoryLogger).write({
+                event_id: randomUUID(),
+                run_id: runId,
+                session_id: sessionId,
+                trace_id: traceId ?? runId,
+                timestamp: new Date().toISOString(),
+                log_schema_version: 1,
+                kind: "incomplete_recovery",
+                level: "info",
+                stop_reason: stopReason,
+                tokens_used: tokensUsed,
+                soft_cap: softCap,
+              } as any).catch(() => undefined);
+            }
+          }
+        } catch {
+          /* swallow */
+        }
+      }
+
+      // T1: Idle compaction scheduler. OMP equivalent of
+      // `event-controller.ts:#scheduleIdleCompaction`. When the
+      // model has been idle for `idleTimeoutSeconds` (default 300s)
+      // AND tokens exceed `idleThresholdTokens`, fire a
+      // proactive compaction via `setTimeout`. The scheduler is
+      // re-armed on every turn. Conditions are re-checked when
+      // the timer fires (model might be streaming again by then).
+      if (cm.idleEnabled && cm.idleThresholdTokens > 0) {
+        try {
+          const totalTokens = Math.ceil(estimateLiveConversationChars(messages) / 4);
+          if (totalTokens >= cm.idleThresholdTokens) {
+            const idleKey = `${runId}::idle-compaction-timer`;
+            const existing = (globalThis as any)[idleKey];
+            if (existing) clearTimeout(existing);
+            const timeoutMs = cm.idleTimeoutSeconds * 1000;
+            const t = setTimeout(() => {
+              (globalThis as any)[idleKey] = undefined;
+              // Re-check conditions when the timer fires (per OMP).
+              const cm2 = getContextTunables();
+              if (!cm2.idleEnabled || cm2.idleThresholdTokens <= 0) return;
+              const tokensNow = Math.ceil(estimateLiveConversationChars(messages) / 4);
+              if (tokensNow < cm2.idleThresholdTokens) return;
+              // Stash a flag for the next onBeforeModelCall.
+              (globalThis as any)[`${runId}::idle-compaction`] = {
+                triggeredAt: Date.now(),
+                tokensUsed: tokensNow,
+              };
+              try {
+                (trajectoryLogger as TrajectoryLogger)
+                  .write({
+                    event_id: randomUUID(),
+                    run_id: runId,
+                    session_id: sessionId,
+                    trace_id: traceId ?? runId,
+                    timestamp: new Date().toISOString(),
+                    log_schema_version: 1,
+                    kind: "idle_compaction",
+                    level: "info",
+                    idle_threshold_tokens: cm2.idleThresholdTokens,
+                    idle_timeout_seconds: cm2.idleTimeoutSeconds,
+                    tokens_used: tokensNow,
+                    soft_cap: softCap,
+                  } as any)
+                  .catch(() => undefined);
+              } catch {
+                /* best-effort */
+              }
+            }, timeoutMs);
+            // Best-effort: don't keep the Node event loop alive
+            // just for an idle timer.
+            if (typeof (t as any).unref === "function") {
+              (t as any).unref();
+            }
+            (globalThis as any)[idleKey] = t;
+          }
+        } catch {
+          /* swallow */
+        }
+      }
+
       // #9: Time microcompact
       if (cm.timeMicrocompactEnabled) {
         try {

@@ -79,12 +79,39 @@ interface TunablesCache {
     /** #21 Promote threshold ratio. */
     modelPromotionThresholdRatio: number;
     /**
-     * #21 Promote target role name. The wiring promotes to this
+     /** #21 Promote target role name. The wiring promotes to this
      * role (if registered in `config.models` and strictly larger
      * context than the active profile). Set to `null` to disable
      * the auto-pick and only emit the trajectory event.
      */
     modelPromotionTargetRole: string | null;
+    /**
+     * T1 Idle Compaction: when true, schedule a proactive compaction
+     * via setTimeout(idleTimeoutSeconds * 1000) if the model has been
+     * idle for that long and tokens exceed idleThresholdTokens. OMP
+     * equivalent of `event-controller.ts:#scheduleIdleCompaction`.
+     */
+    idleEnabled: boolean;
+    /** T1 Idle threshold: token-count that triggers idle compaction. */
+    idleThresholdTokens: number;
+    /**
+     * T1 Idle timeout (clamped to [60, 3600] seconds per OMP).
+     */
+    idleTimeoutSeconds: number;
+    /**
+     * T2 Incomplete (length-stop) recovery: when true, proactively
+     * compact when the model emits stopReason === "length" (i.e. hit
+     * max_output_tokens without producing a usable deliverable).
+     */
+    incompleteRecoveryEnabled: boolean;
+    /** T3 Handoff: prefer the smaller-context handoff LLM call over the
+     * full OMP 9-section summary template.
+     */
+    handoffEnabled: boolean;
+    /** T4 Snapcompact: image-cluster-aware compaction hook. No-op when
+     * there are no image blocks in the live conversation.
+     */
+    snapcompactEnabled: boolean;
   };
   bg: {
     descendantTermGraceMs: number;
@@ -175,6 +202,16 @@ const DEFAULTS: TunablesCache = {
     modelPromotionEnabled: true,
     modelPromotionThresholdRatio: 0.5,
     modelPromotionTargetRole: "secondary_model" as string | null,
+    // T1 Idle Compaction (defaults match OMP — disabled until user opts in).
+    idleEnabled: false,
+    idleThresholdTokens: 0,
+    idleTimeoutSeconds: 300,
+    // T2 Incomplete (length-stop) recovery — on by default.
+    incompleteRecoveryEnabled: true,
+    // T3 Handoff (smaller-context alternative) — off by default; users opt in.
+    handoffEnabled: false,
+    // T4 Snapcompact (image-cluster hook) — off by default; inert unless images flow.
+    snapcompactEnabled: false,
     warningThresholdRatio: 0.70,
     errorThresholdRatio: 0.85,
     blockingThresholdRatio: 0.95,
@@ -270,6 +307,16 @@ export function applyConfigToTunables(config: ReaperConfig): TunablesCache {
         }
         return String(raw);
       })(),
+      // T1 Idle Compaction (OMP port).
+      idleEnabled: Boolean((cm as any).idleEnabled ?? false),
+      idleThresholdTokens: Number((cm as any).idleThresholdTokens ?? 0),
+      idleTimeoutSeconds: Math.max(60, Math.min(3600, Number((cm as any).idleTimeoutSeconds ?? 300))),
+      // T2 Incomplete (length-stop) recovery.
+      incompleteRecoveryEnabled: Boolean((cm as any).incompleteRecoveryEnabled ?? true),
+      // T3 Handoff (smaller-context summary alternative).
+      handoffEnabled: Boolean((cm as any).handoffEnabled ?? false),
+      // T4 Snapcompact (image-cluster hook; inert when no images).
+      snapcompactEnabled: Boolean((cm as any).snapcompactEnabled ?? false),
       warningThresholdRatio: Number(cm.warningThresholdRatio ?? 0.70),
       errorThresholdRatio: Number(cm.errorThresholdRatio ?? 0.85),
       blockingThresholdRatio: Number(cm.blockingThresholdRatio ?? 0.95),

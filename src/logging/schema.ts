@@ -192,16 +192,66 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
 	    remaining_messages: z.number().int().min(0).optional(),
 	  }),
 	  // Full summarization: emitted when onBeforeModelCall invoked
-	  // tryFullSummarization and replaced the conversation with a
-	  // long-form summary.
-	  CommonLogFieldsSchema.extend({
-	    kind: z.literal("full_summary"),
-	    level: z.enum(["info", "debug", "trace"]),
-	    summary_chars: z.number().int().min(0).optional(),
-	    kept_messages: z.number().int().min(0).optional(),
-	    ptl_drops: z.number().int().min(0).optional(),
-	    saved_chars: z.number().int().min(0).optional(),
-	    }),
+	    // tryFullSummarization and replaced the conversation with a
+	    // long-form summary.
+	    CommonLogFieldsSchema.extend({
+	      kind: z.literal("full_summary"),
+	      level: z.enum(["info", "debug", "trace"]),
+	      summary_chars: z.number().int().min(0).optional(),
+	      kept_messages: z.number().int().min(0).optional(),
+	      ptl_drops: z.number().int().min(0).optional(),
+	      saved_chars: z.number().int().min(0).optional(),
+	      }),
+	      // T3 Handoff summary: smaller-context alternative to
+	      // full_summary. Same schema shape, different `kind` so the
+	      // trajectory clearly distinguishes the two paths. OMP
+	      // equivalent: `compaction.ts:generateHandoff` was used
+	      // instead of `generateSummary`.
+	      CommonLogFieldsSchema.extend({
+	        kind: z.literal("handoff_summary"),
+	        level: z.enum(["info", "debug", "trace"]),
+	        summary_chars: z.number().int().min(0).optional(),
+	        kept_messages: z.number().int().min(0).optional(),
+	        ptl_drops: z.number().int().min(0).optional(),
+	        saved_chars: z.number().int().min(0).optional(),
+	        handoff_kind: z.string().optional(),
+	      }),
+	      // T1 Idle compaction: emitted when setTimeout fires after
+	      // `idleTimeoutSeconds` of model-idle time and tokens exceed
+	      // `idleThresholdTokens`. OMP equivalent:
+	      // `event-controller.ts:#scheduleIdleCompaction`.
+	      CommonLogFieldsSchema.extend({
+	        kind: z.literal("idle_compaction"),
+	        level: z.enum(["info", "debug", "trace"]),
+	        idle_threshold_tokens: z.number().int().min(0),
+	        idle_timeout_seconds: z.number().int().min(60).max(3600),
+	        tokens_used: z.number().int().min(0),
+	        soft_cap: z.number().int().min(0),
+	      }),
+	      // T2 Incomplete (length-stop) recovery: emitted when the model
+	      // returns `stopReason === "length"` AND tokens exceed the OMP
+	      // threshold. The wiring stashes a flag on the runId slot;
+	      // the next `onBeforeModelCall` triggers a full summary
+	      // before the retry. OMP equivalent:
+	      // `#checkCompaction("incomplete", assistantMessage)`.
+	      CommonLogFieldsSchema.extend({
+	        kind: z.literal("incomplete_recovery"),
+	        level: z.enum(["info", "debug", "trace"]),
+	        stop_reason: z.string().min(1),
+	        tokens_used: z.number().int().min(0),
+	        soft_cap: z.number().int().min(0),
+	      }),
+	      // T4 Snapcompact: emitted when `cm.snapcompactEnabled === true`
+	      // AND the live conversation has ≥3 consecutive image blocks.
+	      // OMP equivalent: `compaction/snapcompact.ts:maybeSnapcompact`.
+	      CommonLogFieldsSchema.extend({
+	        kind: z.literal("snapcompact"),
+	        level: z.enum(["info", "debug", "trace"]),
+	        collapsed_images: z.number().int().min(0),
+	        messages_before: z.number().int().min(0),
+	        messages_after: z.number().int().min(0),
+	        saved_chars: z.number().int().min(0),
+	      }),
 	    // #21 Promote Context Model: emitted by the wiring when tokens/softCap
 	    // crosses modelPromotionThresholdRatio AND a sibling profile with a
 	    // strictly larger context window exists. The engine reads this to
