@@ -409,6 +409,7 @@ export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   "grep_search",        // always-on: cross-file patterns
   "bash",               // always-on: tests, git, installs only
   "search_tools",
+  "scratchpad",         // durable working notes across compaction / days-long runs
 ]);
 
 // Tools that were demoted from CORE_TOOL_NAMES in Phase 4. Kept registered
