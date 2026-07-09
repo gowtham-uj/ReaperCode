@@ -5,6 +5,7 @@ import { parseAgentRequestEnvelope, type TransportKind } from "../connection/sch
 import { parseReaperConfig, type ReaperConfig } from "../config/model-config.js";
 import { RuntimeStateSchema, type RuntimeRepoInspection, type RuntimeState } from "./state.js";
 
+/** Prefer contextManagement.softCap; fall back to legacy tokenBudget.softCap; then 200K. */
 const DEFAULT_SOFT_CAP_TOKENS = 200_000;
 
 function resolveSoftCapFromWorkspaceConfig(workspaceRoot: string | undefined): number {
@@ -15,15 +16,45 @@ function resolveSoftCapFromWorkspaceConfig(workspaceRoot: string | undefined): n
     const raw = readFileSync(candidate, "utf8");
     const parsed = JSON.parse(raw) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return DEFAULT_SOFT_CAP_TOKENS;
-    const tokenBudget = (parsed as Record<string, unknown>).tokenBudget;
-    if (!tokenBudget || typeof tokenBudget !== "object" || Array.isArray(tokenBudget)) return DEFAULT_SOFT_CAP_TOKENS;
-    const softCap = (tokenBudget as Record<string, unknown>).softCap;
-    return typeof softCap === "number" && Number.isFinite(softCap) && softCap > 0
-      ? Math.floor(softCap)
-      : DEFAULT_SOFT_CAP_TOKENS;
+    const obj = parsed as Record<string, unknown>;
+
+    // Preferred: contextManagement.softCap (single source of truth for compaction).
+    const contextManagement = obj.contextManagement;
+    if (contextManagement && typeof contextManagement === "object" && !Array.isArray(contextManagement)) {
+      const softCap = (contextManagement as Record<string, unknown>).softCap;
+      if (typeof softCap === "number" && Number.isFinite(softCap) && softCap > 0) {
+        return Math.floor(softCap);
+      }
+    }
+
+    // Legacy: tokenBudget.softCap (still honored for older configs).
+    const tokenBudget = obj.tokenBudget;
+    if (tokenBudget && typeof tokenBudget === "object" && !Array.isArray(tokenBudget)) {
+      const softCap = (tokenBudget as Record<string, unknown>).softCap;
+      if (typeof softCap === "number" && Number.isFinite(softCap) && softCap > 0) {
+        return Math.floor(softCap);
+      }
+    }
+
+    return DEFAULT_SOFT_CAP_TOKENS;
   } catch {
     return DEFAULT_SOFT_CAP_TOKENS;
   }
+}
+
+/**
+ * Resolve the softCap used by the live agent loop.
+ * Prefer an already-parsed ReaperConfig.contextManagement.softCap when available.
+ */
+export function resolveSoftCap(options: {
+  workspaceRoot?: string;
+  config?: ReaperConfig | null;
+}): number {
+  const fromConfig = options.config?.contextManagement?.softCap;
+  if (typeof fromConfig === "number" && Number.isFinite(fromConfig) && fromConfig > 0) {
+    return Math.floor(fromConfig);
+  }
+  return resolveSoftCapFromWorkspaceConfig(options.workspaceRoot);
 }
 
 export interface Phase0BootstrapInput {
@@ -58,7 +89,10 @@ export function bootPhase0Runtime(input: Phase0BootstrapInput): Phase0BootstrapR
     sessionProtocolVersion: 1,
     userIntentSummary: input.userIntentSummary ?? "Phase 0 bootstrapped session",
     tokenBudget: {
-      softCap: resolveSoftCapFromWorkspaceConfig(input.workspaceRoot),
+      softCap: resolveSoftCap({
+        ...(input.workspaceRoot !== undefined ? { workspaceRoot: input.workspaceRoot } : {}),
+        config,
+      }),
       inputTokens: 0,
       outputTokens: 0,
     },
