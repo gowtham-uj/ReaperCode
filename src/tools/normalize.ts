@@ -484,8 +484,42 @@ export function normalizeToolCall(input: unknown): unknown {
           ...(typeof record.query === "string" ? { query: record.query } : {}),
         };
         break;
-      default:
+      case "scratchpad":
         args = {
+          ...(typeof record.action === "string" ? { action: record.action } : {}),
+          ...(typeof record.note === "string" ? { note: record.note } : {}),
+          ...(typeof record.label === "string" ? { label: record.label } : {}),
+        };
+        break;
+      case "search_memory":
+        args = {
+          ...(typeof record.query === "string" ? { query: record.query } : {}),
+          ...(typeof record.max_hits === "number" ? { max_hits: record.max_hits } : {}),
+          ...(typeof record.include_body === "boolean" ? { include_body: record.include_body } : {}),
+          ...(typeof record.session_id === "string" ? { session_id: record.session_id } : {}),
+          ...(typeof record.since === "string" ? { since: record.since } : {}),
+        };
+        break;
+      case "call_subagent":
+        args = {
+          ...(typeof record.type === "string" ? { type: record.type } : {}),
+          ...(typeof record.task === "string" ? { task: record.task } : {}),
+          ...(typeof record.context === "string" ? { context: record.context } : {}),
+          ...(typeof record.mode === "string" ? { mode: record.mode } : {}),
+          ...(typeof record.timeoutMs === "number" ? { timeoutMs: record.timeoutMs } : {}),
+        };
+        break;
+      case "poll_subagent":
+        args = {
+          ...(typeof record.jobId === "string" ? { jobId: record.jobId } : {}),
+        };
+        break;
+      default:
+        // Preserve original args for tools without a dedicated normalizer
+        // (skills, extensions, hooks, etc.). Only overlay path/cmd/cwd aliases
+        // when present — never wipe the payload to those three keys alone.
+        args = {
+          ...record,
           ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
           ...(normalizedCmd ? { cmd: normalizedCmd } : {}),
           ...(normalizedCwd ? { cwd: normalizedCwd } : {}),

@@ -182,6 +182,65 @@ export const ContextManagementConfigSchema = z
     modelPromotionTargetRole: z
       .union([ModelRoleInputSchema, z.null()])
       .default("secondary_model"),
+    /**
+     * Idle Compaction (T1 OMP port): when the model is not actively
+     * generating a turn (no streaming, no tool running) AND context
+     * tokens exceed `idleThresholdTokens`, schedule a proactive
+     * compaction via `setTimeout(idleTimeoutSeconds * 1000)`. OMP
+     * equivalent of `event-controller.ts:#scheduleIdleCompaction`.
+     *
+     * Defaults to `false` to match OMP — most runs complete within a
+     * turn and don't need it. Set to `true` for days-long autonomous
+     * sessions where the user might be away from the keyboard.
+     */
+    idleEnabled: z.boolean().default(false),
+    /**
+     * Token-count threshold at which idle compaction fires. Default 0
+     * means "only fire if enabled AND tokens exceed the threshold".
+     * Users should set this to a non-zero value (e.g. 100,000) when
+     * enabling `idleEnabled`.
+     */
+    idleThresholdTokens: z.number().int().min(0).default(0),
+    /**
+     * How long the model must be idle before proactive compaction
+     * fires. Clamped to [60, 3600] seconds per OMP's `Math.max(60,
+     * Math.min(3600, idleTimeoutSeconds))` pattern. Default 300s (5
+     * min) matches OMP's typical authoring-session value.
+     */
+    idleTimeoutSeconds: z.number().int().min(60).max(3600).default(300),
+    /**
+     * Incomplete (length-stop) recovery (T2 OMP port): when the model
+     * emits `stopReason === "length"` (i.e. hit `max_output_tokens`
+     * without producing a usable deliverable), proactively compact
+     * before the next model call. OMP equivalent of
+     * `#checkCompaction("incomplete", assistantMessage)`.
+     *
+     * Defaults to `true` to match the rest of the OMP-defaulted
+     * layers. Disable for fully-streaming models that never hit
+     * `max_output_tokens`.
+     */
+    incompleteRecoveryEnabled: z.boolean().default(true),
+    /**
+     * Handoff (T3 OMP port): smaller-context summarization as an
+     * alternative to `full_summary`. The handoff LLM call produces a
+     * tighter narrative focused on the active task rather than the
+     * full 9-section OMP summary template. Fires on the same OMP gate
+     * (`tokensAfterShake > softCap - reserve`).
+     *
+     * When `handoffEnabled` is `false`, `full_summary` is used (the
+     * default). Set to `true` to prefer the smaller handoff.
+     */
+    handoffEnabled: z.boolean().default(false),
+    /**
+     * Snapcompact (T4 OMP port): image-cluster-aware compaction
+     * variant. OMP's snapcompact collapses consecutive image blocks
+     * into a single summary stub before the conversation grows. Reaper
+     * treats images as opaque text (no media channels), so this
+     * layer is a no-op when there are no image blocks in the live
+     * conversation. Set `snapcompactEnabled` to `true` to enable the
+     * hook; it will simply be inert for non-image conversations.
+     */
+    snapcompactEnabled: z.boolean().default(false),
     warningThresholdRatio: z.number().min(0).max(1).default(0.70),
     errorThresholdRatio: z.number().min(0).max(1).default(0.85),
     blockingThresholdRatio: z.number().min(0).max(1).default(0.95),
@@ -210,6 +269,15 @@ export const ContextManagementConfigSchema = z
     bashHeadPreviewChars: 1_200,
     bashTailPreviewChars: 1_200,
     bashPersistThresholdChars: 30_000,
+    modelPromotionEnabled: true,
+    modelPromotionThresholdRatio: 0.5,
+    modelPromotionTargetRole: "secondary_model",
+    idleEnabled: false,
+    idleThresholdTokens: 0,
+    idleTimeoutSeconds: 300,
+    incompleteRecoveryEnabled: true,
+    handoffEnabled: false,
+    snapcompactEnabled: false,
     warningThresholdRatio: 0.70,
     errorThresholdRatio: 0.85,
     blockingThresholdRatio: 0.95,

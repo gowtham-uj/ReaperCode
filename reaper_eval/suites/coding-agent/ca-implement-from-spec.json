@@ -1,0 +1,23 @@
+{
+  "id": "ca-implement-from-spec",
+  "title": "Implement a feature from a short SPEC.md",
+  "suite": "coding-agent",
+  "difficulty": "hard",
+  "language": "javascript",
+  "prompt": "Read SPEC.md and implement the missing `src/rate_limit.js` module so all tests pass. Do not modify SPEC.md or the tests. Use file_view to read the spec and tests before writing code.",
+  "projectFiles": {
+    "package.json": "{\n  \"name\": \"ca-implement-from-spec\",\n  \"version\": \"1.0.0\",\n  \"type\": \"module\",\n  \"scripts\": { \"test\": \"node --test test/rate_limit.test.js\" }\n}\n",
+    "SPEC.md": "# Rate limiter\n\nImplement `createRateLimiter({ limit, windowMs })` in `src/rate_limit.js`.\n\n## API\n\n```js\nconst rl = createRateLimiter({ limit: 3, windowMs: 1000 });\nrl.allow(\"user-1\"); // boolean\nrl.remaining(\"user-1\"); // number of remaining tokens in current window\nrl.reset(\"user-1\"); // clears that key\n```\n\n## Rules\n- Each key starts with `limit` tokens.\n- `allow(key)` consumes one token if available and returns true; otherwise false.\n- Tokens refill to `limit` when `windowMs` has elapsed since the window start for that key.\n- Windows are per-key and start on the first `allow` after a refill/reset.\n- Pure in-memory; no timers required beyond `Date.now()`.\n",
+    "test/rate_limit.test.js": "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { createRateLimiter } from \"../src/rate_limit.js\";\n\ntest(\"allows up to limit then blocks\", () => {\n  const rl = createRateLimiter({ limit: 2, windowMs: 60_000 });\n  assert.equal(rl.allow(\"a\"), true);\n  assert.equal(rl.allow(\"a\"), true);\n  assert.equal(rl.allow(\"a\"), false);\n  assert.equal(rl.remaining(\"a\"), 0);\n});\n\ntest(\"keys are independent\", () => {\n  const rl = createRateLimiter({ limit: 1, windowMs: 60_000 });\n  assert.equal(rl.allow(\"a\"), true);\n  assert.equal(rl.allow(\"b\"), true);\n});\n\ntest(\"reset restores tokens\", () => {\n  const rl = createRateLimiter({ limit: 1, windowMs: 60_000 });\n  assert.equal(rl.allow(\"a\"), true);\n  assert.equal(rl.allow(\"a\"), false);\n  rl.reset(\"a\");\n  assert.equal(rl.allow(\"a\"), true);\n});\n"
+  },
+  "verification": {
+    "command": "npm test",
+    "maxIterations": 14
+  },
+  "gates": [
+    { "type": "verification_exit_0" },
+    { "type": "file_exists", "path": "src/rate_limit.js" },
+    { "type": "file_contains", "path": "src/rate_limit.js", "contains": "createRateLimiter" },
+    { "type": "model_calls_min", "minCount": 1 }
+  ]
+}
