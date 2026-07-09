@@ -135,3 +135,15 @@ When the user asks Pi to create, change, or test a Pi tool, Pi extension, provid
 - Use unique marker files for tool tests so the model cannot guess the answer.
 - Verify that Opus continues normally after receiving each tool result.
 - Do not export or store raw cookies, tokens, or API keys. Use the authenticated browser profile/CDP session.
+
+## Cursor Cloud specific instructions
+
+Reaper is a single-package Node/TypeScript coding-agent harness with two terminal surfaces (CLI `bin/reaper` and an Ink/React TUI). There is no web server or database: `main: "vite.config.js"` and the `dev:ui`/`build:ui` scripts are dead (no Vite app exists) — ignore them. There is no `lint` script or ESLint config; `npm run typecheck` (`tsc --noEmit`) is the static-check surface. Standard commands live in `package.json` (`reaper`, `reaper:dev`, `reaper:exec`, `test`, `typecheck`, `build`).
+
+Non-obvious caveats:
+- Running the agent (`node bin/reaper exec run --prompt ...`, or a real task in the TUI) requires an LLM provider credential. Default is Anthropic: `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` (optionally `ANTHROPIC_BASE_URL`); other providers (`OPENAI_API_KEY`+`OPENAI_BASE_URL`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_PROVIDER_KEY`, `MINIMAX_API_KEY`, Azure) also work. Keys are read from the process env or from `~/.reaper/.env`, `~/.hermes/.env`, or `./.env` (loader in `scripts/run-reaper.ts`). Without a key the CLI/TUI still boot; the TUI opens a first-run provider/API-key setup wizard and `exec run` exits with a clear "requires ANTHROPIC_AUTH_TOKEN" notice.
+- The TUI requires a real interactive TTY (Ink raw mode); it cannot be driven via piped stdin (fails with "Raw mode is not supported"). Use a real terminal to interact with it.
+- `npm test` intentionally hard-kills the test child at 60s (see `scripts/run-node-tests.mjs`); a trailing `[test-runner] killing child after 60000ms hang` line is expected and not a failure.
+- Known pre-existing failure on a clean tree (unrelated to environment): `tests/integration/context-phase4.test.ts` → "tool result rendering exposes workspace path aliases for container runs" (`renderToolResultForModel` returns `undefined` for `workspacePathAliases`).
+- The `@mariozechner/pi-ai` dependency is a `file:source_codes/...` path that does not exist in the repo, so `npm install` leaves a dangling symlink at `node_modules/@mariozechner/pi-ai`. This is harmless — nothing imports it — and install/typecheck/tests still pass. Nothing needs to be done about it.
+- Browser/computer-use tools are optional; their tests SKIP unless Playwright Chromium is installed (`npx playwright install chromium`).
