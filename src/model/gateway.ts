@@ -22,6 +22,7 @@ import {
   getExtensionLifecycleEventBus,
   type ExtensionLifecycleEventBus,
 } from "../extensions/lifecycle-events.js";
+import { routeForCapabilities } from "./capability-router.js";
 
 export interface ProviderModelClient {
   generate(request: GenerateRequest, profile: ResolvedModelProfile): Promise<GenerateResult>;
@@ -120,19 +121,20 @@ export class ConfiguredModelGateway implements ModelGateway {
   async generate(request: GenerateRequest): Promise<GenerateResult> {
     await this.emitBeforeModelRequest(request);
     const profile = await this.resolveRole(request.role);
-    this.assertGenerateCompatibility(request, profile);
+    const adapted = this.adaptRequestForCapabilities(request, profile);
+    this.assertGenerateCompatibility(adapted, profile);
     const callId = nextCallId("active", "generate");
     const startedAtMs = Date.now();
     const startedAt = new Date(startedAtMs).toISOString();
     try {
-      const result = await this.withFallback(profile, request.role, (resolvedProfile) => this.client.generate(request, resolvedProfile), "primary");
-      await this.emitAfterModelResponse(request, result);
+      const result = await this.withFallback(profile, adapted.role, (resolvedProfile) => this.client.generate(adapted, resolvedProfile), "primary");
+      await this.emitAfterModelResponse(adapted, result);
       await logModelCall({
         kind: "generate",
         callId,
-        role: request.role,
+        role: adapted.role,
         profile,
-        request,
+        request: adapted,
         response: result,
         startedAt,
         completedAt: new Date().toISOString(),
@@ -140,13 +142,13 @@ export class ConfiguredModelGateway implements ModelGateway {
       });
       return result;
     } catch (error) {
-      await this.emitAfterModelResponse(request, undefined, error);
+      await this.emitAfterModelResponse(adapted, undefined, error);
       await logModelCall({
         kind: "generate",
         callId,
-        role: request.role,
+        role: adapted.role,
         profile,
-        request,
+        request: adapted,
         error,
         startedAt,
         completedAt: new Date().toISOString(),
@@ -159,7 +161,8 @@ export class ConfiguredModelGateway implements ModelGateway {
   async *stream(request: GenerateRequest): AsyncIterable<StreamEvent> {
     await this.emitBeforeModelRequest(request);
     const profile = await this.resolveRole(request.role);
-    this.assertGenerateCompatibility(request, profile, true);
+    const adapted = this.adaptRequestForCapabilities(request, profile);
+    this.assertGenerateCompatibility(adapted, profile, true);
     const callId = nextCallId("active", "stream");
     const startedAtMs = Date.now();
     const startedAt = new Date(startedAtMs).toISOString();
@@ -172,33 +175,33 @@ export class ConfiguredModelGateway implements ModelGateway {
       // preserve long-running agent sessions. Mid-stream failures are
       // surfaced inline via StreamEvent errors (we don't restart the
       // stream because the consumer is already in the middle of reading).
-      for await (const event of this.streamWithFallback(profile, request)) {
+      for await (const event of this.streamWithFallback(profile, adapted)) {
         events.push(event);
         if (event.type === "message_end") {
           streamUsage = (event.data as { usage?: unknown } | undefined)?.usage;
         }
         yield event;
       }
-      await this.emitAfterModelResponse(request, undefined, undefined, streamUsage);
+      await this.emitAfterModelResponse(adapted, undefined, undefined, streamUsage);
       await logModelCall({
         kind: "stream",
         callId,
-        role: request.role,
+        role: adapted.role,
         profile,
-        request,
+        request: adapted,
         streamEvents: events,
         startedAt,
         completedAt: new Date().toISOString(),
         durationMs: Date.now() - startedAtMs,
       });
     } catch (error) {
-      await this.emitAfterModelResponse(request, undefined, error, streamUsage);
+      await this.emitAfterModelResponse(adapted, undefined, error, streamUsage);
       await logModelCall({
         kind: "stream",
         callId,
-        role: request.role,
+        role: adapted.role,
         profile,
-        request,
+        request: adapted,
         streamEvents: events,
         error,
         startedAt,
@@ -369,6 +372,47 @@ export class ConfiguredModelGateway implements ModelGateway {
     });
   }
 
+  /**
+   * Apply capability routing before dispatch. When the caller asks for
+   * native tools but the profile cannot do toolCalling, rewrite the
+   * request to a JSON envelope (OMP/Codex-style fallback) instead of
+   * hard-failing — model-agnostic harness goal.
+   */
+  private adaptRequestForCapabilities(
+    request: GenerateRequest,
+    profile: ResolvedModelProfile,
+  ): GenerateRequest {
+    const wantsToolCalling = Array.isArray(request.tools) && request.tools.length > 0;
+    const decision = routeForCapabilities({
+      capabilities: profile.capabilities,
+      wantsToolCalling,
+    });
+
+    if (decision.strategy === "native_tools" || !wantsToolCalling) {
+      return request;
+    }
+
+    // Downgrade: strip native tools, force JSON mode when available, and
+    // inject a short envelope hint into the system prompt.
+    const envelopeHint = decision.jsonEnvelopeTemplate
+      ? `\n\n[capability-router] Native tool calling unavailable for this profile. ${decision.jsonEnvelopeTemplate}`
+      : "\n\n[capability-router] Native tool calling unavailable; emit a JSON object with tool_calls.";
+    const system =
+      typeof request.system === "string"
+        ? `${request.system}${envelopeHint}`
+        : envelopeHint.trim();
+
+    const next: GenerateRequest = {
+      ...request,
+      system,
+    };
+    delete (next as { tools?: unknown }).tools;
+    if (profile.capabilities.jsonMode || decision.useJsonMode) {
+      next.responseFormat = "json";
+    }
+    return next;
+  }
+
   private assertGenerateCompatibility(
     request: GenerateRequest,
     profile: ResolvedModelProfile,
@@ -380,6 +424,9 @@ export class ConfiguredModelGateway implements ModelGateway {
       throw new Error(`Role '${request.role}' requires a profile with streaming=true`);
     }
 
+    // After adaptRequestForCapabilities, tools should only remain when
+    // the profile supports them. Keep a hard guard for callers that
+    // bypass adaptation.
     if (request.tools && request.tools.length > 0 && !profile.capabilities.toolCalling) {
       throw new Error(`Role '${request.role}' requires a profile with toolCalling=true`);
     }

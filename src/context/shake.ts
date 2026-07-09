@@ -15,19 +15,63 @@
  * 4. Never touch the cockpit message (first user message) or the last assistant turn
  */
 
+import { getContextTunables } from "../config/config-tunables.js";
 import { normalizeToolResult } from "../tools/tool-result.js";
 
-/** Minimum savings (in chars) to justify a shake pass. */
-const MIN_SAVINGS_CHARS = 100;
+/** Fallback minimum savings (in chars) when tunables are unavailable. */
+const DEFAULT_MIN_SAVINGS_CHARS = 100;
 
-/** Protect the most recent tool results (in chars) from shaking. */
-const PROTECT_WINDOW_CHARS = 12_000;
+/** Fallback protect window (chars) when tunables are unavailable. */
+const DEFAULT_PROTECT_WINDOW_CHARS = 12_000;
 
 /** Minimum tool result size (in chars) to be eligible for shake. */
 const FENCE_MIN_CHARS = 200;
 
-/** Context window threshold (% of max tokens) to trigger shake. */
-const SHAKE_TRIGGER_PCT = 50;
+/** Fallback trigger percentage when tunables are unavailable. */
+const DEFAULT_SHAKE_TRIGGER_PCT = 50;
+
+/** Fallback circuit-breaker cap when tunables are unavailable. */
+const DEFAULT_MAX_CONSECUTIVE_FAILURES = 3;
+
+export interface ShakeTunables {
+  shakeEnabled?: boolean;
+  shakeTriggerPct?: number;
+  shakeProtectWindowChars?: number;
+  shakeMinSavingsChars?: number;
+  maxConsecutiveShakeFailures?: number;
+}
+
+function resolveShakeTunables(override?: ShakeTunables): Required<
+  Pick<
+    ShakeTunables,
+    | "shakeEnabled"
+    | "shakeTriggerPct"
+    | "shakeProtectWindowChars"
+    | "shakeMinSavingsChars"
+    | "maxConsecutiveShakeFailures"
+  >
+> {
+  let fromConfig: ShakeTunables = {};
+  try {
+    fromConfig = getContextTunables();
+  } catch {
+    /* tunables may be unavailable in isolated unit tests */
+  }
+  return {
+    shakeEnabled: override?.shakeEnabled ?? fromConfig.shakeEnabled ?? true,
+    shakeTriggerPct: override?.shakeTriggerPct ?? fromConfig.shakeTriggerPct ?? DEFAULT_SHAKE_TRIGGER_PCT,
+    shakeProtectWindowChars:
+      override?.shakeProtectWindowChars ??
+      fromConfig.shakeProtectWindowChars ??
+      DEFAULT_PROTECT_WINDOW_CHARS,
+    shakeMinSavingsChars:
+      override?.shakeMinSavingsChars ?? fromConfig.shakeMinSavingsChars ?? DEFAULT_MIN_SAVINGS_CHARS,
+    maxConsecutiveShakeFailures:
+      override?.maxConsecutiveShakeFailures ??
+      fromConfig.maxConsecutiveShakeFailures ??
+      DEFAULT_MAX_CONSECUTIVE_FAILURES,
+  };
+}
 
 /**
  * Optional test/debug override for forcing shake in small smoke runs.
@@ -76,9 +120,10 @@ function estimateTotalChars(messages: Message[]): number {
 
 /**
  * Estimate tokens from chars (rough heuristic).
+ * Prefer provider usage when available; this is the fallback.
  */
 export function estimateTokens(chars: number): number {
-  return Math.ceil(chars / (2 + 2));
+  return Math.ceil(chars / 4);
 }
 
 /**
@@ -88,11 +133,15 @@ export function estimateTokens(chars: number): number {
 export function shouldShake(
   messages: Message[],
   contextWindowTokens: number,
+  tunables?: ShakeTunables,
 ): boolean {
+  const t = resolveShakeTunables(tunables);
+  if (!t.shakeEnabled) return false;
   const totalChars = estimateTotalChars(messages);
   const totalTokens = estimateTokens(totalChars);
   const effectiveWindow = effectiveContextWindowTokens(contextWindowTokens);
-  const threshold = Math.floor(effectiveWindow * SHAKE_TRIGGER_PCT / 100);
+  const pct = Math.min(99, Math.max(1, t.shakeTriggerPct));
+  const threshold = Math.floor((effectiveWindow * pct) / 100);
   return totalTokens > threshold;
 }
 
@@ -259,21 +308,28 @@ function getShakeReplacement(
 export function shakeConversation(
   messages: Message[],
   contextWindowTokens: number,
+  tunables?: ShakeTunables,
 ): ShakeResult {
-  const totalChars = estimateTotalChars(messages);
+  const t = resolveShakeTunables(tunables);
+  if (!t.shakeEnabled) {
+    return { shaken: 0, savedChars: 0, performed: false };
+  }
 
   // Check if we should shake
-  if (!shouldShake(messages, contextWindowTokens)) {
+  if (!shouldShake(messages, contextWindowTokens, t)) {
     return { shaken: 0, savedChars: 0, performed: false };
   }
 
   // Calculate the protect window: keep the most recent tool results intact.
-  // Protect ~1/3 of the tool result chars, minimum 200, capped at 12K.
+  // Protect ~1/3 of the tool result chars, minimum 200, capped at tunable.
   // This ensures recent results survive while old ones get shaken.
   const toolResultChars = messages
     .filter(m => m.role === "tool")
     .reduce((sum, m) => sum + (m.content?.length ?? 0), 0);
-  const protectWindow = Math.min(PROTECT_WINDOW_CHARS, Math.max(200, Math.floor(toolResultChars / 3)));
+  const protectWindow = Math.min(
+    t.shakeProtectWindowChars,
+    Math.max(200, Math.floor(toolResultChars / 3)),
+  );
 
   let protectedFromEnd = 0;
   let firstUnprotectedIdx = messages.length;
@@ -330,13 +386,15 @@ export function shakeConversation(
   }
 
   // Only return as performed if savings are meaningful
-  if (savedChars < MIN_SAVINGS_CHARS) {
+  if (savedChars < t.shakeMinSavingsChars) {
     return { shaken: 0, savedChars: 0, performed: false };
   }
 
   return { shaken, savedChars, performed: true };
 }
-export const MAX_CONSECUTIVE_FAILURES = 3;
+
+/** @deprecated Prefer resolveShakeTunables().maxConsecutiveShakeFailures */
+export const MAX_CONSECUTIVE_FAILURES = DEFAULT_MAX_CONSECUTIVE_FAILURES;
 
 export interface PTLRecoveryOptions {
   maxDrops: number;
@@ -386,17 +444,19 @@ export function shakeConversationWithBreaker(
   messages: Message[],
   contextWindowTokens: number,
   consecutiveFailures: number = 0,
+  tunables?: ShakeTunables,
 ): {
   result: ShakeResult & { aborted?: boolean };
   nextFailures: number;
 } {
-  if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+  const t = resolveShakeTunables(tunables);
+  if (consecutiveFailures >= t.maxConsecutiveShakeFailures) {
     return {
       result: { shaken: 0, savedChars: 0, performed: false, aborted: true },
       nextFailures: consecutiveFailures,
     };
   }
-  const result = shakeConversation(messages, contextWindowTokens);
+  const result = shakeConversation(messages, contextWindowTokens, t);
   const nextFailures = result.performed ? 0 : consecutiveFailures + 1;
   return { result, nextFailures };
 }

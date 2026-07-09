@@ -37,6 +37,10 @@ export const BashOutputSchema = z.object({
   persisted_output_path: z.string().optional(),
   persisted_output_size: z.number().optional(),
   background_task_id: z.string().optional(),
+  /** True when the inline preview includes the head of the full output. */
+  head_available: z.boolean().optional(),
+  /** True when the inline preview includes the tail of the full output. */
+  tail_available: z.boolean().optional(),
 });
 
 export type BashOutput = z.infer<typeof BashOutputSchema>;

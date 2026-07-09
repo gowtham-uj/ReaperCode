@@ -1,6 +1,5 @@
 // @ts-nocheck — stale tool surface cleanup in progress; will be removed once all refs are cleaned
 import { createHash, randomUUID } from "node:crypto";
-import { shakeConversation } from "../context/shake.js";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdir,  readFile,  writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -44,6 +43,7 @@ import {
 import { generateStructuredJson } from "../model/json-response.js";
 import type { ModelGateway, ModelRole, ResolvedModelProfile } from "../model/types.js";
 import { pushModelCallContext } from "../model/observability.js";
+import { setModelCallLogContext } from "../logging/model-call-log.js";
 import { appendFailureMemory, loadRecentFailureMemory } from "../recovery/failure-memory.js";
 import { commitVerifiedRunKnowledge, loadVerifiedLessons } from "../recovery/verified-memory.js";
 import { RecoverySession } from "../recovery/session.js";
@@ -75,7 +75,7 @@ import { classifyShellCommandSemantics } from "../tools/command-semantics.js";
 import { loadMcpServersFromFile } from "../tools/mcp/config.js";
 import { MergedToolRegistry } from "../tools/mcp/registry.js";
 import { ToolCallSchema, type ToolCall, type ToolResult } from "../tools/types.js";
-import { streamMainAgentResponse } from "./main-agent-node.js";
+import { streamMainAgentResponse, isFinalAssistantSummary } from "./main-agent-node.js";
 import type { GenerateRequest } from "../model/types.js";
 import { batchNeedsMutationCheckpoint, createCheckpoint } from "./checkpoints.js";
 import { getGitDiffState, getGitStatusState, summarizeGitDiffState } from "./diff-state.js";
@@ -509,6 +509,12 @@ export class RuntimeEngine {
     // once per run so runtime model calls share the same cacheable prefix. supported providers
     // use the literal prefix bytes as the cache key.
     const systemPromptPrefix = buildRuntimeAgentSystemPrompt("executor");
+    // Ensure per-call JSON + readable .txt transcripts are written under
+    // `.reaper/runs/<runId>/model-calls/` for every generate/stream.
+    setModelCallLogContext({
+      workspaceRoot: this.input.workspaceRoot,
+      runId: runContext.runId,
+    });
     const releaseModelCallContext = pushModelCallContext({
       workspaceRoot: this.input.workspaceRoot,
       runId: runContext.runId,
@@ -523,6 +529,7 @@ export class RuntimeEngine {
       return await this.runInner({ startedAt, initialRequest, runContext });
     } finally {
       releaseModelCallContext();
+      setModelCallLogContext(undefined);
     }
   }
 
@@ -806,6 +813,20 @@ export class RuntimeEngine {
         ctxHooks = createContextEngineeringHooks({
           infer: inferSummariser,
           config: this.config as { models?: unknown } as any,
+          // Prefer last provider-reported input tokens as a floor so
+          // shake/full-summary gates track real usage, not only chars/4.
+          countTokens: (msgs) => {
+            const charsEst = Math.ceil(
+              (typeof msgs === "object" && msgs !== null
+                ? JSON.stringify(msgs).length
+                : 0) / 4,
+            );
+            const last = (globalThis as any)[`${getBoot().state.runId}::last-input-tokens`];
+            if (typeof last === "number" && Number.isFinite(last) && last > 0) {
+              return Math.max(charsEst, Math.floor(last));
+            }
+            return charsEst;
+          },
         });
         (this as any).ctxHooks = ctxHooks;
       }
@@ -902,6 +923,7 @@ export class RuntimeEngine {
         const liveToolResults: ToolResult[] = [];
         let lastAssistantMessage = "";
         let loopGuard = 0;
+        let incompleteRecoveryAttempts = 0;
         const resumedConversation = await loadLiveConversationSnapshot(runContext.runDir);
         const liveConversation: GenerateRequest["messages"] = resumedConversation ?? [
           { role: "user", content: cockpit },
@@ -918,6 +940,38 @@ export class RuntimeEngine {
             level: getBoot().state.logLevel,
             content: `[resume] restored ${resumedConversation.length} live conversation message(s) from prior run snapshot`,
           });
+        }
+
+        // Soft-context continuity: prepend session-resume re-anchor when
+        // onBoot stashed one and this is a fresh (non-snapshot) conversation.
+        if (!resumedConversation) {
+          const resumeSlot = (globalThis as any)[`${getBoot().state.runId}::session-resume`];
+          const resume = resumeSlot?.resume;
+          if (resume && typeof resume.reAnchor === "string" && resume.reAnchor.trim().length > 0) {
+            liveConversation.push({
+              role: "user",
+              content: resume.reAnchor,
+            } as any);
+            if (Array.isArray(resume.rehydratedMessages) && resume.rehydratedMessages.length > 0) {
+              for (const msg of resume.rehydratedMessages) {
+                if (msg && typeof msg === "object" && typeof (msg as any).role === "string") {
+                  liveConversation.push(msg as any);
+                }
+              }
+            }
+            delete (globalThis as any)[`${getBoot().state.runId}::session-resume`];
+            await this.trajectoryLogger.write({
+              event_id: randomUUID(),
+              run_id: getBoot().state.runId,
+              session_id: getBoot().state.sessionId,
+              trace_id: getBoot().state.runId,
+              timestamp: new Date().toISOString(),
+              log_schema_version: 1,
+              kind: "assistant_message",
+              level: getBoot().state.logLevel,
+              content: `[session-resume] prepended re-anchor (${resume.stats?.recentTurns ?? 0} turns, ${resume.stats?.summariesAvailable ?? 0} summaries)`,
+            }).catch(() => undefined);
+          }
         }
 
         // ─── Context-engineering: APPLY STASHED FULL-SUMMARY ─────────────
@@ -1125,14 +1179,133 @@ export class RuntimeEngine {
             });
           } catch { /* swallow */ }
 
+          // Stash provider usage for token-native compaction gates.
+          try {
+            const usage = (turn as any).usage;
+            const inputTokens =
+              typeof usage?.inputTokens === "number"
+                ? usage.inputTokens
+                : typeof (turn as any).raw?.usage?.inputTokens === "number"
+                  ? (turn as any).raw.usage.inputTokens
+                  : undefined;
+            if (typeof inputTokens === "number" && inputTokens > 0) {
+              (globalThis as any)[`${getBoot().state.runId}::last-input-tokens`] = inputTokens;
+            }
+          } catch { /* best-effort */ }
+
           const tc = (turn.toolCalls ?? []) as ToolCall[];
           if (turn.content) {
             lastAssistantMessage = turn.content;
+          }
+          // If the provider emitted tool_calls that failed ToolCallSchema after
+          // normalize, surface the parse errors so the model can repair instead
+          // of silently retrying the same broken call (or claiming it ran).
+          const droppedRaw = (turn as any)?.raw?.droppedToolCalls;
+          if (
+            tc.length === 0 &&
+            Array.isArray(droppedRaw) &&
+            droppedRaw.length > 0
+          ) {
+            const detail = droppedRaw
+              .map(
+                (d: { name?: string; id?: string; error?: string }) =>
+                  `- ${d.name ?? "unknown"} (${d.id ?? "?"}): ${d.error ?? "invalid args"}`,
+              )
+              .join("\n");
+            const feedback =
+              `Your previous tool_calls were rejected by the runtime schema and were NOT executed:\n${detail}\n` +
+              `Fix the arguments (or tool name) and emit valid tool_calls. Do not claim those tools already ran.`;
+            liveConversation.push({
+              role: "assistant",
+              content: turn.content ?? "",
+            });
+            liveConversation.push({ role: "user", content: feedback });
+            await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
+            await this.trajectoryLogger
+              .write({
+                event_id: randomUUID(),
+                run_id: getBoot().state.runId,
+                session_id: getBoot().state.sessionId,
+                trace_id: getBoot().state.runId,
+                timestamp: new Date().toISOString(),
+                log_schema_version: 1,
+                kind: "tool_call_parse_error",
+                level: getBoot().state.logLevel,
+                dropped: droppedRaw,
+              } as any)
+              .catch(() => undefined);
+            continue;
           }
           if (tc.length === 0) {
             if (turn.content) {
               liveConversation.push({ role: "assistant", content: turn.content });
               await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
+            }
+            // Premature-stop nudge: model announced next actions in text but
+            // emitted no tool_calls (e.g. "Writing f10-f14 now"). Push once so
+            // it continues instead of treating the announcement as completion.
+            const prematureStopNudgeKey = `${getBoot().state.runId}::premature-stop-nudge`;
+            const alreadyNudged = Boolean((globalThis as any)[prematureStopNudgeKey]);
+            if (
+              !alreadyNudged &&
+              typeof turn.content === "string" &&
+              turn.content.trim().length > 0 &&
+              !isFinalAssistantSummary(turn.content)
+            ) {
+              (globalThis as any)[prematureStopNudgeKey] = true;
+              const nudge =
+                "Your last turn had no tool_calls, but the message does not look like a verified final summary. " +
+                "If work remains, emit concrete tool_calls now (write_file / file_edit / bash / scratchpad). " +
+                "Only finish with a final assistant_message and empty tool_calls after the required verification has actually passed.";
+              liveConversation.push({ role: "user", content: nudge });
+              await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
+              await this.trajectoryLogger
+                .write({
+                  event_id: randomUUID(),
+                  run_id: getBoot().state.runId,
+                  session_id: getBoot().state.sessionId,
+                  trace_id: getBoot().state.runId,
+                  timestamp: new Date().toISOString(),
+                  log_schema_version: 1,
+                  kind: "premature_stop_nudge",
+                  level: getBoot().state.logLevel,
+                  assistant_excerpt: turn.content.slice(0, 400),
+                } as any)
+                .catch(() => undefined);
+              continue;
+            }
+            // Incomplete recovery (OMP): finishReason === "length" means the
+            // model hit the output/context ceiling mid-turn. Shrink context
+            // once and continue so it can finish; only break if recovery fails.
+            if (turn.finishReason === "length" && incompleteRecoveryAttempts < 1) {
+              incompleteRecoveryAttempts += 1;
+              try {
+                const softCapValue = getBoot().state.tokenBudget?.softCap ?? 270_000;
+                const recovered = await ctxHooks.onProviderTokenLimitError({
+                  messages: liveConversation as unknown[],
+                  softCap: softCapValue,
+                  runId: getBoot().state.runId,
+                });
+                if (Array.isArray(recovered?.messages) && recovered.messages.length > 0) {
+                  liveConversation.length = 0;
+                  liveConversation.push(...(recovered.messages as any[]));
+                  await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
+                  await this.trajectoryLogger.write({
+                    event_id: randomUUID(),
+                    run_id: getBoot().state.runId,
+                    session_id: getBoot().state.sessionId,
+                    trace_id: getBoot().state.runId,
+                    timestamp: new Date().toISOString(),
+                    log_schema_version: 1,
+                    kind: "ptl_recovery",
+                    level: getBoot().state.logLevel,
+                    saved_chars: recovered.savedChars ?? 0,
+                    remaining_messages: recovered.messages.length,
+                    reason: "incomplete_length",
+                  } as any).catch(() => undefined);
+                  continue;
+                }
+              } catch { /* fall through to break */ }
             }
             // The model emits its own final assistant turn (with or
             // without text, but no tool calls) when it is done. The
@@ -1285,28 +1458,17 @@ export class RuntimeEngine {
           if (scheduled.aborted) {
             break;
           }
-          // Shake: prune stale tool results from context when approaching
-          // the context window threshold. Ported from oh-my-pi's shake
-          // technique — mechanically replaces old/stale tool results with
-          // short placeholders. No LLM call needed. Triggers only when
-          // context exceeds 50% of the model's context window, not every turn.
-          const contextWindow = getBoot().state.tokenBudget?.softCap ?? 270_000;
-          const shakeResult = shakeConversation(liveConversation as any[], contextWindow);
-          if (shakeResult.performed) {
-            await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
-            await this.trajectoryLogger.write({
-              event_id: randomUUID(),
-              run_id: getBoot().state.runId,
-              session_id: getBoot().state.sessionId,
-              trace_id: getBoot().state.runId,
-              timestamp: new Date().toISOString(),
-              log_schema_version: 1,
-              kind: "context_shake",
-              level: getBoot().state.logLevel,
-              shaken_results: shakeResult.shaken,
-              saved_chars: shakeResult.savedChars,
-            });
-          }
+          // Mid-run maintain (OMP maintainContextMidRun): cheap supersede
+          // prune after each tool batch so read-heavy loops shed stale
+          // results before the next model call. Full shake/summary still
+          // run exclusively via ctxHooks.onBeforeModelCall (single path).
+          try {
+            const { pruneSupersededToolResults } = await import("../context/supersede-prune.js");
+            const mid = pruneSupersededToolResults(liveConversation as any[], { warmPrefixCount: 1 });
+            if (mid.performed) {
+              await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
+            }
+          } catch { /* best-effort */ }
           continue;
         }
         await logModelResponseTrace({
@@ -2336,6 +2498,10 @@ function toCanonicalBuildFastStartTools(tools: AgentToolDescriptor[]): AgentTool
     byName.get("file_find"),
     byName.get("list_directory"),
     byName.get("grep_search"),
+    // Keep continuity + discovery tools on the wire for build-like tasks so
+    // days-long / eval prompts that require scratchpad or search_tools work.
+    byName.get("scratchpad"),
+    byName.get("search_tools"),
   ].filter((tool): tool is AgentToolDescriptor => Boolean(tool));
 }
 

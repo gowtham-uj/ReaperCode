@@ -1,0 +1,27 @@
+{
+  "id": "cd-plan-edit-remember",
+  "title": "Plan, many edits, remember user note across compaction",
+  "suite": "context-days",
+  "difficulty": "stress",
+  "language": "javascript",
+  "softCap": 30000,
+  "prompt": "CRITICAL USER NOTE (must survive compaction): the release codename is AMBER-FOX and must appear in FINAL.md.\n\nTasks:\n1. Write the user note into the scratchpad tool immediately (label=user-note).\n2. Create files f00.js through f19.js under src/batch/ each exporting `export const id = \"fNN\";` (zero-padded).\n3. After every 5 files, append a progress line to the scratchpad.\n4. When done, write FINAL.md containing: the codename AMBER-FOX, the count of files created, and a one-line summary of what you did.\n5. Prefer file tools over bash for file creation. Do not lose the codename even if context is shaken/summarized.\n\nDO NOT stop mid-batch. Announcing \"Writing f10-f14\" in assistant_message does nothing — you must keep emitting write_file tool_calls until f00..f19, FINAL.md, and `npm test` all succeed. Only then finish with a final summary and no tool_calls.\n\nSuccess requires FINAL.md to contain AMBER-FOX and the scratchpad to still mention AMBER-FOX.",
+  "projectFiles": {
+    "package.json": "{\n  \"name\": \"cd-plan-edit-remember\",\n  \"version\": \"1.0.0\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"test\": \"node scripts/verify.mjs\"\n  }\n}\n",
+    "scripts/verify.mjs": "import { readFileSync, readdirSync, existsSync } from \"node:fs\";\nimport assert from \"node:assert/strict\";\n\nconst final = readFileSync(\"FINAL.md\", \"utf8\");\nassert.match(final, /AMBER-FOX/);\nconst files = readdirSync(\"src/batch\").filter((f) => /^f\\d{2}\\.js$/.test(f));\nassert.equal(files.length, 20, `expected 20 batch files, got ${files.length}`);\nfor (const f of files) {\n  const body = readFileSync(`src/batch/${f}`, \"utf8\");\n  const id = f.replace(\".js\", \"\");\n  assert.match(body, new RegExp(`id\\\\s*=\\\\s*[\"']${id}[\"']`));\n}\nconst scratch = existsSync(\".reaper/memory/scratch.md\")\n  ? readFileSync(\".reaper/memory/scratch.md\", \"utf8\")\n  : \"\";\nassert.match(scratch, /AMBER-FOX/);\nconsole.log(\"ok\", files.length);\n",
+    "README.md": "# Context days fixture\nCreate 20 files and preserve the user note AMBER-FOX across compaction.\n"
+  },
+  "verification": {
+    "command": "npm test",
+    "maxIterations": 40
+  },
+  "gates": [
+    { "type": "verification_exit_0" },
+    { "type": "file_contains", "path": "FINAL.md", "contains": "AMBER-FOX" },
+    { "type": "scratchpad_contains", "contains": "AMBER-FOX" },
+    { "type": "file_exists", "path": "src/batch/f00.js" },
+    { "type": "file_exists", "path": "src/batch/f19.js" },
+    { "type": "model_calls_min", "minCount": 2 }
+  ],
+  "notes": "softCap=30k forces shake during 20 writes; scratchpad + FINAL.md prove user-note survival."
+}

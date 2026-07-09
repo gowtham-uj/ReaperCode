@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
@@ -15,9 +16,9 @@ export interface ContextFileLoadOptions {
   userHome?: string;
   /** Defaults to true. */
   trusted?: boolean;
-  /** Per-file byte cap. Defaults to 4KB. */
+  /** Per-file byte cap. Defaults to 8KB. */
   maxFileBytes?: number;
-  /** Total combined byte cap. Defaults to 16KB. */
+  /** Total combined byte cap. Defaults to 32KB. */
   maxTotalBytes?: number;
 }
 
@@ -33,21 +34,30 @@ const TRUSTED_PROJECT_CANDIDATES = [
   ".pi/context.md",
 ];
 
-const PROJECT_CANDIDATES = [
+/** Project rule filenames loaded at workspace root and each ancestor. */
+const PROJECT_RULE_CANDIDATES = [
   "AGENTS.md",
   "AGENTS.MD",
   "CLAUDE.md",
   "CLAUDE.MD",
+  "REAPER.md",
+  "REAPER.MD",
+  ".cursorrules",
 ];
 
 const USER_CANDIDATES = [".config/reaper/context.md", ".pi/context.md", ".reaper/AGENTS.md", ".reaper/AGENTS.MD"];
 
+const DEFAULT_MAX_FILE_BYTES = 8 * 1024;
+const DEFAULT_MAX_TOTAL_BYTES = 32 * 1024;
+
 export async function loadContextFiles(options: ContextFileLoadOptions): Promise<ContextFileLoadResult> {
   const { workspaceRoot, userHome, trusted = true } = options;
-  const maxFileBytes = options.maxFileBytes ?? 4 * 1024;
-  const maxTotalBytes = options.maxTotalBytes ?? 16 * 1024;
+  const maxFileBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
+  const maxTotalBytes = options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
   const files: ContextFile[] = [];
   const diagnostics: string[] = [];
+  /** Content-hash dedup for monorepo ancestor walks (same body → skip). */
+  const seenContentHashes = new Set<string>();
 
   if (trusted) {
     for (const relative of TRUSTED_PROJECT_CANDIDATES) {
@@ -60,9 +70,17 @@ export async function loadContextFiles(options: ContextFileLoadOptions): Promise
     );
   }
 
-  for (const relative of PROJECT_CANDIDATES) {
-    const absolute = path.join(workspaceRoot, relative);
-    await maybeLoad(absolute, relative, "project");
+  // Pi parity: walk workspaceRoot → filesystem root (stop at git root),
+  // loading project rule files with content-hash dedup.
+  for (const dir of collectAncestorDirs(workspaceRoot)) {
+    for (const name of PROJECT_RULE_CANDIDATES) {
+      const absolute = path.join(dir, name);
+      const source =
+        path.resolve(dir) === path.resolve(workspaceRoot)
+          ? name
+          : path.relative(workspaceRoot, absolute) || name;
+      await maybeLoad(absolute, source, "project");
+    }
   }
 
   if (userHome) {
@@ -72,6 +90,8 @@ export async function loadContextFiles(options: ContextFileLoadOptions): Promise
     }
   }
 
+  // Prefer project rules over user when the total budget is tight:
+  // project files are already first in `files`; renderCombined keeps that order.
   const combined = renderCombined(files, maxTotalBytes);
   if (combined.truncated) {
     diagnostics.push(`Combined context files were truncated to ${maxTotalBytes} bytes.`);
@@ -84,6 +104,12 @@ export async function loadContextFiles(options: ContextFileLoadOptions): Promise
       const info = await stat(absolute);
       if (!info.isFile()) return;
       const raw = await readFile(absolute, "utf8");
+      const hash = createHash("sha256").update(raw).digest("hex");
+      if (seenContentHashes.has(hash)) {
+        diagnostics.push(`Skipped duplicate context file '${source}' (same content as an earlier file).`);
+        return;
+      }
+      seenContentHashes.add(hash);
       const bytes = Buffer.byteLength(raw, "utf8");
       const truncated = bytes > maxFileBytes;
       const content = truncated ? truncateBytes(raw, maxFileBytes) : raw;
@@ -95,6 +121,26 @@ export async function loadContextFiles(options: ContextFileLoadOptions): Promise
       // ignore unreadable files
     }
   }
+}
+
+/**
+ * Directories from `start` up to filesystem root, stopping after the
+ * nearest directory that contains `.git` (inclusive of that dir's parents
+ * are not walked — git root is the ceiling).
+ */
+export function collectAncestorDirs(start: string): string[] {
+  const dirs: string[] = [];
+  let current = path.resolve(start);
+  const root = path.parse(current).root;
+  while (true) {
+    dirs.push(current);
+    if (existsSync(path.join(current, ".git"))) break;
+    if (current === root) break;
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return dirs;
 }
 
 function truncateBytes(text: string, maxBytes: number): string {

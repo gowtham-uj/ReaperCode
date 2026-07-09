@@ -47,7 +47,7 @@ export async function buildBashResultOutput(
       const middleBytes = base.persisted_output_size - headChars - tail.length;
       stdout =
         head +
-        `\n\n... ${middleBytes} chars truncated, full output persisted to ${base.persisted_output_path} ...\n\n` +
+        `\n\n... ${middleBytes} chars truncated, full output persisted to ${base.persisted_output_path} (head_available=true, tail_available=${tail.length > 0}) ...\n\n` +
         tail;
     } else {
       stdout = stdout.slice(0, BASH_INPUT_DEFAULTS.PREVIEW_SIZE_CHARS) +
@@ -85,17 +85,51 @@ export async function persistBashOutput(
   stdout: string,
   stderr: string,
   workspaceRoot: string,
-): Promise<{ stdout: string; stderr: string; persistedOutputPath: string; persistedOutputSize: number }> {
+  previewOptions: { headChars?: number; tailChars?: number } = {},
+): Promise<{
+  stdout: string;
+  stderr: string;
+  persistedOutputPath: string;
+  persistedOutputSize: number;
+  headAvailable: boolean;
+  tailAvailable: boolean;
+}> {
   const combined = `=== stdout ===\n${stdout}\n\n=== stderr ===\n${stderr}`;
   const artifactId = randomUUID();
   const dir = path.join(workspaceRoot, ".reaper", "artifacts", "bash");
   await mkdir(dir, { recursive: true });
   const artifactPath = path.join(dir, `${artifactId}.txt`);
   await writeFile(artifactPath, combined, "utf8");
-  const preview = stdout.slice(0, BASH_INPUT_DEFAULTS.PREVIEW_SIZE_CHARS) ||
-    stderr.slice(0, BASH_INPUT_DEFAULTS.PREVIEW_SIZE_CHARS) ||
-    "(output persisted)";
-  return { stdout: preview, stderr: "", persistedOutputPath: artifactPath, persistedOutputSize: Buffer.byteLength(combined, "utf8") };
+
+  // Keep BOTH head and tail in the inline preview so needles in either
+  // end of giant logs remain visible (A/B finding: tail-only lost head needles).
+  const headChars = previewOptions.headChars ?? BASH_INPUT_DEFAULTS.PREVIEW_SIZE_CHARS;
+  const tailChars = previewOptions.tailChars ?? BASH_INPUT_DEFAULTS.PREVIEW_SIZE_CHARS;
+  let preview: string;
+  let headAvailable = false;
+  let tailAvailable = false;
+  if (stdout.length <= headChars + tailChars) {
+    preview = stdout || stderr.slice(0, headChars) || "(output persisted)";
+    headAvailable = stdout.length > 0;
+  } else {
+    const head = stdout.slice(0, headChars);
+    const tail = stdout.slice(-tailChars);
+    preview =
+      head +
+      `\n\n... ${stdout.length - headChars - tailChars} chars truncated; full output at ${artifactPath} ...\n\n` +
+      tail;
+    headAvailable = true;
+    tailAvailable = true;
+  }
+
+  return {
+    stdout: preview,
+    stderr: "",
+    persistedOutputPath: artifactPath,
+    persistedOutputSize: Buffer.byteLength(combined, "utf8"),
+    headAvailable,
+    tailAvailable,
+  };
 }
 
 export function getActivityDescription(input: BashInput): string {
