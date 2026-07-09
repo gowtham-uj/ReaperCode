@@ -103,7 +103,7 @@ interface TunablesCache {
      * equivalent of `event-controller.ts:#scheduleIdleCompaction`.
      */
     idleEnabled: boolean;
-    /** T1 Idle threshold: token-count that triggers idle compaction. */
+    /** T1 Idle threshold: token-count that triggers idle compaction (OMP default 200k). */
     idleThresholdTokens: number;
     /**
      * T1 Idle timeout (clamped to [60, 3600] seconds per OMP).
@@ -191,8 +191,8 @@ const DEFAULTS: TunablesCache = {
     shakeEnabled: true,
     softCap: REAPER_DEFAULT_SOFT_CAP_TOKENS,
     shakeTriggerPct: 60,
-    shakeProtectWindowChars: 20_000,
-    shakeMinSavingsChars: 100,
+    shakeProtectWindowChars: 64_000,
+    shakeMinSavingsChars: 16_000,
     maxConsecutiveShakeFailures: 3,
     ptlRecoveryMaxDrops: 5,
     ptlRecoveryMinChars: 200,
@@ -217,7 +217,7 @@ const DEFAULTS: TunablesCache = {
     modelPromotionTargetRole: "secondary_model" as string | null,
     // T1 Idle Compaction (defaults match OMP — disabled until user opts in).
     idleEnabled: false,
-    idleThresholdTokens: 0,
+    idleThresholdTokens: 200_000,
     idleTimeoutSeconds: 300,
     // T2 Incomplete (length-stop) recovery — on by default.
     incompleteRecoveryEnabled: true,
@@ -292,8 +292,8 @@ export function applyConfigToTunables(config: ReaperConfig): TunablesCache {
       shakeEnabled: Boolean(cm.shakeEnabled ?? true),
       softCap: clampSoftCapTokens(Number(cm.softCap ?? REAPER_DEFAULT_SOFT_CAP_TOKENS)),
       shakeTriggerPct: Number(cm.shakeTriggerPct ?? 60),
-      shakeProtectWindowChars: Number(cm.shakeProtectWindowChars ?? 20_000),
-      shakeMinSavingsChars: Number(cm.shakeMinSavingsChars ?? 100),
+      shakeProtectWindowChars: Number(cm.shakeProtectWindowChars ?? 64_000),
+      shakeMinSavingsChars: Number(cm.shakeMinSavingsChars ?? 16_000),
       maxConsecutiveShakeFailures: Number(cm.maxConsecutiveShakeFailures ?? 3),
       ptlRecoveryMaxDrops: Number(cm.ptlRecoveryMaxDrops ?? 5),
       ptlRecoveryMinChars: Number(cm.ptlRecoveryMinChars ?? 200),
@@ -324,7 +324,7 @@ export function applyConfigToTunables(config: ReaperConfig): TunablesCache {
       })(),
       // T1 Idle Compaction (OMP port).
       idleEnabled: Boolean((cm as any).idleEnabled ?? false),
-      idleThresholdTokens: Number((cm as any).idleThresholdTokens ?? 0),
+      idleThresholdTokens: Number((cm as any).idleThresholdTokens ?? 200_000),
       idleTimeoutSeconds: Math.max(60, Math.min(3600, Number((cm as any).idleTimeoutSeconds ?? 300))),
       // T2 Incomplete (length-stop) recovery.
       incompleteRecoveryEnabled: Boolean((cm as any).incompleteRecoveryEnabled ?? true),

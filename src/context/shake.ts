@@ -18,11 +18,13 @@
 import { getContextTunables } from "../config/config-tunables.js";
 import { normalizeToolResult } from "../tools/tool-result.js";
 
-/** Fallback minimum savings (in chars) when tunables are unavailable. */
-const DEFAULT_MIN_SAVINGS_CHARS = 100;
+/** Fallback minimum savings (in chars) when tunables are unavailable.
+ * OMP shake minSavings ≈ 4_000 tokens → ~16_000 chars. */
+const DEFAULT_MIN_SAVINGS_CHARS = 16_000;
 
-/** Fallback protect window (chars) when tunables are unavailable. */
-const DEFAULT_PROTECT_WINDOW_CHARS = 20_000;
+/** Fallback protect window (chars) when tunables are unavailable.
+ * OMP protectTokens ≈ 16_000 → ~64_000 chars. */
+const DEFAULT_PROTECT_WINDOW_CHARS = 64_000;
 
 /** Minimum tool result size (in chars) to be eligible for shake. */
 const FENCE_MIN_CHARS = 200;

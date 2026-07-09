@@ -117,8 +117,8 @@ export function buildStarterConfig(input: { defaultModel?: string; defaultProvid
     contextManagement: {
       softCap: 270_000,
       shakeTriggerPct: 60,
-      shakeProtectWindowChars: 20_000,
-      shakeMinSavingsChars: 100,
+      shakeProtectWindowChars: 64_000,
+      shakeMinSavingsChars: 16_000,
       maxConsecutiveShakeFailures: 3,
       ptlRecoveryMaxDrops: 5,
       ptlRecoveryMinChars: 200,

@@ -149,9 +149,10 @@ export const ContextManagementConfigSchema = z
       .transform((v) => Math.min(v, REAPER_CONTEXT_HARD_CAP_TOKENS)),
     /** Fire shake around mid-budget so cheap prune runs before summary. */
     shakeTriggerPct: z.number().min(1).max(99).default(60),
-    /** Keep recent tool evidence (KEY harvests, writes) through shake. */
-    shakeProtectWindowChars: z.number().int().nonnegative().default(20_000),
-    shakeMinSavingsChars: z.number().int().nonnegative().default(100),
+    /** Keep recent tool evidence (KEY harvests, writes) through shake. OMP ~16k tokens. */
+    shakeProtectWindowChars: z.number().int().nonnegative().default(64_000),
+    /** OMP shake minSavings ~4k tokens. */
+    shakeMinSavingsChars: z.number().int().nonnegative().default(16_000),
     maxConsecutiveShakeFailures: z.number().int().positive().default(3),
     ptlRecoveryMaxDrops: z.number().int().nonnegative().default(5),
     ptlRecoveryMinChars: z.number().int().positive().default(200),
@@ -226,12 +227,11 @@ export const ContextManagementConfigSchema = z
      */
     idleEnabled: z.boolean().default(false),
     /**
-     * Token-count threshold at which idle compaction fires. Default 0
-     * means "only fire if enabled AND tokens exceed the threshold".
-     * Users should set this to a non-zero value (e.g. 100,000) when
-     * enabling `idleEnabled`.
+     * Token-count threshold at which idle compaction fires. Default
+     * 200_000 matches OMP (~74% of Reaper's 270k hard cap). Idle still
+     * requires `idleEnabled: true`.
      */
-    idleThresholdTokens: z.number().int().min(0).default(0),
+    idleThresholdTokens: z.number().int().min(0).default(200_000),
     /**
      * How long the model must be idle before proactive compaction
      * fires. Clamped to [60, 3600] seconds per OMP's `Math.max(60,
@@ -281,8 +281,8 @@ export const ContextManagementConfigSchema = z
   .default({
     softCap: REAPER_DEFAULT_SOFT_CAP_TOKENS,
     shakeTriggerPct: 60,
-    shakeProtectWindowChars: 20_000,
-    shakeMinSavingsChars: 100,
+    shakeProtectWindowChars: 64_000,
+    shakeMinSavingsChars: 16_000,
     maxConsecutiveShakeFailures: 3,
     ptlRecoveryMaxDrops: 5,
     ptlRecoveryMinChars: 200,
@@ -306,7 +306,7 @@ export const ContextManagementConfigSchema = z
     modelPromotionThresholdRatio: 0.5,
     modelPromotionTargetRole: "secondary_model",
     idleEnabled: false,
-    idleThresholdTokens: 0,
+    idleThresholdTokens: 200_000,
     idleTimeoutSeconds: 300,
     incompleteRecoveryEnabled: true,
     handoffEnabled: false,

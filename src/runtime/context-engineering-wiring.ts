@@ -8,6 +8,8 @@ import { shakeConversationWithBreaker, truncateHeadForPTLRecovery } from "../con
 import { maybeTimeBasedMicrocompact } from "../context/time-microcompact.js";
 import { compactToolHistory } from "../context/history-compaction.js";
 import { pruneSupersededToolResults } from "../context/supersede-prune.js";
+import { pruneToolOutputs } from "../context/tool-output-prune.js";
+import { compactionContextTokens } from "../config/context-budget.js";
 import { getContextTunables } from "../config/config-tunables.js";
 import { tokenUsageFromResponse } from "../context/token-budget.js";
 import { TrajectoryLogger } from "../logging/trajectory.js";
@@ -326,6 +328,20 @@ export function createContextEngineeringHooks(
         /* best-effort */
       }
 
+      // OMP pruneToolOutputs: age-based truncate outside protect window
+      // before shake / full-summary so cheap reclaim happens first.
+      let toolOutputsPruned = 0;
+      let toolOutputSaved = 0;
+      try {
+        const out = pruneToolOutputs(working as Array<Record<string, unknown>>, {
+          warmPrefixCount: 1,
+        });
+        toolOutputsPruned = out.pruned;
+        toolOutputSaved = out.savedChars;
+      } catch {
+        /* best-effort */
+      }
+
       // #6, #7: Shake (cheapest LLM-free pass after supersede)
       const tokensBeforeShake = countTokens(working);
       let shaken = 0;
@@ -351,6 +367,19 @@ export function createContextEngineeringHooks(
       const tokensAfterShake = countTokens(working);
       const tokensSavedByShake = Math.max(0, tokensBeforeShake - tokensAfterShake);
 
+      // OMP compactionContextTokens: floor local estimate with last provider
+      // input tokens so compressed wire payloads cannot under-trigger.
+      let providerInputTokens = 0;
+      try {
+        const stashed = (globalThis as any)[`${runId}::last-input-tokens`];
+        if (typeof stashed === "number" && Number.isFinite(stashed) && stashed > 0) {
+          providerInputTokens = stashed;
+        }
+      } catch {
+        /* best-effort */
+      }
+      const tokensForCompactGate = compactionContextTokens(providerInputTokens, tokensAfterShake);
+
       if (cmTunablesBefore.shakeEnabled && shaken > 0) {
         try {
           await (trajectoryLogger as TrajectoryLogger).write({
@@ -368,6 +397,8 @@ export function createContextEngineeringHooks(
             consecutive_failures: breaker.consecutiveFailures,
             superseded_results: superseded,
             supersede_saved_chars: supersedeSaved,
+            tool_outputs_pruned: toolOutputsPruned,
+            tool_output_saved_chars: toolOutputSaved,
           } as any).catch(() => undefined);
         } catch {
           /* best-effort */
@@ -400,7 +431,7 @@ export function createContextEngineeringHooks(
           cooldown.toolBatchesSince < minBatches &&
           tokensAfterShake < cooldown.baselineTokens + minGrowth,
       );
-      const overThreshold = shouldCompact(tokensAfterShake, softCap);
+      const overThreshold = shouldCompact(tokensForCompactGate, softCap);
       const fireFullSummary =
         fullSummaryEnabledConfig &&
         (forceCompactFromIdleOrIncomplete || (overThreshold && !cooldownActive));
@@ -585,7 +616,7 @@ export function createContextEngineeringHooks(
       return {
         messages: working,
         shaken,
-        savedChars: savedChars + supersedeSaved,
+        savedChars: savedChars + supersedeSaved + toolOutputSaved,
         savedTokens: tokensSavedByShake,
         fullSummarized,
         ptlDrops: 0,

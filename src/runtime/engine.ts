@@ -858,12 +858,14 @@ export class RuntimeEngine {
       }
       state = mutableState;
 
-      const system = buildMainAgentSystemPrompt(state);
       const allGeneralAgentTools = buildGeneralAgentTools();
       const generalAgentTools = selectGeneralAgentToolsForTurn({
         request: getRequest(),
         state,
         tools: allGeneralAgentTools,
+      });
+      const system = buildMainAgentSystemPrompt(state, {
+        availableTools: generalAgentTools,
       });
       const cockpit = buildMainAgentCockpit(
         {
@@ -924,6 +926,8 @@ export class RuntimeEngine {
         let lastAssistantMessage = "";
         let loopGuard = 0;
         let incompleteRecoveryAttempts = 0;
+        let emptyStopRetries = 0;
+        const EMPTY_STOP_MAX_RETRIES = 3;
         const resumedConversation = await loadLiveConversationSnapshot(runContext.runDir);
         const liveConversation: GenerateRequest["messages"] = resumedConversation ?? [
           { role: "user", content: cockpit },
@@ -1237,6 +1241,42 @@ export class RuntimeEngine {
             continue;
           }
           if (tc.length === 0) {
+            const assistantText = typeof turn.content === "string" ? turn.content.trim() : "";
+            // OMP #handleEmptyAssistantStop: empty stop is a harness glitch —
+            // retry a few times. Non-empty text-only stop is model-owned.
+            if (
+              !assistantText &&
+              emptyStopRetries < EMPTY_STOP_MAX_RETRIES &&
+              (!turn.finishReason ||
+                turn.finishReason === "stop" ||
+                turn.finishReason === "end_turn" ||
+                turn.finishReason === "toolUse")
+            ) {
+              emptyStopRetries += 1;
+              liveConversation.push({
+                role: "user",
+                content:
+                  "Your previous turn returned no tool_calls and an empty assistant_message. " +
+                  "Either take the next concrete action with structured tool_calls, or emit a " +
+                  "short final summary and stop. Do not return empty again.",
+              });
+              await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
+              await this.trajectoryLogger
+                .write({
+                  event_id: randomUUID(),
+                  run_id: getBoot().state.runId,
+                  session_id: getBoot().state.sessionId,
+                  trace_id: getBoot().state.runId,
+                  timestamp: new Date().toISOString(),
+                  log_schema_version: 1,
+                  kind: "empty_stop_retry",
+                  level: getBoot().state.logLevel,
+                  attempt: emptyStopRetries,
+                  max_attempts: EMPTY_STOP_MAX_RETRIES,
+                } as any)
+                .catch(() => undefined);
+              continue;
+            }
             if (turn.content) {
               liveConversation.push({ role: "assistant", content: turn.content });
               await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
@@ -1275,8 +1315,7 @@ export class RuntimeEngine {
               } catch { /* fall through to break */ }
             }
             // The model owns the stop. A turn with no structured tool_calls
-            // is terminal — no nudges, no verification holds, no forced
-            // continuation. Textual tool markup is simply ignored.
+            // and non-empty text (or exhausted empty-stop retries) is terminal.
             if (
               !turn.finishReason ||
               turn.finishReason === "stop" ||
@@ -2240,28 +2279,24 @@ export class RuntimeEngine {
       return "summarize";
     };
     const routeAfterToolValidation = (state: GraphState) => {
-      // The model owns the loop. We only run validation when the model
-      // asked for tools; otherwise we summarize.
-      if (state.runtimeBlockers.length > 0 && !(state.plannedToolCalls?.length)) return "main_agent";
-      // Model returned final text and chose to stop. Do not force another turn.
-      if (state.plannedToolCalls?.length === 0 && state.assistantMessage?.trim()) return "summarize";
-      if (state.split?.completionSignal && (state.split.executableToolCalls.length ?? 0) === 0) return "main_agent";
+      // Model owns the loop. Never force another main_agent turn after a
+      // text-only stop — blockers are advisory in the cockpit only.
+      if (state.plannedToolCalls?.length === 0) return "summarize";
       if ((state.split?.executableToolCalls.length ?? 0) > 0) return "permission_check";
+      // Invalid tool batch with no executable calls: let the model repair
+      // only when it still intended tools (plannedToolCalls non-empty above).
       return "main_agent";
     };
     const routeAfterQueue = (state: GraphState) => {
-      // The model owns the loop. Loop back to main_agent so the model
-      // can decide its next move.
+      // After tools execute, return to main_agent so the model decides next.
       if (state.mode !== "autonomous") return "verify";
       return "main_agent";
     };
     const routeAfterVerify = (state: GraphState) => {
-      // The model owns the loop. If verification ran, hand back to
-      // main_agent (or summarize if it succeeded). Non-autonomous
-      // mode unconditionally summarizes.
+      // Model owns stop. Verification is observational — do not force
+      // another main_agent turn when the model already stopped.
       if (state.mode !== "autonomous") return "summarize";
-      if (state.explicitVerification?.ok) return "summarize";
-      return "main_agent";
+      return "summarize";
     };
 
     type RuntimeNodeName =

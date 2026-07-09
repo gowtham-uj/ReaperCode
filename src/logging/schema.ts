@@ -163,6 +163,8 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
 	    consecutive_failures: z.number().int().min(0).optional(),
 	    superseded_results: z.number().int().min(0).optional(),
 	    supersede_saved_chars: z.number().int().min(0).optional(),
+	    tool_outputs_pruned: z.number().int().min(0).optional(),
+	    tool_output_saved_chars: z.number().int().min(0).optional(),
 	  }),
 	  // Bash head+tail: emitted by the context-engineering wiring's
 	  // onAfterToolResult hook when a bash tool result had been truncated
@@ -307,6 +309,12 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
 	    reason: z.string().min(1),
 	    latency_ms: z.number().int().min(0).optional(),
 	    resolved_on_primary: z.boolean(),
+	  }),
+	  CommonLogFieldsSchema.extend({
+	    kind: z.literal("empty_stop_retry"),
+	    level: z.enum(["info", "debug", "trace"]),
+	    attempt: z.number().int().min(1).optional(),
+	    max_attempts: z.number().int().min(1).optional(),
 	  }),
 	  CommonLogFieldsSchema.extend({
 	    kind: z.literal("premature_stop_nudge"),

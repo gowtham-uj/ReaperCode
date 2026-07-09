@@ -6,7 +6,7 @@ import {
   buildMainAgentSystemPrompt,
 } from "../../src/runtime/main-agent-prompt.js";
 
-test("main-agent cockpit includes all required sections", () => {
+test("main-agent cockpit includes required OMP-aligned sections", () => {
   const cockpit = buildMainAgentCockpit(
     {
       currentPlan: [{ id: "inspect", title: "Inspect repo" }],
@@ -37,17 +37,16 @@ test("main-agent cockpit includes all required sections", () => {
     "Runtime Blockers",
     "Running Subagents",
     "Completed Subagent Results",
-    "Verification State",
     "Budget",
-    "Available Tools",
   ]) {
     assert.match(cockpit, new RegExp(`## ${escapeRegExp(section)}`));
   }
 
   assert.match(cockpit, /Implement Part 8/);
-  // Available Tools is names-only (schemas live on API tools[]).
-  assert.match(cockpit, /- read_file\b/);
-  assert.doesNotMatch(cockpit, /read_file: Read file content/);
+  // Tool inventory moved to system prompt (OMP toolListMode); not in cockpit.
+  assert.doesNotMatch(cockpit, /## Available Tools/);
+  assert.doesNotMatch(cockpit, /## Verification State/);
+  assert.doesNotMatch(cockpit, /## Tool Shortlist/);
 });
 
 test("main-agent system prompt includes required requirements text", () => {
@@ -59,14 +58,24 @@ test("main-agent system prompt includes required requirements text", () => {
     "STOP:",
     "no tool_calls",
     "Do not call complete_task",
-    "EDIT PATH",
+    "Edit path",
     "file_view",
     "file_edit",
-    "ESCAPE:",
+    "Escape",
+    "Delivery contract",
   ]) {
-    assert.match(system, new RegExp(escapeRegExp(requiredText)));
+    assert.match(system, new RegExp(escapeRegExp(requiredText), "i"));
   }
   assert.doesNotMatch(system, /\bscratchpad\b/i);
+});
+
+test("main-agent system prompt includes compact tool inventory when provided", () => {
+  const system = buildMainAgentSystemPrompt({}, {
+    availableTools: [{ name: "read_file" }, { name: "bash" }],
+  });
+  assert.match(system, /# Tool inventory/);
+  assert.match(system, /- read_file\b/);
+  assert.match(system, /- bash\b/);
 });
 
 test("main-agent cockpit compacts long tool history instead of replaying full file contents", () => {
@@ -101,25 +110,18 @@ test("main-agent cockpit compacts long tool history instead of replaying full fi
   assert.doesNotMatch(cockpit, new RegExp(escapeRegExp(longContent)));
 });
 
-test("main-agent cockpit caps long tool descriptions", () => {
+test("main-agent system prompt lists tools without long descriptions", () => {
   const longDescription = "word ".repeat(120);
-  const cockpit = buildMainAgentCockpit(
-    {},
-    { payload: { prompt: "Use tools" } },
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    { availableTools: [{ name: "very_verbose_tool", description: longDescription }] },
-  );
+  const system = buildMainAgentSystemPrompt({}, {
+    availableTools: [{ name: "very_verbose_tool", description: longDescription }],
+  });
 
-  assert.match(cockpit, /very_verbose_tool/);
-  // Descriptions are omitted from cockpit (API tools[] carries schemas).
-  assert.doesNotMatch(cockpit, /word word word/);
-  assert.ok(cockpit.length < longDescription.length + 1200);
+  assert.match(system, /- very_verbose_tool\b/);
+  // Descriptions are omitted from system inventory (API tools[] carries schemas).
+  assert.doesNotMatch(system, /word word word/);
 });
 
-test("main-agent cockpit renders prepared context and tool shortlist compactly", () => {
+test("main-agent cockpit renders prepared context compactly without tool shortlist", () => {
   const longDescription = "Read a file from disk with many details. ".repeat(20);
   const cockpit = buildMainAgentCockpit(
     {
@@ -155,7 +157,8 @@ test("main-agent cockpit renders prepared context and tool shortlist compactly",
   assert.match(cockpit, /files \(3\): package\.json, README\.md, src\/index\.js/);
   assert.match(cockpit, /--- package\.json score=0\.988 reason=manifest and test command/);
   assert.match(cockpit, /node --test/);
-  assert.match(cockpit, /- read_file \[0\.91\] — Read a file/);
+  assert.doesNotMatch(cockpit, /## Tool Shortlist/);
+  assert.doesNotMatch(cockpit, /- read_file \[0\.91\]/);
   assert.doesNotMatch(cockpit, /\"fileTree\"/);
   assert.doesNotMatch(cockpit, /\"toolShortlist\"/);
   assert.doesNotMatch(cockpit, /\"description\"/);

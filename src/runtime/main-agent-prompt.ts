@@ -1,6 +1,5 @@
 import { compactToolHistory, renderToolResultForModel } from "../context/history-compaction.js";
 import { renderSessionSummaryForCockpit, type SessionSummary } from "../context/session-summary.js";
-import { toolRegistry } from "../tools/registry.js";
 import type { ToolResult } from "../tools/types.js";
 import { renderPlanForCockpit, renderTodoForCockpit, type PlanState, type TodoState } from "./plan-state.js";
 
@@ -33,6 +32,11 @@ export { buildMainAgentSystemPrompt, MAIN_AGENT_SYSTEM_PROMPT_TEXT, REAPER_MAIN_
  * because each turn the cached prefix up to the volatile boundary is
  * reused without re-tokenizing.
  */
+/**
+ * OMP-aligned cockpit: volatile run state only.
+ * Stable policy + tool inventory live in the system prompt.
+ * Verification / Available Tools are not stop gates in the cockpit.
+ */
 const SYSTEM_TIER_SECTIONS: ReadonlyArray<{ name: string; kind: "system" | "stable" | "volatile" }> = [
   { name: "User Request", kind: "volatile" },
   { name: "Build Task Guidance", kind: "volatile" },
@@ -40,7 +44,6 @@ const SYSTEM_TIER_SECTIONS: ReadonlyArray<{ name: string; kind: "system" | "stab
   { name: "Task Contract", kind: "stable" },
   { name: "Repo Snapshot", kind: "stable" },
   { name: "Prepared Context", kind: "stable" },
-  { name: "Tool Shortlist", kind: "stable" },
   { name: "Skills / Mentions", kind: "stable" },
   { name: "Context Files", kind: "stable" },
   { name: "Current Plan", kind: "volatile" },
@@ -50,9 +53,7 @@ const SYSTEM_TIER_SECTIONS: ReadonlyArray<{ name: string; kind: "system" | "stab
   { name: "Runtime Blockers", kind: "volatile" },
   { name: "Running Subagents", kind: "volatile" },
   { name: "Completed Subagent Results", kind: "volatile" },
-  { name: "Verification State", kind: "volatile" },
   { name: "Budget", kind: "volatile" },
-  { name: "Available Tools", kind: "stable" },
 ];
 
 const COCKPIT_SECTIONS = SYSTEM_TIER_SECTIONS.map((section) => section.name) as readonly string[];
@@ -158,7 +159,6 @@ export function buildMainAgentCockpit(
     "Task Contract": contract,
     "Repo Snapshot": repoInspection ?? pickFirst(stateRecord, ["repoInspection", "repoSnapshot"]),
     "Prepared Context": renderPreparedContext(pickFirst(stateRecord, ["contentPrep", "preparedContext"])),
-    "Tool Shortlist": renderToolShortlist(pickFirst(stateRecord, ["contentPrep", "toolShortlist"])),
     "Skills / Mentions": renderSkillsAndMentions(pickFirst(stateRecord, ["contentPrep"])),
     "Context Files": renderContextFiles(pickFirst(stateRecord, ["contentPrep", "contextFiles"])),
     "Current Plan": renderPlanSection(pickFirst(stateRecord, ["planState", "currentPlan", "plan", "executionPlan", "steps"])),
@@ -171,10 +171,10 @@ export function buildMainAgentCockpit(
     "Runtime Blockers": pickFirst(stateRecord, ["runtimeBlockers", "blockers", "feedback"]),
     "Running Subagents": pickFirst(stateRecord, ["runningSubagents", "activeSubagents"]),
     "Completed Subagent Results": pickFirst(stateRecord, ["completedSubagentResults", "backgroundSubagentResults", "subagentResults"]),
-    "Verification State": verificationState,
     Budget: budgetState,
-    "Available Tools": renderAvailableTools(options.availableTools),
   };
+  void verificationState;
+  void options.availableTools;
 
   return [
     "# Main Agent Cockpit",
@@ -233,26 +233,17 @@ export function detectBuildLikeTask(request: unknown): boolean {
 }
 
 function renderBuildTaskGuidance(): string {
+  // Lean OMP-style advisory — not a stop gate.
   return [
-    "BUILD task: ship the codebase, not a plan.",
-    "- Skip update_plan / update_todo; ignore plan/todo cockpit sections.",
-    "- First message: short numbered checklist (5–12 artifacts) in assistant_message.",
-    "- Prefer many small write_file / file_edit calls; do not re-read files you just wrote.",
-    "- bash for install/test/build/smoke only — not cat/ls of your own writes.",
-    "- Verify every few writes; run the spec's required commands before the final summary.",
-    "- Finish with a concise final assistant_message (files, commands, status) and no tool_calls.",
+    "BUILD task: ship artifacts, not a plan.",
+    "- Prefer write_file / file_edit; skip plan/todo churn.",
+    "- Verify with the required commands, then stop with a short final summary.",
   ].join("\n");
 }
 
 function renderSessionSummary(value: unknown): string {
   if (!value) return "None.";
   return renderSessionSummaryForCockpit(value as SessionSummary | undefined);
-}
-
-function renderAvailableTools(tools?: Array<{ name: string; description?: string }>): string {
-  const entries = tools ?? Object.entries(toolRegistry).map(([name, spec]) => ({ name, description: spec.description }));
-  // Names only — full schemas already ship on the API tools[] surface.
-  return entries.map((tool) => `- ${tool.name}`).join("\n");
 }
 
 function renderRecentToolResultsSection(value: unknown, options: MainAgentCockpitOptions): unknown {
@@ -412,24 +403,6 @@ function renderPreparedContext(value: unknown): unknown {
     }
   }
   return lines.length > 0 ? lines.join("\n") : "No prepared context.";
-}
-
-function renderToolShortlist(value: unknown): unknown {
-  const maybeRecord = asRecord(value);
-  const shortlist = Array.isArray(value)
-    ? value
-    : maybeRecord && Array.isArray(maybeRecord.toolShortlist)
-      ? maybeRecord.toolShortlist
-      : undefined;
-  if (!shortlist) return value;
-  const lines = shortlist.slice(0, 24).flatMap((entry) => {
-    const record = asRecord(entry);
-    if (!record || typeof record.name !== "string") return [];
-    const description = typeof record.description === "string" ? ` — ${truncateOneLine(record.description, 180)}` : "";
-    const score = typeof record.score === "number" ? ` [${Number(record.score.toFixed(2))}]` : "";
-    return [`- ${record.name}${score}${description}`];
-  });
-  return lines.length > 0 ? lines.join("\n") : "No shortlisted tools.";
 }
 
 function renderSkillsAndMentions(value: unknown): unknown {
