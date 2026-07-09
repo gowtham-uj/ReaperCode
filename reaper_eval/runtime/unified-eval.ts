@@ -90,6 +90,8 @@ export async function runUnifiedEval(options: UnifiedEvalOptions): Promise<Unifi
         ...((config as any).contextManagement ?? {}),
         softCap: task.softCap,
         shakeEnabled: true,
+        // Fire shake earlier under stress so layers trip before the model finishes.
+        shakeTriggerPct: 25,
         fullSummaryEnabled: true,
         bashHeadTailEnabled: true,
         bashPersistThresholdChars: bashThreshold,
@@ -258,6 +260,7 @@ async function writeTaskSoftCap(workspaceRoot: string, task: EvalTask): Promise<
     ...((existing.contextManagement as object) ?? {}),
     softCap: task.softCap,
     shakeEnabled: true,
+    shakeTriggerPct: 25,
     fullSummaryEnabled: true,
     bashHeadTailEnabled: true,
     bashPersistThresholdChars: bashThreshold,
