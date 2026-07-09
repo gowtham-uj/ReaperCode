@@ -1264,9 +1264,9 @@ export class RuntimeEngine {
             if (shouldNudge) {
               (globalThis as any)[prematureStopNudgeKey] = nudgeCount + 1;
               const nudge = hasFakeToolMarkup
-                ? "Your last turn embedded tool intent as text (`<tool_call>...`) instead of structured tool_calls, so nothing executed. " +
-                  "Re-emit the same actions as real tool_calls (write_file / file_edit / bash / scratchpad / file_view). " +
-                  "Do not claim tools already ran."
+                ? "Your last turn put tool intent in assistant text (`<tool_call>...` or similar) instead of the OpenAI-compatible structured tool_calls protocol. " +
+                  "Textual tool markup is ignored and never executed. Re-send the same actions as real tool_calls " +
+                  "(write_file / file_edit / bash / scratchpad / file_view). Do not claim those tools already ran."
                 : requiredVerificationPending
                   ? "Your last turn had no tool_calls, but the required verification command has not succeeded yet. " +
                     "Run the verification (e.g. npm test / the task's verification command) via bash and only then finish with a final summary."

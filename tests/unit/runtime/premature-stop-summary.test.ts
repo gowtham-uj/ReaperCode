@@ -1,10 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  isFinalAssistantSummary,
-  recoverEmbeddedToolCallsFromText,
-} from "../../../src/runtime/main-agent-node.js";
+import { isFinalAssistantSummary } from "../../../src/runtime/main-agent-node.js";
 
 test("isFinalAssistantSummary rejects mid-batch action announcements", () => {
   assert.equal(
@@ -42,31 +39,11 @@ test("isFinalAssistantSummary accepts verified completion summaries", () => {
   );
 });
 
-test("isFinalAssistantSummary rejects embedded tool_call markup", () => {
+test("isFinalAssistantSummary rejects embedded tool_call markup (never treat as done)", () => {
   assert.equal(
     isFinalAssistantSummary(
       `I'll execute steps 1-3 now.\n\n<tool_call>{"name":"scratchpad","parameters":{"action":"append","note":"STRESS-TOKEN-991"}}</tool_call>`,
     ),
     false,
-  );
-});
-
-test("recoverEmbeddedToolCallsFromText parses MiniMax-style tool_call markup", () => {
-  const recovered = recoverEmbeddedToolCallsFromText(
-    `Starting.\n<tool_call>{"name":"scratchpad","parameters":{"action":"append","label":"user-note","note":"STRESS-TOKEN-991"}}\\n{"name":"bash","parameters":{"cmd":"cat big/logdump.txt","description":"Full cat","timeout":30}}</tool_call>`,
-  );
-  assert.ok(recovered.calls.length >= 2, `expected >=2 calls, got ${recovered.calls.length}: ${JSON.stringify(recovered)}`);
-  assert.equal(recovered.calls[0]?.name, "scratchpad");
-  assert.equal(recovered.calls[1]?.name, "bash");
-});
-
-test("recoverEmbeddedToolCallsFromText parses escaped-quote MiniMax dumps", () => {
-  const recovered = recoverEmbeddedToolCallsFromText(
-    `<tool_call>{\\"name\\": \\"scratchpad\\", \\"parameters\\": {\\"action\\": \\"append\\", \\"label\\": \\"user-note\\", \\"note\\": \\"STRESS-TOKEN-991\\"}}\\n{\\"name\\": \\"bash\\", \\"parameters\\": {\\"cmd\\": \\"cat big/logdump.txt\\", \\"timeout\\": 30}}\\n{\\"name\\": \\"file_view\\", \\"parameters\\": {\\"path\\": \\"docs/alpha.md\\"}}</tool_call>`,
-  );
-  assert.equal(recovered.calls.length, 3, JSON.stringify(recovered));
-  assert.deepEqual(
-    recovered.calls.map((c) => c.name),
-    ["scratchpad", "bash", "file_view"],
   );
 });
