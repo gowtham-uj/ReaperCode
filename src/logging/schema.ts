@@ -159,6 +159,10 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
 	    level: z.enum(["info", "debug", "trace"]),
 	    shaken_results: z.number().int().min(0),
 	    saved_chars: z.number().int().min(0),
+	    saved_tokens: z.number().int().min(0).optional(),
+	    consecutive_failures: z.number().int().min(0).optional(),
+	    superseded_results: z.number().int().min(0).optional(),
+	    supersede_saved_chars: z.number().int().min(0).optional(),
 	  }),
 	  // Bash head+tail: emitted by the context-engineering wiring's
 	  // onAfterToolResult hook when a bash tool result had been truncated
@@ -201,6 +205,8 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
 	      kept_messages: z.number().int().min(0).optional(),
 	      ptl_drops: z.number().int().min(0).optional(),
 	      saved_chars: z.number().int().min(0).optional(),
+	      /** True when full-summary blocked the model call (OMP runAutoCompaction). */
+	      blocking: z.boolean().optional(),
 	      }),
 	      // T3 Handoff summary: smaller-context alternative to
 	      // full_summary. Same schema shape, different `kind` so the
@@ -215,6 +221,7 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
 	        ptl_drops: z.number().int().min(0).optional(),
 	        saved_chars: z.number().int().min(0).optional(),
 	        handoff_kind: z.string().optional(),
+	        blocking: z.boolean().optional(),
 	      }),
 	      // T1 Idle compaction: emitted when setTimeout fires after
 	      // `idleTimeoutSeconds` of model-idle time and tokens exceed
