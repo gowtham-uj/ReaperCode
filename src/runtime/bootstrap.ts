@@ -89,7 +89,10 @@ export function bootPhase0Runtime(input: Phase0BootstrapInput): Phase0BootstrapR
     sessionProtocolVersion: 1,
     userIntentSummary: input.userIntentSummary ?? "Phase 0 bootstrapped session",
     tokenBudget: {
-      softCap: resolveSoftCap({ workspaceRoot: input.workspaceRoot, config }),
+      softCap: resolveSoftCap({
+        ...(input.workspaceRoot !== undefined ? { workspaceRoot: input.workspaceRoot } : {}),
+        config,
+      }),
       inputTokens: 0,
       outputTokens: 0,
     },

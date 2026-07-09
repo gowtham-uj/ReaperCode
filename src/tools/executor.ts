@@ -1316,7 +1316,14 @@ export class ToolExecutor {
       }
       case "scratchpad": {
         const scratchArgs = toolRegistry.scratchpad.argsSchema.parse(call.args);
-        return executeScratchpad(scratchArgs, { workspaceRoot: this.options.workspaceRoot });
+        const normalized: {
+          action: "append" | "read" | "clear";
+          note?: string;
+          label?: string;
+        } = { action: scratchArgs.action };
+        if (typeof scratchArgs.note === "string") normalized.note = scratchArgs.note;
+        if (typeof scratchArgs.label === "string") normalized.label = scratchArgs.label;
+        return executeScratchpad(normalized, { workspaceRoot: this.options.workspaceRoot });
       }
       case "search_memory": {
         const memArgs = toolRegistry.search_memory.argsSchema.parse(call.args);

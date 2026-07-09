@@ -71,8 +71,11 @@ function findToolMeta(
   }
   const useless =
     toolMsg?.useless === true ||
-    (toolMsg?.meta && typeof toolMsg.meta === "object" && (toolMsg.meta as Record<string, unknown>).useless === true);
-  return { name, args, useless };
+    (toolMsg?.meta !== undefined &&
+      typeof toolMsg.meta === "object" &&
+      toolMsg.meta !== null &&
+      (toolMsg.meta as Record<string, unknown>).useless === true);
+  return { name, args, ...(useless ? { useless: true as const } : {}) };
 }
 
 /**
