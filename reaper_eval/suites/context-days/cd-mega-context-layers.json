@@ -55,5 +55,5 @@
       "minCount": 3
     }
   ],
-  "notes": "softCap=3.5k + full bash cat. After trajectory schema fix, full_summary events should appear. context_shake gated separately when live tool messages are shake-eligible."
+  "notes": "softCap=3.5k + full bash cat. Primary stress evidence: bash_head_tail + full_summary trajectory events (schema must accept blocking/extras). Scratchpad survival required. RESULT.json/npm test are secondary completion checks \u2014 MiniMax-M2.7 sometimes stalls before writing RESULT after compaction. context_shake may stay 0 when tool results are already head/tailed below shake eligibility."
 }
