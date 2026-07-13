@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -54,15 +54,21 @@ test("spillLargeToolResult writes big output to a file and returns a short summa
 });
 
 test("spillLargeToolResult falls back gracefully when workspace is not writable", async () => {
-  // A path that does not exist: mkdir will throw, we should still get a result back.
-  const result = await spillLargeToolResult(
-    { stdout: bigStdout, stderr: "", exitCode: 0, wouldBlock: false },
-    { id: "fallback-1" },
-    "/dev/null/reaper-spillover-unwritable",
-  );
-  assert.ok(result);
-  // Even when the spillover path is unwritable, the executor must still
-  // return a result with a bounded-size stdout (otherwise the model call
-  // would block on an unbounded prompt next time).
-  assert.ok((result.stdout ?? "").length < 2_000, "fallback stdout should be bounded");
+  const root = await mkdtemp(path.join(tmpdir(), "reaper-spillover-unwritable-"));
+  try {
+    // A regular file cannot contain a child directory on any platform.
+    const notDirectory = path.join(root, "not-a-directory");
+    await writeFile(notDirectory, "x", "utf8");
+    const result = await spillLargeToolResult(
+      { stdout: bigStdout, stderr: "", exitCode: 0, wouldBlock: false },
+      { id: "fallback-1" },
+      path.join(notDirectory, "workspace"),
+    );
+    assert.ok(result);
+    // Even when the spillover path is unwritable, the executor must still
+    // return bounded stdout or the next model prompt can exceed context.
+    assert.ok((result.stdout ?? "").length < 2_000, "fallback stdout should be bounded");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

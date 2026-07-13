@@ -32,7 +32,7 @@ test("loads project AGENTS/CLAUDE context files even when workspace is not trust
   await writeFile(path.join(workspaceRoot, "AGENTS.MD"), "agent rules");
   await writeFile(path.join(workspaceRoot, "CLAUDE.md"), "claude rules");
   const result = await loadContextFiles({ workspaceRoot, trusted: false });
-  assert.deepEqual(result.files.map((f) => f.source), ["AGENTS.MD", "CLAUDE.md"]);
+  assert.deepEqual(result.files.map((f) => f.source.toLowerCase()), ["agents.md", "claude.md"]);
   assert.ok(result.combined.includes("agent rules"));
   assert.ok(!result.combined.includes("protected"));
   assert.ok(result.diagnostics[0]?.includes("not trusted"));
@@ -46,7 +46,7 @@ test("loads user context files when provided", async () => {
   const result = await loadContextFiles({ workspaceRoot, userHome, trusted: true });
   assert.equal(result.files.length, 1);
   const first = result.files[0]!;
-  assert.equal(first.source, path.join("~/.config/reaper/context.md"));
+  assert.equal(first.source, "~/.config/reaper/context.md");
 });
 
 test("truncates oversized context files and records diagnostics", async () => {

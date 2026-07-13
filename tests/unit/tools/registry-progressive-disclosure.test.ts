@@ -21,6 +21,8 @@ import {
   type ToolName,
 } from "../../../src/tools/registry.js";
 import { executeSearchTools } from "../../../src/tools/write/search-tools.js";
+import { buildGeneralAgentTools } from "../../../src/runtime/agent-tools.js";
+import { getDiscoveredTools } from "../../../src/tools/discovery.js";
 
 test("CORE_TOOL_NAMES contains the expected always-present basics", () => {
   const expected: ToolName[] = [
@@ -78,6 +80,11 @@ test("search_tools promotes an on-demand tool into full-schema rendering", () =>
   assert.ok(
     result.discovered.includes("web_search"),
     "Expected web_search to be promoted to the discovered set",
+  );
+  const nextTurnTools = buildGeneralAgentTools(getDiscoveredTools("run-test-1"));
+  assert.ok(
+    nextTurnTools.some((tool) => tool.name === "web_search"),
+    "the next model call must receive the discovered tool schema",
   );
 });
 

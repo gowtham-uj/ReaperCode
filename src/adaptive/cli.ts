@@ -1,15 +1,6 @@
 /**
  * CLI for the Adaptive Intelligence layer.
  *
- *   reaper swarm    — Model-driven subagents (single delegated agent)
- *     plan            Build a plan that may include a subagent
- *     list            List active/finished subagent instances
- *     show <id>       Show a subagent's output transcript
- *     status <id>     Show a subagent's status
- *     cancel <id>     Cancel a running subagent
- *     output <id>     Tail a subagent's output
- *     agents          List built-in subagent types
- *
  *   reaper skill    — Skill authoring & lookup
  *   reaper memory   — Persistent memory store
  *   reaper visual   — Visual analysis (gated by model capability)
@@ -56,18 +47,11 @@ import { registerBuiltinCommands } from "../commands/index.js";
 import { builtinSkillsRoot } from "../skills/built-in/index.js";
 import { runExec, type ExecRunnerOptions } from "./exec-runner.js";
 
-// Subagent (model-driven swarm) imports
-import { LaborMarket, ForegroundSubagentRunner, SubagentStore, parseAgentTypeYaml } from "./swarm/index.js";
-import type { SubagentModelFn } from "./swarm/index.js";
 
 export interface ReaperCLIOptions {
   workspaceRoot: string;
   userHome?: string;
   capabilities?: ModelCapabilitiesRegistry;
-  /** A custom model gateway for swarm foreground runs. */
-  swarmModelCall?: SubagentModelFn;
-  /** Known model aliases accepted by the Agent tool. */
-  knownModels?: string[];
 }
 
 export class ReaperCLI {
@@ -76,9 +60,6 @@ export class ReaperCLI {
   private readonly memory: PersistentMemoryStore;
   private readonly scopePolicy: MemoryScopePolicy;
   private readonly visual: VisualInputAnalyzer;
-  // Subagent runtime state
-  private readonly swarmMarket: LaborMarket;
-  private readonly swarmStore: SubagentStore;
   private readonly hooks: Hooks;
 
   // Skills + Extensions plugin system state (lazy — created on first use)
@@ -96,10 +77,6 @@ export class ReaperCLI {
     this.memory = new PersistentMemoryStore({ workspaceRoot: opts.workspaceRoot, ...(opts.userHome !== undefined ? { userHome: opts.userHome } : {}) });
     this.scopePolicy = new MemoryScopePolicy();
     this.visual = new VisualInputAnalyzer({ workspaceRoot: opts.workspaceRoot, ...(opts.capabilities !== undefined ? { capabilities: opts.capabilities } : {}) });
-    this.swarmMarket = new LaborMarket();
-    // Load any built-in types from the default directory; ignore failures
-    try { this.swarmMarket.loadBuiltinTypesFromDir(); } catch { /* no built-ins on disk */ }
-    this.swarmStore = new SubagentStore({ workspaceRoot: opts.workspaceRoot });
     this.hooks = new Hooks();
   }
 
@@ -111,13 +88,11 @@ export class ReaperCLI {
         case "skill":   return await this.skill(subcommand, rest);
         case "extensions": return await this.extensions(subcommand, rest);
         case "memory":  return await this.memory_(subcommand, rest);
-        case "swarm":   return await this.swarm(subcommand, rest);
         case "visual":  return await this.visual_(subcommand, rest);
         case "capability": return await this.capability(subcommand, rest);
         case "redact":  return await this.redactCmd(undefined, subcommand !== undefined ? [subcommand, ...rest] : rest);
         case "slash":   return await this.slash(subcommand, subcommand !== undefined ? rest : []);
         case "exec":    return await this.execGroup(subcommand, rest);
-        case "tui":     return await this.tuiGroup(subcommand, rest);
         default:        return { exitCode: 2, stdout: "", stderr: `unknown group "${group}"` };
       }
     } catch (e) {
@@ -279,111 +254,6 @@ export class ReaperCLI {
     return { exitCode: 0, stdout: JSON.stringify(h, null, 2) + "\n", stderr: "" };
   }
 
-  /* --- subagent runtime --- */
-  private async swarm(sub: string | undefined, args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    switch (sub) {
-      case "plan":      return this.swarmPlan(args);
-      case "list":      return this.swarmList(args);
-      case "show":      return this.swarmShow(args);
-      case "status":    return this.swarmStatus(args);
-      case "cancel":    return this.swarmCancel(args);
-      case "output":    return this.swarmOutput(args);
-      case "agents":    return this.swarmAgents_(args);
-      case "run":       return this.swarmRun(args);
-      case undefined:   return { exitCode: 2, stdout: "", stderr: "swarm subcommand required (plan|list|show|status|cancel|output|agents|run)" };
-      default: return { exitCode: 2, stdout: "", stderr: `unknown swarm subcommand "${sub}"` };
-    }
-  }
-
-  private async swarmPlan(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    const opts = parseFlags(args);
-    const task = typeof opts.task === "string" ? opts.task : args[0];
-    if (!task) return { exitCode: 2, stdout: "", stderr: "--task required" };
-    // swarm plan only suggests a subagent type (single delegation).
-    const visualAvailable = this.opts.capabilities?.isVisualSupported() ?? true;
-    let type = "coder";
-    if (/(\bexplor|\bfind\b|\bmap\b|\bsearch\b)/i.test(task)) type = "explore";
-    else if (/(\bplan|\barchitect|\bstep.by.step)/i.test(task)) type = "plan";
-    if (visualAvailable === false && type === "coder") {
-      // coder is fine without visual
-    }
-    return { exitCode: 0, stdout: JSON.stringify({ mode: "single_subagent", subagent_type: type, reason: "picked by task keyword heuristic" }, null, 2) + "\n", stderr: "" };
-  }
-
-  private async swarmList(_: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    const records = this.swarmStore.list();
-    const lines = records.map((r) => `${r.agentId}\t${r.status}\t${r.subagentType}\t${r.description}`);
-    return { exitCode: 0, stdout: `agentId\tstatus\tsubagent_type\tdescription\n${lines.join("\n")}\n`, stderr: "" };
-  }
-
-  private async swarmShow(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    const [id] = args;
-    if (!id) return { exitCode: 2, stdout: "", stderr: "agentId required" };
-    const r = this.swarmStore.readInstance(id);
-    if (!r) return { exitCode: 1, stdout: "", stderr: `subagent "${id}" not found` };
-    return { exitCode: 0, stdout: JSON.stringify(r, null, 2) + "\n", stderr: "" };
-  }
-
-  private async swarmStatus(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    const [id] = args;
-    if (!id) return { exitCode: 2, stdout: "", stderr: "agentId required" };
-    const r = this.swarmStore.readInstance(id);
-    if (!r) return { exitCode: 1, stdout: "", stderr: `subagent "${id}" not found` };
-    return { exitCode: 0, stdout: JSON.stringify({ agentId: r.agentId, status: r.status, subagentType: r.subagentType, description: r.description, createdAt: r.createdAt, updatedAt: r.updatedAt }, null, 2) + "\n", stderr: "" };
-  }
-
-  private async swarmCancel(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    const [id, reason] = args;
-    if (!id) return { exitCode: 2, stdout: "", stderr: "agentId required" };
-    const r = this.swarmStore.readInstance(id);
-    if (!r) return { exitCode: 1, stdout: "", stderr: `subagent "${id}" not found` };
-    this.swarmStore.setStatus(id, "killed");
-    return { exitCode: 0, stdout: `cancelled ${id} (${reason ?? "manual"})\n`, stderr: "" };
-  }
-
-  private async swarmOutput(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    const [id] = args;
-    if (!id) return { exitCode: 2, stdout: "", stderr: "agentId required" };
-    const path = this.swarmStore.outputPath(id);
-    if (!existsSync(path)) return { exitCode: 1, stdout: "", stderr: `no output at ${path}` };
-    return { exitCode: 0, stdout: readFileSync(path, "utf8"), stderr: "" };
-  }
-
-  private async swarmAgents_(_: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    const types = this.swarmMarket.listBuiltinTypes();
-    const lines = types.map((t) => `${t.name}\t${t.defaultModel ?? "inherit"}\t${t.supportsBackground ? "yes" : "no"}\t${t.description}`);
-    return { exitCode: 0, stdout: `name\tmodel\tbackground\tdescription\n${lines.join("\n")}\n`, stderr: "" };
-  }
-
-  private async swarmRun(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    if (!this.opts.swarmModelCall) return { exitCode: 1, stdout: "", stderr: "swarm run requires a model gateway" };
-    const opts = parseFlags(args);
-    const prompt = typeof opts.prompt === "string" ? opts.prompt : (args.length > 0 ? args.join(" ") : "");
-    if (!prompt) return { exitCode: 2, stdout: "", stderr: "--prompt required (or pass as positional args)" };
-    const description = typeof opts.description === "string" ? opts.description : "swarm cli run";
-    const subagentType = typeof opts.type === "string" ? opts.type : "coder";
-    const model = typeof opts.model === "string" ? opts.model : null;
-    const runner = new ForegroundSubagentRunner({
-      store: this.swarmStore,
-      market: this.swarmMarket,
-      modelCall: this.opts.swarmModelCall,
-      parentBasePrompt: "You are a Reaper subagent running headless from the CLI.",
-      parentTools: [],
-    });
-    const result = await runner.run({
-      description,
-      prompt,
-      requestedType: subagentType,
-      model,
-      resume: null,
-      timeout: typeof opts.timeout === "string" ? Number(opts.timeout) : null,
-    });
-    return {
-      exitCode: result.status === "completed" ? 0 : 1,
-      stdout: JSON.stringify(result, null, 2) + "\n",
-      stderr: "",
-    };
-  }
 
   /* --- visual --- */
   private async visual_(sub: string | undefined, args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
@@ -486,13 +356,14 @@ export class ReaperCLI {
     const model = flags["model"];
     const maxTokens = flags["max-tokens"] ? Number(flags["max-tokens"]) : undefined;
     const timeoutMs = flags["timeout-ms"] ? Number(flags["timeout-ms"]) : undefined;
+    const session = flags["session"];
     const providerRaw = flags["provider"];
     const isExecProvider = (value: string | undefined): value is NonNullable<ExecRunnerOptions["provider"]> =>
       value === "openai" || value === "openai-codex" || value === "anthropic" || value === "minimax" || value === "deepseek" || value === "nuralwatt" || value === "nuralwatt2";
     let provider: ExecRunnerOptions["provider"] | undefined = isExecProvider(providerRaw) ? providerRaw : undefined;
     let selectedModel = model;
     if (this.opts.userHome === undefined) {
-      const { seedEnvFromOnboarding } = await import("../tui/provider-onboarding.js");
+      const { seedEnvFromOnboarding } = await import("../model/provider-onboarding.js");
       const saved = seedEnvFromOnboarding();
       const savedProvider: ExecRunnerOptions["provider"] | undefined = isExecProvider(saved?.provider) ? saved.provider : undefined;
       if (!provider && savedProvider) {
@@ -515,6 +386,7 @@ export class ReaperCLI {
         ...(timeoutMs !== undefined && Number.isFinite(timeoutMs) ? { timeoutMs } : {}),
         ...(provider !== undefined ? { provider } : {}),
         ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+        ...(session !== undefined ? { session } : {}),
       });
       if (wantJson) {
         return { exitCode: result.status === "completed" ? 0 : 1, stdout: JSON.stringify(result, null, 2) + "\n", stderr: "" };
@@ -554,66 +426,6 @@ export class ReaperCLI {
     }
   }
 
-  /* --- tui --- */
-  /** Interactive Ink-based REPL. The TUI mounts and owns process.exit;
-   *  this method blocks until the Ink instance unmounts. */
-  private async tuiGroup(_sub: string | undefined, args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    const flags = parseFlags(args);
-    const slashRegistry = this.ensureSlashRegistry();
-
-    // Seed env from any saved onboarding file, then decide whether
-    // to run the picker before the TUI mounts. The user can also
-    // re-trigger via the /provider slash command once they're inside
-    // the TUI.
-    const { hasAnyAuth, seedEnvFromOnboarding, loadOnboarding } =
-      await import("../tui/provider-onboarding.js");
-    const { autoDetectProvider } = await import("../model/provider/registry.js");
-    const { findProviderDescriptor } = await import("../model/provider/catalog.js");
-    const saved = seedEnvFromOnboarding();
-    const explicitProvider = flags["provider"];
-    const needsOnboarding = !hasAnyAuth() && !explicitProvider;
-
-    // Resolve the active provider in priority order:
-    //   1. Explicit --provider flag.
-    //   2. Saved onboarding file (the user already picked).
-    //   3. Auto-detect from env (the registry walks the catalog).
-    //   4. Fall back to anthropic for the legacy case where the user
-    //      has set ANTHROPIC_AUTH_TOKEN but hasn't onboarded.
-    const detected = explicitProvider
-      ? findProviderDescriptor(explicitProvider)
-      : saved
-        ? findProviderDescriptor(saved.provider)
-        : autoDetectProvider();
-    const activeProviderId = detected?.id ?? "anthropic";
-
-    // The model is: explicit --model, then the saved onboarding's
-    // model, then the catalog's defaultModel. We don't fall back to
-    // a hardcoded string — the catalog owns defaults now.
-    const explicitModel = flags["model"];
-    const modelFromOnboarding = loadOnboarding()?.model;
-    const model = explicitModel
-      ?? modelFromOnboarding
-      ?? findProviderDescriptor(activeProviderId)?.defaultModel
-      ?? "claude-opus-4-8";
-
-    const provider = activeProviderId as
-      | "anthropic" | "openai" | "minimax" | "deepseek";
-
-    const { renderTui } = await import("../tui/render.js");
-    // The engine driver is constructed inside renderTui. It builds
-    // the yolo config + Hooks adapter and routes events into the
-    // SessionStore. We just mount Ink and wait for the user to exit.
-    const handle = renderTui({
-      workspaceRoot: this.opts.workspaceRoot,
-      model,
-      provider,
-      slashRegistry,
-      needsOnboarding,
-    });
-    await handle.done;
-    return { exitCode: 0, stdout: "", stderr: "" };
-  }
-
   private usage(): { exitCode: number; stdout: string; stderr: string } {
     const usage = [
       "reaper <group> <subcommand> [args]",
@@ -623,12 +435,10 @@ export class ReaperCLI {
       "  extensions  list | add | enable | disable | trust | untrust | doctor | remove",
       "  slash       /<name> [args...]   (host-agnostic slash command registry)",
       "  memory      list | search | forget | summarize | health",
-      "  swarm       plan | list | show | status | cancel | output | agents | run",
       "  visual      list | analyze | bridge",
       "  capability  show | probe",
       "  redact      <file|->",
-      "  exec        run --prompt <text> [--workspace <dir>] [--model <id>] [--provider anthropic|openai|openai-codex|minimax|deepseek|nuralwatt|nuralwatt2] [--reasoning-effort low|medium|high] [--max-tokens N] [--timeout-ms N] [--json]",
-      "  tui         interactive REPL (default if no group given) [--model <id>] [--provider anthropic|openai|openai-codex|minimax|deepseek|nuralwatt|nuralwatt2] [--workspace <dir>]",
+      "  exec        run --prompt <text> [--session <name>] [--workspace <dir>] [--model <id>] [--provider anthropic|openai|openai-codex|minimax|deepseek|nuralwatt|nuralwatt2] [--reasoning-effort low|medium|high] [--max-tokens N] [--timeout-ms N] [--json]",
     ].join("\n");
     return { exitCode: 0, stdout: usage + "\n", stderr: "" };
   }
@@ -931,5 +741,3 @@ function parseFlags(args: string[]): Record<string, string> {
   return out;
 }
 
-// Re-export swarm utility for tests that need it
-export { parseAgentTypeYaml };

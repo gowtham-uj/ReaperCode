@@ -18,6 +18,7 @@ import { RuntimeEngine } from "../../src/runtime/engine.js";
 import { createValidRequestEnvelope } from "../../tests/fixtures/phase0.js";
 import { createLiveReaperConfig } from "../../tests/fixtures/live-gateway.js";
 import { applyConfigToTunables } from "../../src/config/config-tunables.js";
+import { resolveShellBinary } from "../../src/tools/global/bash.js";
 
 import { parseEvalTask, type EvalTask } from "./task-schema.js";
 import { scoreTask, type GateResult } from "./scorer.js";
@@ -85,20 +86,21 @@ export async function runUnifiedEval(options: UnifiedEvalOptions): Promise<Unifi
     // Stress tasks also tighten bash head/tail so large tool output is
     // compacted under the same pressure window.
     if (typeof task.softCap === "number") {
-      // Stress calibration: fire layers without thrashing. Keep softCap
-      // large enough that post-compact rebuild (cockpit+summary) fits
-      // under threshold; use mid-window shake + summary cooldown.
+      // Stress calibration: force each layer without reducing the retained
+      // working set below the prompt/tool-schema footprint.
       const bashThreshold = Math.min(12_000, Math.max(4_000, Math.floor(task.softCap * 0.2)));
       (config as any).contextManagement = {
         ...((config as any).contextManagement ?? {}),
         softCap: task.softCap,
         shakeEnabled: true,
-        shakeTriggerPct: 45,
-        shakeProtectWindowChars: Math.min(8_000, Math.max(2_000, Math.floor(task.softCap * 0.2))),
-        shakeMinSavingsChars: 50,
+        shakeTriggerPct: 30,
+        shakeProtectWindowChars: Math.min(64_000, Math.max(2_000, Math.floor(task.softCap * 0.1))),
+        shakeMinSavingsChars: Math.max(500, Math.min(16_000, Math.floor(task.softCap * 0.04))),
         fullSummaryEnabled: true,
         fullSummaryCooldownMinToolBatches: 2,
         fullSummaryCooldownMinTokenGrowth: Math.max(1_500, Math.floor(task.softCap * 0.08)),
+        fullSummaryMaxFilesToRestore: 2,
+        fullSummaryFileTokenBudget: Math.max(1_000, Math.floor(task.softCap * 0.2)),
         bashHeadTailEnabled: true,
         bashPersistThresholdChars: bashThreshold,
       };
@@ -261,14 +263,15 @@ async function writeTaskSoftCap(workspaceRoot: string, task: EvalTask): Promise<
       existing = {};
     }
   }
-  const bashThreshold = Math.min(12_000, Math.max(4_000, Math.floor(task.softCap * 0.2)));
+  const softCapChars = task.softCap * 4;
+  const bashThreshold = Math.min(12_000, Math.max(4_000, Math.floor(softCapChars * 0.2)));
   existing.contextManagement = {
     ...((existing.contextManagement as object) ?? {}),
     softCap: task.softCap,
     shakeEnabled: true,
     shakeTriggerPct: 45,
-    shakeProtectWindowChars: Math.min(8_000, Math.max(2_000, Math.floor(task.softCap * 0.2))),
-    shakeMinSavingsChars: 50,
+    shakeProtectWindowChars: Math.min(64_000, Math.max(8_000, Math.floor(softCapChars * 0.2))),
+    shakeMinSavingsChars: Math.min(16_000, Math.max(1_000, Math.floor(softCapChars * 0.05))),
     fullSummaryEnabled: true,
     fullSummaryCooldownMinToolBatches: 2,
     fullSummaryCooldownMinTokenGrowth: Math.max(1_500, Math.floor(task.softCap * 0.08)),
@@ -300,7 +303,7 @@ async function runShell(
   };
   delete (env as { npm_config_prefix?: string }).npm_config_prefix;
   try {
-    const { stdout, stderr } = await exec("bash", ["-c", command], {
+    const { stdout, stderr } = await exec(resolveShellBinary(), ["-c", command], {
       cwd,
       env,
       maxBuffer: 32 * 1024 * 1024,

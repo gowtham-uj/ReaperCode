@@ -89,6 +89,9 @@ test("main-agent graph finishes with empty-tool final summary (natural stop)", a
   const request = createValidRequestEnvelope();
   request.payload = {
     prompt: "Create .reaper-synth-marker, verify it, and finish.",
+    verification: {
+      command: "node -e \"require('node:fs').writeFileSync('.reaper-verify-node-ran', 'unexpected')\"",
+    },
   };
   const gateway = new StreamingJsonGateway([
     {
@@ -126,6 +129,12 @@ test("main-agent graph finishes with empty-tool final summary (natural stop)", a
   assert.equal(
     result.toolResults.some((item) => item.name === "complete_task"),
     false,
+  );
+  assert.equal(result.verification, undefined, "natural stop must not route through an automatic verification node");
+  await assert.rejects(
+    readFile(path.join(workspaceRoot, ".reaper-verify-node-ran"), "utf8"),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT",
+    "the request-level verification command must not run after a model-owned natural stop",
   );
   assert.equal(
     await readFile(path.join(workspaceRoot, ".reaper-synth-marker"), "utf8"),

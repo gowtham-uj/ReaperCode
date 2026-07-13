@@ -117,10 +117,7 @@ export async function logModelResponseTrace(input: {
 }
 
 export function splitControlToolCalls(toolCalls: ToolCall[]): SplitToolCalls {
-  // All tool calls are executable — no advisory/control-plane split.
-  return {
-    executableToolCalls: toolCalls,
-  };
+  return { executableToolCalls: toolCalls };
 }
 
 // Phase T3.11: file-hint helpers moved to ./file-hints.ts

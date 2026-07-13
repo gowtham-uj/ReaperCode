@@ -94,6 +94,12 @@ export interface CompactionEntry extends SessionEntryBase {
     resultsShaken: number;
     /** Path to the persisted summary file (relative to journal). */
     summaryPath?: string;
+    /**
+     * Inline summary text (full_summary write-back). When present,
+     * rehydration starts from this entry: the summary REPLACES every
+     * message before it, and only messages after it are kept raw.
+     */
+    summary?: string;
     /** Optional query that triggered this compaction. */
     query?: string;
   };
@@ -536,10 +542,30 @@ export function buildActiveBranchMessages(workspaceRoot: string, name: string): 
     chain.unshift(cur);
     cur = cur.parentId ? byId.get(cur.parentId) : undefined;
   }
-  // Only message entries become the live conversation.
-  return chain
+  // A compaction entry with an inline summary replaces everything before
+  // it (OMP semantics: summary + raw tail). Use the LAST such entry.
+  let cutIdx = -1;
+  for (let i = chain.length - 1; i >= 0; i -= 1) {
+    const e = chain[i]!;
+    if (e.type === "compaction" && typeof (e as CompactionEntry).payload.summary === "string" && (e as CompactionEntry).payload.summary!.length > 0) {
+      cutIdx = i;
+      break;
+    }
+  }
+  const tail = (cutIdx >= 0 ? chain.slice(cutIdx + 1) : chain)
     .filter((e): e is MessageEntry => e.type === "message")
     .map((e) => e.payload);
+  if (cutIdx < 0) return tail;
+  const summary = (chain[cutIdx] as CompactionEntry).payload.summary!;
+  const anchor: SessionMessage = {
+    role: "user",
+    content:
+      "# Prior session context (compacted)\n" +
+      "The earlier conversation in this session was summarized to stay within the context budget. " +
+      "Treat this summary as the authoritative record of everything before the turns that follow.\n\n" +
+      summary,
+  };
+  return [anchor, ...tail];
 }
 
 // ─────────────────────────────────────────────────────────────────────────

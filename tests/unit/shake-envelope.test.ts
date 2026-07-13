@@ -24,9 +24,9 @@ test("shake uses normalized envelope pruneReplacement for write_file/file_edit a
   ];
   for (let i = 0; i < 10; i += 1) {
     messages.push({ role: "assistant", content: "", tool_calls: [{ id: `call-${i}`, function: { name: "write_file", arguments: JSON.stringify({ path: "src/big.ts" }) } }] });
-    messages.push({ role: "tool", tool_call_id: `call-${i}`, content: "File written: src/big.ts" });
+    messages.push({ role: "tool", tool_call_id: `call-${i}`, content: `File written: src/big.ts\n${"ack ".repeat(40)}` });
   }
-  shakeConversation(messages as unknown as Parameters<typeof shakeConversation>[0], 200);
+  shakeConversation(messages as unknown as Parameters<typeof shakeConversation>[0], 200, { shakeMinSavingsChars: 1 });
   const toolMessages = messages.filter((m) => m.role === "tool");
   const shaken = toolMessages.filter((m) => m.content === "[write_file: src/big.ts]");
   assert.ok(shaken.length >= 1, `expected at least 1 shaken, got ${shaken.length}`);
@@ -44,7 +44,7 @@ test("shake prefers normalized envelope for large bash output when safeToPrune i
     messages.push({ role: "assistant", content: "", tool_calls: [{ id: `call-${i}`, function: { name: "bash", arguments: JSON.stringify({ cmd: "pnpm test" }) } }] });
     messages.push({ role: "tool", tool_call_id: `call-${i}`, content: longContent });
   }
-  shakeConversation(messages as unknown as Parameters<typeof shakeConversation>[0], 200);
+  shakeConversation(messages as unknown as Parameters<typeof shakeConversation>[0], 200, { shakeMinSavingsChars: 1 });
   const toolMessages = messages.filter((m) => m.role === "tool");
   const shaken = toolMessages.filter((m) => typeof m.content === "string" && m.content.startsWith("[bash:"));
   assert.ok(shaken.length > 0, "expected at least one shaken bash message");

@@ -235,7 +235,7 @@ async function walkFiles(root: string, currentDir: string, currentDepth: number,
         if (fileStat.size > MAX_INDEXED_FILE_BYTES) return null;
         return {
           path: fullPath,
-          relativePath: path.relative(root, fullPath),
+          relativePath: path.relative(root, fullPath).split(path.sep).join("/"),
           sizeBytes: fileStat.size,
           modifiedMs: Math.trunc(fileStat.mtimeMs),
         } satisfies IndexedFile;

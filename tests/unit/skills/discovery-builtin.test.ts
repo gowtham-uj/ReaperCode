@@ -40,14 +40,12 @@ test("AC1: loads every built-in skill", () => {
     "swe-bench-solving",
     "agent-runtime-debugging",
     "session-persistence",
-    "completion-gate-debugging",
     "prompt-enhancement",
-    "swarm-orchestration",
   ]) {
     assert.ok(names.includes(expected), `missing built-in skill "${expected}"`);
   }
   for (const r of out.records) {
     assert.equal(r.trust, "builtin", `skill ${r.manifest.name} should be builtin`);
   }
-  assert.equal(out.records.length, 17, "exactly 17 built-in skills");
+  assert.equal(out.records.length, 15, "exactly 15 built-in skills");
 });

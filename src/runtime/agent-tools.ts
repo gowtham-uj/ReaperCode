@@ -40,12 +40,19 @@ function descriptorFor(name: string): AgentToolDescriptor | undefined {
   };
 }
 
-export function buildGeneralAgentTools(): AgentToolDescriptor[] {
+export function buildGeneralAgentTools(additionalNames: Iterable<string> = []): AgentToolDescriptor[] {
   const out: AgentToolDescriptor[] = [];
-  for (const name of CORE_TOOL_NAMES) {
-    const desc = descriptorFor(name);
-    if (desc) out.push(desc);
-  }
+  const included = new Set<string>();
+  const add = (name: string) => {
+    if (included.has(name)) return;
+    const descriptor = descriptorFor(name);
+    if (!descriptor) return;
+    included.add(name);
+    out.push(descriptor);
+  };
+
+  for (const name of CORE_TOOL_NAMES) add(name);
+  for (const name of additionalNames) add(name);
   return out;
 }
 

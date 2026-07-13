@@ -32,12 +32,14 @@ function globToRegExp(pattern: string): RegExp {
 }
 
 function pathMatches(workspaceRoot: string, candidate: string, pattern: string): boolean {
-  // Patterns are relative to workspaceRoot. Strip leading `./` and
-  // normalize separators.
-  const rel = candidate.startsWith(workspaceRoot + "/")
-    ? candidate.slice(workspaceRoot.length + 1)
-    : candidate;
-  return globToRegExp(pattern.replace(/^\.\//, "")).test(rel);
+  // Patterns are slash-separated and relative to workspaceRoot. Normalize
+  // native Windows paths before stripping the workspace prefix.
+  const root = workspaceRoot.replace(/\\/g, "/").replace(/\/+$/, "");
+  const normalizedCandidate = candidate.replace(/\\/g, "/");
+  const rel = normalizedCandidate.startsWith(`${root}/`)
+    ? normalizedCandidate.slice(root.length + 1)
+    : normalizedCandidate.replace(/^\.\//, "");
+  return globToRegExp(pattern.replace(/\\/g, "/").replace(/^\.\//, "")).test(rel);
 }
 
 /**

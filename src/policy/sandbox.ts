@@ -68,11 +68,9 @@ const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   "git_diff",
   "get_tool_output",
   "search_tools",
-  "call_subagent",
   "request_human_approval",
   "update_plan",
   "update_todo",
-  "complete_task",
   "advance_step",
   "web_search",
   "web_fetch",
@@ -90,7 +88,6 @@ const WORKSPACE_WRITE_TOOLS: ReadonlySet<string> = new Set([
 
 const MUTATING_SHELL_TOOLS: ReadonlySet<string> = new Set([
   "bash",
-  "sandbox_service_control",
 ]);
 
 /**
@@ -288,24 +285,6 @@ export class SandboxPolicy {
         ruleId: "shell_not_in_allowlist",
         allowedIn: ["workspace_write", "danger_full_access"],
       };
-    }
-    if (call.name === "sandbox_service_control") {
-      if (this.mode === "read_only") {
-        return {
-          verdict: "needs_human_approval",
-          reason: "Mode 'read_only' forbids 'sandbox_service_control'.",
-          ruleId: "read_only_blocks_sandbox",
-          allowedIn: ["workspace_write", "network_disabled", "danger_full_access"],
-        };
-      }
-      if (this.requireHumanApproval) {
-        return {
-          verdict: "needs_human_approval",
-          reason: "Sandbox service control requires human approval in current mode.",
-          ruleId: "require_human_approval",
-        };
-      }
-      return { verdict: "allow", reason: "Sandbox service control permitted", ruleId: "workspace_write" };
     }
     return { verdict: "deny", reason: "Unknown mutating tool", ruleId: "unknown_mutating" };
   }

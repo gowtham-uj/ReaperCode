@@ -15,11 +15,6 @@
  *   7. Browser     — web/browser-only task
  *   8. Root        — the orchestrator itself
  *
- * These roles are independent of the model-driven sub-agent runtime
- * (src/adaptive/swarm). The sub-agent runtime does not hardcode
- * role names — it uses a `subagent_type` from a YAML-defined list
- * (`coder` / `explore` / `plan`) and the parent agent's tool
- * allowlist. The two layers are intentionally decoupled.
  *
  * Profiles deliberately do not duplicate per-tool forbidden_in_roles
  * from `tool-metadata.ts` — when they overlap, the more restrictive
@@ -48,13 +43,6 @@ export interface RoleProfile {
   can_run_commands: boolean;
   /** Highest command risk the role may invoke without approval. */
   shell_risk_tolerance: CommandRiskTolerance;
-  /**
-   * Whether the role may call `complete_task`. Only `root` has
-   * this. Subagents must report back to root instead.
-   */
-  can_complete: boolean;
-  /** Whether the role can spawn other subagents. Default: false. */
-  can_spawn_agents: boolean;
   /** Whether the role's tool calls require an approval gate. */
   requires_approval: boolean;
 }
@@ -121,12 +109,10 @@ export const ROLE_PROFILES: Record<PolicyRole, RoleProfile> = {
     role: "explorer",
     description: "Read-only repo mapping and discovery. Cannot write, run shell, or complete tasks.",
     allowed_tools: READ_ONLY_TOOLS,
-    forbidden_tools: [...WRITE_TOOLS, "sandbox_service_control", "complete_task", "advance_step"],
+    forbidden_tools: [...WRITE_TOOLS, "advance_step"],
     can_write: false,
     can_run_commands: false,
     shell_risk_tolerance: "low-only",
-    can_complete: false,
-    can_spawn_agents: false,
     requires_approval: false,
   },
 
@@ -135,12 +121,10 @@ export const ROLE_PROFILES: Record<PolicyRole, RoleProfile> = {
     role: "architect",
     description: "Designs the implementation approach. Read-only; cannot edit files or run commands.",
     allowed_tools: READ_ONLY_TOOLS,
-    forbidden_tools: [...WRITE_TOOLS, "sandbox_service_control", "complete_task", "advance_step"],
+    forbidden_tools: [...WRITE_TOOLS, "advance_step"],
     can_write: false,
     can_run_commands: false,
     shell_risk_tolerance: "low-only",
-    can_complete: false,
-    can_spawn_agents: false,
     requires_approval: false,
   },
 
@@ -156,12 +140,10 @@ export const ROLE_PROFILES: Record<PolicyRole, RoleProfile> = {
       ...HOOK_AUTHORING_TOOLS,
       "advance_step",
     ],
-    forbidden_tools: ["sandbox_service_control", "complete_task", "computer_control", "mouse_move", "mouse_click", "mouse_scroll", "keyboard_type", "keyboard_press", "screenshot", "start_live_view", "stop_live_view", "request_human_approval", "is_human_intervening", "wait", "get_screen_size", "get_mouse_position", "browser_control", "approve_skill", "uninstall_skill", "enable_extension", "trust_extension", "uninstall_extension", "approve_hook", "update_hook", "uninstall_hook"],
+    forbidden_tools: ["computer_control", "mouse_move", "mouse_click", "mouse_scroll", "keyboard_type", "keyboard_press", "screenshot", "start_live_view", "stop_live_view", "request_human_approval", "is_human_intervening", "wait", "get_screen_size", "get_mouse_position", "browser_control", "approve_skill", "uninstall_skill", "enable_extension", "trust_extension", "uninstall_extension", "approve_hook", "update_hook", "uninstall_hook"],
     can_write: true,
     can_run_commands: true,
     shell_risk_tolerance: "medium", // high still requires approval
-    can_complete: false,
-    can_spawn_agents: false,
     requires_approval: false,
   },
 
@@ -180,12 +162,10 @@ export const ROLE_PROFILES: Record<PolicyRole, RoleProfile> = {
       "list_hooks",
       "advance_step",
     ],
-    forbidden_tools: ["sandbox_service_control", "complete_task", "computer_control", "mouse_move", "mouse_click", "mouse_scroll", "keyboard_type", "keyboard_press", "screenshot", "start_live_view", "stop_live_view", "request_human_approval", "is_human_intervening", "wait", "get_screen_size", "get_mouse_position", "browser_control", "create_skill", "approve_skill", "uninstall_skill", "create_extension", "enable_extension", "trust_extension", "uninstall_extension", "create_hook", "update_hook", "approve_hook", "uninstall_hook"],
+    forbidden_tools: ["computer_control", "mouse_move", "mouse_click", "mouse_scroll", "keyboard_type", "keyboard_press", "screenshot", "start_live_view", "stop_live_view", "request_human_approval", "is_human_intervening", "wait", "get_screen_size", "get_mouse_position", "browser_control", "create_skill", "approve_skill", "uninstall_skill", "create_extension", "enable_extension", "trust_extension", "uninstall_extension", "create_hook", "update_hook", "approve_hook", "uninstall_hook"],
     can_write: true,
     can_run_commands: true,
     shell_risk_tolerance: "medium",
-    can_complete: false,
-    can_spawn_agents: false,
     requires_approval: false,
   },
 
@@ -194,12 +174,10 @@ export const ROLE_PROFILES: Record<PolicyRole, RoleProfile> = {
     role: "reviewer",
     description: "Reviews the diff. Read-only; cannot edit files. May run read-only or test commands.",
     allowed_tools: [...READ_ONLY_TOOLS, "bash", "read_background_output"],
-    forbidden_tools: ["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file", "sandbox_service_control", "complete_task", "advance_step", "computer_control", "mouse_move", "mouse_click", "mouse_scroll", "keyboard_type", "keyboard_press", "screenshot", "start_live_view", "stop_live_view", "request_human_approval", "is_human_intervening", "wait", "get_screen_size", "get_mouse_position", "browser_control"],
+    forbidden_tools: ["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file", "advance_step", "computer_control", "mouse_move", "mouse_click", "mouse_scroll", "keyboard_type", "keyboard_press", "screenshot", "start_live_view", "stop_live_view", "request_human_approval", "is_human_intervening", "wait", "get_screen_size", "get_mouse_position", "browser_control"],
     can_write: false,
     can_run_commands: true, // for tests / inspection
     shell_risk_tolerance: "medium",
-    can_complete: false,
-    can_spawn_agents: false,
     requires_approval: false,
   },
 
@@ -208,12 +186,10 @@ export const ROLE_PROFILES: Record<PolicyRole, RoleProfile> = {
     role: "critic",
     description: "Adversarially challenges the solution. Strictly read-only.",
     allowed_tools: READ_ONLY_TOOLS,
-    forbidden_tools: [...WRITE_TOOLS, "sandbox_service_control", "complete_task", "advance_step", "computer_control", "mouse_move", "mouse_click", "mouse_scroll", "keyboard_type", "keyboard_press", "screenshot", "start_live_view", "stop_live_view", "request_human_approval", "is_human_intervening", "wait", "get_screen_size", "get_mouse_position", "browser_control"],
+    forbidden_tools: [...WRITE_TOOLS, "advance_step", "computer_control", "mouse_move", "mouse_click", "mouse_scroll", "keyboard_type", "keyboard_press", "screenshot", "start_live_view", "stop_live_view", "request_human_approval", "is_human_intervening", "wait", "get_screen_size", "get_mouse_position", "browser_control"],
     can_write: false,
     can_run_commands: false,
     shell_risk_tolerance: "low-only",
-    can_complete: false,
-    can_spawn_agents: false,
     requires_approval: false,
   },
 
@@ -246,26 +222,22 @@ export const ROLE_PROFILES: Record<PolicyRole, RoleProfile> = {
       "task_list",
       "activate_skill",
     ],
-    forbidden_tools: ["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file", "bash", "sandbox_service_control", "complete_task", "advance_step", "computer_control", "mouse_move", "mouse_click", "mouse_scroll", "keyboard_type", "keyboard_press", "read_background_output", "signal_process", "write_to_process"],
+    forbidden_tools: ["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file", "bash", "advance_step", "computer_control", "mouse_move", "mouse_click", "mouse_scroll", "keyboard_type", "keyboard_press", "read_background_output", "signal_process", "write_to_process"],
     can_write: false,
     can_run_commands: false,
     shell_risk_tolerance: "low-only",
-    can_complete: false,
-    can_spawn_agents: false,
     requires_approval: false,
   },
 
   /* 8) Root — the orchestrator itself. */
   root: {
     role: "root",
-    description: "The orchestrator. May call every tool subject to per-tool risk gating. The only role permitted to call complete_task.",
+    description: "The orchestrator. May call every registered tool subject to per-tool risk handling.",
     allowed_tools: Object.keys(TOOL_METADATA),
     forbidden_tools: [], // per-tool forbidden_in_roles may still restrict; root defaults to "may call but may be blocked by risk gate"
     can_write: true,
     can_run_commands: true,
     shell_risk_tolerance: "high", // root is trusted, but high-risk still audited
-    can_complete: true,
-    can_spawn_agents: true,
     requires_approval: false,
   },
 };

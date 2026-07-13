@@ -126,13 +126,13 @@ test("model profile naming aliases map legacy roles to tier labels", () => {
   assert.equal(displayModelProfile("custom_profile"), "custom_profile");
 });
 
-test("model role alias helper resolves strong/fast profile names", () => {
+test("model role alias helper resolves supported profile names only", () => {
   // `strong_model`, `secondary_model`, `main_agent`, and
   // `secondary_model` all resolve to the canonical `secondary_model`.
   assert.equal(resolveModelRoleAlias("strong_model"), "secondary_model");
   assert.equal(resolveModelRoleAlias("secondary_model"), "secondary_model");
   assert.equal(resolveModelRoleAlias("main_agent"), "secondary_model");
-  assert.equal(resolveModelRoleAlias("fast_model"), "fast_reasoner");
+  assert.equal(resolveModelRoleAlias("fast_model"), undefined);
   assert.equal(resolveModelRoleAlias("secondary_model"), "secondary_model");
   assert.equal(resolveModelRoleAlias("unknown_profile"), undefined);
 });

@@ -1,11 +1,9 @@
 /**
  * ToolPolicy: the entry-gate decision engine.
  *
- * The engine evaluates a single tool call against the metadata,
- * the caller's role profile, the command risk (for shell tools),
- * and the completion-safety gate (for `complete_task`). The result
- * is a single `PolicyDecision` the executor consumes BEFORE
- * dispatching to its existing `PermissionClassifier` and switch.
+ * The engine evaluates a single tool call against metadata, the caller's
+ * role profile, and command risk for shell tools. The result is a single
+ * `PolicyDecision` the executor can consume before dispatch.
  *
  * The engine is intentionally additive: a decision of "allow" is
  * the same as no decision. A decision of "deny" produces a
@@ -24,7 +22,7 @@
  *   2. The executor threads the active role and the trusted-sandbox
  *      flag via `ToolExecutorOptions` (extended with optional
  *      `callerRole` and `trustedSandbox`).
- *   3. The executor's `run_shell_command` case additionally calls
+ *   3. The executor's `bash` case additionally calls
  *      `classifyCommandRisk(args.cmd)` and combines the result
  *      with the engine's role-based check.
  */
@@ -32,7 +30,6 @@
 import { getToolMetadata, hasToolMetadata, type RiskLevel, type PolicyRole, type ToolMetadata } from "./tool-metadata.js";
 import { roleAllowsTool,  roleToleratesCommandRisk,  getRoleProfile } from "./role-profiles.js";
 import { classifyCommandRisk, type ShellRisk, type ShellRiskFinding } from "./shell-risk.js";
-import { canCompleteTask, type CompletionContext, type CompletionDecision } from "./completion-safety.js";
 import { getOrderingAdvisories, type OrderingAdvisory } from "./preferred-ordering.js";
 
 /* -------------------------------------------------------------------------- */
@@ -51,7 +48,6 @@ export type PolicyDenyCode =
   | "not_in_role_allowlist" // role's allowed_tools does not include this tool
   | "shell_risk_exceeded"   // command risk above the role's tolerance
   | "shell_approval_required" // high-risk command without trusted-sandbox
-  | "completion_blocked"    // canCompleteTask returned a denial
   | "approval_required"     // tool requires_approval and sandbox not trusted
   | "missing_context";      // the call had no usable args at all
 
@@ -68,8 +64,6 @@ export interface PolicyDecision {
   metadata: ToolMetadata | null;
   /** Shell risk classification, if this was a shell call. */
   shellRisk: ShellRiskFinding | null;
-  /** Completion-safety decision, if this was a complete_task call. */
-  completion: CompletionDecision | null;
   /** Advisory-only ordering notes. Never block. */
   advisories: OrderingAdvisory[];
 }
@@ -97,8 +91,6 @@ export interface PolicyEvaluationContext {
   /** True iff this is a subagent call (suppress ordering advisories
    *  in some deployments). */
   isSubagentCall?: boolean;
-  /** Completion-safety context, only consulted for complete_task. */
-  completion?: Omit<CompletionContext, "callerRole">;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -121,7 +113,6 @@ export function evaluateToolCall(ctx: PolicyEvaluationContext): PolicyDecision {
       role: callerRole,
       metadata: null,
       shellRisk: null,
-      completion: null,
       advisories: [],
     };
   }
@@ -137,7 +128,6 @@ export function evaluateToolCall(ctx: PolicyEvaluationContext): PolicyDecision {
       role: callerRole,
       metadata: meta,
       shellRisk: null,
-      completion: null,
       advisories: [],
     };
   }
@@ -153,7 +143,6 @@ export function evaluateToolCall(ctx: PolicyEvaluationContext): PolicyDecision {
       role: callerRole,
       metadata: meta,
       shellRisk: null,
-      completion: null,
       advisories: [],
     };
   }
@@ -167,20 +156,12 @@ export function evaluateToolCall(ctx: PolicyEvaluationContext): PolicyDecision {
       role: callerRole,
       metadata: meta,
       shellRisk: null,
-      completion: null,
       advisories: [],
     };
   }
 
-  // 2. Per-tool requires_approval. Native computer control and
-  //    host-side service control always need approval.
-  //    EXCEPTION: complete_task uses the completion-safety gate
-  //    (which is more specific than requires_approval). We
-  //    defer the approval check to AFTER the completion-safety
-  //    check below so that the engine surfaces the more
-  //    specific reason ("verification_missing") instead of the
-  //    generic approval gate.
-  if (meta.requires_approval && !trustedSandbox && toolName !== "complete_task") {
+  // 2. Per-tool approval metadata.
+  if (meta.requires_approval && !trustedSandbox) {
     return {
       verdict: "require_approval",
       code: "approval_required",
@@ -188,12 +169,11 @@ export function evaluateToolCall(ctx: PolicyEvaluationContext): PolicyDecision {
       role: callerRole,
       metadata: meta,
       shellRisk: null,
-      completion: null,
       advisories: [],
     };
   }
 
-  // 3. Shell command risk. run_shell_command is the only tool
+  // 3. Shell command risk. bash is the only tool
   //    whose `args.cmd` is itself a risk surface.
   let shellRisk: ShellRiskFinding | null = null;
   if (toolName === "bash") {
@@ -218,7 +198,6 @@ export function evaluateToolCall(ctx: PolicyEvaluationContext): PolicyDecision {
         role: callerRole,
         metadata: meta,
         shellRisk,
-        completion: null,
         advisories: [],
       };
     }
@@ -233,36 +212,11 @@ export function evaluateToolCall(ctx: PolicyEvaluationContext): PolicyDecision {
         role: callerRole,
         metadata: meta,
         shellRisk,
-        completion: null,
         advisories: [],
       };
     }
   }
 
-  // 4. Completion-safety. complete_task is its own gate.
-  let completion: CompletionDecision | null = null;
-  if (toolName === "complete_task") {
-    const csCtx: CompletionContext = {
-      callerRole,
-      explicitVerificationPassed: ctx.completion?.explicitVerificationPassed ?? false,
-      humanApprovalInFlight: ctx.completion?.humanApprovalInFlight ?? false,
-      unapprovedHighRiskCommands: ctx.completion?.unapprovedHighRiskCommands ?? [],
-      trustedSandbox,
-    };
-    completion = canCompleteTask(csCtx);
-    if (!completion.allow) {
-      return {
-        verdict: "deny",
-        code: "completion_blocked",
-        reason: completion.reason,
-        role: callerRole,
-        metadata: meta,
-        shellRisk,
-        completion,
-        advisories: [],
-      };
-    }
-  }
 
   // 5. Ordering advisories. Always advisory, never blocking.
   const advisories: OrderingAdvisory[] = [];
@@ -283,7 +237,6 @@ export function evaluateToolCall(ctx: PolicyEvaluationContext): PolicyDecision {
     role: callerRole,
     metadata: meta,
     shellRisk,
-    completion,
     advisories,
   };
 }

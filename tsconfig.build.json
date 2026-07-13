@@ -9,13 +9,10 @@
   },
   "include": [
     "src/**/*.ts",
-    "src/**/*.tsx",
     "scripts/run-reaper.ts"
   ],
   "exclude": [
     "tests/**",
-    "dev-ui/**",
-    "scripts/tools/**",
-    "vite.config.ts"
+    "scripts/tools/**"
   ]
 }

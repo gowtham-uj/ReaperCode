@@ -12,7 +12,7 @@
  * The helper is deliberately reusable outside of the foreground-spill path so
  * callers that own the underlying `ChildProcess` stream (for example custom
  * `shellRunner` integrations) can hook the model or TUI into partial updates
- * without modifying {@link "../../tools/global/run-shell-command"}.
+ * without modifying {@link "../../tools/global/bash"}.
  */
 
 import { randomBytes } from "node:crypto";
@@ -313,7 +313,7 @@ export type BashPartialUpdateCallback = (snapshot: BashOutputSnapshot) => void;
  * `ChildProcess` stdout/stderr into the accumulator; command execution,
  * timeout enforcement, and final-result formatting remain the caller's job so
  * we don't bypass the existing foreground spill logic in
- * `global/run-shell-command`.
+ * `global/bash`.
  */
 export interface AttachBashStreamOptions {
   onPartialUpdate?: BashPartialUpdateCallback;

@@ -4,16 +4,25 @@ import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { runShellCommandTool, isForegroundShellResult } from "../../src/tools/global/run-shell-command.js";
+import { executeBashTool, isForegroundShellResult, resolveShellBinary } from "../../src/tools/global/bash.js";
+
+test("shell binary resolution returns a trusted absolute path", () => {
+  const shell = resolveShellBinary();
+  assert.equal(path.isAbsolute(shell), true);
+  if (process.platform === "win32") {
+    assert.match(shell.replace(/\\/g, "/"), /\/Git\/(?:bin|usr\/bin)\/bash\.exe$/i);
+  }
+});
 
 test("shell stall watchdog kills interactive prompt command", async () => {
   // Shorten the stall watchdog timers for testing
   process.env.REAPER_STALL_WATCHDOG_INTERVAL_MS = "500";
   process.env.REAPER_STALL_WATCHDOG_NO_OUTPUT_MS = "1500";
+  const workspace = await mkdtemp(path.join(tmpdir(), "reaper-shell-stall-"));
   let caught: Error | undefined;
   try {
-    await runShellCommandTool(
-      "/workspace",
+    await executeBashTool(
+      workspace,
       { cmd: 'bash -c \'echo "(y/n)"; sleep 60\'', timeoutMs: 120_000 },
       "allow_all",
     );
@@ -31,7 +40,7 @@ test("shell stall watchdog kills interactive prompt command", async () => {
 test("package-manager version probes do not require package.json", async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), "reaper-shell-version-probe-"));
   try {
-    await runShellCommandTool(
+    await executeBashTool(
       workspace,
       { cmd: "pnpm --version", timeoutMs: 10_000 },
       "allow_all",
@@ -47,7 +56,7 @@ test("foreground shell returns after wrapper exit even if a temporary child keep
   const workspace = await mkdtemp(path.join(tmpdir(), "reaper-shell-foreground-child-"));
   const marker = `reaper-fg-orphan-${Date.now()}-${process.pid}`;
   const started = Date.now();
-  const result = await runShellCommandTool(
+  const result = await executeBashTool(
     workspace,
     {
       cmd: `node -e "process.title=${JSON.stringify(marker)}; setInterval(()=>{},1000)" & printf 'foreground-done\\n'`,
@@ -75,12 +84,12 @@ test("foreground shell resolves quickly when inner bash -c leaves a grandchild s
   // wrapper's stdout/stderr pipes. Pi's waitForChildProcess pattern (see
   // earendil-works/pi#5303) is what allows us to finalize the bash tool
   // result without killing the orphan; we mirror that pattern in
-  // runShellCommandTool's close handler.
+  // executeBashTool's close handler.
   const workspace = await mkdtemp(path.join(tmpdir(), "reaper-shell-grandchild-"));
   const marker = `reaper-grandchild-${Date.now()}-${process.pid}`;
   const innerCmd = `node -e "process.title=${JSON.stringify(marker)}; setInterval(()=>{},1000)" & printf 'orphan-backgrounded\\n'`;
   const started = Date.now();
-  const result = await runShellCommandTool(
+  const result = await executeBashTool(
     workspace,
     {
       cmd: `bash -c ${JSON.stringify(innerCmd)}`,
@@ -106,7 +115,7 @@ test("shell output spill keeps command running and writes foreground output to a
   const workspace = await mkdtemp(path.join(tmpdir(), "reaper-shell-spill-workspace-"));
   const artifactDir = await mkdtemp(path.join(tmpdir(), "reaper-shell-spill-artifacts-"));
   try {
-    const result = await runShellCommandTool(
+    const result = await executeBashTool(
       workspace,
       { cmd: "node -e \"for (let i = 0; i < 500; i++) console.log('line-' + i + '-' + 'x'.repeat(40))\"", timeoutMs: 10_000 },
       "allow_all",

@@ -22,7 +22,7 @@ process.env.USERPROFILE = tmpHome;
 
 const { PROVIDER_CATALOG } = await import("../../../src/model/provider/catalog.js");
 const { saveOnboarding, loadOnboarding, clearOnboarding, hasAnyAuth, SUPPORTED_PROVIDERS } =
-  await import("../../../src/tui/provider-onboarding.js");
+  await import("../../../src/model/provider-onboarding.js");
 const { buildProvider, autoDetectProvider } =
   await import("../../../src/model/provider/registry.js");
 

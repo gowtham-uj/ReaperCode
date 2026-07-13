@@ -48,9 +48,6 @@ export function normalizeToolCall(input: unknown): unknown {
 
   const inferredName = normalizeToolName(rawName, args);
   let normalizedName = inferredName;
-  if ((!args || typeof args !== "object") && inferredName === "sandbox_service_control") {
-    args = {};
-  }
 
   if (args && typeof args === "object") {
     const record = args as Record<string, unknown>;
@@ -100,29 +97,7 @@ export function normalizeToolCall(input: unknown): unknown {
                   ? raw.new_string
                   : undefined;
 
-    const normalizedCmd =
-      typeof record.cmd === "string"
-        ? record.cmd
-        : typeof record.command === "string"
-          ? record.command
-          : typeof record.shellCommand === "string"
-            ? record.shellCommand
-            : typeof record.shell_command === "string"
-              ? record.shell_command
-              : undefined;
-
-    const normalizedCwd =
-      typeof record.cwd === "string"
-        ? record.cwd
-        : typeof record.working_directory === "string"
-          ? record.working_directory
-          : typeof record.workingDirectory === "string"
-            ? record.workingDirectory
-            : typeof record.workdir === "string"
-              ? record.workdir
-              : typeof record.directory === "string"
-                ? record.directory
-                : undefined;
+    const normalizedCmd = typeof record.cmd === "string" ? record.cmd : undefined;
 
     const normalizedStepId =
       typeof record.stepId === "string"
@@ -132,9 +107,6 @@ export function normalizeToolCall(input: unknown): unknown {
           : undefined;
 
     let name = normalizeToolName(rawName, args);
-    if (name === "bash" && shouldRouteShellCommandToSandboxService(id, raw, record, normalizedCmd)) {
-      name = "sandbox_service_control";
-    }
     normalizedName = name;
     switch (name) {
       case "read_file":
@@ -175,14 +147,36 @@ export function normalizeToolCall(input: unknown): unknown {
           ...(typeof record.scrapePages === "number" ? { scrapePages: record.scrapePages } : {}),
         };
         break;
-      case "replace_in_file":
-        args = {
-          ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
-          ...(normalizedOld !== undefined ? { oldString: normalizedOld } : {}),
-          ...(normalizedNew !== undefined ? { newString: normalizedNew } : {}),
-          ...(typeof record.allowMultiple === "boolean" ? { allowMultiple: record.allowMultiple } : {}),
-        };
+      case "replace_in_file": {
+        const startLine =
+          typeof record.startLine === "number"
+            ? record.startLine
+            : typeof record.start_line === "number"
+              ? record.start_line
+              : undefined;
+        const endLine =
+          typeof record.endLine === "number"
+            ? record.endLine
+            : typeof record.end_line === "number"
+              ? record.end_line
+              : undefined;
+        if (startLine !== undefined && endLine !== undefined && typeof record.content === "string") {
+          args = {
+            ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
+            startLine,
+            endLine,
+            content: record.content,
+          };
+        } else {
+          args = {
+            ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
+            ...(normalizedOld !== undefined ? { oldString: normalizedOld } : {}),
+            ...(normalizedNew !== undefined ? { newString: normalizedNew } : {}),
+            ...(typeof record.allowMultiple === "boolean" ? { allowMultiple: record.allowMultiple } : {}),
+          };
+        }
         break;
+      }
       case "edit_file":
         args = {
           ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
@@ -207,20 +201,27 @@ export function normalizeToolCall(input: unknown): unknown {
           ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
         };
         break;
-      case "bash":
+      case "bash": {
+        const timeout =
+          typeof record.timeout === "number"
+            ? record.timeout
+            : typeof record.timeoutMs === "number"
+              ? Math.max(1, Math.ceil(record.timeoutMs / 1000))
+              : undefined;
+        const description =
+          typeof record.description === "string"
+            ? record.description
+            : typeof record.summary === "string"
+              ? record.summary
+              : undefined;
         args = {
           ...(normalizedCmd ? { cmd: normalizedCmd } : {}),
-          ...(typeof record.summary === "string" ? { summary: record.summary } : {}),
-          ...(typeof record.description === "string" ? { description: record.description } : {}),
-          ...(typeof record.timeout === "number" ? { timeout: record.timeout } : {}),
-          ...(typeof record.timeoutMs === "number" ? { timeoutMs: record.timeoutMs } : {}),
-          ...(typeof record.idleTimeoutMs === "number" ? { idleTimeoutMs: record.idleTimeoutMs } : {}),
-          ...(typeof record.barrier === "boolean" ? { barrier: record.barrier } : {}),
-          ...(typeof record.forceNonBarrier === "boolean" ? { forceNonBarrier: record.forceNonBarrier } : {}),
-          ...(typeof record.isBackground === "boolean" ? { isBackground: record.isBackground } : {}),
+          ...(description ? { description } : {}),
+          ...(timeout !== undefined ? { timeout } : {}),
           ...(typeof record.run_in_background === "boolean" ? { run_in_background: record.run_in_background } : {}),
         };
         break;
+      }
       case "file_view":
         args = {
           ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
@@ -257,65 +258,6 @@ export function normalizeToolCall(input: unknown): unknown {
           ...(typeof record.reason === "string" ? { reason: record.reason } : {}),
         };
         break;
-      case "bash":
-        args = {
-          ...(normalizedCmd ? { cmd: normalizedCmd } : {}),
-          ...(normalizedCwd ? { cwd: normalizedCwd } : {}),
-          ...(typeof record.timeoutMs === "number" ? { timeoutMs: record.timeoutMs } : {}),
-          ...(typeof record.idleTimeoutMs === "number" ? { idleTimeoutMs: record.idleTimeoutMs } : {}),
-          ...(typeof record.isBackground === "boolean" ? { isBackground: record.isBackground } : {}),
-          ...(typeof record.summary === "string" ? { summary: record.summary } : {}),
-          ...(typeof record.barrier === "boolean" ? { barrier: record.barrier } : {}),
-          ...(typeof record.forceNonBarrier === "boolean" ? { forceNonBarrier: record.forceNonBarrier } : {}),
-        };
-        break;
-      case "sandbox_service_control": {
-        const action = normalizeSandboxServiceAction(record, raw, id);
-        const service =
-          typeof record.service === "string"
-            ? record.service
-            : typeof record.serviceName === "string"
-              ? record.serviceName
-              : typeof record.service_name === "string"
-                ? record.service_name
-                : typeof record.container === "string"
-                  ? record.container
-                  : typeof record.containerName === "string"
-                    ? record.containerName
-                    : undefined;
-        const sourcePath =
-          typeof record.sourcePath === "string"
-            ? record.sourcePath
-            : typeof record.source_path === "string"
-              ? record.source_path
-              : typeof record.src === "string"
-                ? record.src
-                : undefined;
-        const targetPath =
-          typeof record.targetPath === "string"
-            ? record.targetPath
-            : typeof record.target_path === "string"
-              ? record.target_path
-              : typeof record.destination === "string"
-                ? record.destination
-                : typeof record.dest === "string"
-                  ? record.dest
-                  : ["write_file", "copy_to_service", "restore_from_image"].includes(action ?? "") && normalizedPath
-                    ? normalizedPath
-                    : undefined;
-        args = {
-          ...(action ? { action } : {}),
-          ...(service ? { service } : {}),
-          ...(normalizedCmd ? { command: normalizedCmd } : {}),
-          ...(sourcePath ? { sourcePath } : {}),
-          ...(targetPath ? { targetPath } : {}),
-          ...(typeof record.content === "string" ? { content: record.content } : {}),
-          ...(typeof record.tail === "number" ? { tail: record.tail } : {}),
-          ...(typeof record.intervalMs === "number" ? { intervalMs: record.intervalMs } : {}),
-          ...(typeof record.timeoutMs === "number" ? { timeoutMs: record.timeoutMs } : {}),
-        };
-        break;
-      }
       case "browser_control":
         args = {
           ...(typeof record.action === "string" ? { action: record.action } : {}),
@@ -500,29 +442,14 @@ export function normalizeToolCall(input: unknown): unknown {
           ...(typeof record.since === "string" ? { since: record.since } : {}),
         };
         break;
-      case "call_subagent":
-        args = {
-          ...(typeof record.type === "string" ? { type: record.type } : {}),
-          ...(typeof record.task === "string" ? { task: record.task } : {}),
-          ...(typeof record.context === "string" ? { context: record.context } : {}),
-          ...(typeof record.mode === "string" ? { mode: record.mode } : {}),
-          ...(typeof record.timeoutMs === "number" ? { timeoutMs: record.timeoutMs } : {}),
-        };
-        break;
-      case "poll_subagent":
-        args = {
-          ...(typeof record.jobId === "string" ? { jobId: record.jobId } : {}),
-        };
-        break;
       default:
         // Preserve original args for tools without a dedicated normalizer
-        // (skills, extensions, hooks, etc.). Only overlay path/cmd/cwd aliases
-        // when present — never wipe the payload to those three keys alone.
+        // (skills, extensions, hooks, etc.). Only overlay path/cmd aliases
+        // when present — never wipe the payload to those keys alone.
         args = {
           ...record,
           ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
           ...(normalizedCmd ? { cmd: normalizedCmd } : {}),
-          ...(normalizedCwd ? { cwd: normalizedCwd } : {}),
         };
         break;
     }
@@ -543,122 +470,11 @@ function normalizeContainerWorkspacePath(value: string | undefined): string | un
   return value;
 }
 
-function normalizeSandboxServiceAction(record: Record<string, unknown>, raw: Record<string, unknown>, id: string): string | undefined {
-  const explicit =
-    typeof record.action === "string"
-      ? record.action
-      : typeof record.operation === "string"
-        ? record.operation
-        : typeof record.op === "string"
-          ? record.op
-          : undefined;
-  const normalizedExplicit = normalizeSandboxServiceActionToken(explicit);
-  if (normalizedExplicit) return normalizedExplicit;
 
-  const hint = [id, raw.name, raw.toolName, raw.tool_name, raw.tool, record.intent, record.summary, record.description]
-    .filter((value): value is string => typeof value === "string")
-    .join(" ")
-    .toLowerCase()
-    .replace(/[_-]+/g, " ");
-
-  if (/\b(?:wait ready|wait_ready|readiness|ready|health)\b/.test(hint)) return "wait_ready";
-  if (typeof record.command === "string" || typeof record.cmd === "string" || typeof record.shellCommand === "string" || typeof record.shell_command === "string") {
-    return "exec";
-  }
-  if (typeof record.content === "string") return "write_file";
-  if (
-    typeof record.sourcePath === "string" ||
-    typeof record.source_path === "string" ||
-    typeof record.src === "string"
-  ) {
-    return "copy_to_service";
-  }
-  if (/\b(?:log|logs|tail)\b/.test(hint)) return "logs";
-  if (/\b(?:inspect image|image inspect|underlying image)\b/.test(hint)) return "inspect_image";
-  if (/\b(?:restore from image|restore image|image restore)\b/.test(hint)) return "restore_from_image";
-  if (/\b(?:snap|snapshot|inspect|inventory)\b/.test(hint)) return "snapshot";
-  if (/\b(?:list|services|service list|ps)\b/.test(hint)) return "list";
-  if (/\brestart\b/.test(hint)) return "restart";
-  if (/\brecreate\b/.test(hint)) return "recreate";
-  if (/\bstart\b/.test(hint)) return "start";
-  if (/\bstop\b/.test(hint)) return "stop";
-  if (/\b(?:copy|cp)\b/.test(hint)) return "copy_to_service";
-  if (/\b(?:write|create)\b/.test(hint)) return "write_file";
-  if (/\b(?:exec|run|shell|command)\b/.test(hint)) return "exec";
-  return undefined;
-}
-
-function shouldRouteShellCommandToSandboxService(
-  id: string,
-  raw: Record<string, unknown>,
-  record: Record<string, unknown>,
-  command: string | undefined,
-): boolean {
-  if (!command?.trim()) return false;
-  const hint = [id, raw.name, raw.toolName, raw.tool_name, raw.tool, record.intent, record.summary, record.description]
-    .filter((value): value is string => typeof value === "string")
-    .join(" ")
-    .toLowerCase()
-    .replace(/[_-]+/g, " ");
-  if (!/\b(?:svc|service|sandbox service|sidecar|sibling container)\b/.test(hint)) return false;
-  if (/\bdocker(?:\s+compose)?\b/i.test(command)) return false;
-  return true;
-}
-
-function normalizeSandboxServiceActionToken(value: string | undefined): string | undefined {
-  const token = value?.trim().toLowerCase().replace(/[\s-]+/g, "_");
-  if (!token) return undefined;
-  const aliases: Record<string, string> = {
-    list: "list",
-    services: "list",
-    ps: "list",
-    logs: "logs",
-    log: "logs",
-    tail: "logs",
-    snapshot: "snapshot",
-    snap: "snapshot",
-    inspect: "snapshot",
-    inventory: "snapshot",
-    inspect_image: "inspect_image",
-    image_inspect: "inspect_image",
-    restore_from_image: "restore_from_image",
-    image_restore: "restore_from_image",
-    exec: "exec",
-    run: "exec",
-    shell: "exec",
-    command: "exec",
-    write: "write_file",
-    write_file: "write_file",
-    create: "write_file",
-    copy: "copy_to_service",
-    cp: "copy_to_service",
-    copy_to_service: "copy_to_service",
-    restart: "restart",
-    recreate: "recreate",
-    start: "start",
-    stop: "stop",
-    ready: "wait_ready",
-    readiness: "wait_ready",
-    health: "wait_ready",
-    wait_ready: "wait_ready",
-  };
-  return aliases[token];
-}
-
-function normalizeToolName(rawName: string | undefined, args: unknown): string | undefined {
+function normalizeToolName(rawName: string | undefined, _args: unknown): string | undefined {
   const canonical = rawName?.trim().toLowerCase().replace(/[\s-]+/g, "_");
   const aliases: Record<string, string> = {
     bash: "bash",
-    shell: "bash",
-    run_command: "bash",
-    execute_command: "bash",
-    shell_command: "bash",
-    terminal: "bash",
-    sandbox_service: "sandbox_service_control",
-    sandbox_services: "sandbox_service_control",
-    sandbox_service_control: "sandbox_service_control",
-    service_control: "sandbox_service_control",
-    container_service_control: "sandbox_service_control",
     browser: "browser_control",
     browser_use: "browser_control",
     browser_action: "browser_control",
@@ -710,15 +526,6 @@ function normalizeToolName(rawName: string | undefined, args: unknown): string |
   };
   if (canonical && aliases[canonical]) {
     return aliases[canonical];
-  }
-  if (canonical && args && typeof args === "object") {
-    const record = args as Record<string, unknown>;
-    if (typeof record.cmd === "string" || typeof record.command === "string" || typeof record.shellCommand === "string" || typeof record.shell_command === "string") {
-      return "bash";
-    }
-    if (typeof record.path === "string" && typeof record.content === "string") {
-      return "write_file";
-    }
   }
   return rawName;
 }

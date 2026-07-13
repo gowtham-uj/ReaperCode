@@ -4,12 +4,6 @@
  *  - Risky shell blocking
  *  - Browser preferred over computer (advisory)
  *  - Native OS control requires approval
- *  - complete_task blocked before verification
- *  - complete_task allowed after verification
- *  - Subagents cannot call complete_task
- *  - Reviewers cannot edit
- *  - Critics are read-only
- *  - Implementers cannot bypass verification
  *  - search_tools only reveals schemas
  *  - Trusted-sandbox shortcut for high-risk commands
  *  - Ordering advisories are surfaced (advisory only, not blocking)
@@ -33,7 +27,7 @@ test("role deny: explorer cannot call write_file", () => {
   assert.equal(d.code, "forbidden_in_role");
 });
 
-test("role deny: critic cannot call run_shell_command", () => {
+test("role deny: critic cannot call bash", () => {
   const d = evaluateToolCall({ toolName: "bash", args: { cmd: "ls" }, callerRole: "critic", trustedSandbox: false });
   assert.equal(d.verdict, "deny");
   // Critic cannot run shell — either shell_risk_exceeded (because low-only) or forbidden_in_role.
@@ -127,56 +121,6 @@ test("browser_control is browser-only; other roles are denied", () => {
   assert.equal(d.verdict, "allow");
 });
 
-test("complete_task is blocked when verification is not passed", () => {
-  const d = evaluateToolCall({
-    toolName: "complete_task",
-    args: { summary: "Done" },
-    callerRole: "root",
-    trustedSandbox: false,
-    completion: { explicitVerificationPassed: false, humanApprovalInFlight: false, unapprovedHighRiskCommands: [], trustedSandbox: false },
-  });
-  assert.equal(d.verdict, "deny");
-  assert.equal(d.code, "completion_blocked");
-});
-
-test("complete_task is allowed when verification is passed", () => {
-  const d = evaluateToolCall({
-    toolName: "complete_task",
-    args: { summary: "Done" },
-    callerRole: "root",
-    trustedSandbox: false,
-    completion: { explicitVerificationPassed: true, humanApprovalInFlight: false, unapprovedHighRiskCommands: [], trustedSandbox: false },
-  });
-  assert.equal(d.verdict, "allow");
-});
-
-test("subagents cannot call complete_task", () => {
-  for (const role of ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser"]) {
-    const d = evaluateToolCall({
-      toolName: "complete_task",
-      args: { summary: "Done" },
-      callerRole: role,
-      trustedSandbox: false,
-      completion: { explicitVerificationPassed: true, humanApprovalInFlight: false, unapprovedHighRiskCommands: [], trustedSandbox: false },
-    });
-    assert.equal(d.verdict, "deny", `${role} should not be allowed to call complete_task`);
-  }
-});
-
-test("implementer cannot bypass verification to complete", () => {
-  const d = evaluateToolCall({
-    toolName: "complete_task",
-    args: { summary: "Done" },
-    callerRole: "implementer",
-    trustedSandbox: false,
-    completion: { explicitVerificationPassed: true, humanApprovalInFlight: false, unapprovedHighRiskCommands: [], trustedSandbox: false },
-  });
-  // The role-based check fires first (implementer is not allowed
-  // to call complete_task at all), giving a deny with code
-  // 'forbidden_in_role'.
-  assert.equal(d.verdict, "deny");
-  assert.equal(d.code, "forbidden_in_role");
-});
 
 test("search_tools is read-only and available to all roles", () => {
   for (const role of ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser", "root"]) {
@@ -228,17 +172,6 @@ test("isPolicyDenial and isPolicyApprovalRequired are accurate", () => {
   assert.equal(isPolicyApprovalRequired(approval), true);
 });
 
-test("isPolicyDenial flags completion_blocked as a denial", () => {
-  const d = evaluateToolCall({
-    toolName: "complete_task",
-    args: { summary: "Done" },
-    callerRole: "root",
-    trustedSandbox: false,
-    completion: { explicitVerificationPassed: false, humanApprovalInFlight: false, unapprovedHighRiskCommands: [], trustedSandbox: false },
-  });
-  assert.equal(d.verdict, "deny");
-  assert.equal(isPolicyDenial(d), true);
-});
 
 test("metadata is surfaced on the decision for downstream consumers", () => {
   const d = evaluateToolCall({ toolName: "read_file", args: { path: "/tmp/x" }, callerRole: "root", trustedSandbox: false });
@@ -247,7 +180,7 @@ test("metadata is surfaced on the decision for downstream consumers", () => {
   assert.equal(d.metadata.risk_level, "low");
 });
 
-test("shell risk finding is surfaced on the decision for run_shell_command", () => {
+test("shell risk finding is surfaced on the decision for bash", () => {
   const d = evaluateToolCall({ toolName: "bash", args: { cmd: "sudo apt install vim" }, callerRole: "root", trustedSandbox: false });
   // The decision itself is require_approval, but the shell risk
   // finding should still be set.

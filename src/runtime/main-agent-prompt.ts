@@ -51,8 +51,6 @@ const SYSTEM_TIER_SECTIONS: ReadonlyArray<{ name: string; kind: "system" | "stab
   { name: "Changed Files / Current Diff", kind: "volatile" },
   { name: "Recent Tool Results", kind: "volatile" },
   { name: "Runtime Blockers", kind: "volatile" },
-  { name: "Running Subagents", kind: "volatile" },
-  { name: "Completed Subagent Results", kind: "volatile" },
   { name: "Budget", kind: "volatile" },
 ];
 
@@ -169,8 +167,6 @@ export function buildMainAgentCockpit(
     },
     "Recent Tool Results": renderRecentToolResultsSection(pickFirst(stateRecord, ["recentToolResults", "toolResults"]), options),
     "Runtime Blockers": pickFirst(stateRecord, ["runtimeBlockers", "blockers", "feedback"]),
-    "Running Subagents": pickFirst(stateRecord, ["runningSubagents", "activeSubagents"]),
-    "Completed Subagent Results": pickFirst(stateRecord, ["completedSubagentResults", "backgroundSubagentResults", "subagentResults"]),
     Budget: budgetState,
   };
   void verificationState;

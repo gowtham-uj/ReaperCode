@@ -305,7 +305,7 @@ function findLatestRescuerWorthyFailure(results: ToolResult[]): ToolResult | und
 
 function isRescuerWorthyFailure(result: ToolResult): boolean {
   if (isRescuerWorthyBlockedResult(result)) return true;
-  if (["replace_in_file", "edit_file", "replace_symbol", "write_file", "sandbox_service_control"].includes(result.name)) {
+  if (["replace_in_file", "edit_file", "replace_symbol", "write_file"].includes(result.name)) {
     return true;
   }
   if (result.name !== "bash") return false;

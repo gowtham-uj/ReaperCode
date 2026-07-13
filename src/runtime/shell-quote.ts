@@ -3,8 +3,8 @@
  *
  * Used by:
  *   - src/runtime/engine.ts:10722
- *   - src/tools/global/run-shell-command.ts:588
- *   - src/tools/global/run-shell-command.ts:1174 (printf-style)
+ *   - src/tools/global/bash.ts:588
+ *   - src/tools/global/bash.ts:1174 (printf-style)
  *   - src/verify/runner.ts:268
  *   - src/tools/executor.ts:1884
  *

@@ -11,7 +11,7 @@ import { pruneSupersededToolResults } from "../context/supersede-prune.js";
 import { pruneToolOutputs } from "../context/tool-output-prune.js";
 import { compactionContextTokens } from "../config/context-budget.js";
 import { getContextTunables } from "../config/config-tunables.js";
-import { tokenUsageFromResponse } from "../context/token-budget.js";
+import { TokenBudgetTracker, tokenUsageFromResponse } from "../context/token-budget.js";
 import { TrajectoryLogger } from "../logging/trajectory.js";
 
 export interface ContextEngineeringHooksOptions {
@@ -89,6 +89,10 @@ export interface ContextEngineeringHooks {
     runId: string;
     sessionId: string;
     namedSession?: string;
+    /** The run's user intent (exec preamble stripped) — journaled for named sessions. */
+    userPrompt?: string;
+    /** Final POST-TRANSFORM live conversation (shake/prune/summary applied). */
+    conversation?: unknown[];
     assistantMessage: string;
     trajectoryLogger?: unknown;
     success?: boolean;
@@ -141,12 +145,31 @@ function estimateLiveConversationChars(messages: unknown): number {
   return total;
 }
 
+function estimateModelResponseTokens(response: unknown): number {
+  if (!response || typeof response !== "object") return 0;
+  const record = response as Record<string, unknown>;
+  let chars = 0;
+  for (const key of ["content", "reasoningContent", "assistantMessage"]) {
+    const value = record[key];
+    if (typeof value === "string") chars += value.length;
+  }
+  if (Array.isArray(record.toolCalls)) {
+    try {
+      chars += JSON.stringify(record.toolCalls).length;
+    } catch {
+      /* best-effort estimate */
+    }
+  }
+  return Math.ceil(chars / 4);
+}
+
 export function createContextEngineeringHooks(
   options: ContextEngineeringHooksOptions = {},
 ): ContextEngineeringHooks {
   const infer = options.infer;
   const config = options.config;
   const countTokens = options.countTokens ?? ((msgs) => Math.ceil(estimateLiveConversationChars(msgs) / 4));
+  const tokenBudgetTracker = new TokenBudgetTracker();
 
   return {
     async onBoot({ workspaceRoot, runId, sessionId, namedSession }) {
@@ -164,6 +187,54 @@ export function createContextEngineeringHooks(
               workspaceRoot,
               cwd: workspaceRoot,
             }).catch(() => undefined);
+          }
+
+          // Coding-agent session continuity: when the named-session journal
+          // already holds a prior conversation, rehydrate the REAL prior
+          // messages so the next prompt sees the full session history — not
+          // a lossy summary. This is the primary continuity path; the
+          // summary/turn-index re-anchor below is only a fallback.
+          if (isValidSessionName(namedSession) && journalExists(workspaceRoot, namedSession)) {
+            const { buildActiveBranchMessages } = await import("../context/session-journal.js");
+            const prior = buildActiveBranchMessages(workspaceRoot, namedSession)
+              .filter((m) => m.role === "user" || m.role === "assistant" || m.role === "tool")
+              .map((m) => {
+                const toolCalls =
+                  Array.isArray(m.tool_calls) && m.tool_calls.length > 0
+                    ? m.tool_calls.map((c) => ({
+                        id: c.id,
+                        type: "function" as const,
+                        function: {
+                          name: c.name,
+                          arguments: typeof c.args === "string" ? c.args : JSON.stringify(c.args ?? {}),
+                        },
+                      }))
+                    : undefined;
+                return {
+                  role: m.role,
+                  content: typeof m.content === "string" ? m.content : "",
+                  ...(typeof m.tool_call_id === "string" ? { tool_call_id: m.tool_call_id } : {}),
+                  ...(toolCalls ? { tool_calls: toolCalls } : {}),
+                  ...(typeof m.name === "string" ? { name: m.name } : {}),
+                  ...(typeof m.is_error === "boolean" ? { is_error: m.is_error } : {}),
+                };
+              })
+              .filter((m) => m.content.trim().length > 0 || (m as { tool_calls?: unknown[] }).tool_calls);
+            if (prior.length > 0) {
+              (globalThis as Record<string, unknown>)[`${runId}::session-resume`] = {
+                resume: {
+                  reAnchor: "",
+                  rehydratedMessages: prior,
+                  summary: null,
+                  stats: { recentTurns: prior.length, recentChars: 0, summariesAvailable: 0 },
+                  seededFromJournal: true,
+                },
+                namedSession,
+                sessionId,
+                stashedAt: Date.now(),
+              };
+              return; // journal wins — skip the summary fallback
+            }
           }
         }
 
@@ -440,10 +511,42 @@ export function createContextEngineeringHooks(
       const useHandoff = cmTunablesBefore.handoffEnabled === true;
       if (fireFullSummary && infer) {
         const inflightKey = `${runId}::full-summary`;
-        const runInfer = async (jsonl: string): Promise<string> => {
-          if (!useHandoff) return infer(jsonl);
+        const ptlConsumedKey = `${runId}::full-summary-ptl-consumed`;
+        const armSummaryCooldown = (): void => {
+          (globalThis as any)[cooldownSlotKey] = {
+            baselineTokens: countTokens(working),
+            toolBatchesSince: 0,
+            appliedAt: Date.now(),
+          };
+        };
+        const runInfer = async (summaryPrompt: string): Promise<string> => {
+          if (!useHandoff) return infer(summaryPrompt);
           const { HANDOFF_SUMMARY_SYSTEM_PROMPT, HANDOFF_SUMMARY_USER_PROMPT_INSTRUCTIONS } = await import("../context/handoff.js");
-          return infer(`${HANDOFF_SUMMARY_SYSTEM_PROMPT}\n\n---\n\n${HANDOFF_SUMMARY_USER_PROMPT_INSTRUCTIONS}\n\n---\n\n${jsonl}`);
+          const conversationMarker = "## Conversation to summarize";
+          const markerIndex = summaryPrompt.indexOf(conversationMarker);
+          const conversation = markerIndex >= 0 ? summaryPrompt.slice(markerIndex) : summaryPrompt;
+          const handoff = await infer(
+            `${HANDOFF_SUMMARY_SYSTEM_PROMPT}\n\n---\n\n${HANDOFF_SUMMARY_USER_PROMPT_INSTRUCTIONS}\n\n---\n\n${conversation}`,
+          );
+          const cleaned = handoff
+            .replace(/<analysis>[\s\S]*?<\/analysis>/gi, "")
+            .replace(/<\/?summary>/gi, "")
+            .trim();
+          return `<summary>${cleaned}</summary>`;
+        };
+        const summarizeWorkingConversation = async (): Promise<string> => {
+          const { tryFullSummarization } = await import("../context/full-summary.js");
+          const result = await tryFullSummarization(working as any[], {
+            softCap,
+            // The outer gate already decided to compact, including forced
+            // idle/incomplete paths. Do not apply a second threshold here.
+            thresholdTokens: 0,
+            infer: runInfer,
+          });
+          if (!result?.performed) {
+            throw new Error(result?.summary ?? "full-summary inference produced no usable summary");
+          }
+          return result.summary;
         };
         const applySummary = async (summaryText: string): Promise<void> => {
           const { persistSummary } = await import("../context/persistent-summary.js");
@@ -451,17 +554,42 @@ export function createContextEngineeringHooks(
           const preChars = estimateLiveConversationChars(working);
           const newMsgs = buildPostCompactMessages(summaryText, working as any, { softCap } as any);
           const postChars = estimateLiveConversationChars(newMsgs as unknown[]);
+          const savedChars = preChars - postChars;
+          if (savedChars <= 0) {
+            // A verbose summarizer can produce more context than it consumes.
+            // Keep the source conversation and cool down before retrying.
+            armSummaryCooldown();
+            return;
+          }
           working = newMsgs as unknown[];
           fullSummarized = true;
           const postTokens = countTokens(working);
-          (globalThis as any)[`${runId}::full-summary-applied`] = {
-            messages: newMsgs,
-            summaryText,
-            appliedAt: Date.now(),
-          };
+          // Blocking compaction is already returned to the engine in this
+          // call. Only async compaction needs a one-shot next-call handoff;
+          // replaying a blocking result would discard newer tool messages.
+          if (!blockingFullSummary) {
+            if ((globalThis as any)[ptlConsumedKey]) {
+              delete (globalThis as any)[ptlConsumedKey];
+            } else {
+              (globalThis as any)[`${runId}::full-summary-applied`] = {
+                messages: newMsgs,
+                summaryText,
+                appliedAt: Date.now(),
+              };
+            }
+          }
           (globalThis as any)[cooldownSlotKey] = {
             baselineTokens: postTokens,
             toolBatchesSince: 0,
+            appliedAt: Date.now(),
+          };
+          // Session write-back: keep the LAST applied summary for this run so
+          // onRunComplete can persist it as a journal compaction entry
+          // (named sessions rehydrate summary + raw tail, OMP semantics).
+          (globalThis as any)[`${runId}::last-full-summary`] = {
+            summaryText,
+            preChars,
+            postChars,
             appliedAt: Date.now(),
           };
           await persistSummary(workspaceRoot, {
@@ -499,8 +627,7 @@ export function createContextEngineeringHooks(
             if (existing?.promise && typeof existing.promise.then === "function") {
               summaryText = await existing.promise;
             } else {
-              const jsonl = JSON.stringify(working);
-              const inflightRef = { promise: runInfer(jsonl) };
+              const inflightRef = { promise: summarizeWorkingConversation() };
               (globalThis as any)[inflightKey] = inflightRef;
               try {
                 summaryText = await inflightRef.promise;
@@ -514,12 +641,12 @@ export function createContextEngineeringHooks(
               await applySummary(summaryText);
             }
           } catch {
+            armSummaryCooldown();
             /* best-effort — fall through with unshaken working set */
           }
         } else if (!(globalThis as any)[inflightKey]) {
-          const jsonl = JSON.stringify(working);
           const inflightRef: { promise: Promise<string> } = (globalThis as any)[inflightKey] = {
-            promise: runInfer(jsonl),
+            promise: summarizeWorkingConversation(),
           };
           inflightRef.promise
             .then(async (summaryText: string) => {
@@ -529,6 +656,10 @@ export function createContextEngineeringHooks(
                 /* best-effort */
               }
               return summaryText;
+            })
+            .catch(() => {
+              armSummaryCooldown();
+              delete (globalThis as any)[ptlConsumedKey];
             })
             .finally(() => {
               if ((globalThis as any)[inflightKey] === inflightRef) {
@@ -637,7 +768,7 @@ export function createContextEngineeringHooks(
       }
       const cm = getContextTunables();
       if (!cm.bashHeadTailEnabled) return { savedChars: 0 };
-      if (toolName !== "bash" && toolName !== "run_shell_command") {
+      if (toolName !== "bash") {
         return { savedChars: 0 };
       }
       const wireHead = cm.bashHeadPreviewChars;
@@ -819,62 +950,73 @@ export function createContextEngineeringHooks(
       else if (ratio >= cm.errorThresholdRatio) state = { state: "error", warnings: ["error"] };
       else if (ratio >= cm.warningThresholdRatio) state = { state: "warning", warnings: ["warning"] };
       try {
-        const rawUsage = tokenUsageFromResponse(modelResponse as any);
-        let inputTokens = rawUsage?.inputTokens;
-        let outputTokens = rawUsage?.outputTokens;
-        if (inputTokens === undefined && outputTokens === undefined) {
-          inputTokens = totalTokens;
-          outputTokens = 0;
-        }
-        if (inputTokens || outputTokens) {
-          await (trajectoryLogger as TrajectoryLogger).write({
-            event_id: randomUUID(),
-            run_id: runId,
-            session_id: sessionId,
-            trace_id: traceId ?? runId,
-            timestamp: new Date().toISOString(),
-            log_schema_version: 1,
-            kind: "token_budget",
-            level: "info",
-            turn_input_tokens: inputTokens ?? 0,
-            turn_output_tokens: outputTokens ?? 0,
-            turn_cache_read_tokens: 0,
-            turn_cache_write_tokens: 0,
-            turn_call_count: 1,
-            cumulative_input_tokens: inputTokens ?? 0,
-            cumulative_output_tokens: outputTokens ?? 0,
-            cumulative_cache_read_tokens: 0,
-            cumulative_cache_write_tokens: 0,
-            cumulative_call_count: 1,
-            source: "wiring-token-budget",
-          } as any).catch(() => undefined);
-        }
+        const usage = tokenUsageFromResponse(modelResponse as any) ?? {
+          inputTokens: totalTokens,
+          outputTokens: estimateModelResponseTokens(modelResponse),
+        };
+        tokenBudgetTracker.beginTurn();
+        tokenBudgetTracker.record(usage);
+        const tokenSnapshot = tokenBudgetTracker.snapshot();
+        await (trajectoryLogger as TrajectoryLogger).write({
+          event_id: randomUUID(),
+          run_id: runId,
+          session_id: sessionId,
+          trace_id: traceId ?? runId,
+          timestamp: new Date().toISOString(),
+          log_schema_version: 1,
+          kind: "token_budget",
+          level: "info",
+          turn_input_tokens: tokenSnapshot.inputTokens,
+          turn_output_tokens: tokenSnapshot.outputTokens,
+          turn_cache_read_tokens: tokenSnapshot.cacheReadTokens,
+          turn_cache_write_tokens: tokenSnapshot.cacheWriteTokens,
+          turn_call_count: tokenSnapshot.callCount,
+          cumulative_input_tokens: tokenSnapshot.cumulativeInputTokens,
+          cumulative_output_tokens: tokenSnapshot.cumulativeOutputTokens,
+          cumulative_cache_read_tokens: tokenSnapshot.cumulativeCacheReadTokens,
+          cumulative_cache_write_tokens: tokenSnapshot.cumulativeCacheWriteTokens,
+          cumulative_call_count: tokenSnapshot.cumulativeCallCount,
+          source: "wiring-token-budget",
+        } as any).catch(() => undefined);
       } catch {
         /* swallow */
       }
       return { used: totalTokens, totalChars, state, timeCompacted };
     },
 
-    async onProviderTokenLimitError({ messages, softCap: _softCap, runId: providedRunId }) {
+    async onProviderTokenLimitError({ messages, softCap, runId: providedRunId }) {
       const runKey = providedRunId ?? "default";
       const inflightKey = `${runKey}::full-summary`;
       const inflight = (globalThis as any)[inflightKey];
       if (inflight && typeof inflight.promise?.then === "function") {
+        const ptlConsumedKey = `${runKey}::full-summary-ptl-consumed`;
+        (globalThis as any)[ptlConsumedKey] = Date.now();
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
         try {
           const summary = await Promise.race([
             inflight.promise,
-            new Promise<string>((_resolve, reject) =>
-              setTimeout(() => reject(new Error("timeout")), 240_000),
-            ),
+            new Promise<string>((_resolve, reject) => {
+              timeoutHandle = setTimeout(() => reject(new Error("timeout")), 240_000);
+            }),
           ]);
           if (typeof summary === "string" && summary.length > 0) {
-            (globalThis as any)[`${runKey}::full-summary-applied`] = {
-              summaryText: summary,
-              appliedAt: Date.now(),
-            };
+            const { buildPostCompactMessages } = await import("../context/full-summary.js");
+            const postCompactMessages = buildPostCompactMessages(summary, messages as any[], { softCap });
+            const savedChars = Math.max(
+              0,
+              estimateLiveConversationChars(messages) - estimateLiveConversationChars(postCompactMessages),
+            );
+            // Both PTL callers retry immediately with this same live array.
+            // Replace it in place; a next-call stash would replay stale state
+            // after the retry's tool results had already been appended.
+            messages.splice(0, messages.length, ...postCompactMessages);
+            delete (globalThis as any)[`${runKey}::full-summary-applied`];
+            return { messages, savedChars };
           }
         } catch {
-          // best-effort
+          // Best effort: fall through to bounded head truncation.
+        } finally {
+          if (timeoutHandle) clearTimeout(timeoutHandle);
         }
       }
       const truncated = truncateHeadForPTLRecovery(messages as Array<Record<string, unknown>>, {
@@ -885,7 +1027,7 @@ export function createContextEngineeringHooks(
       return { messages: messagesArr, savedChars: ptlsaved };
     },
 
-    async onRunComplete({ workspaceRoot: _w, runId, sessionId, namedSession: _ns, assistantMessage, trajectoryLogger, success: _success, softCap: _softCap, usedChars }) {
+    async onRunComplete({ workspaceRoot, runId, sessionId, namedSession, userPrompt, conversation, assistantMessage, trajectoryLogger, success: _success, softCap: _softCap, usedChars }) {
       try {
         await (trajectoryLogger as TrajectoryLogger).write({
           event_id: randomUUID(),
@@ -906,6 +1048,134 @@ export function createContextEngineeringHooks(
       } catch {
         /* best-effort */
       }
+
+      // Named-session continuity (OMP parity): journal the run's NEW turns —
+      // the POST-TRANSFORM conversation delta, including assistant tool_calls
+      // and (already shaken/pruned) tool results — so the next run with the
+      // same --session name rehydrates the real multi-turn conversation.
+      if (namedSession) {
+        try {
+          const { isValidSessionName, journalExists, initJournal, appendEntry, lastEntryId } =
+            await import("../context/session-journal.js");
+          if (isValidSessionName(namedSession)) {
+            if (!journalExists(workspaceRoot, namedSession)) {
+              await initJournal({ name: namedSession, workspaceRoot, cwd: workspaceRoot }).catch(() => undefined);
+            }
+            if (journalExists(workspaceRoot, namedSession)) {
+              // Full-summary write-back FIRST: the compaction entry replaces
+              // all prior journaled turns on the next rehydration; this run's
+              // own final exchange is then appended raw after it.
+              const summarySlot = (globalThis as any)[`${runId}::last-full-summary`] as
+                | { summaryText: string; preChars: number; postChars: number }
+                | undefined;
+              if (summarySlot && typeof summarySlot.summaryText === "string" && summarySlot.summaryText.length > 0) {
+                await appendEntry(workspaceRoot, namedSession, {
+                  id: randomUUID(),
+                  parentId: lastEntryId(workspaceRoot, namedSession),
+                  type: "compaction",
+                  ts: new Date().toISOString(),
+                  note: "full_summary write-back",
+                  payload: {
+                    preChars: summarySlot.preChars,
+                    postChars: summarySlot.postChars,
+                    savedChars: Math.max(0, summarySlot.preChars - summarySlot.postChars),
+                    resultsShaken: 0,
+                    summary: summarySlot.summaryText,
+                  },
+                });
+              }
+              const wire = Array.isArray(conversation)
+                ? (conversation as Array<Record<string, unknown>>)
+                : [];
+              let slice: Array<Record<string, unknown>> = [];
+              if (summarySlot && wire.length > 0) {
+                // Post-compact state: everything before the summary block is
+                // already represented by the compaction entry above.
+                let cut = -1;
+                for (let i = wire.length - 1; i >= 0; i -= 1) {
+                  const m = wire[i]!;
+                  if (
+                    m.role === "user" &&
+                    typeof m.content === "string" &&
+                    m.content.startsWith("Summary of prior context:")
+                  ) {
+                    cut = i;
+                    break;
+                  }
+                }
+                slice = cut >= 0 ? wire.slice(cut + 1) : wire;
+              } else if (wire.length > 0) {
+                const rawCount = Number((globalThis as any)[`${runId}::rehydrated-count`] ?? 0);
+                slice = wire.slice(Number.isFinite(rawCount) && rawCount > 0 ? rawCount : 0);
+              }
+              // Harness-frame messages never enter the session: post-compact
+              // re-anchors are derivable, and the cockpit is replaced by the
+              // clean user intent.
+              const SKIP_PREFIXES = [
+                "[Reaper context boundary]",
+                "Summary of prior context:",
+                "[Post-compact progress]",
+                "[Post-compact re-anchor]",
+              ];
+              const payloads: Array<Record<string, unknown>> = [];
+              for (const m of slice) {
+                const role = m.role;
+                if (role !== "user" && role !== "assistant" && role !== "tool") continue;
+                let content = typeof m.content === "string" ? m.content : "";
+                if (role === "user") {
+                  if (SKIP_PREFIXES.some((p) => content.startsWith(p))) continue;
+                  if (content.startsWith("# Main Agent Cockpit")) {
+                    if (typeof userPrompt === "string" && userPrompt.trim().length > 0) {
+                      content = userPrompt.trim();
+                    } else {
+                      continue;
+                    }
+                  }
+                }
+                const toolCalls = Array.isArray(m.tool_calls)
+                  ? (m.tool_calls as Array<{ id?: string; function?: { name?: string; arguments?: string } }>).map((c) => ({
+                      id: String(c.id ?? ""),
+                      name: String(c.function?.name ?? ""),
+                      args: c.function?.arguments ?? "",
+                    }))
+                  : undefined;
+                if (content.trim().length === 0 && (!toolCalls || toolCalls.length === 0)) continue;
+                payloads.push({
+                  role,
+                  content,
+                  ...(typeof m.tool_call_id === "string" ? { tool_call_id: m.tool_call_id } : {}),
+                  ...(toolCalls && toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+                  ...(typeof m.name === "string" ? { name: m.name } : {}),
+                  ...(typeof m.is_error === "boolean" ? { is_error: m.is_error } : {}),
+                  ts: Date.now(),
+                });
+              }
+              if (payloads.length === 0) {
+                // Fallback (no snapshot available): minimal final exchange.
+                if (typeof userPrompt === "string" && userPrompt.trim().length > 0) {
+                  payloads.push({ role: "user", content: userPrompt.trim(), ts: Date.now() });
+                }
+                if (typeof assistantMessage === "string" && assistantMessage.trim().length > 0) {
+                  payloads.push({ role: "assistant", content: assistantMessage.trim(), ts: Date.now() });
+                }
+              }
+              for (const payload of payloads) {
+                await appendEntry(workspaceRoot, namedSession, {
+                  id: randomUUID(),
+                  parentId: lastEntryId(workspaceRoot, namedSession),
+                  type: "message",
+                  ts: new Date().toISOString(),
+                  payload: payload as any,
+                });
+              }
+            }
+          }
+        } catch {
+          /* best-effort — journaling must not fail the run */
+        }
+      }
+      delete (globalThis as any)[`${runId}::last-full-summary`];
+      delete (globalThis as any)[`${runId}::rehydrated-count`];
       return { summaryPersisted: typeof assistantMessage === "string" };
     },
   };

@@ -175,6 +175,6 @@ test("cockpit renders build progress with missing artifact areas", () => {
 
 test("bash tool description positions shell as execution, not file reading", () => {
   assert.match(toolRegistry.bash.description, /package installs, tests, builds, typechecks/);
-  assert.match(toolRegistry.bash.description, /Do not use bash as a file reader/i);
-  assert.match(toolRegistry.bash.description, /Prefer `read_file` for targeted file inspection/i);
+  assert.match(toolRegistry.bash.description, /Do not use bash for file reads/i);
+  assert.match(toolRegistry.bash.description, /inspect that path with file_view/i);
 });

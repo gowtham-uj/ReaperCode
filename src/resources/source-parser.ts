@@ -124,7 +124,18 @@ function isLocalSource(value: string): boolean {
 
 function normalizeLocalPath(value: string): string {
   if (/^file:\/\//i.test(value)) {
-    return fileURLToPath(value);
+    const url = new URL(value);
+    // Resource manifests are portable and may contain POSIX file URLs even
+    // when Reaper is inspecting them on Windows. Node's Win32 fileURLToPath
+    // rejects those URLs because they have no drive letter.
+    if (
+      process.platform === "win32" &&
+      url.hostname === "" &&
+      !/^\/[A-Za-z]:/.test(url.pathname)
+    ) {
+      return decodeURIComponent(url.pathname);
+    }
+    return fileURLToPath(url);
   }
   return value;
 }

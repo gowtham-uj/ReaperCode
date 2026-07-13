@@ -1,13 +1,13 @@
 import type { ChildProcess } from "node:child_process";
 
 import {
-  runShellCommandTool,
+  executeBashTool,
   isBackgroundShellResult,
   isForegroundShellResult,
   type ForegroundShellResult,
   type BackgroundShellResult,
   type ShellCommandResult,
-} from "../global/run-shell-command.js";
+} from "../global/bash.js";
 import type { SafetyProfile } from "../../policy/rules.js";
 import type { RuleEvaluationContext } from "../../policy/rules.js";
 import { BASH_INPUT_DEFAULTS } from "./constants.js";
@@ -25,7 +25,7 @@ export interface BashExecutionContext {
    * Optional streaming sink. When provided, `executeBashCommand` will allocate
    * a bounded `BashOutputAccumulator` and emit throttled partial snapshots
    * via this callback so callers (model layer, TUI) can render progress while
-   * the foreground shell spill is being managed inside `runShellCommandTool`.
+   * the foreground shell spill is being managed inside `executeBashTool`.
    *
    * Omitting the callback is a no-op: command execution behaves exactly as
    * before and only the final, fully-buffered `BashExecutionResult` is
@@ -90,23 +90,9 @@ export async function executeBashCommand(
 ): Promise<BashExecutionResult> {
   const command = input.command;
   const description = input.description;
-  // The bash tool has NO DEFAULT TIMEOUT. The model-facing schema
-  // requires `timeout` in SECONDS (matching the reference-agent
-  // pattern, e.g. pi-mono). We enforce the requirement here too
-  // so any internal caller that forgot to set it gets a clear
-  // error rather than a silent 60-second fallback.
-  if (input.timeout === undefined) {
-    throw new Error(
-      "bash tool: `timeout` is required (in SECONDS, 1-3600). " +
-      "There is no default timeout. The model and all internal callers " +
-      "MUST pass an explicit `timeout` on every bash call. " +
-      "Suggested values: 60 for short probes, 300 for builds/installs/tests, " +
-      "larger for long-running jobs.",
-    );
-  }
-  // The model-facing schema documents `timeout` in SECONDS. Convert
-  // to milliseconds for the underlying shell runner.
-  const timeoutMs = Math.max(1, Math.floor(input.timeout * 1000));
+  // The model-facing timeout is expressed in seconds. Preserve the historical
+  // 60-second default for internal and replayed calls that omit it.
+  const timeoutMs = Math.max(1, Math.floor((input.timeout ?? 60) * 1000));
   const args = {
     cmd: command,
     timeoutMs,
@@ -122,7 +108,7 @@ export async function executeBashCommand(
   // pays zero allocation overhead.
   const partialAccumulator = ctx.onPartialUpdate ? new BashOutputAccumulator() : undefined;
 
-  const raw: ShellCommandResult = await runShellCommandTool(
+  const raw: ShellCommandResult = await executeBashTool(
     ctx.workspaceRoot,
     args,
     ctx.safetyProfile,

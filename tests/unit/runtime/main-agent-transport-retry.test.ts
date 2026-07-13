@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { streamMainAgentResponseWithTransportRetry, classifyMainAgentTransportError } from "../../../src/runtime/engine.js";
+import {
+  classifyMainAgentTransportError,
+  isProviderTokenLimitError,
+  replaceConversationMessages,
+  streamMainAgentResponseWithTransportRetry,
+} from "../../../src/runtime/engine.js";
 
 function okTurn(content = "ok") {
   return {
@@ -69,6 +74,29 @@ test("classifyMainAgentTransportError: non-transport error returns undefined", (
   assert.equal(t, undefined);
 });
 
+test("provider limit classifier rejects MiniMax empty-content validation errors", () => {
+  const error = Object.assign(new Error("invalid params, chat content is empty (2013)"), { status: 400 });
+  assert.equal(isProviderTokenLimitError(error), false);
+});
+
+test("provider limit classifier accepts real context overflow errors", () => {
+  const error = Object.assign(new Error("context length exceeds max tokens"), { status: 400 });
+  assert.equal(isProviderTokenLimitError(error), true);
+});
+
+test("replaceConversationMessages preserves an in-place recovery array", () => {
+  const messages = [{ role: "user", content: "keep me" }];
+  replaceConversationMessages(messages, messages);
+  assert.deepEqual(messages, [{ role: "user", content: "keep me" }]);
+});
+
+test("replaceConversationMessages applies a distinct compacted array", () => {
+  const live = [{ role: "user", content: "old" }];
+  const compacted = [{ role: "user", content: "summary" }];
+  replaceConversationMessages(live, compacted);
+  assert.deepEqual(live, compacted);
+});
+
 test("streamMainAgentResponseWithTransportRetry: returns turn on first success", async () => {
   let calls = 0;
   const gw = makeGateway(async () => {
@@ -96,6 +124,35 @@ test("streamMainAgentResponseWithTransportRetry: retries transient failures then
   } as any);
   assert.ok(calls >= 3);
   assert.equal(turn.content, "ok-after-retries");
+});
+
+test("streamMainAgentResponseWithTransportRetry forwards runId to PTL recovery", async () => {
+  let calls = 0;
+  let recoveredRunId: string | undefined;
+  const gw = makeGateway(async () => {
+    calls += 1;
+    if (calls === 1) {
+      throw Object.assign(new Error("context length exceeds max tokens"), { status: 400 });
+    }
+    return okTurn("ok-after-ptl");
+  });
+  const request = { messages: [{ role: "user", content: "large request" }] } as any;
+  const turn = await streamMainAgentResponseWithTransportRetry(
+    gw,
+    request,
+    { write: async () => undefined } as any,
+    {
+      onProviderTokenLimitError: async ({ messages, runId }) => {
+        recoveredRunId = runId;
+        return { messages, savedChars: 0 };
+      },
+    },
+    270_000,
+    "run-ptl-integration",
+  );
+  assert.equal(calls, 2);
+  assert.equal(recoveredRunId, "run-ptl-integration");
+  assert.equal(turn.content, "ok-after-ptl");
 });
 
 test("streamMainAgentResponseWithTransportRetry: persistent transport failure surfaces as a model-facing assistant turn, not a thrown error", async () => {

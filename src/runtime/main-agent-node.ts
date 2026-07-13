@@ -82,9 +82,15 @@ export async function callMainAgent(input: MainAgentCallInput): Promise<MainAgen
   };
 }
 
+export interface MainAgentStreamCallbacks {
+  onMessageDelta?: (text: string) => void | Promise<void>;
+  onReasoningDelta?: (text: string) => void | Promise<void>;
+}
+
 export async function streamMainAgentResponse(
   modelGateway: ModelGateway,
   request: GenerateRequest,
+  callbacks: MainAgentStreamCallbacks = {},
 ): Promise<GenerateResult> {
   const role = request.role;
   let provider = "stream";
@@ -101,8 +107,10 @@ export async function streamMainAgentResponse(
   const rawBuffer = new Map<string, { name?: string; argsText: string; sourceIndex: number }>();
   let nextSourceIndex = 0;
   let rawOrder: string[] = [];
+  let sawStreamEvent = false;
 
   for await (const event of modelGateway.stream(request)) {
+    sawStreamEvent = true;
     if (event.type === "message_start") {
       const data = asRecord(event.data);
       if (typeof data?.provider === "string") provider = data.provider;
@@ -114,12 +122,14 @@ export async function streamMainAgentResponse(
         content += event.content;
         // Live stream actual model output to stdout immediately — no buffering
         process.stdout.write(event.content);
+        await callbacks.onMessageDelta?.(event.content);
       }
       const data = asRecord(event.data);
       if (typeof data?.reasoningContent === "string") {
         reasoningContent += data.reasoningContent;
         // Live stream reasoning as dimmed "thinking" text
         process.stdout.write(dim(data.reasoningContent, process.stdout as NodeJS.WriteStream));
+        await callbacks.onReasoningDelta?.(data.reasoningContent);
       }
       continue;
     }
@@ -127,6 +137,7 @@ export async function streamMainAgentResponse(
       if (typeof event.content === "string") {
         reasoningContent += event.content;
         process.stdout.write(dim(event.content, process.stdout as NodeJS.WriteStream));
+        await callbacks.onReasoningDelta?.(event.content);
       }
       continue;
     }
@@ -216,6 +227,30 @@ export async function streamMainAgentResponse(
       const data = asRecord(event.data);
       throw new Error(typeof data?.message === "string" ? data.message : "main agent stream failed");
     }
+  }
+  // Some gateways intentionally expose only generate() and implement stream()
+  // as an empty iterable. Fall back without treating that capability mismatch
+  // as a model-owned empty stop.
+  if (!sawStreamEvent) {
+    const response = await modelGateway.generate(request);
+    const rawToolCalls = extractRawToolCalls(response);
+    const parsed = parseMainAgentToolCallsDetailed(response);
+    return {
+      ...response,
+      content: parseAssistantMessage(response),
+      toolCalls: parsed.calls,
+      raw: {
+        ...(asRecord(response.raw) ?? {}),
+        ...(parsed.parseErrors.length
+          ? {
+              droppedToolCalls: parsed.parseErrors.map((error, index) => ({
+                id: `generated-${index}`,
+                error,
+              })),
+            }
+          : {}),
+      },
+    };
   }
 
   return {
@@ -337,6 +372,7 @@ export function buildToolCallParseErrorsFeedback(parseErrors: string[]): string[
     ...parseErrors.map((err) => `- ${err}`),
   ];
 }
+
 
 function extractRawToolCalls(response: GenerateResult | unknown): unknown {
   const record = asRecord(response);

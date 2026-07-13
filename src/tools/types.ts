@@ -65,26 +65,7 @@ export const ScratchpadArgsSchema = z
   })
   .strict();
 
-export const CallSubagentArgsSchema = z
-  .object({
-    type: z
-      .enum(["planner", "reviewer", "repair", "tester", "researcher"])
-      .describe("Subagent role to invoke"),
-    task: z.string().min(1).describe("Task for the subagent to complete"),
-    context: z.string().optional().describe("Optional extra context for the subagent"),
-    mode: z
-      .enum(["blocking", "background"])
-      .optional()
-      .describe("blocking (default) waits for JSON result; background returns a jobId to poll"),
-    timeoutMs: z.number().int().positive().optional().describe("Optional timeout in milliseconds"),
-  })
-  .strict();
 
-export const PollSubagentArgsSchema = z
-  .object({
-    jobId: z.string().min(1).describe("Background subagent job id from call_subagent"),
-  })
-  .strict();
 
 export const ReadFileArgsSchema = z
   .object({
@@ -216,79 +197,24 @@ export const ReplaceSymbolArgsSchema = z
   })
   .strict();
 
-export const RunShellCommandArgsSchema = z
+export const BashArgsSchema = z
   .object({
-    cmd: z.string().min(1),
-    summary: z.string().min(1).optional(),
-    /** Short human-readable description of what the command does. */
-    description: z.string().min(1).optional(),
-    /** Alias for `cmd` for compatibility with common shell-tool schemas. */
-    command: z.string().min(1).optional(),
-    barrier: z.boolean().optional(),
-    forceNonBarrier: z.boolean().optional(),
-    isBackground: z.boolean().optional(),
-    /** Alias for `isBackground`. */
-    run_in_background: z.boolean().optional(),
-    /**
-     * DEPRECATED. Use `timeout` (in seconds) instead. This field is
-     * kept for backward compatibility with internal callers. The
-     * model-facing convention is `timeout` in seconds; do not emit
-     * `timeoutMs` from the model.
-     */
-    timeoutMs: z.number().int().positive().max(600_000).optional(),
-    /**
-     * REQUIRED: timeout for the command, IN SECONDS (matching the
-     * reference-agent pattern, e.g. pi-mono). The bash tool has
-     * NO DEFAULT TIMEOUT. The model MUST pass an explicit value
-     * on every call, otherwise the call will fail with a clear
-     * error. Suggested values: 60 for short probes, 300 for
-     * builds/installs/tests, larger for long-running jobs.
-     */
+    cmd: z.string().min(1).describe("Shell command to run in the workspace"),
+    description: z.string().min(1).optional().describe("Short human-readable intent"),
     timeout: z
       .number()
       .int()
       .min(1)
       .max(3600)
-      .describe(
-        "REQUIRED. Timeout in SECONDS (1-3600). There is no default; " +
-        "you must pass an explicit value on every bash call. " +
-        "Use 60 for short probes, 300 for builds/installs/tests, " +
-        "larger for long-running jobs.",
-      ),
-    idleTimeoutMs: z.number().int().positive().optional(),
-  })
-  .strict()
-  .refine((data) => data.cmd || data.command, {
-    message: "Either cmd or command is required",
-  });
-
-export const SandboxServiceControlArgsSchema = z
-  .object({
-    action: z.enum([
-      "list",
-      "logs",
-      "snapshot",
-      "inspect_image",
-      "restore_from_image",
-      "exec",
-      "write_file",
-      "copy_to_service",
-      "restart",
-      "recreate",
-      "start",
-      "stop",
-      "wait_ready",
-    ]),
-    service: z.string().min(1).optional(),
-    command: z.string().min(1).optional(),
-    sourcePath: z.string().min(1).optional(),
-    targetPath: z.string().min(1).optional(),
-    content: z.string().optional(),
-    tail: z.number().int().positive().max(500).optional(),
-    intervalMs: z.number().int().positive().max(10_000).optional(),
-    timeoutMs: z.number().int().positive().max(300_000).optional(),
+      .optional()
+      .describe("Optional command timeout in SECONDS (1-3600); defaults to 60"),
+    run_in_background: z
+      .boolean()
+      .optional()
+      .describe("Run as a tracked background task"),
   })
   .strict();
+
 
 export const BrowserControlArgsSchema = z
   .object({
@@ -470,6 +396,7 @@ export const WebFetchArgsSchema = z
 
 
 
+
 export const GetToolOutputArgsSchema = z
   .object({
     artifactId: z.string().min(1),
@@ -524,8 +451,7 @@ export const ToolCallSchema = z.discriminatedUnion("name", [
   z.object({ id: z.string().min(1), name: z.literal("edit_file"), args: EditFileArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("replace_symbol"), args: ReplaceSymbolArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("delete_file"), args: DeleteFileArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("bash"), args: RunShellCommandArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("sandbox_service_control"), args: SandboxServiceControlArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("bash"), args: BashArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("browser_control"), args: BrowserControlArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("computer_control"), args: ComputerControlArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("mouse_move"), args: MouseMoveArgsSchema }).strict(),
@@ -550,8 +476,6 @@ export const ToolCallSchema = z.discriminatedUnion("name", [
   z.object({ id: z.string().min(1), name: z.literal("search_tools"), args: SearchToolsArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("search_memory"), args: SearchMemoryArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("scratchpad"), args: ScratchpadArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("call_subagent"), args: CallSubagentArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("poll_subagent"), args: PollSubagentArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("create_skill"), args: CreateSkillArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("test_skill"), args: TestSkillArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("approve_skill"), args: ApproveSkillArgsSchema }).strict(),

@@ -185,16 +185,6 @@ const RULES: Record<string, Predicate[]> = {
     },
   ],
 
-  // ---- completion: prefer a final test run ----
-  complete_task: [
-    (history) => {
-      const lastTest = findLast(history, (t) => t === "bash");
-      if (lastTest === null) {
-        return { severity: "warn", ruleId: "ordering.complete_no_test", message: "complete_task called without any shell command in this run. Run tests / verification before completing." };
-      }
-      return null;
-    },
-  ],
 };
 
 /* -------------------------------------------------------------------------- */

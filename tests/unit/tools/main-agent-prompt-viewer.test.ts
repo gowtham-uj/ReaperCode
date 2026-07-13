@@ -7,14 +7,13 @@ import test from "node:test";
 test("system prompt renders Preferred Edit Path with canonical tools", async () => {
   const { buildMainAgentSystemPrompt } = await import("../../../src/runtime/main-agent-prompt.js");
   const prompt = buildMainAgentSystemPrompt({});
-  assert.match(prompt, /EDIT PATH/);
+  assert.match(prompt, /Preferred edit path/i);
   assert.match(prompt, /1\. file_view/);
   assert.match(prompt, /file_scroll/);
   assert.match(prompt, /file_find/);
   assert.match(prompt, /2\. file_edit/);
   assert.match(prompt, /3\. write_file/);
   assert.match(prompt, /4\. bash/);
-  assert.match(prompt, /Legacy read_file/);
   assert.doesNotMatch(prompt, /\bscratchpad\b/i);
 });
 

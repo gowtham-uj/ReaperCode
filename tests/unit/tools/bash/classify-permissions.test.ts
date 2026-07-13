@@ -61,11 +61,9 @@ test("BashInputSchema requires a command", () => {
   assert.throws(() => BashInputSchema.parse({}));
 });
 
-test("BashInputSchema requires a timeout (no default)", () => {
-  // The bash tool requires `timeout` in seconds (matching the
-  // reference-agent pattern, e.g. pi-mono). Parsing without it
-  // throws — there is no default.
-  assert.throws(() => BashInputSchema.parse({ command: "echo hi" } as any));
+test("BashInputSchema defaults omitted timeout at execution and validates explicit bounds", () => {
+  const parsed = BashInputSchema.parse({ command: "echo hi" });
+  assert.equal(parsed.timeout, undefined);
   assert.throws(() => BashInputSchema.parse({ command: "echo hi", timeout: 0 } as any));
   assert.throws(() => BashInputSchema.parse({ command: "echo hi", timeout: 4000 } as any));
 });

@@ -64,8 +64,8 @@ const UNTRUSTED_TOOL_NAMES = new Set([
 /**
  * Shell command patterns whose output is intrinsically external data
  * (network calls, package installs, remote reads). The model should
- * treat them as untrusted data even though `run_shell_command`
- * itself is a trusted tool — the output of *these commands* is not.
+ * treat them as untrusted data even though `bash` itself is a trusted
+ * tool — the output of *these commands* is not.
  */
 const UNTRUSTED_SHELL_COMMAND_PATTERNS: readonly RegExp[] = [
   /\bcurl\b/,

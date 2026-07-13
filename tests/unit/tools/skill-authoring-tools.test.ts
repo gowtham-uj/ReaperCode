@@ -8,7 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync,  mkdirSync,  rmSync,  existsSync,  readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 
 import { SkillRegistry } from "../../../src/skills/registry.js";
 import { SkillLifecycle } from "../../../src/skills/lifecycle.js";
@@ -79,7 +79,7 @@ test("create_skill happy path lands as draft", () => {
       assert.equal(out.ok, true);
       assert.equal(out.name, "python-pytest-runner");
       assert.equal(out.trust, "draft");
-      assert.ok(out.skillDir?.includes(".reaper/skills/drafts"));
+      assert.ok(out.skillDir?.split(sep).join("/").includes(".reaper/skills/drafts"));
     });
   } finally {
     ctx.cleanup();

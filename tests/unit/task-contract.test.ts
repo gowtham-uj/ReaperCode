@@ -70,6 +70,28 @@ test("extractTaskContract suggests repoInspection validation commands by task re
   assert.deepEqual(contract.likelyValidation, ["npm test", "npm run build", "npm run typecheck", "npm run lint"]);
 });
 
+test("extractTaskContract ignores harness exec-environment boilerplate", () => {
+  const wrapped = [
+    "[exec environment — single-prompt run, no approval gate]",
+    "Workspace root: workspace/scratch",
+    "Tool rules:",
+    "  1. Stay inside the workspace.",
+    "  2. Do not create source files through shell heredocs or redirection.",
+    "[end exec environment]",
+    "",
+    "User prompt:",
+    "Create marker.txt containing OK and verify it with a bash command.",
+  ].join("\n");
+  const contract = extractTaskContract(wrapped, repoInspection);
+
+  assert.equal(contract.userGoal, "Create marker.txt containing OK and verify it with a bash command.");
+  assert.ok(
+    contract.deliverables.every((item) => !/heredocs|redirection|Stay inside/i.test(item)),
+    `boilerplate leaked into deliverables: ${contract.deliverables.join(" | ")}`,
+  );
+  assert.ok(contract.deliverables.some((item) => /marker\.txt/.test(item)));
+});
+
 test("renderTaskContractForCockpit renders all contract fields", () => {
   const rendered = renderTaskContractForCockpit(
     extractTaskContract("Fix the flaky provider retry test; never skip verification.", repoInspection),

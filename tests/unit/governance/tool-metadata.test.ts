@@ -93,18 +93,6 @@ test("native computer control tools have can_control_ui=true and requires_approv
   }
 });
 
-test("complete_task has risk=critical, requires_approval=true, and is root-only", () => {
-  const m = getToolMetadata("complete_task");
-  assert.ok(m);
-  assert.equal(m.risk_level, "critical");
-  assert.equal(m.requires_approval, true);
-  assert.deepEqual([...m.allowed_in_roles], ["root"]);
-  // every other role is forbidden
-  for (const role of ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser"]) {
-    assert.ok((m.forbidden_in_roles as readonly string[]).includes(role), `${role} should be forbidden from complete_task`);
-  }
-});
-
 test("browser_control is browser-role-only", () => {
   const m = getToolMetadata("browser_control");
   assert.ok(m);

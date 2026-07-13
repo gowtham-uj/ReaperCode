@@ -137,7 +137,7 @@ function isHighSignalFailure(result: ToolResult): boolean {
 
 function isBlockedDiagnostic(result: ToolResult): boolean {
   if (result.ok) return false;
-  return /^(?:synthetic_result)$/.test(
+  return /^(?:policy_block|path_escape|synthetic_result)$/.test(
     result.error?.code ?? "",
   );
 }

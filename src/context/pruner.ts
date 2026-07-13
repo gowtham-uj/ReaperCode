@@ -35,7 +35,10 @@ export interface PrepareContextInput {
 export async function prepareContext(input: PrepareContextInput): Promise<PreparedContext> {
   const excluded = new Set(input.guardrailExcludes ?? []);
   const pinnedFiles = resolvePinnedFiles(input.index, input.mentions.fileMentions).filter((file) => !excluded.has(file.relativePath));
-  const alwaysInclude = input.index.alwaysInclude.filter((file) => !excluded.has(file.relativePath));
+  const pinnedPaths = new Set(pinnedFiles.map((file) => file.relativePath));
+  const alwaysInclude = input.index.alwaysInclude.filter(
+    (file) => !excluded.has(file.relativePath) && !pinnedPaths.has(file.relativePath),
+  );
   const graph = await buildDependencyGraph(input.index);
   const discovery = rankDiscoveryFiles(
     input.index,

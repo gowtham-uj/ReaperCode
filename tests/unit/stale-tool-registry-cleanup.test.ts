@@ -11,9 +11,9 @@ const STALE_TOOLS = [
   "complete_task",
   "advance_step",
   "delegate_to_plan",
+  "cancel_subagent",
   "call_subagent",
   "poll_subagent",
-  "cancel_subagent",
   "agent",
   "agent_swarm",
   "task_create",
@@ -21,9 +21,12 @@ const STALE_TOOLS = [
   "task_list",
   "update_plan",
   "update_todo",
+  "run_command",
+  "run_shell_command",
+  "sandbox_service_control",
 ];
 
-test("stale planner/subagent/task tools are not registered or discoverable", () => {
+test("retired planner, task, and shell tools are not registered or discoverable", () => {
   resetDescriptors();
   buildDescriptorsFromRegistry();
 
@@ -43,4 +46,11 @@ test("normalization does not alias natural finish words to removed complete_task
   const complete = normalizeToolCall({ id: "complete-1", name: "complete", args: { summary: "done" } }) as { name: string };
   assert.equal(finish.name, "finish");
   assert.equal(complete.name, "complete");
+});
+
+test("normalization does not alias retired shell names to bash", () => {
+  for (const name of ["run_command", "run_shell_command", "sandbox_service_control"]) {
+    const normalized = normalizeToolCall({ id: name, name, args: { cmd: "true" } }) as { name: string };
+    assert.equal(normalized.name, name);
+  }
 });

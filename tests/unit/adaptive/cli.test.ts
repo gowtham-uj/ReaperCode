@@ -53,17 +53,6 @@ test("CLI visual analyze succeeds when model supports images (metadata fallback)
   assert.equal(r.exitCode, 1);
 });
 
-test("CLI swarm plan produces a single-subagent decision", async () => {
-  const cli = makeCLI();
-  const r = await cli.run(["swarm", "plan", "--task", "fix a typo in README"]);
-  assert.equal(r.exitCode, 0);
-  const json = JSON.parse(r.stdout) as { mode: string; subagent_type: string };
-  assert.equal(json.mode, "single_subagent");
-  // The swarm is now a single subagent launcher, not a workflow.
-  // The plan picks a subagent type by keyword.
-  assert.ok(json.subagent_type);
-});
-
 test("CLI redact redacts inline secrets", async () => {
   const cli = makeCLI();
   const r = await cli.run(["redact", "AKIAIOSFODNN7EXAMPLE"]);

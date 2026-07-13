@@ -23,11 +23,14 @@ test("Phase 4 promoted viewer tools to CORE_TOOL_NAMES", () => {
   assert.ok(CORE_TOOL_NAMES.has("file_edit"));
 });
 
-test("Phase 4 kept grep_search + write_file + bash always-on", () => {
+test("Phase 4 keeps grep_search, write_file, and bash always-on while legacy viewer aliases stay deferred", () => {
   assert.ok(CORE_TOOL_NAMES.has("grep_search"));
   assert.ok(CORE_TOOL_NAMES.has("write_file"));
   assert.ok(CORE_TOOL_NAMES.has("bash"));
-  assert.ok(CORE_TOOL_NAMES.has("view_file"));
+  assert.ok(!CORE_TOOL_NAMES.has("view_file"));
+  assert.ok(!CORE_TOOL_NAMES.has("edit_file"));
+  assert.ok(ON_DEMAND_TOOL_NAMES.has("view_file"));
+  assert.ok(ON_DEMAND_TOOL_NAMES.has("edit_file"));
 });
 
 test("Phase 4 demoted read_file and replace_in_file to on-demand", () => {

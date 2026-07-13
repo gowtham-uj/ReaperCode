@@ -35,7 +35,7 @@ export type HookTrust = "draft" | "user-trusted" | "project-untrusted";
 export interface HookMatcher {
   /** Path glob. Example patterns: a glob, or an absolute path. */
   path_glob?: string;
-  /** Tool name. Example: run_shell_command. */
+  /** Tool name. Example: bash. */
   tool_name?: string;
   /** Regex pattern matched against the tool cmd arg. */
   cmd_pattern?: string;

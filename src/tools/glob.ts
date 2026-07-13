@@ -116,7 +116,7 @@ export async function executeGlob(
   const matches = allFiles
     .map((fullPath) => ({
       path: fullPath,
-      relativePath: relative(workspaceRoot, fullPath),
+      relativePath: relative(workspaceRoot, fullPath).replace(/\\/g, "/"),
     }))
     .filter((f) => {
       // Match against relative path

@@ -11,7 +11,7 @@ export function enforceDelegationDepth(depth: number, maxDepth = 2): void {
 
 export function truncateToolsetForDepth(toolCalls: ToolCall[], depth: number, maxDepth = 2): ToolCall[] {
   if (depth >= maxDepth) {
-    return toolCalls.filter((call) => (call.name as string) !== "delegate_to_plan" && (call.name as string) !== "complete_task");
+    return toolCalls.filter((call) => (call.name as string) !== "delegate_to_plan");
   }
 
   if (depth > 0) {

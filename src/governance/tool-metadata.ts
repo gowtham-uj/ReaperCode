@@ -51,7 +51,6 @@ export type ToolCategory =
   | "plan"
   | "task"
   | "control"
-  | "completion"
   | "discovery";
 
 export type PolicyRole =
@@ -114,28 +113,8 @@ export interface ToolMetadata {
 }
 
 /* -------------------------------------------------------------------------- */
-/*                       Reused swarm role / task role names                  */
+/*                              Governance roles                              */
 /* -------------------------------------------------------------------------- */
-
-/**
- * Roles usable in `forbidden_in_roles` / `allowed_in_roles`. These
- * cover both the swarm subagent roles (scout, architect, etc.) AND
- * the governance-level role names requested by the user (Explorer,
- * Implementer, ...). The mapping is:
- *
- *   governance  ->  swarm         (notes)
- *   explorer    ->  scout         (read-only repo mapping)
- *   architect   ->  architect     (read-only planning)
- *   implementer ->  implementer   (writes, runs commands)
- *   test        ->  test          (writes tests, runs commands)
- *   reviewer    ->  reviewer      (read-only diff review)
- *   critic      ->  critic        (read-only adversarial)
- *   browser     ->  browser       (browser-only task profile)
- *   root        ->  root          (the orchestrator itself)
- *
- * The governance names are what callers use; the role-profiles
- * module maps them to swarm roles for the orchestrator.
- */
 
 /* -------------------------------------------------------------------------- */
 /*                              The metadata map                              */
@@ -170,6 +149,36 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     requires_approval: false,
     preferred_before: ["write_file", "edit_file", "replace_in_file", "delete_file", "bash"],
     preferred_after: ["grep_search", "skim_file"],
+    forbidden_in_roles: [],
+    allowed_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser", "root"],
+  },
+  file_view: {
+    name: "file_view",
+    category: "read",
+    risk_level: "low",
+    is_read_only: true,
+    can_modify_files: false,
+    can_execute_code: false,
+    can_control_ui: false,
+    can_affect_host: false,
+    requires_approval: false,
+    preferred_before: ["write_file", "file_edit", "delete_file", "bash"],
+    preferred_after: ["file_find", "grep_search"],
+    forbidden_in_roles: [],
+    allowed_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser", "root"],
+  },
+  file_scroll: {
+    name: "file_scroll",
+    category: "read",
+    risk_level: "low",
+    is_read_only: true,
+    can_modify_files: false,
+    can_execute_code: false,
+    can_control_ui: false,
+    can_affect_host: false,
+    requires_approval: false,
+    preferred_before: ["write_file", "file_edit", "delete_file", "bash"],
+    preferred_after: ["file_find", "grep_search"],
     forbidden_in_roles: [],
     allowed_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser", "root"],
   },
@@ -231,6 +240,21 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     can_affect_host: false,
     requires_approval: false,
     preferred_before: ["read_file", "view_file", "write_file", "edit_file", "replace_in_file"],
+    preferred_after: ["list_directory"],
+    forbidden_in_roles: [],
+    allowed_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser", "root"],
+  },
+  file_find: {
+    name: "file_find",
+    category: "search",
+    risk_level: "low",
+    is_read_only: true,
+    can_modify_files: false,
+    can_execute_code: false,
+    can_control_ui: false,
+    can_affect_host: false,
+    requires_approval: false,
+    preferred_before: ["file_view", "file_edit", "write_file"],
     preferred_after: ["list_directory"],
     forbidden_in_roles: [],
     allowed_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser", "root"],
@@ -327,6 +351,21 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     forbidden_in_roles: ["explorer", "architect", "reviewer", "critic", "browser"],
     allowed_in_roles: ["implementer", "test", "root"],
   },
+  file_edit: {
+    name: "file_edit",
+    category: "write",
+    risk_level: "medium",
+    is_read_only: false,
+    can_modify_files: true,
+    can_execute_code: false,
+    can_control_ui: false,
+    can_affect_host: false,
+    requires_approval: false,
+    preferred_before: ["file_view", "file_find", "grep_search"],
+    preferred_after: ["bash"],
+    forbidden_in_roles: ["explorer", "architect", "reviewer", "critic", "browser"],
+    allowed_in_roles: ["implementer", "test", "root"],
+  },
   replace_symbol: {
     name: "replace_symbol",
     category: "write",
@@ -373,21 +412,6 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     preferred_after: [],
     forbidden_in_roles: ["explorer", "architect", "reviewer", "critic", "browser"],
     allowed_in_roles: ["implementer", "test", "root"],
-  },
-  sandbox_service_control: {
-    name: "sandbox_service_control",
-    category: "service",
-    risk_level: "high",
-    is_read_only: false,
-    can_modify_files: true,
-    can_execute_code: true,
-    can_control_ui: false,
-    can_affect_host: true,
-    requires_approval: true, // host-side service lifecycle
-    preferred_before: ["inspect_environment"],
-    preferred_after: [],
-    forbidden_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser"],
-    allowed_in_roles: ["root"],
   },
 
   // ---- Browser ----
@@ -778,22 +802,6 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     allowed_in_roles: ["root", "architect", "implementer", "test", "reviewer", "critic", "explorer", "browser"],
   },
 
-  // ---- Completion ----
-  complete_task: {
-    name: "complete_task",
-    category: "completion",
-    risk_level: "critical",
-    is_read_only: false,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: false,
-    can_affect_host: false,
-    requires_approval: true, // never auto-complete
-    preferred_before: ["bash"], // for tests
-    preferred_after: [],
-    forbidden_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser"],
-    allowed_in_roles: ["root"],
-  },
 
   update_plan: {
     name: "update_plan",
@@ -823,51 +831,6 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     preferred_before: [],
     preferred_after: [],
     forbidden_in_roles: [],
-    allowed_in_roles: ["root", "explorer", "architect", "implementer", "test", "reviewer", "critic"],
-  },
-  call_subagent: {
-    name: "call_subagent",
-    category: "control",
-    risk_level: "medium",
-    is_read_only: false,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: false,
-    can_affect_host: false,
-    requires_approval: false,
-    preferred_before: [],
-    preferred_after: [],
-    forbidden_in_roles: ["browser"],
-    allowed_in_roles: ["root", "explorer", "architect", "implementer", "test", "reviewer", "critic"],
-  },
-  poll_subagent: {
-    name: "poll_subagent",
-    category: "control",
-    risk_level: "low",
-    is_read_only: true,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: false,
-    can_affect_host: false,
-    requires_approval: false,
-    preferred_before: [],
-    preferred_after: [],
-    forbidden_in_roles: ["browser"],
-    allowed_in_roles: ["root", "explorer", "architect", "implementer", "test", "reviewer", "critic"],
-  },
-  cancel_subagent: {
-    name: "cancel_subagent",
-    category: "control",
-    risk_level: "low",
-    is_read_only: false,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: false,
-    can_affect_host: false,
-    requires_approval: false,
-    preferred_before: [],
-    preferred_after: [],
-    forbidden_in_roles: ["browser"],
     allowed_in_roles: ["root", "explorer", "architect", "implementer", "test", "reviewer", "critic"],
   },
 
@@ -1171,9 +1134,3 @@ export function assertMetadataCoversRegistry(): {
   return { ok: missing.length === 0, missing, extras };
 }
 
-/* swarmRoleToPolicyRole / policyRoleToSwarmRole were removed when
- * the controlled 7-role swarm was deleted in favor of the
- * model-driven sub-agent runtime.
- * The governance role layer (explorer / architect / implementer /
- * test / reviewer / critic / browser / root) is independent of the
- * sub-agent runtime; the runtime no longer hardcodes role names. */

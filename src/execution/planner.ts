@@ -179,10 +179,6 @@ const READ_ONLY_GIT_SUBCOMMANDS = new Set([
 ]);
 
 export function classifyToolCall(call: ToolCall): ExecutionKind {
-  if ((call.name as string) === "complete_task") {
-    return "shell_barrier";
-  }
-
   if ((call.name as string) === "delegate_to_plan") {
     return "read";
   }
@@ -218,12 +214,6 @@ export function classifyToolCall(call: ToolCall): ExecutionKind {
   }
 
   if (call.name === "bash") {
-    if (call.args.barrier === true) {
-      return "shell_barrier";
-    }
-    if (call.args.forceNonBarrier === true) {
-      return "shell_non_barrier";
-    }
     // Default to barrier for unknown shell commands — earlier the default
     // was `shell_non_barrier` which let mutating scripts run concurrently
     // with reads and produce stale observations. Reads now have to be
@@ -237,12 +227,6 @@ export function classifyToolCall(call: ToolCall): ExecutionKind {
     return "shell_barrier";
   }
 
-  if (call.name === "sandbox_service_control") {
-    if (["exec", "write_file", "copy_to_service", "restart", "start", "stop"].includes(call.args.action)) {
-      return "shell_barrier";
-    }
-    return "read";
-  }
 
   return "read";
 }

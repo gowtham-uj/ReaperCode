@@ -42,21 +42,29 @@ test("indexer: indexes a normal workspace tree", async () => {
   }
 });
 
-test("indexer: skips symlinked directories (no infinite recursion)", async () => {
+test("indexer: skips symlinked directories (no infinite recursion)", async (t) => {
   const root = makeTree();
   try {
     // Create a symlink that loops back to the workspace root — without
     // the symlink-skip fix, walkFiles recurses forever and overflows
     // the async stack.
-    symlinkSync(root, join(root, "loop"), "dir");
-    // Create a symlink that points to a deeply nested real dir.
-    symlinkSync(join(root, "a"), join(root, "shallow-loop"), "dir");
-    // Create a self-referential symlink (dir → ../dir). This is the
-    // exact pattern from reaper_eval/pruner_env/lib64 → lib where
-    // Python venvs canonicalize.
-    const sub = join(root, "venv");
-    mkdirSync(sub);
-    symlinkSync(sub, join(sub, "loop"), "dir");
+    try {
+      symlinkSync(root, join(root, "loop"), "dir");
+      // Create a symlink that points to a deeply nested real dir.
+      symlinkSync(join(root, "a"), join(root, "shallow-loop"), "dir");
+      // Create a self-referential symlink (dir → ../dir). This is the
+      // exact pattern from reaper_eval/pruner_env/lib64 → lib where
+      // Python venvs canonicalize.
+      const sub = join(root, "venv");
+      mkdirSync(sub);
+      symlinkSync(sub, join(sub, "loop"), "dir");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") {
+        t.skip("symlink creation requires elevated privileges on this platform");
+        return;
+      }
+      throw error;
+    }
 
     const idx = await buildCodebaseIndex(root);
     // Symlinks must not contribute entries beyond what the real tree
@@ -72,10 +80,18 @@ test("indexer: skips symlinked directories (no infinite recursion)", async () =>
   }
 });
 
-test("indexer: skips symlinked files", async () => {
+test("indexer: skips symlinked files", async (t) => {
   const root = makeTree();
   try {
-    symlinkSync(join(root, "README.md"), join(root, "link-to-readme"), "file");
+    try {
+      symlinkSync(join(root, "README.md"), join(root, "link-to-readme"), "file");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") {
+        t.skip("symlink creation requires elevated privileges on this platform");
+        return;
+      }
+      throw error;
+    }
     const idx = await buildCodebaseIndex(root);
     // The real README.md should be indexed; the symlink should not.
     const realCount = idx.files.filter((f) => f.relativePath === "README.md").length;

@@ -161,7 +161,11 @@ async function callProviderOnce(
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "<no body>");
-      throw new Error(`provider ${res.status}: ${text.slice(0, 500)}`);
+      // Carry the HTTP status so tryFullSummarization's PTL retry loop can
+      // classify context-limit rejections and head-truncate before retrying.
+      const err = new Error(`provider ${res.status}: ${text.slice(0, 500)}`) as Error & { status?: number };
+      err.status = res.status;
+      throw err;
     }
     const json = (await res.json()) as {
       choices?: Array<{ message?: { content?: string } }>;

@@ -30,14 +30,6 @@ export function createValidConfig(): ReaperConfig {
     runtime: {
       recedingHorizonPlanContext: true,
       voteAttempts: 1,
-      serviceSupervisor: {
-        enabled: true,
-        readinessTimeoutMs: 30_000,
-        minimumStableMs: 1_500,
-        autoRecover: true,
-        maxAutoRecoveriesPerService: 1,
-        crashLoopThreshold: 2,
-      },
     },
     verification: {
       requireGroundedCompletion: false,

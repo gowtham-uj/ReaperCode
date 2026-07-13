@@ -28,7 +28,7 @@ test("normalizeToolCall preserves scratchpad action/note/label from streamed fun
   }
 });
 
-test("normalizeToolCall preserves search_memory and call_subagent args", () => {
+test("normalizeToolCall preserves search_memory args", () => {
   const memory = normalizeToolCall({
     id: "call_mem_1",
     name: "search_memory",
@@ -39,17 +39,6 @@ test("normalizeToolCall preserves search_memory and call_subagent args", () => {
   });
   const memParsed = ToolCallSchema.safeParse(memory);
   assert.equal(memParsed.success, true, JSON.stringify((memParsed as any).error?.issues));
-
-  const sub = normalizeToolCall({
-    id: "call_sub_1",
-    name: "call_subagent",
-    function: {
-      name: "call_subagent",
-      arguments: JSON.stringify({ type: "reviewer", task: "review the diff" }),
-    },
-  });
-  const subParsed = ToolCallSchema.safeParse(sub);
-  assert.equal(subParsed.success, true, JSON.stringify((subParsed as any).error?.issues));
 });
 
 test("normalizeToolCall default branch preserves unknown tool payload fields", () => {

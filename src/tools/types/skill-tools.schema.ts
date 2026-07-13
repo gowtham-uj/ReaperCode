@@ -26,9 +26,7 @@ const CATEGORIES = [
   "swe-bench-solving",
   "agent-runtime-debugging",
   "session-persistence",
-  "completion-gate-debugging",
   "prompt-enhancement",
-  "swarm-orchestration",
 ] as const;
 
 export const CreateSkillArgsSchema = z.object({

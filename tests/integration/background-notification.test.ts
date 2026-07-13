@@ -22,7 +22,7 @@ test("background process can be started and read", async () => {
   const startResult = await executor.execute({
     id: "1",
     name: "bash",
-    args: { cmd: "sleep 2 && echo hello", isBackground: true, timeout: 60},
+    args: { cmd: "sleep 2 && echo hello", run_in_background: true, timeout: 60},
   });
 
   assert.equal(startResult.ok, true);
@@ -50,7 +50,7 @@ test("background process cleanup uses tree-kill reliably", async () => {
   const startResult = await executor.execute({
     id: "1",
     name: "bash",
-    args: { cmd: "sleep 60", isBackground: true, timeout: 60},
+    args: { cmd: "sleep 60", run_in_background: true, timeout: 60},
   });
 
   assert.equal(startResult.ok, true);

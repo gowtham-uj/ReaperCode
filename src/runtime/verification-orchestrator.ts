@@ -1,19 +1,8 @@
 /**
- * Verification orchestrator for the Reaper runtime.
+ * Pure verification-evidence classifier for cockpit observability.
  *
- * Wraps `verification-state.ts` (the underlying typed state) and adds
- * the Codex/Claude-style "completion gate" logic: a tool cannot mark
- * the task complete unless there is matching verification evidence in
- * the verification state.
- *
- * The orchestrator is a pure, deterministic module. It does not
- * spawn subprocesses, call the model, or hit the filesystem; it only
- * inspects tool results and produces a verdict that the engine then
- * uses to gate `complete_task`.
- *
- * The class is intentionally side-effect free so it can be tested in
- * isolation, and so the engine can decide whether to run the gate on
- * the main thread or off (e.g. in a verifier subagent).
+ * It classifies command results and records matching checks. It never gates
+ * tool execution or the model-owned natural-stop path.
  */
 
 import {
@@ -56,12 +45,6 @@ export interface OrchestratorOptions {
    * `vitest`, `jest`. Override to add custom test runners.
    */
   verificationPatterns?: RegExp[];
-  /**
-   * When true, only require the FIRST required check to be passed
-   * before `complete_task` is allowed. When false (default), all
-   * required checks must pass.
-   */
-  requireAllChecks?: boolean;
 }
 
 const DEFAULT_VERIFICATION_PATTERNS: RegExp[] = [
@@ -79,12 +62,11 @@ const DEFAULT_VERIFICATION_PATTERNS: RegExp[] = [
 ];
 
 export class VerificationOrchestrator {
-  private readonly options: Required<OrchestratorOptions>;
+  private readonly options: { verificationPatterns: RegExp[] };
 
   constructor(options: OrchestratorOptions = {}) {
     this.options = {
       verificationPatterns: options.verificationPatterns ?? DEFAULT_VERIFICATION_PATTERNS,
-      requireAllChecks: options.requireAllChecks ?? false,
     };
   }
 
@@ -98,7 +80,7 @@ export class VerificationOrchestrator {
   }
 
   /**
-   * Classify a tool result as a verification check or not. A run_shell_command
+   * Classify a tool result as a verification check or not. A bash call
    * that matches one of the verification patterns becomes a check;
    * everything else is not a check.
    */
@@ -163,68 +145,8 @@ export class VerificationOrchestrator {
     return { state: next, candidate };
   }
 
-  /**
-   * Determine whether the agent is allowed to call `complete_task`.
-   * The rule:
-   *
-   * - If there are no required checks, allow (the agent did not opt
-   *   into verification; trust the task contract).
-   * - Otherwise, at least one passed check must exist; if
-   *   requireAllChecks is true, every required check must have a
-   *   passing entry.
-   *
-   * Returns the verdict + the reason.
-   */
-  evaluateCompletion(state: VerificationState): {
-    allowed: boolean;
-    reason: string;
-    missingRequiredChecks: string[];
-  } {
-    if (state.requiredChecks.length === 0) {
-      return { allowed: true, reason: "no required checks defined; complete_task allowed", missingRequiredChecks: [] };
-    }
-    const passedByCommand = new Set<string>();
-    for (const check of state.completedChecks) {
-      if (check.status === "passed") passedByCommand.add(check.command);
-    }
-    const missing: string[] = [];
-    for (const required of state.requiredChecks) {
-      if (!requiredCommandMatches(required, passedByCommand)) missing.push(required);
-    }
-    if (missing.length === 0) {
-      return {
-        allowed: true,
-        reason: this.options.requireAllChecks
-          ? `all ${state.requiredChecks.length} required checks passed`
-          : "at least one required check passed",
-        missingRequiredChecks: [],
-      };
-    }
-    return {
-      allowed: false,
-      reason: this.options.requireAllChecks
-        ? `${missing.length}/${state.requiredChecks.length} required checks still missing`
-        : "no passing required check; run one of: " + missing.join(", "),
-      missingRequiredChecks: missing,
-    };
-  }
 }
 
-/**
- * Loose matching between a required-check pattern and a passing command.
- * The required check might be `npm test` while the agent actually ran
- * `npm test --watch=false`. Normalize both sides by lowercasing and
- * stripping trailing whitespace before comparing the required command
- * as a prefix of the observed command.
- */
-function requiredCommandMatches(required: string, passing: Set<string>): boolean {
-  if (passing.has(required)) return true;
-  const r = required.trim().toLowerCase();
-  for (const candidate of passing) {
-    if (candidate.trim().toLowerCase().startsWith(r)) return true;
-  }
-  return false;
-}
 
 function readExitCode(output: unknown): number | undefined {
   if (!output || typeof output !== "object") return undefined;

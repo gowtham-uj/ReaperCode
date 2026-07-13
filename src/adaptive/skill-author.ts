@@ -471,7 +471,7 @@ export function createSkillFromRunTrace(trace: RunTraceSummary, opts: { workspac
     type: "prompt",
     scope: trace.scope ?? "project",
     body,
-    allowedTools: ["view_file", "edit_file", "run_command", "run_tests"],
+    allowedTools: ["file_view", "file_edit", "bash"],
     arguments: [],
     memoryPolicy: { mayReadProjectMemory: true, mayWriteProjectMemory: true, mayReadUserMemory: false, mayWriteUserMemory: false },
     workspaceRoot: opts.workspaceRoot,

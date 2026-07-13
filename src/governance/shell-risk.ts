@@ -1,5 +1,5 @@
 /**
- * Command risk classification for `run_shell_command`.
+ * Command risk classification for `bash`.
  *
  * Layered on top of (but not replacing) `src/policy/rules.ts`. That
  * module produces a binary `allow | deny | would_block` outcome

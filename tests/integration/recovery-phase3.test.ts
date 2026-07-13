@@ -185,7 +185,7 @@ async function run(command: string, args: string[], cwd: string) {
   });
 }
 
-test("runtime engine rollback on failed write leaves disk unchanged and logs recovery summary", async () => {
+test("runtime engine preserves successful writes when a sibling write fails", async () => {
   const workspaceRoot = await createTempWorkspace();
   const request = createValidRequestEnvelope();
   request.payload = {
@@ -206,8 +206,8 @@ test("runtime engine rollback on failed write leaves disk unchanged and logs rec
   const disk = await readFile(path.join(workspaceRoot, "src", "app.ts"), "utf8");
   const trajectory = await readFile(result.trajectoryPath, "utf8");
 
+  assert.equal(result.toolResults[0]?.ok, true);
   assert.equal(result.toolResults[1]?.ok, false);
-  assert.match(disk, /41/);
-  assert.match(trajectory, /recovery_summary/);
-  assert.match(trajectory, /wal_rollback/);
+  assert.match(disk, /42/);
+  assert.match(trajectory, /"status":"failed"/);
 });

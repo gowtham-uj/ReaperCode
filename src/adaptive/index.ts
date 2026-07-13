@@ -1,12 +1,6 @@
 /**
- * Adaptive Intelligence — public surface.
- *
- * The Subagent runtime:
- *
- * - `swarm/` — Model-driven subagents. A single subagent at a time,
- *   spawned by the main agent via the Agent tool. Returns a compact
- *   summary to the main context. The main agent never sees the
- *   subagent's full history.
+ * Adaptive Intelligence public surface: skills, memory, hooks, visual input,
+ * capabilities, redaction, and CLI integration.
  */
 
 export * from "./types.js";
@@ -49,6 +43,3 @@ export { redactSecrets } from "./redact.js";
 export { ReaperCLI } from "./cli.js";
 export type { ReaperCLIOptions } from "./cli.js";
 
-// Re-export the orchestration system as a sub-object so consumers
-// can either use it as a flat namespace or pull it by group.
-export * as Swarm from "./swarm/index.js";

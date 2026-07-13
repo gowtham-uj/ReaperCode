@@ -158,6 +158,10 @@ export function tokenUsageFromResponse(
   response:
     | {
         usage?: {
+          inputTokens?: number;
+          outputTokens?: number;
+          cacheReadTokens?: number;
+          cacheWriteTokens?: number;
           input_tokens?: number;
           output_tokens?: number;
           prompt_tokens?: number;
@@ -171,23 +175,32 @@ export function tokenUsageFromResponse(
 ): TokenUsage | undefined {
   if (!response || !response.usage) return undefined;
   const u = response.usage;
-  const input = typeof u.input_tokens === "number"
-    ? u.input_tokens
-    : typeof u.prompt_tokens === "number" ? u.prompt_tokens : undefined;
-  const output = typeof u.output_tokens === "number"
-    ? u.output_tokens
-    : typeof u.completion_tokens === "number" ? u.completion_tokens : undefined;
+  const input = typeof u.inputTokens === "number"
+    ? u.inputTokens
+    : typeof u.input_tokens === "number"
+      ? u.input_tokens
+      : typeof u.prompt_tokens === "number"
+        ? u.prompt_tokens
+        : undefined;
+  const output = typeof u.outputTokens === "number"
+    ? u.outputTokens
+    : typeof u.output_tokens === "number"
+      ? u.output_tokens
+      : typeof u.completion_tokens === "number"
+        ? u.completion_tokens
+        : undefined;
   if (input === undefined && output === undefined) return undefined;
   const result: TokenUsage = {
     inputTokens: input ?? 0,
     outputTokens: output ?? 0,
   };
-  // Anthropic-specific cache fields.
-  if (typeof u.cache_read_input_tokens === "number") {
-    result.cacheReadTokens = u.cache_read_input_tokens;
-  }
-  if (typeof u.cache_creation_input_tokens === "number") {
-    result.cacheWriteTokens = u.cache_creation_input_tokens;
-  }
+  const cacheRead = typeof u.cacheReadTokens === "number"
+    ? u.cacheReadTokens
+    : u.cache_read_input_tokens;
+  const cacheWrite = typeof u.cacheWriteTokens === "number"
+    ? u.cacheWriteTokens
+    : u.cache_creation_input_tokens;
+  if (typeof cacheRead === "number") result.cacheReadTokens = cacheRead;
+  if (typeof cacheWrite === "number") result.cacheWriteTokens = cacheWrite;
   return result;
 }

@@ -99,8 +99,6 @@ const TOOL_FAMILY: Record<string, ToolFamily> = {
   request_human_approval: "exec",
   is_human_intervening: "exec",
 
-  // Sandbox
-  sandbox_service_control: "exec",
 
 };
 
@@ -152,7 +150,6 @@ const TOOL_CAPABILITY: Record<string, CapabilityTier> = {
   start_live_view: "exec",
   stop_live_view: "exec",
   request_human_approval: "exec",
-  sandbox_service_control: "exec",
   create_checkpoint: "write",
   restore_checkpoint: "write",
   activate_skill: "exec",
@@ -223,7 +220,6 @@ const TOOL_CONCURRENCY: Record<string, ToolConcurrency> = {
   start_live_view: "exclusive",
   stop_live_view: "exclusive",
   request_human_approval: "exclusive",
-  sandbox_service_control: "exclusive",
   create_checkpoint: "exclusive",
   restore_checkpoint: "exclusive",
   activate_skill: "exclusive",
@@ -280,7 +276,6 @@ const TOOL_CONTEXT_COST: Record<string, ContextCost> = {
   inspect_environment: "low",
   browser_control: "high",
   computer_control: "high",
-  sandbox_service_control: "high",
   screenshot: "low",
   wait: "low",
   start_live_view: "medium",
@@ -327,7 +322,7 @@ const TOOL_ALIASES: Record<string, readonly string[]> = {
   delete_file: ["rm", "remove_file"],
   list_directory: ["ls", "dir", "list_files"],
   grep_search: ["grep", "search_files", "rg", "ripgrep"],
-  bash: ["shell", "run_command", "execute", "terminal", "cmd"],
+  bash: ["shell", "execute", "terminal", "cmd"],
   search_tools: ["find_tool", "discover_tools", "tool_search"],
   web_fetch: ["fetch_url", "get_url", "curl"],
   web_search: ["search_web", "google"],

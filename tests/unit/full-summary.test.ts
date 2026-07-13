@@ -75,7 +75,9 @@ test("tryFullSummarization retries on PTL by truncating head", async () => {
     softCap: 50_000,
     infer: async () => {
       attempts += 1;
-      if (attempts === 1) return "ok"; // first attempt: too short → retry triggers
+      if (attempts === 1) {
+        throw Object.assign(new Error("context length exceeded"), { status: 400 });
+      }
       return "<summary>1. intent\n2. files\n3. work\n4. errors\n5. pending</summary>";
     },
     maxPtlRetries: 3,
@@ -85,14 +87,38 @@ test("tryFullSummarization retries on PTL by truncating head", async () => {
   assert.ok((result?.ptlDrops ?? 0) >= 1, `expected at least 1 PTL drop, got ${result?.ptlDrops}`);
 });
 
-test("tryFullSummarization returns performed=false when summarizer keeps failing", async () => {
+test("tryFullSummarization preserves complete context on a formatting retry", async () => {
+  const marker = "DURABLE_FACT_MUST_SURVIVE";
+  const longConversation = [
+    { role: "user", content: `${marker} ${"x".repeat(200_000)}` },
+    { role: "assistant", content: "continue" },
+  ];
+  const prompts: string[] = [];
+  const result = await tryFullSummarization(longConversation, {
+    softCap: 50_000,
+    infer: async (prompt) => {
+      prompts.push(prompt);
+      return prompts.length === 1
+        ? "untagged summary"
+        : `<summary>${marker} preserved after formatting retry</summary>`;
+    },
+    maxPtlRetries: 2,
+  });
+  assert.equal(result?.performed, true);
+  assert.equal(result?.ptlDrops, 0);
+  assert.equal(prompts.length, 2);
+  assert.equal(prompts.every((prompt) => prompt.includes(marker)), true);
+  assert.match(result?.summary ?? "", new RegExp(marker));
+});
+
+test("tryFullSummarization rejects an untagged failure message", async () => {
   const longConversation: Array<{ role: string; content?: string; tool_call_id?: string; name?: string; tool_calls?: Array<{ function: { name: string; arguments: string } }> }> = [];
   for (let i = 0; i < 100; i += 1) {
     longConversation.push({ role: "tool", tool_call_id: `t-${i}`, name: "file_view", content: "x".repeat(2000) });
   }
   const result = await tryFullSummarization(longConversation, {
     softCap: 50_000,
-    infer: async () => "x", // always too short
+    infer: async () => "I cannot summarize this conversation because the input is too long.",
     maxPtlRetries: 2,
   });
   assert.ok(result, "result should be defined even on failure");
@@ -135,6 +161,33 @@ test("buildPostCompactMessages produces boundary + summary + re-anchor + deferre
   assert.equal(messages[4]?.content, "old prompt");
 });
 
+test("buildPostCompactMessages preserves system instructions", () => {
+  const system = "System instruction that must survive compaction.";
+  const messages = buildPostCompactMessages("summary text", [
+    { role: "system", content: system },
+    { role: "user", content: "current task" },
+    { role: "tool", tool_call_id: "t1", name: "file_view", content: "old output" },
+  ], { softCap: 1000 });
+
+  assert.deepEqual(messages[0], { role: "system", content: system });
+  assert.match(messages[1]?.content ?? "", /\[Reaper context boundary\]/);
+  assert.equal(messages.at(-1)?.content, "current task");
+});
+
+test("buildPostCompactMessages preserves structured system content", () => {
+  const structuredSystem = [
+    { type: "text", text: "stable instruction" },
+    { type: "image", image_url: "artifact://diagram" },
+  ];
+  const messages = buildPostCompactMessages("summary text", [
+    { role: "system", content: structuredSystem },
+    { role: "user", content: "current task" },
+  ] as any, { softCap: 1000 });
+
+  assert.deepEqual((messages[0] as any).content, structuredSystem);
+  assert.equal(messages.at(-1)?.content, "current task");
+});
+
 test("extractPostCompactProgressHints resumes without scratchpad nudges", async () => {
   const { extractPostCompactProgressHints } = await import("../../src/context/full-summary.js");
   const hints = extractPostCompactProgressHints([
@@ -143,6 +196,7 @@ test("extractPostCompactProgressHints resumes without scratchpad nudges", async 
       tool_calls: [
         { function: { name: "scratchpad", arguments: JSON.stringify({ action: "append", note: "TOKEN" }) } },
         { function: { name: "bash", arguments: JSON.stringify({ cmd: "cat big/logdump.txt" }) } },
+        { function: { name: "read_file", arguments: JSON.stringify({ path: "src/legacy.ts" }) } },
         { function: { name: "write_file", arguments: JSON.stringify({ path: "RESULT.json" }) } },
       ],
     },
@@ -150,4 +204,5 @@ test("extractPostCompactProgressHints resumes without scratchpad nudges", async 
   assert.ok(hints.some((h) => /bash cat already ran/i.test(h)));
   assert.ok(hints.some((h) => /already wrote: RESULT\.json/i.test(h)));
   assert.ok(!hints.some((h) => /\bscratchpad\b/i.test(h)));
+  assert.ok(hints.some((h) => /already viewed: src\/legacy\.ts/i.test(h)));
 });

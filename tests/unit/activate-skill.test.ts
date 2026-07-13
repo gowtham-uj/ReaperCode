@@ -158,7 +158,7 @@ test("S1: rejects a skill with disableAutoInvocation=true (legacy alias)", async
   }
 });
 
-test("S1: rejects a symlink that escapes the workspace", async () => {
+test("S1: rejects a symlink that escapes the workspace", async (t) => {
   const ws = makeWorkspace();
   const outsideDir = mkdtempSync(path.join(tmpdir(), "reaper-activate-skill-outside-"));
   try {
@@ -166,7 +166,15 @@ test("S1: rejects a symlink that escapes the workspace", async () => {
     writeFileSync(path.join(outsideDir, "evil.md"), "# evil");
     // Create a symlink inside the workspace skill dir that points to it.
     mkdirSync(path.join(ws, ".reaper", "skills"), { recursive: true });
-    symlinkSync(path.join(outsideDir, "evil.md"), path.join(ws, ".reaper", "skills", "evil.md"));
+    try {
+      symlinkSync(path.join(outsideDir, "evil.md"), path.join(ws, ".reaper", "skills", "evil.md"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") {
+        t.skip("symlink creation requires elevated privileges on this platform");
+        return;
+      }
+      throw error;
+    }
     // Register the skill.
     register(ws, { name: "evil" });
     await assert.rejects(

@@ -171,7 +171,7 @@ function buildPlaceholder(
   }
 
   // For bash: extract a hint about the command
-  if (toolName === "bash" || toolName === "run_shell_command") {
+  if (toolName === "bash") {
     if (toolCallArgs) {
       try {
         const args = JSON.parse(toolCallArgs);
@@ -242,7 +242,7 @@ function getShakeReplacement(
 
   // bash needs a command-aware placeholder, so it has its own branch below.
   // For everything else, defer to the envelope.
-  if (toolName !== "bash" && toolName !== "run_shell_command") {
+  if (toolName !== "bash") {
     // write/file-edit acks (write_file/file_edit/replace_in_file) are always
     // safe to prune regardless of size; other safe tools only when they are
     // large enough to be worth a shake.
@@ -322,9 +322,22 @@ export function shakeConversation(
     return { shaken: 0, savedChars: 0, performed: false };
   }
 
-  // Calculate the protect window: keep the most recent tool results intact.
-  // Protect ~1/3 of the tool result chars, minimum 200, capped at tunable.
-  // This ensures recent results survive while old ones get shaken.
+  // Protect every result from the newest tool-call batch. These results have
+  // not been observed by a subsequent model turn yet, so pruning any one of
+  // them can make the agent repeat reads or act without evidence.
+  let latestBatchStart = messages.length;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const msg = messages[i];
+    if (msg?.role !== "assistant") continue;
+    if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+      latestBatchStart = i + 1;
+    }
+    break;
+  }
+
+  // Extend protection backwards up to the configured character window. If
+  // there is no trailing batch, protect at least the newest tool result even
+  // when that single result exceeds the nominal window.
   const toolResultChars = messages
     .filter(m => m.role === "tool")
     .reduce((sum, m) => sum + (m.content?.length ?? 0), 0);
@@ -332,23 +345,29 @@ export function shakeConversation(
     t.shakeProtectWindowChars,
     Math.max(200, Math.floor(toolResultChars / 3)),
   );
-
-  let protectedFromEnd = 0;
-  let firstUnprotectedIdx = messages.length;
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
+  let protectedFromEnd = messages
+    .slice(latestBatchStart)
+    .filter((msg) => msg.role === "tool")
+    .reduce((sum, msg) => sum + (msg.content?.length ?? 0), 0);
+  let protectedAny = protectedFromEnd > 0;
+  let firstUnprotectedIdx = latestBatchStart;
+  for (let i = latestBatchStart - 1; i >= 0; i -= 1) {
     const msg = messages[i];
     if (!msg || msg.role !== "tool") continue;
-    const content = msg.content ?? "";
-    if (protectedFromEnd + content.length > protectWindow) {
+    const contentLength = msg.content?.length ?? 0;
+    if (protectedAny && protectedFromEnd + contentLength > protectWindow) {
       firstUnprotectedIdx = i + 1;
       break;
     }
-    protectedFromEnd += content.length;
+    protectedAny = true;
+    protectedFromEnd += contentLength;
     firstUnprotectedIdx = i;
   }
 
-  // Shake tool results before the protect window
-  let shaken = 0;
+  // Collect replacements first. A pass below the minimum-savings threshold
+  // must be a true no-op; mutating and then reporting performed=false silently
+  // destroyed context in the previous implementation.
+  const replacements: Array<{ index: number; content: string; savedChars: number }> = [];
   let savedChars = 0;
   const seenToolCallIds = new Set<string>();
 
@@ -358,41 +377,34 @@ export function shakeConversation(
 
     // Skip the cockpit message (first user message)
     if (msg.role === "user" && i === 0) continue;
-
     if (msg.role !== "tool") continue;
 
     // Skip if already shaken (content already starts with [)
     const content = msg.content ?? "";
     if (content.startsWith("[") && content.endsWith("]")) continue;
 
-    // Find the tool name and args
     const { name: toolName, args: toolArgs } = findToolNameForCall(messages, i);
-
-    // Check if this tool result is eligible for shaking
     const replacement = getShakeReplacement(toolName, content, toolArgs);
     if (replacement === null) continue;
 
-    // Only shake if we haven't already shaken for this same tool call id
     const callId = msg.tool_call_id ?? `idx-${i}`;
     if (seenToolCallIds.has(callId)) continue;
     seenToolCallIds.add(callId);
 
-    // Perform the shake
-    const originalSize = content.length;
-    const targetMsg = messages[i];
-    if (targetMsg) {
-      targetMsg.content = replacement;
-    }
-    savedChars += originalSize - replacement.length;
-    shaken += 1;
+    const candidateSavings = content.length - replacement.length;
+    replacements.push({ index: i, content: replacement, savedChars: candidateSavings });
+    savedChars += candidateSavings;
   }
 
-  // Only return as performed if savings are meaningful
   if (savedChars < t.shakeMinSavingsChars) {
     return { shaken: 0, savedChars: 0, performed: false };
   }
 
-  return { shaken, savedChars, performed: true };
+  for (const replacement of replacements) {
+    const target = messages[replacement.index];
+    if (target) target.content = replacement.content;
+  }
+  return { shaken: replacements.length, savedChars, performed: replacements.length > 0 };
 }
 
 /** @deprecated Prefer resolveShakeTunables().maxConsecutiveShakeFailures */

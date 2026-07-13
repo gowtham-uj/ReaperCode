@@ -443,9 +443,11 @@ export class ConfiguredModelGateway implements ModelGateway {
     primaryStrategy: RouterStrategy,
     seen: Set<ModelRole> = new Set(),
   ): Promise<T> {
-    assertProviderProfileReady(profile);
     const startedAt = Date.now();
     try {
+      // Credential/capability preflight failures are ordinary primary
+      // failures for routing purposes and must be eligible for fallback.
+      assertProviderProfileReady(profile);
       const result = await fn(profile);
       const latencyMs = Date.now() - startedAt;
       // The success emit uses the ACTUAL profile we just called,

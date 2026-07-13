@@ -10,6 +10,7 @@ appropriate for end users.
 | `context-engineering-research.md` | Comparative research across Aider, Claude Code, Pi/OMP, OpenHands. |
 | `context-engineering-layer-audit.md` | Trigger map for Reaper's 21 context-engineering layers vs OMP. |
 | `roadmap-v0.1.4-omp-tool-port.md` | OMP tool-architecture port phases. |
+| `sessions.md` | **The single session mechanism** — journal format, `exec --session` lifecycle, context-engineering × session sync, compaction write-back, TUI contract, and the deleted duplicates that must not come back. |
 
 ## Why this directory exists
 

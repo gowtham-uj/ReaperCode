@@ -15,6 +15,7 @@
 import { ExtensionValidationError } from "./types.js";
 import { parsePackageMetadata } from "./package.js";
 import type { ExtensionManifest } from "./types.js";
+import { pathToFileURL } from "node:url";
 
 export interface LoadResult {
   ok: boolean;
@@ -50,7 +51,7 @@ export async function loadExtensionMain(extensionDir: string, manifest: Extensio
   try {
     // Use a file URL for cross-platform safety; this is required
     // for Windows paths and for source paths with spaces.
-    mod = await import(pathToFileUrl(mainPath));
+    mod = await import(pathToFileURL(mainPath).href);
   } catch (e) {
     return {
       ok: false,
@@ -72,13 +73,6 @@ export async function loadExtensionMain(extensionDir: string, manifest: Extensio
   return { ok: true, module: { default: activated }, mainPath };
 }
 
-function pathToFileUrl(p: string): string {
-  // Node provides url.pathToFileURL but we avoid the dep just for this.
-  if (p.startsWith("file://")) return p;
-  // Replace backslashes for Windows; escape # for URLs.
-  const norm = p.replace(/\\/g, "/");
-  return "file://" + norm.split("/").map(encodeURIComponent).join("/");
-}
 
 /**
  * Same as loadExtensionMain but synchronous. Returns the module if

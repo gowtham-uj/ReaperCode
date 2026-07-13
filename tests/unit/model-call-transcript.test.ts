@@ -39,7 +39,7 @@ test("renderModelCallTranscript includes system, messages, and output", () => {
       raw: {},
     } as any,
   });
-  assert.match(text, /You are a main agent/);
+  assert.match(text, /You are Reaper's main agent/);
   assert.match(text, /Create hello\.txt/);
   assert.match(text, /write_file/);
   assert.match(text, /Done\./);

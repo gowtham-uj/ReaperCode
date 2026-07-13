@@ -41,18 +41,10 @@ export function buildStarterConfig(input: { defaultModel?: string; defaultProvid
       localOnly: true,
       threshold: 0.5,
     },
-    // ── Runtime control (service supervisor, retries) ──────────────
+    // ── Runtime control ─────────────────────────────────────────────
     runtime: {
       recedingHorizonPlanContext: true,
       voteAttempts: 1,
-      serviceSupervisor: {
-        enabled: true,
-        readinessTimeoutMs: 30_000,
-        minimumStableMs: 1_500,
-        autoRecover: true,
-        maxAutoRecoveriesPerService: 1,
-        crashLoopThreshold: 2,
-      },
     },
     // ── Verification gates ─────────────────────────────────────────
     verification: {

@@ -31,7 +31,7 @@ test("source edits do not hide repeated high-signal failures", () => {
 
 test("blocked discriminating diagnostic immediately promotes simple execution", () => {
   const result = failedShell("probe", "printf 'probe' > .reaper/tmp/probe.c", "blocked");
-  result.error = { code: "source_shell_write_blocked", message: "Use write_file for source probes." };
+  result.error = { code: "policy_block", message: "Use write_file for source probes." };
 
   const decision = evaluateMilestoneProgress([result]);
 

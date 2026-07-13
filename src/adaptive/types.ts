@@ -316,29 +316,17 @@ export interface ReasoningCompletePayload {
 }
 
 /**
- * Typed payload for the engine-level turn-completion signal. The
- * engine emits this event when a model turn ends with a non-empty
- * assistant message and zero tool calls — i.e. the model is saying
- * "task complete" without explicitly emitting `complete_task`. The
- * TUI uses this event to transition cleanly to phase="done" without
- * waiting for the next prompt-submit cycle.
- *
- * This event is also fired when a `complete_task` signal produces a
- * successful `assistant_message` via the normal `summarize` path,
- * so TUI consumers do not need to subscribe to both surfaces.
+ * Typed payload for the engine-level model-owned stop. The engine emits this
+ * event when a turn ends with a non-empty assistant message and zero tool
+ * calls. The TUI can transition to phase="done" without waiting for another
+ * prompt-submit cycle.
  */
 export interface EngineTurnCompletePayload {
-  /** Final assistant message for this turn (may be empty when the
-   *  model emitted only a `complete_task` signal). */
+  /** Final assistant message for the model-owned terminal turn. */
   assistantMessage: string;
-  /** Tool results accumulated up to the end of this turn. May be
-   *  empty for `needs_model` runs that return without any tool
-   *  execution. */
+  /** Tool results accumulated before the terminal turn. */
   toolResults: Array<{ name: string; ok: boolean }>;
-  /** True when the turn ended because the model emitted a non-empty
-   *  assistant message with zero tool calls (implicit completion).
-   *  False when the turn ended via an explicit `complete_task`
-   *  signal from the model or via an explicit_tools request. */
+  /** True for a model-owned assistant-message stop; false for explicit tool runs. */
   implicit: boolean;
 }
 

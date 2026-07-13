@@ -50,12 +50,20 @@ test("FileMutationQueue allows different files to run concurrently and cleans up
   assert.equal(queue.size, 0);
 });
 
-test("FileMutationQueue serializes symlinked paths that resolve to the same real file", async () => {
+test("FileMutationQueue serializes symlinked paths that resolve to the same real file", async (t) => {
   const dir = await tempDir("reaper-mutation-symlink-");
   const file = path.join(dir, "real.txt");
   const link = path.join(dir, "link.txt");
   await writeFile(file, "", "utf8");
-  await symlink(file, link);
+  try {
+    await symlink(file, link);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EPERM") {
+      t.skip("symlink creation requires elevated privileges on this platform");
+      return;
+    }
+    throw error;
+  }
   const queue = new FileMutationQueue();
   const events: string[] = [];
 

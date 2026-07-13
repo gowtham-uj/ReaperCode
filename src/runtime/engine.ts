@@ -1,4 +1,3 @@
-// @ts-nocheck — stale tool surface cleanup in progress; will be removed once all refs are cleaned
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdir,  readFile,  writeFile } from "node:fs/promises";
@@ -6,7 +5,7 @@ import path from "node:path";
 
 
 import { parseReaperConfig, type ReaperConfig } from "../config/model-config.js";
-import { applyConfigToTunables, getEngineTunables, getSandboxTunables } from "../config/config-tunables.js";
+import { applyConfigToTunables, getEngineTunables } from "../config/config-tunables.js";
 import { ReaperConfigSearchPaths, loadReaperConfigFromWorkspace } from "../runtime/workspace-config.js";
 import { describeToolResultTarget,  renderStepText,  getToolResultCommand,  isBuildCommand,  isTestCommand,  normalizeVerificationCommand, 
   isVerificationLikeCommand,  hasInlineAssertionOrFailureExit, 
@@ -50,7 +49,6 @@ import { RecoverySession } from "../recovery/session.js";
 import {ToolExecutor} from "../tools/executor.js";
 import type { ShellRunner} from "../tools/executor.js";
 import type {Hooks} from "../adaptive/hooks.js";
-import {SubagentPool} from "./subagent-pool.js";
 import {
   extractFilePathsFromFailure, 
   isGeneratedOrBuildPath, 
@@ -75,6 +73,7 @@ import { classifyShellCommandSemantics } from "../tools/command-semantics.js";
 import { loadMcpServersFromFile } from "../tools/mcp/config.js";
 import { MergedToolRegistry } from "../tools/mcp/registry.js";
 import { ToolCallSchema, type ToolCall, type ToolResult } from "../tools/types.js";
+import { normalizeToolCall } from "../tools/normalize.js";
 import { streamMainAgentResponse } from "./main-agent-node.js";
 import type { GenerateRequest } from "../model/types.js";
 import { batchNeedsMutationCheckpoint, createCheckpoint } from "./checkpoints.js";
@@ -113,11 +112,9 @@ import { buildRescueHypothesisLedger, renderRescueHypothesisLedger } from "./hyp
 import { printToolCalls, printTurnHeader } from "./session-printer.js";
 import { buildMainAgentCockpit, buildMainAgentSystemPrompt, detectBuildLikeTask } from "./main-agent-prompt.js";
 import { validateToolCallBatch, type ToolValidationBlocker } from "./tool-validation.js";
-import { type CompletionValidationBlocker } from "./completion-validation.js";
-import { getCompletionSummary} from "./completion-signals.js";
 import { getRuntimeDeadlinePressure, type RuntimeDeadlinePressure } from "./deadline-pressure.js";
 import { hasRecentIncompleteGeneratedArtifact, hasRecentStructuredResponseFallbackFeedback } from "./generated-artifact-feedback.js";
-import { extractTaskContract, renderTaskContractForCockpit, type TaskContract } from "./task-contract.js";
+import { extractTaskContract, extractUserIntentText, renderTaskContractForCockpit, type TaskContract } from "./task-contract.js";
 import {
   applyCandidatePlan, 
   createPlanState, 
@@ -131,7 +128,6 @@ import {
   type TodoState} from "./plan-state.js";
 import {
   createVerificationState, 
-  ingestReviewerVerdicts, 
   recordVerificationCheck, 
   renderVerificationStateForCockpit, 
   type VerificationState} from "./verification-state.js";
@@ -168,6 +164,8 @@ export interface RuntimeEngineInput {
   config: unknown;
   workspaceRoot: string;
   requestEnvelope: unknown;
+  /** Named session for cross-run continuity; journaled under .reaper/sessions/. */
+  namedSession?: string;
   modelGateway?: ModelGateway;
   abortSignal?: AbortSignal;
   middlewares?: Array<MiddlewareDefinition<unknown>>;
@@ -203,11 +201,22 @@ export interface RuntimeEngineResult {
   };
 }
 
+export interface AdvisoryToolCall {
+  id: string;
+  name: "update_plan" | "update_todo";
+  args: Record<string, any>;
+}
+
+export interface AdvancementSignalCall {
+  id: string;
+  name: "advance_step";
+  args: { summary: string; evidence?: string[] };
+}
+
 export interface SplitToolCalls {
   executableToolCalls: ToolCall[];
-  advisoryToolCalls?: Array<Extract<ToolCall, { name: "update_plan" | "update_todo" }>>;
-  completionSignal?: Extract<ToolCall, { name: "complete_task" }>;
-  advancementSignal?: Extract<ToolCall, { name: "advance_step" }>;
+  advisoryToolCalls?: AdvisoryToolCall[];
+  advancementSignal?: AdvancementSignalCall;
 }
 
 export interface ExecutionPlanStep {
@@ -222,30 +231,11 @@ export interface ExecutionPlanStep {
   advancementEvidence?: string[];
   type?: "inspect" | "command" | "test" | "verify" | "review" | "finalize";
   onFailure?: "direct_repair" | "needs_replan" | "abort";
-  agent?: "executor" | "reviewer" | "tester" | "researcher";
   tool_calls: ToolCall[];
 }
 
 export type PlannerStepType = NonNullable<ExecutionPlanStep["type"]>;
 
-export interface PlannerSubagentPlan {
-  installs: Array<{ manager: string; packages: string[]; reason: string }>;
-  steps: ExecutionPlanStep[];
-  testGuidance: string;
-}
-
-export interface PatcherSubagentResult {
-  taskId: string;
-  status: "patched_and_verified" | "patched_but_not_fully_verified" | "needs_parent_decision" | "failed_to_patch" | "patch_in_progress";
-  summary: string;
-  filesChanged: string[];
-  behaviorChanged: string[];
-  testsRun: Array<{ command: string; result: "passed" | "failed" | "skipped"; importantOutput?: string }>;
-  remainingRisks: string[];
-  parentNeedsToKnow: string[];
-  tool_calls: ToolCall[];
-  diff?: string;
-}
 
 
 type GraphMode = "explicit_tools" | "needs_model" | "autonomous";
@@ -294,85 +284,12 @@ type GraphState = {
   readOnlyBatchSignatures: string[];
   needsReplan: boolean;
   done: boolean;
-  /** Structured advisory results from background subagents that have completed since the last turn. */
-  backgroundSubagentResults?: BackgroundSubagentResult[];
 };
 
 type ModelRouteName = keyof ReaperConfig["modelRouting"];
 
-type BackgroundSubagentResult = {
-  jobId: string;
-  type: string;
-  status: string;
-  result?: unknown;
-  error?: string;
-  stale: boolean;
-  staleReason?: string;
-};
 
-async function injectBackgroundSubagentResults(
-  _state: GraphState,
-  pool: SubagentPool,
-): Promise<{ results: BackgroundSubagentResult[]; blockers: RuntimeBlocker[] }> {
-  const completed = pool.flushCompleted();
-  const results: BackgroundSubagentResult[] = [];
-  const blockers: RuntimeBlocker[] = [];
 
-  for (const job of completed) {
-    if (job.injected) continue;
-    job.injected = true;
-
-    let stale = false;
-    let staleReason: string | undefined;
-    try {
-      const snapshot = await computeFileSnapshot(job.observedFiles ?? []);
-      if (job.baseFilesSnapshot && snapshot !== job.baseFilesSnapshot) {
-        stale = true;
-        staleReason = `Observed files changed since subagent '${job.id}' started; result may be stale.`;
-      }
-    } catch {
-      // If we cannot read the files, treat as stale as a conservative default.
-      stale = true;
-      staleReason = `Unable to verify observed files for subagent '${job.id}'; result treated as stale.`;
-    }
-    results.push({
-      jobId: job.id,
-      type: job.type,
-      status: job.status,
-      stale,
-      ...(job.result !== undefined ? { result: job.result } : {}),
-      ...(job.error !== undefined ? { error: job.error } : {}),
-      ...(staleReason !== undefined ? { staleReason } : {}),
-    });
-    if (stale) {
-      blockers.push({
-        source: "runtime",
-        code: "subagent_result_stale",
-        message: staleReason ?? "Subagent result is stale.",
-        ...(staleReason !== undefined ? { details: [staleReason] } : {}),
-      });
-    }
-  }
-
-  return { results, blockers };
-}
-
-async function computeFileSnapshot(filePaths: string[]): Promise<string> {
-  const hash = createHash("sha256");
-  const sorted = [...filePaths].sort();
-  for (const filePath of sorted) {
-    try {
-      const content = await readFile(filePath);
-      hash.update(content);
-    } catch {
-      hash.update(`__missing__${filePath}`);
-    }
-  }
-  if (sorted.length === 0) {
-    hash.update("__empty__");
-  }
-  return hash.digest("hex");
-}
 
 function modelRoute(config: ReaperConfig, route: ModelRouteName): ModelRole {
   return config.modelRouting[route];
@@ -387,14 +304,6 @@ function runtimeBlockerFromToolValidation(blocker: ToolValidationBlocker): Runti
   };
 }
 
-function runtimeBlockerFromCompletionValidation(blocker: CompletionValidationBlocker): RuntimeBlocker {
-  return {
-    source: "completion_validation",
-    code: blocker.code,
-    message: blocker.message,
-    ...(blocker.details?.length ? { details: blocker.details } : {}),
-  };
-}
 
 function buildRuntimeAgentSystemPrompt(role: string): string {
   const base = "You are a Reaper sub-agent. Emit only valid tool-call JSON. Do not invent tools.";
@@ -460,6 +369,19 @@ async function loadLiveConversationSnapshot(runDir: string): Promise<GenerateReq
         typeof (message as { content?: unknown }).content === "string",
     );
     return messages.length > 0 ? messages : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Ungated snapshot reader for run-end journaling (the loader above is
+ *  crash-resume only). Returns the POST-TRANSFORM conversation exactly
+ *  as the context-engineering layers left it. */
+async function readFinalConversationSnapshot(runDir: string): Promise<GenerateRequest["messages"] | undefined> {
+  try {
+    const raw = await readFile(path.join(runDir, LIVE_CONVERSATION_SNAPSHOT), "utf8");
+    const parsed = JSON.parse(raw) as { messages?: unknown };
+    return Array.isArray(parsed.messages) ? (parsed.messages as GenerateRequest["messages"]) : undefined;
   } catch {
     return undefined;
   }
@@ -547,7 +469,6 @@ export class RuntimeEngine {
     let executor: ToolExecutor | undefined;
     let auditLogger: AuditLogger | undefined;
     let mcpRegistry: MergedToolRegistry | undefined;
-    let subagentPool: SubagentPool | undefined;
 
     const getRequest = () => {
       if (!request) throw new Error("LangGraph runtime request was not bootstrapped");
@@ -585,6 +506,7 @@ export class RuntimeEngine {
         runId: runContext.runId,
         sessionId: runContext.sessionId,
         traceId: runContext.traceId,
+        ...(this.input.namedSession ? { namedSession: this.input.namedSession } : {}),
         ...(repoInspection ? { repoInspection } : {}),
       });
       const mode: GraphMode = hasExplicitToolCalls ? "explicit_tools" : this.input.modelGateway ? "autonomous" : "needs_model";
@@ -608,13 +530,6 @@ export class RuntimeEngine {
           });
         }
       }
-      if (this.input.modelGateway) {
-        subagentPool = await SubagentPool.create({
-          config: this.config,
-          workspaceRoot: this.input.workspaceRoot,
-          runDir: runContext.runDir,
-        });
-      }
       executor = new ToolExecutor({
         workspaceRoot: this.input.workspaceRoot,
         runId: boot.state.runId,
@@ -625,8 +540,6 @@ export class RuntimeEngine {
         permissionMode: (getEngineTunables().permissionMode as any) ?? "yolo",
         recoverySession,
         config: this.config,
-        ...(this.input.modelGateway ? { modelGateway: this.input.modelGateway } : {}),
-        subagentPool,
         trajectoryLogger: this.trajectoryLogger,
         auditLogger,
         runDir: runContext.runDir,
@@ -831,41 +744,22 @@ export class RuntimeEngine {
         (this as any).ctxHooks = ctxHooks;
       }
 
+      const bootNamedSession = getBoot().state.namedSession;
       await ctxHooks.onBoot({
         workspaceRoot: this.input.workspaceRoot,
         runId: getBoot().state.runId,
         sessionId: getBoot().state.sessionId,
-        namedSession: getBoot().state.namedSession,
+        ...(bootNamedSession ? { namedSession: bootNamedSession } : {}),
       }).catch(() => undefined);
-      if (subagentPool) {
-        const injection = await injectBackgroundSubagentResults(state, subagentPool);
-        if (injection.results.length) {
-          state.backgroundSubagentResults = injection.results;
-        }
-        if (injection.blockers.length) {
-          state.runtimeBlockers = [...state.runtimeBlockers, ...injection.blockers];
-        }
-      }
 
       if (!this.input.modelGateway || !state.contentPrep) return {};
 
-      let mutableState: GraphState = state;
-      if (mutableState.verificationState) {
-        const nextVerificationState = ingestReviewerVerdicts(mutableState.verificationState, mutableState.toolResults);
-        if (nextVerificationState !== mutableState.verificationState) {
-          mutableState = { ...mutableState, verificationState: nextVerificationState };
-        }
-      }
-      state = mutableState;
 
-      const allGeneralAgentTools = buildGeneralAgentTools();
+      const allGeneralAgentTools = buildGeneralAgentTools(getDiscoveredTools(getBoot().state.runId));
       const generalAgentTools = selectGeneralAgentToolsForTurn({
         request: getRequest(),
         state,
         tools: allGeneralAgentTools,
-      });
-      const system = buildMainAgentSystemPrompt(state, {
-        availableTools: generalAgentTools,
       });
       const cockpit = buildMainAgentCockpit(
         {
@@ -923,13 +817,12 @@ export class RuntimeEngine {
         // exhausts. The engine's downstream nodes only see the final
         // accumulated `toolResults`, never the per-tool dispatch latency.
         const liveToolResults: ToolResult[] = [];
+        const liveEvents: AgentEventEnvelope[] = [];
         let lastAssistantMessage = "";
-        let loopGuard = 0;
         let incompleteRecoveryAttempts = 0;
         let emptyStopRetries = 0;
-        let unexpectedStopRetries = 0;
         const EMPTY_STOP_MAX_RETRIES = 3;
-        const UNEXPECTED_STOP_MAX_RETRIES = 3;
+        let terminalRuntimeBlocker: RuntimeBlocker | undefined;
         const resumedConversation = await loadLiveConversationSnapshot(runContext.runDir);
         const liveConversation: GenerateRequest["messages"] = resumedConversation ?? [
           { role: "user", content: cockpit },
@@ -953,18 +846,29 @@ export class RuntimeEngine {
         if (!resumedConversation) {
           const resumeSlot = (globalThis as any)[`${getBoot().state.runId}::session-resume`];
           const resume = resumeSlot?.resume;
-          if (resume && typeof resume.reAnchor === "string" && resume.reAnchor.trim().length > 0) {
-            liveConversation.push({
-              role: "user",
-              content: resume.reAnchor,
-            } as any);
-            if (Array.isArray(resume.rehydratedMessages) && resume.rehydratedMessages.length > 0) {
-              for (const msg of resume.rehydratedMessages) {
-                if (msg && typeof msg === "object" && typeof (msg as any).role === "string") {
-                  liveConversation.push(msg as any);
-                }
-              }
+          const reAnchor =
+            resume && typeof resume.reAnchor === "string" ? resume.reAnchor.trim() : "";
+          const rehydratedMessages =
+            resume && Array.isArray(resume.rehydratedMessages)
+              ? resume.rehydratedMessages.filter(
+                  (msg: unknown) =>
+                    msg &&
+                    typeof msg === "object" &&
+                    typeof (msg as { role?: unknown }).role === "string",
+                )
+              : [];
+          if (resume && (reAnchor.length > 0 || rehydratedMessages.length > 0)) {
+            // Prior-session turns must PRECEDE this run's request so the
+            // conversation stays chronological and the new prompt keeps
+            // recency position.
+            const resumeMessages: unknown[] = [];
+            if (reAnchor.length > 0) {
+              resumeMessages.push({ role: "user", content: reAnchor });
             }
+            resumeMessages.push(...(rehydratedMessages as unknown[]));
+            liveConversation.unshift(...(resumeMessages as any[]));
+            // Session journaling slices the run's NEW turns off this prefix.
+            (globalThis as any)[`${getBoot().state.runId}::rehydrated-count`] = resumeMessages.length;
             delete (globalThis as any)[`${getBoot().state.runId}::session-resume`];
             await this.trajectoryLogger.write({
               event_id: randomUUID(),
@@ -1005,8 +909,7 @@ export class RuntimeEngine {
               from_step: "Content Prep",
               to_step: "Summary Replaced",
             });
-            liveConversation.length = 0;
-            liveConversation.push(...(appliedSlot.messages as any[]));
+            replaceConversationMessages(liveConversation, appliedSlot.messages as any[]);
             delete (globalThis as any)[`${runContext.runId}::full-summary-applied`];
             await this.trajectoryLogger.write({
               event_id: randomUUID(),
@@ -1024,30 +927,24 @@ export class RuntimeEngine {
             delete (globalThis as any)[`${runContext.runId}::full-summary-applied`];
           }
         }
+        const latestVerificationBlocker = [...state.runtimeBlockers]
+          .reverse()
+          .find((blocker) => blocker.source === "verification" && blocker.code === "verification_failed");
+        if (latestVerificationBlocker) {
+          const feedbackMessage = `[Runtime verification failed]\n${latestVerificationBlocker.message}`;
+          const alreadyPresent = liveConversation
+            .slice(-12)
+            .some((message) => message.role === "user" && message.content === feedbackMessage);
+          if (!alreadyPresent) {
+            liveConversation.push({ role: "user", content: feedbackMessage });
+          }
+        }
         await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
 
-        // ─── Context-engineering: BEFORE-MODEL-CALL ──────────────────────
         const softCap = getBoot().state.tokenBudget?.softCap ?? 270_000;
-        const ctxCallStartedAt = Date.now();
-        try {
-          const beforeMc = await ctxHooks.onBeforeModelCall({
-            workspaceRoot: this.input.workspaceRoot,
-            runId: getBoot().state.runId,
-            sessionId: getBoot().state.sessionId,
-            traceId: getBoot().state.runId,
-            messages: liveConversation,
-            softCap,
-            trajectoryLogger: this.trajectoryLogger,
-          });
-          // Apply messages (shake/summary may have replaced them in place)
-          if (Array.isArray(beforeMc.messages)) {
-            liveConversation.length = 0;
-            liveConversation.push(...(beforeMc.messages as any[]));
-          }
-        } catch { /* swallow */ }
 
         while (true) {
-          loopGuard += 1;
+          const ctxCallStartedAt = Date.now();
 
           // ─── Context-engineering: BEFORE-MODEL-CALL (per-iteration) ───
           // Re-evaluate shake/summary/time-MC thresholds on every model
@@ -1066,8 +963,7 @@ export class RuntimeEngine {
               trajectoryLogger: this.trajectoryLogger,
             });
             if (Array.isArray(beforeMcInner.messages)) {
-              liveConversation.length = 0;
-              liveConversation.push(...(beforeMcInner.messages as any[]));
+              replaceConversationMessages(liveConversation, beforeMcInner.messages as any[]);
             }
           } catch { /* swallow */ }
 
@@ -1136,13 +1032,24 @@ export class RuntimeEngine {
             }
           } catch { /* best-effort */ }
 
+          // Tool discovery is live: search_tools and content-prep promotions
+          // must update both the API schemas and the system inventory on the
+          // very next model call, including calls inside this execution loop.
+          const currentGeneralAgentTools = selectGeneralAgentToolsForTurn({
+            request: getRequest(),
+            state: { toolResults: [...state.toolResults, ...liveToolResults] },
+            tools: buildGeneralAgentTools(getDiscoveredTools(getBoot().state.runId)),
+          });
+          const currentSystem = buildMainAgentSystemPrompt(state, {
+            availableTools: currentGeneralAgentTools,
+          });
+
           const turnRequest: GenerateRequest = {
             role: effectiveMainAgentRole,
             source: "main_agent",
-            system,
+            system: currentSystem,
             messages: liveConversation,
-            ...(generalAgentTools ? { tools: generalAgentTools } : {}),
-            ...(generalAgentTools ? {} : { responseFormat: "json" as const }),
+            tools: currentGeneralAgentTools,
             ...(selectMainAgentMaxTokensForTurn({ request: getRequest(), state }) !== undefined
               ? { maxTokens: selectMainAgentMaxTokensForTurn({ request: getRequest(), state }) }
               : {}),
@@ -1168,6 +1075,25 @@ export class RuntimeEngine {
             this.trajectoryLogger,
             ctxHooks,
             softCap,
+            getBoot().state.runId,
+            this.input.hooks
+              ? {
+                  onMessageDelta: async (text) => {
+                    await this.input.hooks!.emit({
+                      name: "AssistantMessageDelta",
+                      payload: { text, role: "assistant", done: false },
+                      blockable: false,
+                    });
+                  },
+                  onReasoningDelta: async (text) => {
+                    await this.input.hooks!.emit({
+                      name: "ReasoningDelta",
+                      payload: { text, done: false },
+                      blockable: false,
+                    });
+                  },
+                }
+              : undefined,
           );
           // ─── Context-engineering: AFTER-MODEL-CALL ───────────────────────
           try {
@@ -1178,8 +1104,6 @@ export class RuntimeEngine {
               traceId: getBoot().state.runId,
               messages: liveConversation,
               modelResponse: (turn as any).raw ?? turn,
-              startedAt: ctxCallStartedAt,
-              finishedAt: Date.now(),
               softCap,
               trajectoryLogger: this.trajectoryLogger,
             });
@@ -1244,6 +1168,13 @@ export class RuntimeEngine {
           }
           if (tc.length === 0) {
             const assistantText = typeof turn.content === "string" ? turn.content.trim() : "";
+            if ((turn as any)?.raw?.transportFallback) {
+              terminalRuntimeBlocker = {
+                source: "model",
+                code: "main_agent_transport_error",
+                message: assistantText || "Main-agent provider transport retries were exhausted.",
+              };
+            }
             // OMP #handleEmptyAssistantStop: empty stop is a harness glitch —
             // retry a few times. Non-empty text-only stop is model-owned.
             if (
@@ -1283,46 +1214,6 @@ export class RuntimeEngine {
               liveConversation.push({ role: "assistant", content: turn.content });
               await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
             }
-            // OMP unexpected-stop (lightweight): text-only stop while required
-            // deliverables are still missing is mid-plan chatter, not completion.
-            // Nudge and continue a few times; do not force forever.
-            if (
-              assistantText &&
-              unexpectedStopRetries < UNEXPECTED_STOP_MAX_RETRIES &&
-              (!turn.finishReason ||
-                turn.finishReason === "stop" ||
-                turn.finishReason === "end_turn") &&
-              looksLikeUnexpectedMidPlanStop({
-                assistantText,
-                workspaceRoot: this.input.workspaceRoot,
-              })
-            ) {
-              unexpectedStopRetries += 1;
-              liveConversation.push({
-                role: "user",
-                content:
-                  "You stopped with assistant text and no tool_calls, but required deliverables " +
-                  "are still missing (e.g. RESULT.json / verification). Continue with the next " +
-                  "concrete structured tool_calls now (small batch). Do not stop until the " +
-                  "required verification command succeeds.",
-              });
-              await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
-              await this.trajectoryLogger
-                .write({
-                  event_id: randomUUID(),
-                  run_id: getBoot().state.runId,
-                  session_id: getBoot().state.sessionId,
-                  trace_id: getBoot().state.runId,
-                  timestamp: new Date().toISOString(),
-                  log_schema_version: 1,
-                  kind: "unexpected_stop_retry",
-                  level: getBoot().state.logLevel,
-                  attempt: unexpectedStopRetries,
-                  max_attempts: UNEXPECTED_STOP_MAX_RETRIES,
-                } as any)
-                .catch(() => undefined);
-              continue;
-            }
             // Incomplete recovery (OMP): finishReason === "length" means the
             // model hit the output/context ceiling mid-turn. Shrink context
             // once and continue so it can finish; only break if recovery fails.
@@ -1336,8 +1227,7 @@ export class RuntimeEngine {
                   runId: getBoot().state.runId,
                 });
                 if (Array.isArray(recovered?.messages) && recovered.messages.length > 0) {
-                  liveConversation.length = 0;
-                  liveConversation.push(...(recovered.messages as any[]));
+                  replaceConversationMessages(liveConversation, recovered.messages as any[]);
                   await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
                   await this.trajectoryLogger.write({
                     event_id: randomUUID(),
@@ -1399,6 +1289,7 @@ export class RuntimeEngine {
             liveRecovery,
             this.input.abortSignal,
           );
+          const currentBatchResults: ToolResult[] = [];
           for (let i = 0; i < tc.length; i += 1) {
             const call = tc[i]!;
             const id = call.id;
@@ -1426,6 +1317,8 @@ export class RuntimeEngine {
               if (!result.toolCallId) result = { ...result, toolCallId: id };
             }
             liveToolResults.push(result);
+            currentBatchResults.push(result);
+            liveEvents.push(makeEvent(getRequest(), "tool_call_completed", { result }));
 
             // ─── Context-engineering: AFTER-TOOL-RESULT ─────────────────
             // Run the wiring hook for normalized envelope / spillover on
@@ -1541,8 +1434,11 @@ export class RuntimeEngine {
         return {
           plannedToolCalls: [],
           assistantMessage: lastAssistantMessage,
+          events: [...state.events, ...liveEvents],
           feedback: state.feedback,
-          runtimeBlockers: state.runtimeBlockers,
+          runtimeBlockers: terminalRuntimeBlocker
+            ? [...state.runtimeBlockers, terminalRuntimeBlocker]
+            : state.runtimeBlockers,
           toolResults: [...(state.toolResults ?? []), ...liveToolResults],
           iteration: state.iteration + 1,
         } satisfies Partial<GraphState>;
@@ -1575,9 +1471,8 @@ export class RuntimeEngine {
 
     const validateToolCallsNode = async (state: GraphState) => {
       let toolCalls = state.plannedToolCalls ?? [];
-      // Terminal assistant text: if the model returns assistant text with
-      // no tool calls, do not synthesize complete_task or force another gate.
-      // The model's text is the terminal response for this turn/session.
+      // Terminal assistant text with no tool calls is the model-owned stop.
+      // Route it directly to the final summary without a completion gate.
       const validation = validateToolCallBatch(toolCalls, {
         agentRole: "main",
         assistantMessage: state.assistantMessage,
@@ -1669,74 +1564,14 @@ export class RuntimeEngine {
       return { ...state, events, assistantMessage: message, done: true };
     };
 
-    const simpleExecutorNode = async (state: GraphState) => {
-      if (!this.input.modelGateway || !state.contentPrep) return {};
-      const activeRuntimeState = getBoot().state;
-      const result = await generateStructuredJson({
-        modelGateway: this.input.modelGateway,
-        source: "executor_subagent",
-        role: modelRoute(this.config, "executor"),
-        switchModeOnTruncation: true,
-        maxTokens: 32_000,
-        system: buildRuntimeAgentSystemPrompt("executor"),
-        messages: [
-          {
-            role: "user",
-              content: buildSimpleExecutorPrompt({
-                prompt: state.prompt,
-                contentPrep: state.contentPrep,
-                ...(activeRuntimeState.repoInspection ? { repoInspection: activeRuntimeState.repoInspection } : {}),
-                toolResults: state.toolResults,
-                feedback: state.feedback,
-                negativeConstraints: state.negativeConstraints,
-                blockingFacts: deriveRuntimeBlockingFacts(state.toolResults),
-                runId: activeRuntimeState.runId,
-              }),
-          },
-        ],
-        parse: (value) => parsePlannedToolCalls(value),
-      });
-      const rawAssistantMessage = result.assistant_message ?? "";
-      await logModelResponseTrace({
-        trajectoryLogger: this.trajectoryLogger,
-        runId: getBoot().state.runId,
-        sessionId: getBoot().state.sessionId,
-        traceId: getBoot().state.runId,
-        level: getBoot().state.logLevel,
-        source: "general_agent_direct",
-        assistantMessage: rawAssistantMessage,
-        toolCalls: result.tool_calls,
-      });
-      await logAssistantMessageTrace({
-        trajectoryLogger: this.trajectoryLogger,
-        runId: getBoot().state.runId,
-        sessionId: getBoot().state.sessionId,
-        traceId: getBoot().state.runId,
-        level: getBoot().state.logLevel,
-        source: "general_agent_direct",
-        content: rawAssistantMessage,
-      });
-      const assistantMessage = getCompletionSummary(result.tool_calls) ? rawAssistantMessage : "";
-      let plannedToolCalls = result.tool_calls;
-      // reference-style invariant: an empty tool_calls array is the natural terminal
-      // signal. We do not synthesize a complete_task here; the runtime emits
-      // the assistant's text as the final summary and exits.
-      const messageEvent = assistantMessage ? [makeEvent(getRequest(), "assistant_message", { content: assistantMessage })] : [];
-      return {
-        plannedToolCalls,
-        assistantMessage,
-        feedback: state.feedback,
-        events: [...state.events, ...messageEvent],
-        iteration: state.iteration + 1,
-      } satisfies Partial<GraphState>;
-    };
 
     const categorizeToolsNode = async (state: GraphState) => {
       const activeRequest = getRequest();
       const toolCalls =
         state.mode === "autonomous"
           ? state.plannedToolCalls ?? []
-          : (Array.isArray(activeRequest.payload.tool_calls) ? activeRequest.payload.tool_calls : []).map((call) => ToolCallSchema.parse(call));
+          : (Array.isArray(activeRequest.payload.tool_calls) ? activeRequest.payload.tool_calls : [])
+              .map((call) => ToolCallSchema.parse(normalizeToolCall(call)));
       const split = splitControlToolCalls(toolCalls);
       await this.trajectoryLogger.write({
         event_id: randomUUID(),
@@ -1787,20 +1622,12 @@ export class RuntimeEngine {
       const toolCalls =
         state.mode === "autonomous"
           ? state.plannedToolCalls ?? []
-          : (Array.isArray(activeRequest.payload.tool_calls) ? activeRequest.payload.tool_calls : []).map((call) => ToolCallSchema.parse(call));
+          : (Array.isArray(activeRequest.payload.tool_calls) ? activeRequest.payload.tool_calls : [])
+              .map((call) => ToolCallSchema.parse(normalizeToolCall(call)));
       const split = splitControlToolCalls(toolCalls);
       const requestMetadata = activeRequest.metadata && typeof activeRequest.metadata === "object" ? (activeRequest.metadata as Record<string, unknown>) : {};
       const execMode = requestMetadata.transport === "http_json" && requestMetadata.yolo === true;
-      const normalizedExecutableToolCalls = normalizeExecutableToolCalls(split.executableToolCalls);
-      const automaticServiceRecovery = buildAutomaticServiceRecoveryCall(
-        normalizedExecutableToolCalls,
-        state.toolResults,
-        this.config.runtime.serviceSupervisor,
-      );
-      const executableToolCalls = automaticServiceRecovery ? [automaticServiceRecovery] : normalizedExecutableToolCalls;
-      if (automaticServiceRecovery) {
-        split.executableToolCalls = [automaticServiceRecovery];
-      }
+      const executableToolCalls = normalizeExecutableToolCalls(split.executableToolCalls);
       const allowedToolCalls = executableToolCalls;
       const blockedBeforeScheduling: ToolResult[] = [];
       const currentStep = state.executionPlan?.[state.currentStepIndex];
@@ -1882,24 +1709,10 @@ export class RuntimeEngine {
       if (shouldAdvanceBuildConfigStep) {
         lastBatchFailed = false;
       }
-      const completionBlocker = split?.completionSignal ? getCompletionBlocker(state.toolResults, getBoot().state.runId, state.prompt, this.config) : undefined;
-      const completionBackfilledTasks = completionBlocker
-        ? backfillRuntimeBlockerTasks({
-            runId: getBoot().state.runId,
-            toolResults: state.toolResults,
-            blocker: completionBlocker,
-          })
-        : [];
-      const bestOfNCandidateRejected = Boolean(completionBlocker && getRequest().metadata?.best_of_n_child);
-      if (split?.completionSignal && completionBlocker) {
-        const { completionSignal: _completionSignal, ...splitWithoutCompletion } = split;
-        split = splitWithoutCompletion;
-      }
       const noActionBatch =
         state.mode === "autonomous" &&
         Boolean(split) &&
         split!.executableToolCalls.length === 0 &&
-        !split!.completionSignal &&
         !split!.advancementSignal;
       if (split && shouldCleanupBackgroundAfterBatch(split.executableToolCalls, state.toolResults, getExecutor().getBackgroundProcesses())) {
         await getExecutor().cleanupBackgroundProcesses("post_foreground_check");
@@ -1908,22 +1721,17 @@ export class RuntimeEngine {
       // step-budget feedback. Reaper's natural-stop path is model-driven;
       // we keep state shape compatible but skip the legacy heuristics.
       const stepBudgetDecision = { tripped: false, feedback: [], negativeConstraints: [] };
-      const completionBlockerFeedback = completionBlocker
-        ? [completionBlocker]
-        : [];
-      // Legacy hidden patcher routing is removed. Failed steps stay
-      // with the main agent and advisory subagents only.
+      // Failed steps remain on the main model path.
       const readOnlyBatchFeedback =
         state.mode === "autonomous" &&
         Boolean(step) &&
         split &&
         split.executableToolCalls.length > 0 &&
         !split.advancementSignal &&
-        !split.completionSignal &&
         !lastBatchFailed
           ? [
               ...state.feedback,
-              `Step '${step!.id}' did not advance because the model did not emit advance_step. The executor must explicitly call advance_step with evidence when the current step is done, or complete_task with a final summary only when the whole task is complete.`,
+              `Step '${step!.id}' did not advance because the model did not emit advance_step. If the whole task is complete, stop with a concise final assistant_message and no tool_calls.`,
               state.readOnlyBatchSignatures.length >= 2
                 ? `Step '${step!.id}' has repeated inspection-only batches without progress. Stop reading the same context. Run the step's concrete command/check, make the required edit, request a patch for a real failure, or advance with evidence.`
                 : "",
@@ -1938,14 +1746,12 @@ export class RuntimeEngine {
       const autoAdvanceReadOnlyInspection =
         state.mode === "autonomous" &&
         Boolean(step) &&
-        !split?.completionSignal &&
         !split?.advancementSignal &&
         !lastBatchFailed &&
         isReadOnlyInspectionStepDone(step, split);
 	      const autoAdvanceVerifiedCommandStep =
 	        state.mode === "autonomous" &&
 	        Boolean(step) &&
-	        !split?.completionSignal &&
         !split?.advancementSignal &&
         !lastBatchFailed &&
 	        isVerificationDrivenPlanStep(step) &&
@@ -1955,14 +1761,12 @@ export class RuntimeEngine {
 	        state.mode === "autonomous" &&
 	        Boolean(step) &&
 	        step!.tool_calls.length > 0 &&
-		        !split?.completionSignal &&
 		        !split?.advancementSignal &&
 	        !lastBatchFailed &&
 	        state.currentStepIndex + 1 < (state.executionPlan?.length ?? 0);
 	      const shouldAdvancePlanStep =
 	        state.mode === "autonomous" &&
 	        Boolean(step) &&
-        !split?.completionSignal &&
         !lastBatchFailed &&
         (Boolean(split?.advancementSignal) ||
 	          autoAdvanceReadOnlyInspection ||
@@ -1974,7 +1778,6 @@ export class RuntimeEngine {
         state.mode === "autonomous" &&
         Boolean(step) &&
         Boolean(split?.advancementSignal) &&
-        !split?.completionSignal &&
         !lastBatchFailed &&
         isReadOnlyPlanStep(step);
       const shouldAdvanceCurrentStep = shouldAdvancePlanStep || explicitReadOnlyStepAdvance;
@@ -1996,28 +1799,16 @@ export class RuntimeEngine {
       if (boundaryPivot) {
         addQueuedNegativeConstraint(boundaryPivot.negativeConstraint);
       }
-      if (completionBlocker) {
-        addQueuedNegativeConstraint(
-          "Do not emit complete_task while recent tool results show missing output artifacts, failed builds, or failed runtime/verification checks without a later successful producer/check.",
-        );
-      }
       addQueuedNegativeConstraint(deadlinePressure.negativeConstraint);
-      if (stepBudgetDecision.tripped && !canAdvancePlanStep && !split?.completionSignal) {
+      if (stepBudgetDecision.tripped && !canAdvancePlanStep) {
         for (const constraint of stepBudgetDecision.negativeConstraints) addQueuedNegativeConstraint(constraint);
       }
       const queuedRuntimeBlockers: RuntimeBlocker[] = [];
-      if (completionBlocker) {
-        queuedRuntimeBlockers.push({
-          source: "completion_validation",
-          code: "runtime_completion_blocker",
-          message: completionBlocker,
-        });
-      }
       if (noActionBatch) {
         queuedRuntimeBlockers.push({
           source: "runtime",
           code: "empty_main_agent_batch",
-          message: "The main_agent response produced no executable tool calls and no completion signal.",
+          message: "The main_agent response produced no executable tool calls.",
         });
       }
       const nextCompletionGateAttempts = queuedRuntimeBlockers.length > 0
@@ -2032,8 +1823,7 @@ export class RuntimeEngine {
         state.mode === "autonomous" &&
         Boolean(step) &&
         Boolean(split) &&
-        !split?.advancementSignal &&
-        !split?.completionSignal;
+        !split?.advancementSignal;
       if (forcedAdvanceForBudget && split && step) {
         split = {
           ...split,
@@ -2043,7 +1833,7 @@ export class RuntimeEngine {
             args: {
               summary: `Step '${step.id}' reached the per-step tool budget without a passing verification signal. Runtime is auto-advancing to the next plan step to avoid an unbounded loop.`,
               evidence: [
-                `Step '${step.id}' reached the per-step tool budget without a passing verification signal. Runtime is auto-advancing to the next plan step to avoid an unbounded loop. The next executor subagent should pick up this step's remaining work.`,
+                `Step '${step.id}' reached the per-step tool budget without a passing verification signal. The main model remains responsible for any unfinished work.`,
               ],
             },
           },
@@ -2070,7 +1860,7 @@ export class RuntimeEngine {
         lastBatchFailed,
         runtimeBlockers: queuedRuntimeBlockers.length > 0 ? [...state.runtimeBlockers, ...queuedRuntimeBlockers] : state.runtimeBlockers,
         readOnlyBatchSignatures,
-        ...(boundaryPivot || (stepBudgetDecision.tripped && !canAdvancePlanStep && !split?.completionSignal) ? { needsReplan: true } : {}),
+        ...(boundaryPivot || (stepBudgetDecision.tripped && !canAdvancePlanStep) ? { needsReplan: true } : {}),
         completionGateAttempts: nextCompletionGateAttempts,
         ...{},
         ...(queuedNegativeConstraints.length !== state.negativeConstraints.length
@@ -2096,14 +1886,12 @@ export class RuntimeEngine {
                 : []
           : noActionBatch
             ? [
-                ...completionBlockerFeedback,
                 "The last model response produced no executable tool calls and no completion/advance signal. This is not progress; inspect the needed files or make the smallest concrete repair before continuing.",
               ]
-            : completionBlockerFeedback,
+            : [],
         ...(boundaryPivot
           ? {
               feedback: [
-                ...completionBlockerFeedback,
                 boundaryPivot.feedback,
               ],
             }
@@ -2123,93 +1911,6 @@ export class RuntimeEngine {
       }
     };
 
-    const verifyNode = async (state: GraphState) => {
-      if (!state.split?.completionSignal) return {};
-      if (shouldRunVerificationForCompletion(getRequest(), state.split.completionSignal, this.config) || state.mode === "autonomous") {
-        const explicitVerification = await runExplicitVerification({
-          workspaceRoot: this.input.workspaceRoot,
-          completionSignal: state.split.completionSignal,
-          request: getRequest(),
-          trajectoryLogger: this.trajectoryLogger,
-          auditLogger: getAuditLogger(),
-          toolResults: state.toolResults,
-          modelGateway: this.input.modelGateway,
-          config: this.config,
-        });
-        const backfilledTasks = explicitVerification.ok
-          ? []
-          : backfillVerificationFailureTasks({
-              runId: getBoot().state.runId,
-              verification: explicitVerification,
-              toolResults: state.toolResults,
-            });
-        // The reference loop has no stuck-detection heuristic; keep state shape but
-        // don't compute tripped flag from verification outcomes.
-          if (!explicitVerification.ok) {
-          const classified = classifyVerificationOutput(
-            [
-              explicitVerification.command ?? "",
-              ...(explicitVerification.feedback ?? []),
-              ...(explicitVerification.negativeConstraints ?? []),
-            ].join("\n"),
-          );
-          await appendFailureMemory(this.input.workspaceRoot, {
-            runId: getBoot().state.runId,
-            source: "verification",
-            summary: classified.repairStrategy,
-            failureClasses: classified.classes,
-            negativeConstraints: explicitVerification.negativeConstraints ?? [],
-          }).catch(() => undefined);
-        }
-        const verificationState = explicitVerification.command
-          ? recordVerificationCheck(state.verificationState ?? createVerificationState(), {
-              command: explicitVerification.command,
-              status: explicitVerification.ok ? "passed" : "failed",
-              evidence: [
-                explicitVerification.groundedSignal?.kind ?? "",
-                explicitVerification.groundedSignal?.command ?? "",
-                explicitVerification.selfDebugExplanation ?? "",
-                explicitVerification.diffReviewExplanation ?? "",
-                ...(explicitVerification.feedback ?? []),
-              ].filter(Boolean).join("\n"),
-              verifiedAt: new Date().toISOString(),
-            })
-          : state.verificationState;
-        const verificationBlockers: RuntimeBlocker[] = explicitVerification.ok
-          ? []
-          : [
-              {
-                source: "verification",
-                code: "verification_failed",
-                message: (explicitVerification.feedback ?? []).join("\n") || "Completion verification failed.",
-                ...(explicitVerification.failureClasses ? { details: explicitVerification.failureClasses } : {}),
-              },
-            ];
-        return {
-          explicitVerification,
-          ...(verificationState ? { verificationState } : {}),
-            runtimeBlockers: explicitVerification.ok ? [] : [...state.runtimeBlockers, ...verificationBlockers],
-          feedback: explicitVerification.ok
-            ? state.feedback
-            : [
-                ...state.feedback,
-                ...(explicitVerification.feedback ?? []),
-                ...(backfilledTasks.length ? [`Backfilled ${backfilledTasks.length} failed verification blocker(s) into the session task list. Complete those tasks before retrying complete_task.`] : []),
-              ],
-          negativeConstraints: explicitVerification.ok ? state.negativeConstraints : [...state.negativeConstraints, ...(explicitVerification.negativeConstraints ?? [])],
-        };
-      }
-      return {
-        explicitVerification: {
-          ok: true,
-          attemptCount: 0,
-          retryBudgetConsumed: 0,
-          command: "model_managed_testing_step",
-          feedback: ["Reaper automatic verification is disabled. The model is responsible for testing as part of the execution plan before complete_task."],
-          negativeConstraints: [],
-        },
-      };
-    };
 
     const summarizeNode = async (state: GraphState) => {
       const activeRequest = getRequest();
@@ -2229,18 +1930,16 @@ export class RuntimeEngine {
       // summary is empty. If non-empty, that IS the summary — the
       // model's own words, written by the model itself.
       const modelSummary =
-        state.split?.completionSignal?.args.summary?.trim() ||
         state.assistantMessage?.trim() ||
-        "";
+        (state.mode === "explicit_tools" ? summarizeExplicitToolRun(state.toolResults) : "");
       const nextEvents = [
         ...state.events,
         makeEvent(activeRequest, "assistant_message", { content: modelSummary }),
       ];
-      // The run is "completed" the moment the model emits a final
-      // assistant turn with no tool calls (the reference-loop
-      // terminal signal). There is no completion gate, no
-      // autonomous-only heuristic, no last-shell-ok heuristic.
-      nextEvents.push(makeEvent(activeRequest, "task_completed", { verification: finalVerification }));
+      const transportFailed = state.runtimeBlockers.some((blocker) => blocker.code === "main_agent_transport_error");
+      if (!transportFailed) {
+        nextEvents.push(makeEvent(activeRequest, "task_completed", { verification: finalVerification }));
+      }
       return {
         contentPrep,
         contentFingerprint: contentPrep.preparedContext.fingerprint,
@@ -2312,34 +2011,17 @@ export class RuntimeEngine {
       if (state.mode !== "autonomous") return "categorize_tools";
       return "main_agent";
     };
-    const routeAfterMainAgent = (state: GraphState) => {
-      // The model owns the stop. If it asked for tools, validate them.
-      // Otherwise let summarize handle the natural stop.
-      if (state.plannedToolCalls && state.plannedToolCalls.length > 0) {
-        return "validate_tool_calls";
-      }
-      return "summarize";
-    };
+    const routeAfterMainAgent = (state: GraphState) =>
+      state.plannedToolCalls && state.plannedToolCalls.length > 0
+        ? "validate_tool_calls"
+        : "summarize";
     const routeAfterToolValidation = (state: GraphState) => {
-      // Model owns the loop. Never force another main_agent turn after a
-      // text-only stop — blockers are advisory in the cockpit only.
-      if (state.plannedToolCalls?.length === 0) return "summarize";
+      if (state.plannedToolCalls?.length === 0) return "main_agent";
       if ((state.split?.executableToolCalls.length ?? 0) > 0) return "permission_check";
-      // Invalid tool batch with no executable calls: let the model repair
-      // only when it still intended tools (plannedToolCalls non-empty above).
       return "main_agent";
     };
-    const routeAfterQueue = (state: GraphState) => {
-      // After tools execute, return to main_agent so the model decides next.
-      if (state.mode !== "autonomous") return "verify";
-      return "main_agent";
-    };
-    const routeAfterVerify = (state: GraphState) => {
-      // Model owns stop. Verification is observational — do not force
-      // another main_agent turn when the model already stopped.
-      if (state.mode !== "autonomous") return "summarize";
-      return "summarize";
-    };
+    const routeAfterQueue = (state: GraphState) =>
+      state.mode === "autonomous" ? "main_agent" : "summarize";
 
     type RuntimeNodeName =
       | "bootstrap"
@@ -2352,7 +2034,6 @@ export class RuntimeEngine {
       | "permission_check"
       | "execute_tools"
       | "queue_results"
-      | "verify"
       | "summarize"
       | "no_model"
       | "metrics";
@@ -2368,7 +2049,6 @@ export class RuntimeEngine {
       permission_check: permissionCheckNode,
       execute_tools: executeToolsNode,
       queue_results: queueResultsNode,
-      verify: verifyNode,
       summarize: summarizeNode,
       no_model: noModelNode,
       metrics: metricsNode,
@@ -2386,7 +2066,6 @@ export class RuntimeEngine {
         case "permission_check": return "execute_tools";
         case "execute_tools": return "queue_results";
         case "queue_results": return routeAfterQueue(state) as RuntimeNodeName;
-        case "verify": return routeAfterVerify(state) as RuntimeNodeName;
         case "summarize": return "metrics";
         case "no_model": return "metrics";
         case "metrics": return undefined;
@@ -2412,15 +2091,9 @@ export class RuntimeEngine {
     // Register scoped cleanup for this run
     const executorInstance = executor;
     const mcpRegistryInstance = mcpRegistry;
-    const subagentPoolInstance = subagentPool;
     const unregisterExecutorCleanup = executorInstance
       ? registerCleanup(async () => {
           await executorInstance.cleanupBackgroundProcesses("runtime_finished");
-        })
-      : undefined;
-    const unregisterSubagentCleanup = subagentPoolInstance
-      ? registerCleanup(async () => {
-          await subagentPoolInstance.close();
         })
       : undefined;
     const unregisterMcpCleanup = mcpRegistryInstance
@@ -2475,15 +2148,26 @@ export class RuntimeEngine {
         if (ctxHooks) {
           const usedChars = JSON.stringify(finalState.toolResults ?? []).length
             + (finalState.assistantMessage ?? "").length;
+          const finalConversation = finalBoot.state.namedSession
+            ? await readFinalConversationSnapshot(runContext.runDir)
+            : undefined;
           await ctxHooks.onRunComplete({
             workspaceRoot: this.input.workspaceRoot,
             runId: finalBoot.state.runId,
             sessionId: finalBoot.state.sessionId,
             traceId: finalBoot.state.runId,
-            namedSession: finalBoot.state.namedSession,
+            ...(finalBoot.state.namedSession ? { namedSession: finalBoot.state.namedSession } : {}),
+            ...(finalBoot.state.namedSession
+              ? {
+                  userPrompt: extractUserIntentText(
+                    typeof getRequest().payload.prompt === "string" ? (getRequest().payload.prompt as string) : "",
+                  ),
+                }
+              : {}),
+            ...(finalConversation ? { conversation: finalConversation } : {}),
             assistantMessage: finalState.assistantMessage ?? "",
             trajectoryLogger: this.trajectoryLogger,
-            success: finalStatus === "succeeded",
+            success: finalStatus === "completed",
             softCap: finalBoot.state.tokenBudget?.softCap ?? 270_000,
             usedChars,
           });
@@ -2502,7 +2186,6 @@ export class RuntimeEngine {
       throw error;
     } finally {
       unregisterExecutorCleanup?.();
-      unregisterSubagentCleanup?.();
       unregisterMcpCleanup?.();
       await runCleanupFunctions();
       await writeLatestRunPointer(this.input.workspaceRoot, runContext);
@@ -2579,7 +2262,7 @@ function renderToolResultSnippet(result: ToolResult): string {
 
 function applyAdvisoryToolCalls(
   state: Pick<GraphState, "planState" | "todoState">,
-  calls: Array<Extract<ToolCall, { name: "update_plan" | "update_todo" }>>,
+  calls: AdvisoryToolCall[],
 ): Partial<Pick<GraphState, "planState" | "todoState" | "toolResults">> {
   if (calls.length === 0) return {};
   let planState = state.planState;
@@ -2640,7 +2323,7 @@ function applyAdvisoryToolCalls(
   return { planState, todoState, toolResults };
 }
 
-function makeAdvisoryToolResult(call: Extract<ToolCall, { name: "update_plan" | "update_todo" }>, output: unknown): ToolResult {
+function makeAdvisoryToolResult(call: AdvisoryToolCall, output: unknown): ToolResult {
   return {
     toolCallId: call.id,
     name: call.name,
@@ -2652,7 +2335,7 @@ function makeAdvisoryToolResult(call: Extract<ToolCall, { name: "update_plan" | 
 }
 
 function normalizeExecutableToolCalls(toolCalls: ToolCall[]): ToolCall[] {
-  return toolCalls.filter((call) => !["complete_task", "advance_step", "delegate_to_plan", "update_plan", "update_todo"].includes(call.name));
+  return toolCalls.filter((call) => !["advance_step", "update_plan", "update_todo"].includes(call.name));
 }
 
 
@@ -2675,7 +2358,7 @@ function updateReadOnlyBatchSignatures(input: {
   lastBatchFailed: boolean;
 }): string[] {
   const split = input.split;
-  if (!split || split.advancementSignal || split.completionSignal) return [];
+  if (!split || split.advancementSignal) return [];
   if (input.lastBatchFailed) return input.previous;
   const signature = makeReadOnlyBatchSignature(split.executableToolCalls);
   if (!signature) return [];
@@ -2694,93 +2377,6 @@ function isReadOnlyInspectionStepDone(step: ExecutionPlanStep | undefined, split
   if (step.type !== "inspect" && step.type !== "review") return false;
   if (split.executableToolCalls.length === 0) return false;
   return split.executableToolCalls.every((call) => Boolean(makeLowInformationToolCallSignature(call)));
-}
-function isSandboxServiceRecoveryAction(call: ToolCall): boolean {
-  if (call.name !== "sandbox_service_control") return false;
-  const action = String((call.args as Record<string, unknown>).action ?? "");
-  return ["wait_ready", "restart", "recreate", "start", "write_file", "copy_to_service", "inspect_image", "restore_from_image"].includes(action);
-}
-
-function findRecentSandboxServiceRecoveryNeed(results: ToolResult[]): { command: string; service?: string } | undefined {
-  for (const result of results.slice(-20).reverse()) {
-    if (result.name === "sandbox_service_control" && result.ok) {
-      const output = result.output && typeof result.output === "object" ? (result.output as Record<string, unknown>) : {};
-      const services = Array.isArray(output.services) ? output.services : [];
-      const failedServices = services.filter((item): item is Record<string, unknown> => {
-        if (!item || typeof item !== "object" || Array.isArray(item)) return false;
-        const service = item as Record<string, unknown>;
-        return service.role === "service" && ["crashed", "unhealthy", "stopped", "configured"].includes(String(service.lifecycle ?? ""));
-      });
-      if (failedServices.length === 1 && typeof failedServices[0]!.name === "string") {
-        return { command: "sandbox_service_control list", service: failedServices[0]!.name as string };
-      }
-    }
-    if (result.name !== "bash") continue;
-    const command = getToolResultCommand(result);
-    if (!isBareSandboxServiceNetworkProbe(command)) continue;
-    const output = result.output && typeof result.output === "object" ? (result.output as Record<string, unknown>) : {};
-    const exitCode = typeof output.exitCode === "number" ? output.exitCode : undefined;
-    const text = `${getToolResultText(result)}\n${command}`.toLowerCase();
-    const failed =
-      !result.ok ||
-      (exitCode !== undefined && exitCode !== 0) ||
-      /could not resolve host|name or service not known|temporary failure in name resolution|connection refused|failed to connect|nameresolutionerror|exit(?:ed)? (?:code|with code) [67]\b/.test(
-        text,
-      );
-    if (!failed) continue;
-    const service = extractUrlHosts(command).find((host) => !host.includes(".") && !["localhost", "127.0.0.1", "0.0.0.0", "::1"].includes(host));
-    return { command, ...(service ? { service } : {}) };
-  }
-  return undefined;
-}
-
-export function buildAutomaticServiceRecoveryCall(
-  toolCalls: ToolCall[],
-  previousResults: ToolResult[],
-  config: Pick<ReaperConfig["runtime"]["serviceSupervisor"], "enabled" | "autoRecover" | "maxAutoRecoveriesPerService" | "readinessTimeoutMs">,
-): ToolCall | undefined {
-  if (!config.enabled || !config.autoRecover || !hasSandboxServiceRuntimeContext()) return undefined;
-  if (toolCalls.some(isSandboxServiceRecoveryAction)) return undefined;
-  const priorAutomaticRecoveries = previousResults.filter(
-    (result) => result.name === "sandbox_service_control" && result.toolCallId.startsWith("auto-service-recovery-"),
-  ).length;
-  if (priorAutomaticRecoveries >= config.maxAutoRecoveriesPerService) return undefined;
-  const failure = findRecentSandboxServiceRecoveryNeed(previousResults);
-  if (!failure) return undefined;
-
-  return ToolCallSchema.parse({
-    id: `auto-service-recovery-${priorAutomaticRecoveries + 1}`,
-    name: "sandbox_service_control",
-    args: {
-      action: "wait_ready",
-      ...(failure.service ? { service: failure.service } : {}),
-      timeoutMs: config.readinessTimeoutMs,
-    },
-  });
-}
-
-function hasSandboxServiceRuntimeContext(): boolean {
-  return Boolean(getSandboxTunables().tbenchContainerName?.trim() || getSandboxTunables().tbenchComposeProject?.trim());
-}
-function isBareSandboxServiceNetworkProbe(command: string): boolean {
-  const normalized = command.replace(/\s+/g, " ").trim();
-  if (!/\b(?:curl|wget|nc|netcat)\b/i.test(normalized)) return false;
-  const hosts = extractUrlHosts(normalized);
-  return hosts.some((host) => {
-    const lower = host.toLowerCase();
-    if (lower === "localhost" || lower === "127.0.0.1" || lower === "0.0.0.0" || lower === "::1") return false;
-    if (lower.includes(".")) return false;
-    return /^[a-z0-9][a-z0-9_-]*$/i.test(host);
-  });
-}
-
-function extractUrlHosts(command: string): string[] {
-  const hosts: string[] = [];
-  for (const match of command.matchAll(/\bhttps?:\/\/\[?([A-Za-z0-9_.:-]+)\]?(?::\d+)?(?:[/?#\s]|$)/g)) {
-    const host = match[1]?.replace(/^\[/, "").replace(/\]$/, "").split(":")[0];
-    if (host) hosts.push(host);
-  }
-  return uniqueStrings(hosts);
 }
 function getRepeatedDiagnosticFailure(results: ToolResult[]):
   | { signature: string; command: string; errorLogs: string; filesHint: string[] }
@@ -2841,46 +2437,6 @@ function extractFirstDiagnosticLine(message: string): string {
   ).slice(0, 1000);
 }
 
-function getCompletionBlocker(results: ToolResult[], runId: string, prompt = "", config?: ReaperConfig): string | undefined {
-  reconcileBackfilledRuntimeTasksWithEvidence(runId, results);
-  const facts = deriveRuntimeBlockingFacts(results);
-  const semanticOutputRecovery = hasSemanticOutputRecovery(results);
-  closeClearedBackfilledRuntimeTasks(runId, facts, hasRecentSuccessfulLocalVerification(results), semanticOutputRecovery);
-  const openTasks = listSessionTasks(undefined, runId).filter((t) => t.status !== "completed");
-  if (openTasks.length > 0) {
-    const preview = openTasks.slice(0, 5).map((t) => `[${t.id} ${t.status}] ${t.subject}`).join("; ");
-    return `Completion is blocked because the session todo list still has ${openTasks.length} open task(s): ${preview}. Finish them with the relevant tools and mark each completed with task_update, or remove tasks that became irrelevant, before emitting complete_task.`;
-  }
-  const unresolvedTaskContractCheck = getUnresolvedTaskContractVerificationBlocker(results);
-  if (unresolvedTaskContractCheck) return unresolvedTaskContractCheck;
-  void config;
-  if (config?.verification.contractCoverage.enabled !== false) {
-    const contractCoverageBlocker = getContractCoverageBlocker(prompt, results);
-    if (contractCoverageBlocker) return contractCoverageBlocker;
-  }
-  if (semanticOutputRecovery && facts.missingArtifacts.length === 0 && facts.failedBuildOrCompile.length === 0) return undefined;
-  if (facts.successfulProducerOrVerificationAfterBlocker) return undefined;
-  const recentPlaceholderProducer = [...results]
-    .slice(-10)
-    .reverse()
-    .find((result) => hasPlaceholderShellOutput(result) && isProducerOrVerificationCommand(getToolResultCommand(result)));
-  if (recentPlaceholderProducer) {
-    return "Completion is blocked because a recent producer/check command succeeded only with placeholder or stub behavior, not real task output.";
-  }
-  const crossOutputCountBlocker = getCrossOutputCountRegressionBlocker(results);
-  if (crossOutputCountBlocker) return crossOutputCountBlocker;
-  const blockers = [
-    ...facts.missingArtifacts.map((artifact) => `missing artifact '${artifact}'`),
-    ...facts.failedBuildOrCompile.map((item) => `build/compile failure '${item}'`),
-    ...facts.failedRuntimeOrVerification.map((item) => `runtime/verification failure '${item}'`),
-  ].slice(0, 8);
-  if (blockers.length) {
-    return `Completion is blocked by unresolved runtime facts: ${blockers.join("; ")}.`;
-  }
-  const unverifiedMutation = getUnverifiedMutationBlocker(results);
-  if (unverifiedMutation) return unverifiedMutation;
-  return undefined;
-}
 
 export function getUnresolvedTaskContractVerificationBlocker(results: ToolResult[]): string | undefined {
   const window = results.slice(-100);
@@ -3237,24 +2793,6 @@ export function isSemanticFailedCheckResult(result: ToolResult): boolean {
   return Boolean(getSemanticFailureSignal(result));
 }
 
-function getUnverifiedMutationBlocker(results: ToolResult[]): string | undefined {
-  const mutationTools = new Set(["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file"]);
-  const window = results.slice(-25);
-  const lastMutationIdx = findLastIndexCompat(window, (r) => r.ok && mutationTools.has(r.name));
-  if (lastMutationIdx < 0) return undefined;
-  const afterMutation = window.slice(lastMutationIdx + 1);
-  const hasVerifier = afterMutation.some((r) =>
-    r.ok && r.name === "bash" && !isSemanticFailedCheckResult(r) && (
-      isBuildCommand(getToolResultCommand(r)) ||
-      isTestCommand(getToolResultCommand(r)) ||
-      isVerificationLikeCommand(getToolResultCommand(r)) ||
-      isProducerOrVerificationCommand(getToolResultCommand(r))
-    ),
-  );
-  if (hasVerifier) return undefined;
-  const lastMut = window[lastMutationIdx]!;
-  return `Completion is blocked because the most recent successful ${lastMut.name} has no subsequent successful run_shell_command that exercises the deliverable. Run a real verification step: prefer any workspace-provided verifier (tests/, run-tests.*, Makefile target, pytest/npm test/cargo test/etc.) if present; otherwise invoke the produced artifact the way the spec describes it being used. Read the output and cross-check both content (values, counts, structure) and form (exact whitespace, punctuation, casing — any literal template in the spec is byte-exact modulo placeholder substitutions). Only emit complete_task after that real verification succeeds and matches. Self-reports do not count.`;
-}
 
 
 function isWeakPrintOnlyValidationResult(result: ToolResult, step: ExecutionPlanStep): boolean {
@@ -3484,14 +3022,13 @@ function renderRuntimeBlockingFacts(facts?: RuntimeBlockingFacts): string {
       failedRuntimeOrVerification: facts.failedRuntimeOrVerification,
       successfulProducerOrVerificationAfterBlocker: facts.successfulProducerOrVerificationAfterBlocker,
       completionRule:
-        "If any blockers exist and no later producer/build/test/check succeeded, do not emit complete_task. Repair the blocker and prove it with a successful command first.",
+        "If any blockers exist and no later producer/build/test/check succeeded, repair the blocker and prove it with a successful command before stopping.",
     }),
   ].join("\n");
 }
 
 function isValidationOfMissingArtifacts(command: string, missingArtifacts: string[]): boolean {
   if (!command.trim()) return false;
-  if (isSandboxServiceDiagnosticPath(command)) return false;
   if (isPureMissingArtifactInspectionCommand(command)) return false;
   if (/\bfind\b[\s\S]*\b-name\b|\blocate\b|\bwhich\b|\brealpath\b/i.test(command)) return false;
   if (/\bls\s+(?:-[A-Za-z]+\s+)*(?:\.|\/app|\/tmp|\/workspace|[^;&|]*\/)\b/i.test(command) && !/\b(?:cat|head|tail|test|python|python3|node|jq)\b/i.test(command)) {
@@ -3520,9 +3057,6 @@ function isPureMissingArtifactInspectionCommand(command: string): boolean {
   });
 }
 
-export function isSandboxServiceDiagnosticPath(value: string): boolean {
-  return value.replace(/\\/g, "/").includes("/.reaper/sandbox-services/");
-}
 
 // Phase T3.11: moved to ./file-hints.ts
 
@@ -3706,15 +3240,6 @@ function makeToolResultActionSignature(result: ToolResult): string | undefined {
     const cmd = typeof args.cmd === "string" ? normalizeCommandForSignature(args.cmd) : "";
     return cmd ? `${result.name}:${JSON.stringify({ cmd })}` : undefined;
   }
-  if (result.name === "sandbox_service_control") {
-    return `${result.name}:${JSON.stringify({
-      action: args.action,
-      service: args.service,
-      command: typeof args.command === "string" ? normalizeCommandForSignature(args.command) : undefined,
-      targetPath: args.targetPath,
-      sourcePath: args.sourcePath,
-    })}`;
-  }
   if (result.name === "replace_in_file") {
     if (typeof args.oldString !== "string") return undefined;
     return `${result.name}:${JSON.stringify(Object.fromEntries(Object.entries(args).filter(([key]) => ["path", "oldString"].includes(key))))}`;
@@ -3825,30 +3350,6 @@ function shouldRunCompaction(input: { prompt: string; toolResults: ToolResult[];
   return calculateContextBudget({ prompt: input.prompt, toolResults: input.toolResults, preparedContextTokens: 0 }).totalTokens >= input.softCap;
 }
 
-/**
- * OMP-style unexpected mid-plan stop heuristic (no LLM classifier).
- * True when the assistant emitted planning prose without tools AND a
- * required deliverable (RESULT.json) is still missing from the workspace.
- */
-function looksLikeUnexpectedMidPlanStop(input: {
-  assistantText: string;
-  workspaceRoot: string;
-}): boolean {
-  const text = input.assistantText.toLowerCase();
-  const planningCue =
-    /\b(turn\s*\d+|phase\s*[a-d]|next\s+(i'?ll|i will|batch|step)|let me\b|now (i'll|writing|creating)|tool_calls?\b|write_file\b|continue with)\b/i.test(
-      input.assistantText,
-    ) ||
-    /\b(i'll|i will|next)\b.{0,80}\b(write|create|append|run)\b/i.test(input.assistantText);
-  if (!planningCue && text.length < 80) return false;
-  try {
-    const resultPath = path.join(input.workspaceRoot, "RESULT.json");
-    if (!existsSync(resultPath)) return true;
-  } catch {
-    return planningCue;
-  }
-  return false;
-}
 
 function calculateContextBudget(input: {
   prompt: string;
@@ -4011,11 +3512,10 @@ export function isProviderTokenLimitError(error: unknown): boolean {
     : undefined;
   // Common PTL signals: HTTP 413, HTTP 400 with "too many tokens" /
   // "context length" / "max tokens" / "context_length" in the body,
-  // or a body that contains a 400 with bad_request_error and the
-  // 2013 / 2014 error codes from the minimax API.
+  // or MiniMax's token-overflow code 2014. Error 2013 ("chat content
+  // is empty") is input-shape validation and must not trigger pruning.
   if (status === 413) return true;
   if (status === 400 && (
-    lower.includes("chat content is empty") ||
     lower.includes("context length") ||
     lower.includes("context_length") ||
     lower.includes("max tokens") ||
@@ -4023,10 +3523,20 @@ export function isProviderTokenLimitError(error: unknown): boolean {
     lower.includes("tokens exceed") ||
     lower.includes("too many tokens") ||
     lower.includes("too long") ||
-    lower.includes("2013") ||
     lower.includes("2014")
   )) return true;
   return false;
+}
+
+/**
+ * Replace live model messages without destroying an in-place recovery
+ * result. Some context hooks intentionally mutate and return the caller's
+ * array; clearing that same array before spreading it erases all context.
+ */
+export function replaceConversationMessages<T>(target: T[], replacement: T[]): void {
+  if (target === replacement) return;
+  target.length = 0;
+  target.push(...replacement);
 }
 
 /**
@@ -4049,8 +3559,10 @@ export async function streamMainAgentResponseWithTransportRetry(
   modelGateway: ModelGateway,
   request: GenerateRequest,
   trajectoryLogger: TrajectoryLogger,
-  ctxHooks?: { onProviderTokenLimitError?: (p: { messages: unknown[]; softCap: number }) => Promise<{ messages: unknown[]; savedChars: number }> },
+  ctxHooks?: { onProviderTokenLimitError?: (p: { messages: unknown[]; softCap: number; runId?: string }) => Promise<{ messages: unknown[]; savedChars: number }> },
   softCap?: number,
+  runId?: string,
+  streamCallbacks?: Parameters<typeof streamMainAgentResponse>[2],
 ): Promise<Awaited<ReturnType<typeof streamMainAgentResponse>>> {
   const backoffsMs = [0, 1_000, 3_000, 9_000];
   let lastError: unknown;
@@ -4059,7 +3571,7 @@ export async function streamMainAgentResponseWithTransportRetry(
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
     try {
-      return await streamMainAgentResponse(modelGateway, request);
+      return await streamMainAgentResponse(modelGateway, request, streamCallbacks);
     } catch (error) {
       lastError = error;
       // Detect PTL (provider token limit exceeded) and attempt recovery:
@@ -4073,15 +3585,16 @@ export async function streamMainAgentResponseWithTransportRetry(
           const result = await ctxHooks.onProviderTokenLimitError({
             messages: request.messages as unknown[],
             softCap: softCapValue,
+            ...(runId ? { runId } : {}),
           });
           if (Array.isArray(result?.messages) && result.messages.length > 0) {
             request = { ...request, messages: result.messages as any };
             try {
               await trajectoryLogger.write({
                 event_id: randomUUID(),
-                run_id: (request as { runId?: string }).runId ?? "unknown",
+                run_id: runId ?? (request as { runId?: string }).runId ?? "unknown",
                 session_id: (request as { sessionId?: string }).sessionId ?? "unknown",
-                trace_id: (request as { traceId?: string }).traceId ?? (request as { runId?: string }).runId ?? "unknown",
+                trace_id: (request as { traceId?: string }).traceId ?? runId ?? (request as { runId?: string }).runId ?? "unknown",
                 timestamp: new Date().toISOString(),
                 log_schema_version: 1,
                 kind: "ptl_recovery",
@@ -4163,18 +3676,7 @@ export function selectRecentStrictVerificationEvidence(results: ToolResult[]): {
   }
   return undefined;
 }
-function hasExplicitVerificationRequest(request: AgentRequestEnvelope): boolean {
-  const verification = request.payload.verification;
-  return Boolean(verification && typeof verification === "object" && typeof (verification as { command?: unknown }).command === "string");
-}
 
-function shouldRunVerificationForCompletion(
-  request: AgentRequestEnvelope,
-  completionSignal: Extract<ToolCall, { name: "complete_task" }> | undefined,
-  config: ReaperConfig,
-): boolean {
-  return config.verification.requireGroundedCompletion || hasExplicitVerificationRequest(request) || Boolean(completionSignal?.args.verificationContract?.commands?.length);
-}
 
 async function createMutationCheckpointResult(input: {
   workspaceRoot: string;
@@ -4471,7 +3973,7 @@ function hasPlaceholderShellOutput(result: ToolResult): boolean {
     .map((line) => line.trim())
     .filter(Boolean)
     .some((line) => {
-      if (/^#?\s*todo\s+(?:0|none)\b/i.test(line) || /^#?\s*(?:0\s+)?todos?\b/i.test(line)) return false;
+      if (/^(?:ℹ\s*)?#?\s*todo\s+(?:\d+|none)\b/i.test(line) || /^#?\s*(?:0\s+)?todos?\b/i.test(line)) return false;
       return /\b(?:stub(?:bed)?|todo|placeholder|not implemented|implementation coming)\b/i.test(line);
     });
 }
@@ -4520,7 +4022,7 @@ function buildSimpleExecutorPrompt(input: {
     "For intermediate steps, assistant_message should usually be empty. When the whole requested task is complete and no work remains, return a concise final assistant_message with no tool_calls.",
     "Use one small batch of concrete tool calls.",
     "After a relevant build/test/lint/runtime smoke check passes and no work remains, stop instead of re-reading files or repeating checks.",
-    "Do not emit complete_task until your testing step has run a real build/test/lint/runtime smoke check or testing is explicitly unavailable with evidence. Placeholder commands such as echo success, true, or exit 0 are not testing.",
+    "Run a real build/test/lint/runtime smoke check before stopping when one is available. Placeholder commands such as echo success, true, or exit 0 are not testing.",
     "",
 	    renderOptimizationFrame({
 	      prompt: input.prompt,
@@ -4540,7 +4042,7 @@ function buildSimpleExecutorPrompt(input: {
 	    "",
 	    "# Tool Rules",
     "Use specific tools for file work: read_file/list_directory/grep_search/write_file/replace_in_file/edit_file/replace_symbol/delete_file.",
-    "Use run_shell_command only for installs, tests, build/runtime checks, or operations the specific tools cannot express.",
+    "Use bash only for installs, tests, build/runtime checks, or operations the specialized tools cannot express.",
     "For dependency discovery, run package-specific checks instead of dumping directories: npm ls <package>, npm view <package> version, node -e \"require.resolve('<package>')\", python -m pip show <package>, cargo tree -p <package>, go list -m <module>, or equivalent for the active ecosystem.",
     "For inspection-only commands, do not make optional utilities such as file, tree, realpath, readlink, du, or stat mandatory. If one is missing but you already got useful stdout from ls/find/read tools, advance the inspection step with that evidence or use a simpler built-in command.",
     "Use the package manager for the active ecosystem only. Do not install a C/C++ header or source library with npm/pnpm/yarn; do not install JavaScript packages with pip/cargo/go. For header-only/source-only dependencies, prefer existing vendored files, system packages, documented direct source/header downloads, or a small local implementation when that satisfies the task.",
@@ -4624,7 +4126,7 @@ function renderRecentToolResultsForPromptCompact(results: ToolResult[], feedback
 /**
  * Compact renderer for a single tool result. Preserves the path/cmd/exit/error
  * (what the model needs to decide the next action) but drops the full output
- * content. write_file/run_shell_command/read_file results all collapse to a
+ * content. write_file/bash/read_file results all collapse to a
  * one-line summary.
  */
 function renderRecentToolResultSummary(result: ToolResult): Record<string, unknown> {
@@ -4750,7 +4252,7 @@ export function renderOptimizationFrame(input: {
     "- For implementation steps, after a small amount of diagnosis, edit or run a targeted check. Repeated searching/reading is drift.",
     "- Use targeted tests first, then escalate only when local evidence passes.",
     "- Keep terminal output small: run narrow commands and focus on exit code, error class, failing file/test, stack frame, and key stderr.",
-    "- Before complete_task, verify scope, minimality, task alignment, and that any server/process you started has been stopped when no longer needed.",
+    "- Before stopping, verify scope, minimality, task alignment, and that any server/process you started has been stopped when no longer needed.",
     "",
     "Current trajectory metrics:",
     JSON.stringify(metrics),
@@ -5055,8 +4557,6 @@ export function renderAgentSourceReliabilityPatterns(role: "planner" | "executor
     "Shell snippet rule: if a diagnostic or validation command needs compound control flow, function definitions, nested quoting, or many statements, write a temporary script file or use a here-doc instead of cramming it into a single shell one-liner. If a one-liner fails with syntax or quoting errors, do not retry the same shape.",
     "Exact artifact rule: if a verifier compares hashes, checksums, byte-exact text, image fingerprints, counts, ordering, or serialized output, treat any expected-vs-actual mismatch as an artifact correctness failure. Inspect the comparator and generated artifacts, then make deterministic outputs that satisfy the visible contract.",
     "Remote input rule: if exact artifacts depend on an HTTP/API resource, do not dismiss mismatches as provider drift until you have inspected the spec/test, redirects, response format, cache/seed/static options, and local fixtures. Prefer pinned, seeded, cached, or otherwise deterministic retrieval when the service supports it.",
-    "Service lifecycle rule: a process/container being running is not readiness. After start/restart/recreate, use sandbox_service_control wait_ready with a bounded task-facing probe command; on crash/unhealthy/timeout, inspect the returned service logs before editing or retrying. If restart cannot repair an entrypoint or mount that has the wrong filesystem type, recreate the service once before changing strategy.",
-    "Container layer rule: the mounted/container view is not proof of image contents. When a provided service entrypoint has the wrong filesystem type or appears missing, inspect_image and compare mounted versus image layers before writing. Prefer restore_from_image over authoring replacement dependency code.",
     "Performance-pair rule: when the task asks for baseline and optimized variants, preserve the required relative performance contract. Do not accidentally optimize the baseline or add overhead to the optimized path; profile both and adjust implementation structure before declaring completion.",
   ];
 
@@ -5150,10 +4650,10 @@ export function renderToolCallContract(runId?: string): string {
     "Every tool call MUST be exactly: {\"id\":\"stable-id\",\"name\":\"tool_name\",\"args\":{...}}.",
     "Do NOT use OpenAI wrappers such as {\"type\":\"function\",\"function\":{\"name\":\"...\",\"arguments\":{...}}}.",
     "Do NOT invent tool names. Unsupported examples: install_dependencies, create_directory, mkdir, read, write, replace, shell.",
-    "Use run_shell_command for installs, mkdir, scaffolding, tests, builds, and other shell-only operations.",
+    "Use bash for installs, mkdir, scaffolding, tests, builds, and other shell-only operations.",
     "Do not create, edit, delete, chmod, copy, or redirect output into external verifier-owned absolute paths such as /tests or /test. Treat those harness files as read-only and satisfy their contract from workspace files.",
-    "Use camelCase argument names exactly as shown. Do not use snake_case aliases, nested file objects, or keys such as command/new_content/from_lines/to_lines.",
-    "For every run_shell_command, include args.summary with the concrete reason for running it now. Keep it short, e.g. \"check pip wrapper after ensurepip\" or \"run focused failing test\".",
+    "Use argument names exactly as shown in the offered tool schema. Do not invent aliases or nested file objects.",
+    "Every bash call requires args.cmd and args.timeout in seconds. Add args.description when its purpose is not obvious.",
     "Final verification must be command-backed and strict: tests, build/check commands, diff/cmp/grep -q/jq -e/test assertions, or python/node assertions. Plain ls/cat/curl, version probes, producer scripts, echo success, and print-only checks do not prove completion.",
     "When checking an expected value, hash, count, schema, or exact content, encode the expectation in the command and exit nonzero on mismatch. Printing observed values for the model to compare is inspection, not verification.",
     "",
@@ -5167,23 +4667,10 @@ export function renderToolCallContract(runId?: string): string {
     "- replace_in_file line range: {\"id\":\"edit-2\",\"name\":\"replace_in_file\",\"args\":{\"path\":\"src/file.js\",\"startLine\":10,\"endLine\":14,\"content\":\"replacement text\"}}",
     "- edit_file: {\"id\":\"multi-edit-1\",\"name\":\"edit_file\",\"args\":{\"path\":\"src/file.js\",\"edits\":[{\"oldString\":\"old exact text\",\"newString\":\"new exact text\"}]}}",
     "- delete_file: {\"id\":\"delete-1\",\"name\":\"delete_file\",\"args\":{\"path\":\"tmp/file.txt\"}}",
-    "- bash: {\"id\":\"shell-1\",\"name\":\"run_shell_command\",\"args\":{\"cmd\":\"npm install\",\"summary\":\"install declared project dependencies\"}}",
-    "- run_shell_command background server: {\"id\":\"server-1\",\"name\":\"run_shell_command\",\"args\":{\"cmd\":\"npm run dev\",\"summary\":\"start app server for runtime check\",\"isBackground\":true,\"timeoutMs\":300000}}",
+    "- bash: {\"id\":\"shell-1\",\"name\":\"bash\",\"args\":{\"cmd\":\"npm install\",\"description\":\"install declared project dependencies\",\"timeout\":300}}",
+    "- bash background server: {\"id\":\"server-1\",\"name\":\"bash\",\"args\":{\"cmd\":\"npm run dev\",\"description\":\"start app server for runtime check\",\"timeout\":300,\"run_in_background\":true}}",
   ];
 
-  if (fullSchemaTools.has("sandbox_service_control")) {
-    lines.push(
-      "- sandbox_service_control list: {\"id\":\"svc-list-1\",\"name\":\"sandbox_service_control\",\"args\":{\"action\":\"list\"}}",
-      "- sandbox_service_control logs: {\"id\":\"svc-logs-1\",\"name\":\"sandbox_service_control\",\"args\":{\"action\":\"logs\",\"service\":\"service-name\",\"tail\":120}}",
-      "- sandbox_service_control snapshot: {\"id\":\"svc-snap-1\",\"name\":\"sandbox_service_control\",\"args\":{\"action\":\"snapshot\",\"service\":\"service-name\"}}",
-      "- sandbox_service_control inspect_image: {\"id\":\"svc-image-1\",\"name\":\"sandbox_service_control\",\"args\":{\"action\":\"inspect_image\",\"service\":\"service-name\"}}",
-      "- sandbox_service_control restore_from_image: {\"id\":\"svc-restore-1\",\"name\":\"sandbox_service_control\",\"args\":{\"action\":\"restore_from_image\",\"service\":\"service-name\",\"targetPath\":\"/app/server.py\"}}",
-      "- sandbox_service_control exec: {\"id\":\"svc-exec-1\",\"name\":\"sandbox_service_control\",\"args\":{\"action\":\"exec\",\"service\":\"service-name\",\"command\":\"cd /app && python3 server.py --check\",\"timeoutMs\":120000}}",
-      "- sandbox_service_control write_file: {\"id\":\"svc-write-1\",\"name\":\"sandbox_service_control\",\"args\":{\"action\":\"write_file\",\"service\":\"service-name\",\"targetPath\":\"/app/file.py\",\"content\":\"full file content\"}}",
-      "- sandbox_service_control copy_to_service: {\"id\":\"svc-copy-1\",\"name\":\"sandbox_service_control\",\"args\":{\"action\":\"copy_to_service\",\"service\":\"service-name\",\"sourcePath\":\"local/file.py\",\"targetPath\":\"/app/file.py\"}}",
-      "- sandbox_service_control restart: {\"id\":\"svc-restart-1\",\"name\":\"sandbox_service_control\",\"args\":{\"action\":\"restart\",\"service\":\"service-name\"}}",
-    );
-  }
 
   // Conditionally render non-core tool examples only when discovered
   if (fullSchemaTools.has("read_background_output")) {
@@ -5201,11 +4688,10 @@ export function renderToolCallContract(runId?: string): string {
 
   lines.push(
     "- advance_step: {\"id\":\"advance-1\",\"name\":\"advance_step\",\"args\":{\"summary\":\"what was completed\",\"evidence\":[\"specific evidence\"]}}",
-    "- complete_task: {\"id\":\"complete-1\",\"name\":\"complete_task\",\"args\":{\"summary\":\"final task completion summary\"}}",
     "- search_tools keyword: {\"id\":\"search-1\",\"name\":\"search_tools\",\"args\":{\"query\":\"background process\"}}",
     "- search_tools direct select: {\"id\":\"search-2\",\"name\":\"search_tools\",\"args\":{\"query\":\"select:read_background_output,signal_process\"}}",
-    "To finish the run, emit complete_task exactly once with the final summary in args.summary, then no more tool calls are needed.",
-    "Executor rule: normal planned implementation and repair both stay on the main agent path. Use advisory subagents only for extra analysis; they do not own routing or edits.",
+    "To finish the run, return a concise final assistant_message with no tool_calls.",
+    "Executor rule: implementation, repair, review, and testing remain on the main model path.",
   );
 
   // Deferred tools section
@@ -5220,17 +4706,16 @@ export function renderToolCallContract(runId?: string): string {
   lines.push(
     "",
     "Common conversions:",
-    "- To create a directory, use run_shell_command with {\"cmd\":\"mkdir -p path/to/dir\"}.",
-    "- To install dependencies, use run_shell_command with the real package-manager command for the active ecosystem, for example {\"cmd\":\"npm install express\"} only in a JavaScript/Node project.",
+    "- To create a directory, use bash with {\"cmd\":\"mkdir -p path/to/dir\",\"timeout\":60}.",
+    "- To install dependencies, use bash with the real package-manager command for the active ecosystem, for example {\"cmd\":\"npm install express\",\"timeout\":300} only in a JavaScript/Node project.",
     "- To run create-vite or another scaffold non-interactively, include documented non-interactive flags or create files directly with write_file.",
     "",
     "Build/config path discipline:",
     "- If a build tool says a source/config file is missing, list/read the owning build config and the exact referenced path before rerunning the build.",
     "- Fix source/config path mismatches by either creating the file at the path referenced by the build config or updating the build config to the actual file path. Do not keep building from a directory that lacks the required config.",
     "- If a command fails because it was run from the wrong directory, rerun from the directory containing the relevant manifest/build config, or pass the build tool's explicit source/build directory flags.",
-    "- If recent tool results include workspacePathAliases, treat those as equivalent roots. When writing scripts/configs that run through run_shell_command, embed the runtime/container path or a relative path, not the host scratch path.",
-    "- Do not emit advance_step or complete_task after a failed build/test/runtime command unless a later command in the same or newer batch has passed and proves the step/task.",
-    "- If a sandbox has sibling service containers, use sandbox_service_control for service logs, snapshots, file writes/copies, command execution, and restart/start/stop. Do not run docker through run_shell_command inside the task sandbox.",
+    "- If recent tool results include workspacePathAliases, treat those as equivalent roots. When writing scripts/configs that run through bash, embed the runtime/container path or a relative path, not the host scratch path.",
+    "- After a failed build/test/runtime command, continue with concrete repair or check tool calls unless a later command has passed and the requested work is complete.",
   );
 
   return lines.join("\n");
@@ -5335,55 +4820,11 @@ function normalizeToolCallInput(input: unknown): unknown {
         ? (raw.file as Record<string, unknown>)
         : extractTopLevelToolArgs(raw);
   const args = { ...rawArgs };
-  delete args.description;
+  if (name !== "bash") delete args.description;
   delete args.reason;
   delete args.explanation;
-  if ((typeof name !== "string" || !isKnownToolName(name)) && (typeof args.cmd === "string" || typeof args.command === "string")) {
-    name = "bash";
-  }
-  if (name === "bash" && (rawName === "create_directory" || rawName === "mkdir" || rawName === "make_directory")) {
-    const directory = typeof args.directory === "string" ? args.directory : typeof args.path === "string" ? args.path : undefined;
-    if (directory) {
-      args.cmd = `mkdir -p ${shellQuote(directory)}`;
-      delete args.directory;
-      delete args.path;
-    }
-  }
-  if (name === "bash" && typeof args.cmd !== "string") {
-    for (const key of ["command", "shellCommand", "shell_command"]) {
-      if (typeof args[key] === "string") {
-        args.cmd = args[key];
-        delete args[key];
-        break;
-      }
-    }
-  }
-  if (name === "bash" && (rawName === "start_background_process" || rawName === "background_process")) {
-    args.isBackground = true;
-  }
-  if (name === "bash" && typeof args.cwd !== "string") {
-    for (const key of ["working_directory", "workingDirectory", "workdir", "directory"]) {
-      if (typeof args[key] === "string") {
-        args.cwd = args[key];
-        delete args[key];
-        break;
-      }
-    }
-  }
-  if (name === "bash" && typeof args.cmd === "string" && typeof args.cwd === "string" && args.cwd.trim()) {
-    args.cmd = `cd ${shellQuote(args.cwd.trim())} && ${args.cmd}`;
-    delete args.cwd;
-  }
-  if (name === "bash" && typeof args.timeoutMs !== "number" && typeof args.timeout === "number") {
-    args.timeoutMs = args.timeout;
-    delete args.timeout;
-  }
   if (["read_background_output", "signal_process", "write_to_process"].includes(String(name)) && typeof args.pid === "number" && args.pid <= 0) {
     args.pid = 1;
-  }
-  if (name === "bash" && typeof args.idleTimeoutMs !== "number" && typeof args.idle_timeout_ms === "number") {
-    args.idleTimeoutMs = args.idle_timeout_ms;
-    delete args.idle_timeout_ms;
   }
   if (typeof args.path !== "string") {
     for (const key of ["file_path", "filepath", "filePath", "file", "targetPath"]) {
@@ -5428,9 +4869,6 @@ function normalizeToolCallInput(input: unknown): unknown {
     if (typeof args.evidence === "string") {
       args.evidence = [args.evidence];
     }
-  }
-  if (name === "complete_task") {
-    normalizeStringAlias(args, "summary", ["message", "result", "status", "evidence", "note"]);
   }
   if (name === "web_search") {
     normalizeIntegerRange(args, "maxResults", 10, 20);
@@ -5598,19 +5036,17 @@ function stripUnknownToolArgs(name: string, args: Record<string, unknown>): void
     edit_file: ["path", "edits"],
     replace_symbol: ["path", "symbolName", "newCode"],
     delete_file: ["path"],
-    bash: ["cmd", "summary", "barrier", "forceNonBarrier", "isBackground", "timeoutMs", "idleTimeoutMs"],
+    bash: ["cmd", "description", "timeout", "run_in_background"],
     read_background_output: ["pid", "lines", "waitForMatch", "minWaitMs"],
     signal_process: ["pid", "signal"],
     write_to_process: ["pid", "input"],
     activate_skill: ["name"],
     get_tool_output: ["artifactId"],
     advance_step: ["summary", "stepId", "evidence"],
-    complete_task: ["summary", "verificationContract", "objectives"],
     web_fetch: ["url", "extractText"],
     task_create: ["subject", "description", "status"],
     task_update: ["taskId", "status", "subject", "description"],
     task_list: ["status"],
-    call_subagent: ["type", "task", "context", "mode", "allowedFiles", "forbiddenFiles", "timeoutMs", "outputSchema"],
   };
   const allowed = allowedByTool[name];
   if (!allowed) return;
@@ -5622,24 +5058,12 @@ function stripUnknownToolArgs(name: string, args: Record<string, unknown>): void
   }
 }
 
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
 
 function normalizeToolName(name: string): string {
   const normalized = name.trim();
   const normalizedLower = normalized.toLowerCase().replace(/[\s-]+/g, "_");
   const aliases: Record<string, string> = {
     bash: "bash",
-    shell: "bash",
-    start_background_process: "bash",
-    background_process: "bash",
-    terminal: "bash",
-    run_command: "bash",
-    execute_command: "bash",
-    mkdir: "bash",
-    make_directory: "bash",
-    create_directory: "bash",
     read: "read_file",
     readfile: "read_file",
     list: "list_directory",
@@ -5653,8 +5077,6 @@ function normalizeToolName(name: string): string {
     replace: "replace_in_file",
     delete: "delete_file",
     rm: "delete_file",
-    finish: "complete_task",
-    complete: "complete_task",
     advance: "advance_step",
     replace_in_file_line_range: "replace_in_file",
     replace_in_file_exact: "replace_in_file",
@@ -5684,8 +5106,6 @@ function isKnownToolName(name: string): boolean {
     "activate_skill",
     "get_tool_output",
     "advance_step",
-    "complete_task",
-    "delegate_to_plan",
     "web_fetch",
     "task_create",
     "task_update",
@@ -5693,316 +5113,6 @@ function isKnownToolName(name: string): boolean {
   ]).has(name);
 }
 
-async function runExplicitVerification(
-  input: {
-    workspaceRoot: string;
-    completionSignal: Extract<ToolCall, { name: "complete_task" }>;
-    request: AgentRequestEnvelope;
-    trajectoryLogger: TrajectoryLogger;
-    auditLogger: AuditLogger;
-    toolResults: ToolResult[];
-    modelGateway?: ModelGateway | undefined;
-    config: ReaperConfig;
-  },
-): Promise<NonNullable<RuntimeEngineResult["verification"]>> {
-  const contractCommands = input.completionSignal.args.verificationContract?.commands;
-  const explicitPayload = input.request.payload.verification;
-  const explicitCommand =
-    explicitPayload && typeof explicitPayload === "object" && typeof (explicitPayload as { command?: unknown }).command === "string"
-      ? (explicitPayload as { command: string }).command
-      : undefined;
-  const normalizedContractCommands = contractCommands?.map((item) => ({
-    ...(item.id !== undefined ? { id: item.id } : {}),
-    command: item.command,
-    ...(item.purpose !== undefined ? { purpose: item.purpose } : {}),
-    ...(item.required !== undefined ? { required: item.required } : {}),
-  }));
-  const command: VerificationCommand | undefined = normalizedContractCommands?.length
-    ? { command: normalizedContractCommands.map((item) => item.command).join(" && "), commands: normalizedContractCommands, generated: true }
-    : explicitCommand
-      ? { command: explicitCommand }
-      : undefined;
-  const selected = await selectVerificationCommand(input.workspaceRoot, command);
-  const requiresExternalCommand = Boolean(normalizedContractCommands?.length || explicitCommand);
-  if (!selected) {
-    const recentStrict = selectRecentStrictVerificationEvidence(input.toolResults);
-    if (!requiresExternalCommand && recentStrict) {
-      const groundedSignal = classifyGroundedVerificationSignal(recentStrict.command);
-      await writeVerificationGateAudit(input, {
-        ok: true,
-        signal: groundedSignal,
-        message: `Verification gate accepted recent command-backed evidence: ${recentStrict.command}`,
-      });
-      return {
-        ok: true,
-        attemptCount: 0,
-        retryBudgetConsumed: 0,
-        command: recentStrict.command,
-        groundedSignal,
-        feedback: [`Accepted recent command-backed strict verification evidence: ${recentStrict.command}`],
-        negativeConstraints: [],
-      };
-    }
-    await writeVerificationGateAudit(input, {
-      ok: false,
-      signal: { kind: "none", command: "", grounded: false },
-      message: "Verification gate found no runnable grounded verification command.",
-    });
-    return {
-      ok: false,
-      attemptCount: 0,
-      retryBudgetConsumed: 0,
-      failureClasses: ["no_verification_command"],
-      feedback: [
-        "No runnable verification command was found. This is not a successful completion signal. Add a real task-local verification script/command plus at least one matching test/smoke file that the command will discover, install any required test runner in that package, and rerun verification.",
-      ],
-      negativeConstraints: [
-        "Do not treat missing verification as success.",
-        "Do not leave package scripts as placeholders such as 'no test specified'.",
-        "Do not create only a test script without a matching test file under __tests__, test, tests, or a *.test/*.spec path.",
-        "Do not create nested duplicate package roots to escape a bad package.json; repair the intended task-local package manifest.",
-      ],
-    };
-  }
-  if (input.config.verification.enforceFailBeforeFixForGeneratedChecks) {
-    const invariant = validateGeneratedVerificationInvariant({
-      verification: selected,
-      priorResults: input.toolResults,
-    });
-    if (!invariant.ok) {
-      const signal = classifyGroundedVerificationSignal(invariant.missingCommands[0] ?? selected.command);
-      await writeVerificationGateAudit(input, {
-        ok: false,
-        signal,
-        message: invariant.message,
-        details: { missingCommands: invariant.missingCommands },
-      });
-      return {
-        ok: false,
-        attemptCount: 0,
-        retryBudgetConsumed: 0,
-        command: selected.command,
-        groundedSignal: signal,
-        failureClasses: ["generated_check_no_fail_before"],
-        feedback: [invariant.message, ...invariant.missingCommands.map((item) => `Rejected generated check that already passed before final verification: ${item}`)],
-        negativeConstraints: [
-          "Do not use a generated reproduction check as final proof when the exact check already passed before the repair.",
-          "Prefer fail-before/pass-after reproduction evidence for generated checks, and always keep the failing result in the trace when available.",
-        ],
-      };
-    }
-  }
-  const maxIterations = getVerificationMaxIterations(explicitPayload);
-  const feedback: string[] = [];
-  const negativeConstraints: string[] = [];
-  const recentFailureKinds: VerificationFailureKind[] = [];
-  let attemptCount = 0;
-  let retryBudgetConsumed = 0;
-  let lastCommand = selected.command;
-
-  while (retryBudgetConsumed < maxIterations) {
-    attemptCount += 1;
-    const result = await runVerificationCommand(input.workspaceRoot, selected);
-    lastCommand = result.command;
-    const summary = createVerificationSummary(result, attemptCount);
-    await input.trajectoryLogger.write({
-      event_id: randomUUID(),
-      run_id: input.request.trace_id,
-      session_id: input.request.session_id,
-      trace_id: input.request.trace_id,
-      timestamp: new Date().toISOString(),
-      log_schema_version: 1,
-      kind: "verification_summary",
-      level: "info",
-      attempt_count: summary.attemptCount,
-      pass_fail: summary.passFail,
-      lite_verified: summary.liteVerified,
-    });
-
-    if (result.ok && (await isInsufficientVerificationForRequest(input.workspaceRoot, input.request, selected))) {
-      const message =
-        `Verification command '${lastCommand}' passed but is insufficient for this complex application task. ` +
-        "The selected check does not prove requested workflows. Add or run a real behavioral test/runtime smoke check that exercises the implemented behavior, including the requested auth/login/register and task create/update/delete/filter flows when those are part of the prompt.";
-      feedback.push(message);
-      negativeConstraints.push("Do not treat build-only or trivial health-only verification as enough for complex full-stack application tasks.");
-      negativeConstraints.push("Do not rerun the same health-only test as final verification. Update or add tests that exercise requested workflows such as auth/login/register and task create/update/delete/filter when present.");
-      retryBudgetConsumed += 1;
-      continue;
-    }
-
-    if (result.ok) {
-      if (input.config.verification.requireGroundedCompletion && !result.groundedSignal.grounded) {
-        const message =
-          `Verification command '${lastCommand}' passed but did not provide a grounded external signal. ` +
-          "Completion requires a real test exit code, build, type-check, lint, or executed reproduction/artifact check.";
-        feedback.push(message);
-        negativeConstraints.push("Do not treat LLM judgment, printed observations, or self-report as final verification.");
-        await writeVerificationGateAudit(input, {
-          ok: false,
-          signal: result.groundedSignal,
-          message,
-        });
-        return {
-          ok: false,
-          attemptCount,
-          retryBudgetConsumed,
-          command: lastCommand,
-          groundedSignal: result.groundedSignal,
-          failureClasses: ["no_grounded_verification_signal"],
-          feedback,
-          negativeConstraints,
-        };
-	      }
-	      let selfDebugExplanation: string | undefined;
-	      if (input.config.verification.selfDebugExplanation.enabled && input.modelGateway) {
-        const selfDebug = await runSelfDebugExplanation({
-          modelGateway: input.modelGateway,
-          role: input.config.modelRouting.judge,
-          prompt: typeof input.request.payload.prompt === "string" ? input.request.payload.prompt : "",
-          completionSummary: input.completionSignal.args.summary,
-          verificationCommand: lastCommand,
-          verificationOutput: result.output,
-        });
-        selfDebugExplanation = selfDebug.explanation;
-        if (!selfDebug.ok) {
-          const message = `Self-debug explanation found completion discrepancies: ${selfDebug.discrepancies.join("; ")}`;
-          await writeVerificationGateAudit(input, {
-            ok: false,
-            signal: result.groundedSignal,
-            message,
-            details: { discrepancies: selfDebug.discrepancies, explanation: selfDebug.explanation },
-          });
-          return {
-            ok: false,
-            attemptCount,
-            retryBudgetConsumed,
-            command: lastCommand,
-            groundedSignal: result.groundedSignal,
-            ...(selfDebugExplanation ? { selfDebugExplanation } : {}),
-            failureClasses: ["self_debug_discrepancy"],
-            feedback: [...feedback, message],
-            negativeConstraints: [...negativeConstraints, "Resolve the discrepancies identified by the self-debug review before completing."],
-	          };
-	        }
-	      }
-	      let diffReviewExplanation: string | undefined;
-	      if (input.config.verification.freshContextDiffReview.enabled && input.modelGateway) {
-	        const diff = await collectWorkspaceDiff(input.workspaceRoot, input.config.verification.freshContextDiffReview.maxDiffChars);
-	        const diffReview = await runFreshContextDiffReview({
-	          modelGateway: input.modelGateway,
-	          role: input.config.modelRouting.judge,
-	          prompt: typeof input.request.payload.prompt === "string" ? input.request.payload.prompt : "",
-	          completionSummary: input.completionSignal.args.summary,
-	          verificationCommand: lastCommand,
-	          verificationOutput: result.output,
-	          diff,
-	        });
-	        diffReviewExplanation = diffReview.explanation;
-	        if (!diffReview.ok) {
-	          const message = `Fresh-context diff review found completion discrepancies: ${diffReview.discrepancies.join("; ")}`;
-	          await writeVerificationGateAudit(input, {
-	            ok: false,
-	            signal: result.groundedSignal,
-	            message,
-	            details: { discrepancies: diffReview.discrepancies, explanation: diffReview.explanation },
-	          });
-	          return {
-	            ok: false,
-	            attemptCount,
-	            retryBudgetConsumed,
-	            command: lastCommand,
-	            groundedSignal: result.groundedSignal,
-	            ...(selfDebugExplanation ? { selfDebugExplanation } : {}),
-	            ...(diffReviewExplanation ? { diffReviewExplanation } : {}),
-	            failureClasses: ["fresh_context_diff_review"],
-	            feedback: [...feedback, message],
-	            negativeConstraints: [...negativeConstraints, "Resolve the discrepancies identified by fresh-context diff review before completing."],
-	          };
-	        }
-	      }
-	      await writeVerificationGateAudit(input, {
-	        ok: true,
-	        signal: result.groundedSignal,
-	        message: `Verification gate accepted grounded ${result.groundedSignal.kind} signal: ${result.groundedSignal.command}`,
-	        ...(selfDebugExplanation || diffReviewExplanation ? { details: { ...(selfDebugExplanation ? { selfDebugExplanation } : {}), ...(diffReviewExplanation ? { diffReviewExplanation } : {}) } } : {}),
-	      });
-	      return {
-	        ok: true,
-	        attemptCount,
-	        retryBudgetConsumed,
-	        command: lastCommand,
-	        groundedSignal: result.groundedSignal,
-	        ...(selfDebugExplanation ? { selfDebugExplanation } : {}),
-	        ...(diffReviewExplanation ? { diffReviewExplanation } : {}),
-	        feedback,
-	        negativeConstraints,
-	      };
-    }
-
-    feedback.push(result.output);
-    if (/No tests found|0 matches|no test files|No test files found/i.test(result.output)) {
-      negativeConstraints.push("A test runner with zero discovered tests is not verification. Create at least one meaningful test file matching the runner discovery pattern before rerunning.");
-    }
-    const kind = classifyVerificationFailure(result.output);
-    recentFailureKinds.push(kind);
-    if (kind === "deterministic" || shouldPromoteNonDeterministicFailure(recentFailureKinds)) {
-      retryBudgetConsumed += 1;
-    }
-  }
-
-  const classified = classifyVerificationOutput(feedback.join("\n"));
-  await writeVerificationGateAudit(input, {
-    ok: false,
-    signal: classifyGroundedVerificationSignal(lastCommand),
-    message: "Verification gate rejected completion because the grounded command failed.",
-  });
-  return {
-    ok: false,
-    attemptCount,
-    retryBudgetConsumed,
-    command: lastCommand,
-    groundedSignal: classifyGroundedVerificationSignal(lastCommand),
-    failureClasses: uniqueStrings(["verification_fail", ...classified.classes]),
-    feedback: [...feedback, ...classified.facts.slice(0, 6), classified.repairStrategy],
-    negativeConstraints,
-  };
-}
-
-async function writeVerificationGateAudit(
-  input: {
-    request: AgentRequestEnvelope;
-    auditLogger: AuditLogger;
-  },
-  event: {
-    ok: boolean;
-    signal: VerificationGroundedSignal;
-    message: string;
-    details?: Record<string, unknown> | undefined;
-  },
-): Promise<void> {
-  await input.auditLogger.write({
-    event_id: randomUUID(),
-    run_id: input.request.trace_id,
-    session_id: input.request.session_id,
-    trace_id: input.request.trace_id,
-    timestamp: new Date().toISOString(),
-    log_schema_version: 1,
-    kind: "verification_gate",
-    severity: event.ok ? "warn" : "error",
-    message: event.message,
-    signal: event.signal.kind,
-    details: {
-      ok: event.ok,
-      command: event.signal.command,
-      grounded: event.signal.grounded,
-      ...(event.details ?? {}),
-    },
-  });
-}
-
-function getVerificationMaxIterations(input: unknown): number {
-  return 1;
-}
 
 function shouldCleanupBackgroundAfterBatch(
   toolCalls: ToolCall[],
@@ -6042,139 +5152,10 @@ function getBoundaryPivotInstruction(toolResults: ToolResult[]): { feedback: str
       `Do not continue repeated invasive edits to ${pathText}. Prefer an acceptance-first boundary implementation: wrapper, adapter, standalone executable/script, compatibility shim, or direct generation of required artifacts when that is valid for the task. Only return to those internals after proving no boundary path can satisfy the visible tests/specs.`,
   };
 }
-async function isInsufficientVerificationForRequest(workspaceRoot: string, request: AgentRequestEnvelope, verification: VerificationCommand): Promise<boolean> {
-  const prompt = typeof request.payload.prompt === "string" ? request.payload.prompt : "";
-  if (!/\b(full[- ]stack|complete|e-?commerce|chat|kanban|collaborative|platform|web application|frontend|backend|authentication|database)\b/i.test(prompt)) {
-    return false;
-  }
-  const commands = verification.commands?.filter((item) => item.required !== false).map((item) => item.command) ?? [verification.command];
-  const joined = commands.join(" && ");
-  const hasBehavioralCheck = /\b(test|spec|pytest|jest|vitest|mocha|node\s+--test|go\s+test|cargo\s+test|curl|playwright|cypress|smoke)\b/i.test(joined);
-  const buildOnly = /\b(build|tsc|compile|lint)\b/i.test(joined) && !hasBehavioralCheck;
-  if (buildOnly || !hasBehavioralCheck) return true;
-  if (!(await hasSourceCoverageForPrompt(workspaceRoot, prompt))) return true;
-  return !(await hasBehavioralCoverageForPrompt(workspaceRoot, prompt));
-}
-
-async function hasSourceCoverageForPrompt(workspaceRoot: string, prompt: string): Promise<boolean> {
-  const files = await collectSourceFiles(workspaceRoot);
-  if (files.length === 0) return false;
-  const joined = (
-    await Promise.all(
-      files.slice(0, 80).map(async (file) => {
-        try {
-          return await import("node:fs/promises").then((fs) => fs.readFile(path.join(workspaceRoot, file), "utf8"));
-        } catch {
-          return "";
-        }
-      }),
-    )
-  )
-    .join("\n")
-    .toLowerCase();
-  if (!joined.trim()) return false;
-  const requiredGroups: string[][] = [];
-  if (/\bauth(?:entication|orization)?|login|register|jwt|session\b/i.test(prompt)) {
-    requiredGroups.push(["/auth", "login", "register", "jwt", "password", "authorization", "bearer"]);
-  }
-  if (/\bcrud|create|edit|update|delete|task|todo\b/i.test(prompt)) {
-    requiredGroups.push(["task", "todo", "create", "post", "put", "patch", "delete", "filter"]);
-  }
-  if (/\bfilter|search|sort|status\b/i.test(prompt)) {
-    requiredGroups.push(["filter", "search", "sort", "status", "query"]);
-  }
-  if (/\bfrontend|ui|responsive|react|vue|svelte|page\b/i.test(prompt)) {
-    requiredGroups.push(["component", "form", "fetch", "axios", "useeffect", "onclick", "className", "responsive"]);
-  }
-  if (/\bdatabase|persistent|persistence|postgres|mongo|sqlite|storage\b/i.test(prompt)) {
-    requiredGroups.push(["mongoose", "schema", "model", "sequelize", "prisma", "sqlite", "postgres", "database"]);
-  }
-  if (requiredGroups.length === 0) return true;
-  const covered = requiredGroups.filter((group) => group.some((term) => joined.includes(term))).length;
-  return covered >= Math.max(1, Math.ceil(requiredGroups.length * 0.7));
-}
-
-async function hasBehavioralCoverageForPrompt(workspaceRoot: string, prompt: string): Promise<boolean> {
-  const files = await collectBehavioralCheckFiles(workspaceRoot);
-  if (files.length === 0) return false;
-  const joined = (
-    await Promise.all(
-      files.slice(0, 20).map(async (file) => {
-        try {
-          return await import("node:fs/promises").then((fs) => fs.readFile(path.join(workspaceRoot, file), "utf8"));
-        } catch {
-          return "";
-        }
-      }),
-    )
-  )
-    .join("\n")
-    .toLowerCase();
-  if (!joined.trim()) return false;
-  const requestedGroups: string[][] = [];
-  if (/\bauth(?:entication|orization)?|login|register|jwt|session\b/i.test(prompt)) requestedGroups.push(["auth", "login", "register", "jwt", "session", "user"]);
-  if (/\bcrud|create|edit|update|delete|task|todo\b/i.test(prompt)) requestedGroups.push(["task", "todo", "create", "edit", "update", "delete", "complete"]);
-  if (/\bfilter|search|sort|status\b/i.test(prompt)) requestedGroups.push(["filter", "search", "sort", "status"]);
-  if (/\bfrontend|ui|responsive|react|vue|svelte|page\b/i.test(prompt)) requestedGroups.push(["render", "screen", "page", "click", "form", "component", "responsive"]);
-  if (requestedGroups.length === 0) return !/\bhealth\b/.test(joined);
-  const covered = requestedGroups.filter((group) => group.some((term) => joined.includes(term))).length;
-  const healthOnly = /\bhealth\b/.test(joined) && covered === 0;
-  return !healthOnly && covered >= Math.min(2, requestedGroups.length);
-}
-
-async function collectBehavioralCheckFiles(root: string): Promise<string[]> {
-  const fs = await import("node:fs/promises");
-  const out: string[] = [];
-  async function walk(dir: string, depth: number): Promise<void> {
-    if (depth < 0 || out.length >= 80) return;
-    let entries: import("node:fs").Dirent[];
-    try {
-      entries = await fs.readdir(path.join(root, dir), { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (entry.name === "node_modules" || entry.name === ".git" || entry.name === "dist" || entry.name === "build" || entry.name === "coverage") continue;
-      const rel = dir ? `${dir}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) {
-        await walk(rel, depth - 1);
-      } else if (/(^|\/)(__tests__|tests?|specs?|e2e|smoke)(\/|$)|\.(test|spec|e2e)\.[cm]?[jt]sx?$|_test\.(go|py)$/i.test(rel)) {
-        out.push(rel);
-      }
-    }
-  }
-  await walk("", 5);
-  return out;
-}
-
-async function collectSourceFiles(root: string): Promise<string[]> {
-  const fs = await import("node:fs/promises");
-  const out: string[] = [];
-  async function walk(dir: string, depth: number): Promise<void> {
-    if (depth < 0 || out.length >= 160) return;
-    let entries: import("node:fs").Dirent[];
-    try {
-      entries = await fs.readdir(path.join(root, dir), { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (entry.name === "node_modules" || entry.name === ".git" || entry.name === "dist" || entry.name === "build" || entry.name === "coverage") continue;
-      const rel = dir ? `${dir}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) {
-        await walk(rel, depth - 1);
-      } else if (/\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|php|rb)$|(?:^|\/)(Dockerfile|docker-compose\.ya?ml|package\.json)$/i.test(rel)) {
-        out.push(rel);
-      }
-    }
-  }
-  await walk("", 6);
-  return out;
-}
 
 function getGraphRecursionLimit(): number {
   const raw = getEngineTunables().langgraphRecursionLimit;
-  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  const parsed = Number(raw);
   if (Number.isInteger(parsed) && parsed >= 100) {
     return parsed;
   }
@@ -6184,7 +5165,7 @@ function getGraphRecursionLimit(): number {
 
 function getMaxRescueAttemptsPerDiagnostic(): number {
   const raw = getEngineTunables().rescueMaxAttemptsPerDiagnostic;
-  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  const parsed = Number(raw);
   if (Number.isInteger(parsed) && parsed >= 1) {
     return parsed;
   }
@@ -6193,7 +5174,7 @@ function getMaxRescueAttemptsPerDiagnostic(): number {
 
 function getMaxRescueStagnantTurns(): number {
   const raw = getEngineTunables().rescueMaxStagnantTurns;
-  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  const parsed = Number(raw);
   if (Number.isInteger(parsed) && parsed >= 1) {
     return parsed;
   }
@@ -6278,7 +5259,7 @@ export async function resolvePlannerMaxTokensForProfile(
   input: { modelGateway: { resolveRole: (role: ModelRole) => Promise<ResolvedModelProfile> | ResolvedModelProfile } },
 ): Promise<number> {
   try {
-    const resolved = await Promise.resolve(input.modelGateway.resolveRole("planner"));
+    const resolved = await Promise.resolve(input.modelGateway.resolveRole("default_model"));
     const provider = String(resolved.provider ?? "").toLowerCase();
     const model = String(resolved.model ?? "").toLowerCase();
     if (provider === "minimax" || model.includes("minimax")) return 16384;

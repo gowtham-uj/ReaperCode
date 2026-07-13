@@ -1,11 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
-import { copyFile,  mkdir,  mkdtemp,  readFile,  readdir,  rm,  stat,  writeFile } from "node:fs/promises";
-import os from "node:os";
+import { copyFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { ForegroundShellResult } from "./global/run-shell-command.js";
-import { promisify } from "node:util";
+import type { ForegroundShellResult } from "./global/bash.js";
 import treeKill from "tree-kill";
 
 import { AuditLogger } from "../logging/audit.js";
@@ -51,14 +48,10 @@ import type { ReaperConfig } from "../config/model-config.js";
 import type { MergedToolRegistry } from "./mcp/registry.js";
 import { ensureReaperScratchpad, getReaperScratchpadPaths } from "../workspace/scratchpad.js";
 import { normalizeWorkspacePath, relativeWorkspacePath } from "../policy/paths.js";
-import { classifyServiceLifecycle, type ServiceLifecycleState } from "./service-lifecycle.js";
 import { BackgroundProcessManager } from "./background-process-manager.js";
 import { createCheckpoint, restoreCheckpoint } from "../runtime/checkpoints.js";
 import { getGitDiffState, getGitStatusState, summarizeGitDiffState } from "../runtime/diff-state.js";
-import type {ModelGateway} from "../model/types.js";
-import type {SubagentPool} from "../runtime/subagent-pool.js";
 
-const execFileAsync = promisify(execFile);
 
 export interface ToolExecutorOptions {
   workspaceRoot: string;
@@ -73,20 +66,9 @@ export interface ToolExecutorOptions {
   recoverySession?: RecoverySession;
   mcpRegistry?: MergedToolRegistry;
   config?: ReaperConfig;
-  /** Model gateway for call_subagent tool. */
-  modelGateway?: ModelGateway;
-  /** Subagent pool for background subagent jobs. */
-  subagentPool?: SubagentPool | undefined;
   runDir?: string;
   artifactsDir?: string;
   shellRunner?: ShellRunner;
-  /**
-   * Subagent host for the `agent` and `agent_swarm` tools. When
-   * provided, the model-driven subagent runtime becomes available
-   * to the main model. When omitted, calls to those tools return a
-   * clear error instead of silently failing.
-   */
-  subagentHost?: SubagentHost;
   /**
    * Hooks adapter — when provided, the executor emits
    * `PreToolUse` / `PostToolUse` / `PostToolUseFailure` around
@@ -143,36 +125,6 @@ export type ShellRunner = (
   runtime: { runId: string; artifactDir: string; toolCallId: string },
 ) => Promise<import("./bash/index.js").BashExecutionResult>;
 
-/**
- * Subagent host — the bridge between the tool executor and the
- * model-driven subagent runtime (LaborMarket + SubagentStore +
- * ForegroundSubagentRunner).
- *
- * Implemented by the runtime layer; the executor only needs the
- * two invocation methods to dispatch the `agent` and `agent_swarm`
- * tools. The runtime returns a string to feed back to the main
- * model as the tool result.
- */
-export interface SubagentHost {
-  invokeAgent(input: {
-    description: string;
-    prompt: string;
-    subagentType: string;
-    model: string | null;
-    resume: string | null;
-    runInBackground: boolean;
-    timeout: number | null;
-  }): Promise<string>;
-  invokeAgentSwarm(input: {
-    description: string;
-    subagentType: string;
-    promptTemplate: string;
-    items: string[];
-    model: string | null;
-    timeout: number | null;
-    maxConcurrency: number | undefined;
-  }): Promise<string>;
-}
 
 interface ManagedBackgroundProcess {
   child: import("node:child_process").ChildProcess;
@@ -191,32 +143,6 @@ interface ManagedBackgroundProcess {
 // Kept as a local alias so existing call sites still typecheck; the
 // canonical definition lives in `background-process-manager.ts`.
 
-type SandboxServiceAction =
-  | "list"
-  | "logs"
-  | "snapshot"
-  | "inspect_image"
-  | "restore_from_image"
-  | "exec"
-  | "write_file"
-  | "copy_to_service"
-  | "restart"
-  | "recreate"
-  | "start"
-  | "stop"
-  | "wait_ready";
-
-interface SandboxServiceControlArgs {
-  action: SandboxServiceAction;
-  service?: string;
-  command?: string;
-  sourcePath?: string;
-  targetPath?: string;
-  content?: string;
-  tail?: number;
-  intervalMs?: number;
-  timeoutMs?: number;
-}
 
 type ReplaceInFileCandidateArgs =
   | { path: string; oldString: string; newString: string; allowMultiple?: boolean | undefined }
@@ -268,7 +194,6 @@ export async function spillLargeToolResult(
   }
 }
 
-import { getSandboxTunables } from "../config/config-tunables.js";
 
 import {
   FileViewerRegistry,
@@ -284,7 +209,6 @@ export class ToolExecutor {
   private readonly artifactStore: ArtifactStore;
   private readonly config: ReaperConfig | undefined;
   private readonly mcpRegistry: MergedToolRegistry | undefined;
-  private readonly subagentHost: SubagentHost | undefined;
   private readonly authoringTools: AuthoringToolDeps | undefined;
   private readonly permissionClassifier: PermissionClassifier;
   private readonly readFileState = new Map<string, { sha256: string | null; mtimeMs: number | null; fullyRead: boolean }>();
@@ -302,9 +226,6 @@ export class ToolExecutor {
   private currentWorkingDirectory: string;
   private consecutiveUnknownTools = 0;
   private lastUnknownToolName?: string;
-  private readonly serviceAutoRecoveryCounts = new Map<string, number>();
-  private readonly serviceRecoveryAttempts = new Map<string, number>();
-  private readonly serviceImageSnapshots = new Map<string, { path: string; inventory: string }>();
 
   constructor(private readonly options: ToolExecutorOptions) {
     void ensureReaperScratchpad(options.workspaceRoot);
@@ -314,7 +235,6 @@ export class ToolExecutor {
     this.artifactStore = new ArtifactStore(options.workspaceRoot);
     this.config = options.config;
     this.mcpRegistry = options.mcpRegistry;
-    this.subagentHost = options.subagentHost;
     this.authoringTools = options.authoringTools;
     this.permissionClassifier = new PermissionClassifier(options.permissionMode ?? "yolo");
     this.currentWorkingDirectory = options.workspaceRoot;
@@ -1075,35 +995,10 @@ export class ToolExecutor {
           return deleteFileTool(this.options.workspaceRoot, args);
         }
       case "bash": {
-        const args = toolRegistry.bash.argsSchema.parse(call.args) as {
-          cmd: string;
-          command?: string;
-          description?: string;
-          summary?: string;
-          timeoutMs?: number;
-          timeout?: number;
-          idleTimeoutMs?: number;
-          isBackground?: boolean;
-          run_in_background?: boolean;
-        };
-        const effectiveCommand = (args.command || args.cmd).trim();
-        const effectiveDescription = args.description ?? args.summary;
-        // Timeout conversion: `timeout` is in SECONDS (the model-facing
-        // convention); `timeoutMs` is in milliseconds (legacy field for
-        // internal callers). The bash tool requires `timeout` to be set
-        // (no default). When both are present, prefer the
-        // model-passed `timeout` (seconds) because that is what the
-        // model actually meant when it emitted the call.
-        const effectiveTimeoutSeconds = args.timeoutMs !== undefined
-          ? Math.max(1, Math.floor(args.timeoutMs / 1000))
-          : args.timeout;
-        const effectiveIsBackground = args.isBackground ?? args.run_in_background ?? false;
-
-        if (this.options.shellRunner && hasSandboxServiceContext() && isDockerCliCommand(effectiveCommand)) {
-          throw new Error(
-            "docker is not available inside this task sandbox. Use sandbox_service_control instead: action=list for services, logs/snapshot to inspect, exec/write_file/copy_to_service to repair /app, and restart/start to apply the change.",
-          );
-        }
+        const args = toolRegistry.bash.argsSchema.parse(call.args);
+        const effectiveCommand = args.cmd.trim();
+        const effectiveTimeoutSeconds = args.timeout;
+        const effectiveIsBackground = args.run_in_background ?? false;
         const localRules = await loadLocalRules(this.options.workspaceRoot);
         if (localRules && localRules.hash !== this.localRulesHash) {
           this.localRulesHash = localRules.hash;
@@ -1120,17 +1015,9 @@ export class ToolExecutor {
           });
         }
 
-        if (effectiveTimeoutSeconds === undefined) {
-          const error = new Error(
-            "bash tool: `timeout` is required (in SECONDS, 1-3600). There is no default timeout; pass an explicit value on every bash call.",
-          ) as Error & { code?: string };
-          error.code = "bash_timeout_required";
-          throw error;
-        }
-
         const bashInput = {
           command: effectiveCommand,
-          ...(effectiveDescription ? { description: effectiveDescription } : {}),
+          ...(args.description ? { description: args.description } : {}),
           timeout: effectiveTimeoutSeconds,
           ...(effectiveIsBackground ? { run_in_background: true } : {}),
         };
@@ -1278,10 +1165,6 @@ export class ToolExecutor {
           await view.cleanup();
         }
       }
-      case "sandbox_service_control": {
-        const args = toolRegistry.sandbox_service_control.argsSchema.parse(call.args) as SandboxServiceControlArgs;
-        return this.executeSandboxServiceControl(args, call.id);
-      }
       case "browser_control": {
         const args = toolRegistry.browser_control.argsSchema.parse(call.args);
         return this.getComputerBrowserController().browserControl(args, this.toolRuntimeMetadata(call.id));
@@ -1329,23 +1212,6 @@ export class ToolExecutor {
         const memArgs = toolRegistry.search_memory.argsSchema.parse(call.args);
         const { executeSearchMemory } = await import("./memory-search-tool.js");
         return executeSearchMemory(memArgs, { workspaceRoot: this.options.workspaceRoot });
-      }
-      case "call_subagent": {
-        if (!this.options.modelGateway) {
-          throw new Error("call_subagent requires a model gateway for this run");
-        }
-        const subArgs = toolRegistry.call_subagent.argsSchema.parse(call.args);
-        const { executeSubagentTool } = await import("./subagent-tools.js");
-        return executeSubagentTool(subArgs, {
-          modelGateway: this.options.modelGateway,
-          toolCallId: call.id,
-          pool: this.options.subagentPool,
-        });
-      }
-      case "poll_subagent": {
-        const pollArgs = toolRegistry.poll_subagent.argsSchema.parse(call.args);
-        const { executePollSubagentTool } = await import("./subagent-tools.js");
-        return executePollSubagentTool(pollArgs, call.id);
       }
       case "apply_patch_edit": {
         const patchArgs = toolRegistry.apply_patch_edit.argsSchema.parse(call.args);
@@ -1480,594 +1346,6 @@ export class ToolExecutor {
     }
   }
 
-  private async executeSandboxServiceControl(args: SandboxServiceControlArgs, toolCallId: string): Promise<unknown> {
-    if (args.action === "list") {
-      const project = await this.resolveSandboxComposeProject();
-      const services = await this.listSandboxServices(project);
-      return { project, services };
-    }
-
-    const project = await this.resolveSandboxComposeProject();
-    const service = await this.resolveSandboxServiceName(project, args.service);
-    switch (args.action) {
-      case "logs": {
-        const tail = String(args.tail ?? 120);
-        const logs = await this.dockerOutput(["logs", "--tail", tail, service], args.timeoutMs ?? 10_000, 2 * 1024 * 1024, {
-          allowNonZero: true,
-        });
-        return { service, stdout: logs.stdout, stderr: logs.stderr, exitCode: logs.exitCode };
-      }
-      case "snapshot": {
-        return this.snapshotSandboxService(service);
-      }
-      case "inspect_image": {
-        return this.inspectSandboxServiceImage(service);
-      }
-      case "restore_from_image": {
-        const targetPath = requireServiceAppPath(args.targetPath, "restore_from_image");
-        return this.restoreSandboxServiceFileFromImage(service, targetPath);
-      }
-      case "exec": {
-        if (!args.command?.trim()) throw new Error("sandbox_service_control exec requires command");
-        const result = await this.dockerOutput(["exec", service, "bash", "-lc", args.command], args.timeoutMs ?? 120_000, 5 * 1024 * 1024, {
-          allowNonZero: true,
-        });
-        if (isStoppedContainerExecResult(result) && isReadOnlyInspectionShellCommand(args.command)) {
-          const snapshot = await this.snapshotSandboxService(service);
-          const fallback = await this.runReadOnlySandboxSnapshotCommand(args.command, snapshot.path, args.timeoutMs ?? 30_000);
-          return {
-            service,
-            stdout: fallback.stdout,
-            stderr: [result.stderr.trim(), fallback.stderr.trim()].filter(Boolean).join("\n"),
-            exitCode: fallback.exitCode,
-            fallback: "stopped_container_snapshot",
-            snapshotPath: snapshot.path,
-            inventory: snapshot.inventory,
-          };
-        }
-        return { service, stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
-      }
-      case "write_file": {
-        if (args.content === undefined) throw new Error("sandbox_service_control write_file requires content");
-        const targetPath = requireServiceAppPath(args.targetPath, "write_file");
-        await this.assertServicePathIsNotImageProvided(service, targetPath);
-        await this.writeFileIntoSandboxService(service, targetPath, args.content, toolCallId);
-        return { service, targetPath, bytesWritten: Buffer.byteLength(args.content, "utf8") };
-      }
-      case "copy_to_service": {
-        if (!args.sourcePath?.trim()) throw new Error("sandbox_service_control copy_to_service requires sourcePath");
-        const targetPath = requireServiceAppPath(args.targetPath, "copy_to_service");
-        await this.assertServicePathIsNotImageProvided(service, targetPath);
-        const copiedFrom = await this.copyWorkspacePathIntoSandboxService(service, args.sourcePath, targetPath, toolCallId);
-        return { service, sourcePath: copiedFrom, targetPath };
-      }
-      case "restart":
-      case "start":
-      case "stop": {
-        if (args.action !== "stop") this.assertServiceRecoveryAttemptAllowed(service, args.action);
-        const result = await this.dockerOutput([args.action, service], args.timeoutMs ?? 60_000, 1024 * 1024, { allowNonZero: true });
-        if (args.action === "start" || args.action === "restart") {
-          const ready = await this.waitForSandboxServiceReady(service, args.command, args.timeoutMs, args.intervalMs);
-          return { service, action: args.action, stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, ...asRecord(ready) };
-        }
-        const state = await this.inspectSandboxServiceState(service).catch(() => undefined);
-        return {
-          service,
-          action: args.action,
-          stdout: result.stdout,
-          stderr: result.stderr,
-          exitCode: result.exitCode,
-          ...(state ?? {}),
-          lifecycle: state ? classifyServiceLifecycle(state) : "absent",
-        };
-      }
-      case "recreate": {
-        this.assertServiceRecoveryAttemptAllowed(service, args.action);
-        const recreatedService = await this.recreateSandboxService(project, service, args.timeoutMs);
-        const ready = await this.waitForSandboxServiceReady(recreatedService, args.command, args.timeoutMs, args.intervalMs);
-        return { service: recreatedService, action: args.action, ...asRecord(ready) };
-      }
-      case "wait_ready": {
-        return this.waitForSandboxServiceReady(service, args.command, args.timeoutMs, args.intervalMs);
-      }
-      default:
-        assertNever(args.action);
-    }
-  }
-
-  private async resolveSandboxComposeProject(): Promise<string> {
-    const explicit = getSandboxTunables().tbenchComposeProject?.trim();
-    if (explicit) return explicit;
-    const containerName = getSandboxTunables().tbenchContainerName?.trim();
-    if (!containerName) {
-      throw new Error("sandbox_service_control is unavailable: no sandbox container context is configured.");
-    }
-    const result = await this.dockerOutput(
-      ["inspect", "--format", "{{ index .Config.Labels \"com.docker.compose.project\" }}", containerName],
-      5_000,
-      256 * 1024,
-    );
-    const project = result.stdout.trim();
-    if (!project || project === "<no value>") {
-      throw new Error(`sandbox_service_control could not determine compose project for container '${containerName}'.`);
-    }
-    // Compose project is derived at runtime, not stored in config.
-    // Caller is responsible for using the returned value.
-    return project;
-  }
-
-  private async listSandboxServices(project: string): Promise<Array<{ name: string; status: string; image: string; role: "client" | "service"; provenance: "task_client" | "provided_dependency"; lifecycle: ServiceLifecycleState }>> {
-    const result = await this.dockerOutput(
-      [
-        "ps",
-        "-a",
-        "--filter",
-        `label=com.docker.compose.project=${project}`,
-        "--format",
-        "{{.Names}}\t{{.Status}}\t{{.Image}}",
-      ],
-      5_000,
-      1024 * 1024,
-    );
-    const client = getSandboxTunables().tbenchContainerName?.trim();
-    return result.stdout
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => {
-        const [name = "", status = "", image = ""] = line.split("\t");
-        return {
-          name,
-          status,
-          image,
-          role: name === client ? ("client" as const) : ("service" as const),
-          provenance: name === client ? ("task_client" as const) : ("provided_dependency" as const),
-          lifecycle: classifyServiceLifecycle({ status, exists: true }),
-        };
-      })
-      .filter((item) => item.name);
-  }
-
-  private async resolveSandboxServiceName(project: string, requested?: string): Promise<string> {
-    const services = await this.listSandboxServices(project);
-    const selected = selectSandboxServiceName(services, requested);
-    if (selected) return selected;
-    const siblings = services.filter((service) => service.role === "service");
-    throw new Error(
-      requested?.trim()
-        ? `No unique sibling sandbox service matches '${requested}'. Available services: ${services.map((service) => `${service.name} (${service.status})`).join(", ")}`
-        : `sandbox_service_control requires service because ${siblings.length} sibling services are available: ${siblings
-            .map((service) => `${service.name} (${service.status})`)
-            .join(", ")}`,
-    );
-  }
-
-  private async inspectSandboxServiceStatus(service: string): Promise<string> {
-    const result = await this.dockerOutput(
-      ["inspect", "--format", "{{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}", service],
-      5_000,
-      256 * 1024,
-    );
-    return result.stdout.trim();
-  }
-
-  private async recreateSandboxService(project: string, service: string, timeoutMs?: number): Promise<string> {
-    const result = await this.dockerOutput(
-      [
-        "inspect",
-        "--format",
-        "{{json .Config.Labels}}",
-        service,
-      ],
-      5_000,
-      512 * 1024,
-    );
-    const labels = JSON.parse(result.stdout.trim()) as Record<string, string | undefined>;
-    const composeService = labels["com.docker.compose.service"]?.trim();
-    const workingDir = labels["com.docker.compose.project.working_dir"]?.trim();
-    const configFiles = labels["com.docker.compose.project.config_files"]
-      ?.split(",")
-      .map((item) => item.trim())
-      .filter(Boolean);
-    if (!composeService || !workingDir || !configFiles?.length) {
-      throw new Error(
-        `Cannot recreate service '${service}' because its Docker Compose provenance labels are incomplete. ` +
-          "Use logs/snapshot and repair the service without recreation.",
-      );
-    }
-    const composeArgs = ["compose", "-p", project, "--project-directory", workingDir];
-    for (const configFile of configFiles) composeArgs.push("-f", configFile);
-    composeArgs.push("up", "-d", "--force-recreate", "--no-deps", composeService);
-    await this.dockerOutput(composeArgs, timeoutMs ?? 120_000, 5 * 1024 * 1024);
-    return this.resolveSandboxServiceName(project, composeService);
-  }
-
-  private async inspectSandboxServiceState(service: string): Promise<{ status: string; health: string; exitCode: number; error: string }> {
-    const result = await this.dockerOutput(
-      ["inspect", "--format", "{{json .State}}", service],
-      5_000,
-      512 * 1024,
-    );
-    const state = JSON.parse(result.stdout.trim()) as {
-      Status?: string;
-      ExitCode?: number;
-      Error?: string;
-      Health?: { Status?: string };
-    };
-    return {
-      status: state.Status ?? "unknown",
-      health: state.Health?.Status ?? "none",
-      exitCode: state.ExitCode ?? 0,
-      error: state.Error ?? "",
-    };
-  }
-
-  private async waitForSandboxServiceReady(
-    service: string,
-    probeCommand?: string,
-    timeoutMs?: number,
-    intervalMs?: number,
-  ): Promise<unknown> {
-    if (this.config?.runtime.serviceSupervisor.enabled === false) {
-      throw new Error("Service readiness supervision is disabled by runtime.serviceSupervisor.enabled=false");
-    }
-    const timeout = timeoutMs ?? this.config?.runtime.serviceSupervisor.readinessTimeoutMs ?? 30_000;
-    const interval = Math.max(100, intervalMs ?? 500);
-    const deadline = Date.now() + timeout;
-    let attempts = 0;
-    let lastProbe = "";
-    let lastAutoRecovery = "";
-    let lastState = await this.inspectSandboxServiceState(service);
-    const stableForMs = this.config?.runtime.serviceSupervisor.minimumStableMs ?? 1_500;
-    let runningSince: number | undefined;
-    while (Date.now() <= deadline) {
-      attempts += 1;
-      lastState = await this.inspectSandboxServiceState(service);
-      const lifecycle = classifyServiceLifecycle(lastState);
-      if (lastState.status === "running") runningSince ??= Date.now();
-      else runningSince = undefined;
-      if (lifecycle === "crashed" || lifecycle === "unhealthy") {
-        const logs = await this.dockerOutput(["logs", "--tail", "120", service], 10_000, 2 * 1024 * 1024, { allowNonZero: true });
-        const recovery = await this.tryAutomaticSandboxServiceRecovery(
-          service,
-          lifecycle,
-          [logs.stdout, logs.stderr].filter(Boolean).join("\n"),
-          timeout,
-        );
-        if (recovery) {
-          lastAutoRecovery = recovery;
-          await new Promise((resolve) => setTimeout(resolve, interval));
-          continue;
-        }
-        throw new Error(
-          `Service '${service}' readiness failed: lifecycle=${lifecycle}, status=${lastState.status}, health=${lastState.health}, exit=${lastState.exitCode}. ` +
-            `${lastAutoRecovery ? `Automatic recovery already attempted: ${lastAutoRecovery}. ` : ""}` +
-            `Recent logs:\n${[logs.stdout, logs.stderr].filter(Boolean).join("\n").slice(-8000)}`,
-        );
-      }
-      if (lifecycle === "configured" || lifecycle === "stopped") {
-        const recovery = await this.tryAutomaticSandboxServiceRecovery(service, lifecycle, "", timeout);
-        if (recovery) {
-          lastAutoRecovery = recovery;
-          await new Promise((resolve) => setTimeout(resolve, interval));
-          continue;
-        }
-      }
-      if (probeCommand?.trim()) {
-        const probeContainer = getSandboxTunables().tbenchContainerName?.trim() || service;
-        const probe = await this.dockerOutput(["exec", probeContainer, "bash", "-lc", probeCommand], Math.min(interval * 2, 10_000), 1024 * 1024, {
-          allowNonZero: true,
-        });
-        lastProbe = [probe.stdout, probe.stderr].filter(Boolean).join("\n").slice(-4000);
-        if (probe.exitCode === 0) {
-          return {
-            service,
-            lifecycle: "ready",
-            status: lastState.status,
-            health: lastState.health,
-            probeCommand,
-            probeFrom: probeContainer,
-            attempts,
-            elapsedMs: timeout - Math.max(0, deadline - Date.now()),
-            output: lastProbe,
-            ...(lastAutoRecovery ? { autoRecovery: lastAutoRecovery } : {}),
-          };
-        }
-      } else if (
-        lastState.status === "running" &&
-        (lastState.health === "healthy" || (lastState.health === "none" && runningSince !== undefined && Date.now() - runningSince >= stableForMs))
-      ) {
-        return {
-          service,
-          lifecycle: "ready",
-          status: lastState.status,
-          health: lastState.health,
-          attempts,
-          elapsedMs: timeout - Math.max(0, deadline - Date.now()),
-          ...(lastAutoRecovery ? { autoRecovery: lastAutoRecovery } : {}),
-        };
-      }
-      await new Promise((resolve) => setTimeout(resolve, interval));
-    }
-    const logs = await this.dockerOutput(["logs", "--tail", "120", service], 10_000, 2 * 1024 * 1024, { allowNonZero: true });
-    throw new Error(
-      `Service '${service}' did not become ready within ${timeout}ms after ${attempts} probe(s). ` +
-        `Last state: status=${lastState.status}, health=${lastState.health}, lifecycle=${classifyServiceLifecycle(lastState)}. ` +
-        `${lastAutoRecovery ? `Automatic recovery attempted: ${lastAutoRecovery}. ` : ""}` +
-        `${lastProbe ? `Last probe output:\n${lastProbe}\n` : ""}Recent logs:\n${[logs.stdout, logs.stderr].filter(Boolean).join("\n").slice(-8000)}`,
-    );
-  }
-
-  private async tryAutomaticSandboxServiceRecovery(
-    service: string,
-    lifecycle: ServiceLifecycleState,
-    logs: string,
-    timeoutMs: number,
-  ): Promise<string | undefined> {
-    const supervisor = this.config?.runtime.serviceSupervisor;
-    if (supervisor?.enabled === false || supervisor?.autoRecover === false) return undefined;
-    const limit = supervisor?.maxAutoRecoveriesPerService ?? 1;
-    const count = this.serviceAutoRecoveryCounts.get(service) ?? 0;
-    if (count >= limit) return undefined;
-
-    let action: "start" | "restart" | "recreate" | undefined;
-    if (lifecycle === "configured" || lifecycle === "stopped") {
-      action = "start";
-    } else if (lifecycle === "crashed" && isConclusiveServiceMountOrEntrypointFailure(logs)) {
-      action = "recreate";
-    } else if (lifecycle === "crashed" || lifecycle === "unhealthy") {
-      action = "restart";
-    }
-    if (!action) return undefined;
-
-    this.assertServiceRecoveryAttemptAllowed(service, action);
-    this.serviceAutoRecoveryCounts.set(service, count + 1);
-    if (action === "recreate") {
-      const project = await this.resolveSandboxComposeProject();
-      await this.recreateSandboxService(project, service, Math.min(timeoutMs, 120_000));
-    } else {
-      await this.dockerOutput([action, service], Math.min(timeoutMs, 60_000), 1024 * 1024, { allowNonZero: true });
-    }
-    return `${action} ${count + 1}/${limit} after lifecycle=${lifecycle}`;
-  }
-
-  private async snapshotSandboxService(service: string): Promise<{ service: string; path: string; inventory: string }> {
-    const safeName = sanitizeSandboxServiceName(service);
-    const appRoot = path.join(this.options.workspaceRoot, ".reaper", "sandbox-services", safeName, "app");
-    await rm(appRoot, { recursive: true, force: true });
-    await mkdir(appRoot, { recursive: true });
-    await this.dockerOutput(["cp", `${service}:/app/.`, appRoot], 15_000, 1024 * 1024);
-    const inventory = await this.buildSandboxSnapshotInventory(appRoot);
-    return { service, path: appRoot, inventory };
-  }
-
-  private async inspectSandboxServiceImage(service: string): Promise<{
-    service: string;
-    provenance: "provided_dependency";
-    mountedPath: string;
-    imagePath: string;
-    mountedInventory: string;
-    imageInventory: string;
-    pathTypeMismatches: ServicePathTypeMismatch[];
-  }> {
-    const mounted = await this.snapshotSandboxService(service);
-    const image = await this.snapshotSandboxServiceImage(service);
-    return {
-      service,
-      provenance: "provided_dependency",
-      mountedPath: mounted.path,
-      imagePath: image.path,
-      mountedInventory: mounted.inventory,
-      imageInventory: image.inventory,
-      pathTypeMismatches: await compareServiceSnapshotPathTypes(mounted.path, image.path),
-    };
-  }
-
-  private async snapshotSandboxServiceImage(service: string): Promise<{ path: string; inventory: string }> {
-    const cached = this.serviceImageSnapshots.get(service);
-    if (cached && (await stat(cached.path).catch(() => undefined))?.isDirectory()) return cached;
-    const image = (await this.dockerOutput(["inspect", "--format", "{{.Image}}", service], 5_000, 256 * 1024)).stdout.trim();
-    if (!image) throw new Error(`Cannot inspect image for service '${service}'`);
-    const tempName = `reaper-image-inspect-${sanitizeSandboxServiceName(service)}-${randomUUID().slice(0, 8)}`;
-    const safeName = sanitizeSandboxServiceName(service);
-    const appRoot = path.join(this.options.workspaceRoot, ".reaper", "sandbox-services", safeName, "image-app");
-    await rm(appRoot, { recursive: true, force: true });
-    await mkdir(appRoot, { recursive: true });
-    try {
-      await this.dockerOutput(["create", "--name", tempName, "--entrypoint", "/bin/sh", image, "-c", "true"], 30_000, 1024 * 1024);
-      await this.dockerOutput(["cp", `${tempName}:/app/.`, appRoot], 30_000, 5 * 1024 * 1024, { allowNonZero: true });
-    } finally {
-      await this.dockerOutput(["rm", "-f", tempName], 10_000, 1024 * 1024, { allowNonZero: true });
-    }
-    const snapshot = { path: appRoot, inventory: await this.buildSandboxSnapshotInventory(appRoot) };
-    this.serviceImageSnapshots.set(service, snapshot);
-    return snapshot;
-  }
-
-  private async restoreSandboxServiceFileFromImage(service: string, targetPath: string): Promise<unknown> {
-    const image = await this.snapshotSandboxServiceImage(service);
-    const relative = targetPath.replace(/^\/app\/?/, "");
-    const imageSource = path.join(image.path, relative);
-    const sourceState = await stat(imageSource).catch(() => undefined);
-    if (!sourceState?.isFile()) {
-      throw new Error(`Refusing restore: image-provided '${targetPath}' is not a regular file.`);
-    }
-    const mounts = await this.inspectSandboxServiceMounts(service);
-    const bindSource = selectExactBindMountFileRepairSource(mounts, targetPath);
-    if (bindSource) {
-      const current = await stat(bindSource).catch(() => undefined);
-      if (current?.isDirectory()) {
-        const entries = await readdir(bindSource);
-        if (entries.length > 0) throw new Error(`Refusing to replace non-empty bind-mount directory '${bindSource}'.`);
-        await rm(bindSource, { recursive: false });
-      }
-      await mkdir(path.dirname(bindSource), { recursive: true });
-      await copyFile(imageSource, bindSource);
-    } else {
-      await this.dockerOutput(["cp", imageSource, `${service}:${targetPath}`], 30_000, 5 * 1024 * 1024);
-    }
-    return { service, targetPath, restoredFrom: "provided_dependency_image", imagePath: imageSource };
-  }
-
-  private async assertServicePathIsNotImageProvided(service: string, targetPath: string): Promise<void> {
-    const image = await this.snapshotSandboxServiceImage(service);
-    const imageTarget = path.join(image.path, targetPath.replace(/^\/app\/?/, ""));
-    const imageState = await stat(imageTarget).catch(() => undefined);
-    if (!imageState) return;
-    throw new Error(
-      `Refusing to fabricate or overwrite provided dependency path '${targetPath}'. ` +
-        "Use sandbox_service_control inspect_image to compare layers, then restore_from_image if the mounted path is shadowed or damaged.",
-    );
-  }
-
-  private async inspectSandboxServiceMounts(service: string): Promise<Array<{ Type?: string; Source?: string; Destination?: string }>> {
-    const result = await this.dockerOutput(["inspect", "--format", "{{json .Mounts}}", service], 5_000, 1024 * 1024);
-    return JSON.parse(result.stdout.trim()) as Array<{ Type?: string; Source?: string; Destination?: string }>;
-  }
-
-  private assertServiceRecoveryAttemptAllowed(service: string, action: "start" | "restart" | "recreate"): void {
-    const limit = this.config?.runtime.serviceSupervisor.crashLoopThreshold ?? 2;
-    const count = this.serviceRecoveryAttempts.get(service) ?? 0;
-    if (count >= limit) {
-      throw new Error(
-        `Service '${service}' is crash-looping after ${count} recovery attempts. ` +
-          "Blind start/restart/recreate is blocked. Inspect logs and inspect_image, restore the provided dependency from its image when appropriate, or classify this as infrastructure failure.",
-      );
-    }
-    this.serviceRecoveryAttempts.set(service, count + 1);
-  }
-
-  private async buildSandboxSnapshotInventory(appRoot: string): Promise<string> {
-    const result = await execFileAsync(
-      "bash",
-      [
-        "-lc",
-        [
-          `cd ${shellQuote(appRoot)}`,
-          "find . -maxdepth 4 \\( -type f -o -type d \\) -printf '%y %p %s bytes\\n' | sort | sed -n '1,120p'",
-        ].join(" && "),
-      ],
-      { timeout: 5_000, maxBuffer: 512 * 1024 },
-    ).catch(() => ({ stdout: "" }));
-    return String(result.stdout).slice(0, 12_000);
-  }
-
-  private async runReadOnlySandboxSnapshotCommand(
-    command: string,
-    snapshotRoot: string,
-    timeoutMs: number,
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    const rewritten = rewriteServiceAppPathsForSnapshot(command, snapshotRoot);
-    try {
-      const result = await execFileAsync("bash", ["-lc", rewritten], {
-        cwd: snapshotRoot,
-        timeout: Math.min(timeoutMs, 30_000),
-        maxBuffer: 5 * 1024 * 1024,
-      });
-      return { stdout: String(result.stdout), stderr: String(result.stderr), exitCode: 0 };
-    } catch (error) {
-      const err = error as Error & { stdout?: string | Buffer; stderr?: string | Buffer; code?: number | string; killed?: boolean };
-      const timeoutNote = err.killed ? `snapshot inspection timed out after ${Math.min(timeoutMs, 30_000)}ms\n` : "";
-      return {
-        stdout: String(err.stdout ?? ""),
-        stderr: `${timeoutNote}${String(err.stderr ?? "")}`,
-        exitCode: typeof err.code === "number" ? err.code : 1,
-      };
-    }
-  }
-
-  private async writeFileIntoSandboxService(service: string, targetPath: string, content: string, toolCallId: string): Promise<void> {
-    if (await this.tryWriteExactBindMountFile(service, targetPath, content)) return;
-    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "reaper-service-write-"));
-    try {
-      const tmpFile = path.join(tmpDir, `${sanitizeSandboxServiceName(toolCallId)}.payload`);
-      await writeFile(tmpFile, content, "utf8");
-      await this.ensureServiceParentDirectory(service, targetPath);
-      await this.dockerOutput(["cp", tmpFile, `${service}:${targetPath}`], 30_000, 1024 * 1024);
-    } finally {
-      await rm(tmpDir, { recursive: true, force: true });
-    }
-  }
-
-  private async copyWorkspacePathIntoSandboxService(service: string, sourcePath: string, targetPath: string, toolCallId: string): Promise<string> {
-    const absoluteSource = normalizeWorkspacePath(this.options.workspaceRoot, sourcePath);
-    const snapshot = await stat(absoluteSource);
-    await this.ensureServiceParentDirectory(service, targetPath);
-    if (snapshot.isFile() && this.recoverySession) {
-      const relativeSource = relativeWorkspacePath(this.options.workspaceRoot, absoluteSource);
-      try {
-        const stagedText = await this.recoverySession.wal.readText(relativeSource);
-        const tmpDir = await mkdtemp(path.join(os.tmpdir(), "reaper-service-copy-"));
-        try {
-          const tmpFile = path.join(tmpDir, `${sanitizeSandboxServiceName(toolCallId)}.payload`);
-          await writeFile(tmpFile, stagedText, "utf8");
-          await this.dockerOutput(["cp", tmpFile, `${service}:${targetPath}`], 30_000, 1024 * 1024);
-          return relativeSource;
-        } finally {
-          await rm(tmpDir, { recursive: true, force: true });
-        }
-      } catch (error) {
-        if (!isMissingFileError(error)) throw error;
-      }
-    }
-    await this.dockerOutput(["cp", absoluteSource, `${service}:${targetPath}`], 30_000, 1024 * 1024);
-    return relativeWorkspacePath(this.options.workspaceRoot, absoluteSource);
-  }
-
-  private async ensureServiceParentDirectory(service: string, targetPath: string): Promise<void> {
-    const parent = path.posix.dirname(targetPath);
-    await this.dockerOutput(["exec", "-u", "0", service, "bash", "-lc", `mkdir -p ${shellQuote(parent)}`], 30_000, 1024 * 1024);
-  }
-
-  private async tryWriteExactBindMountFile(service: string, targetPath: string, content: string): Promise<boolean> {
-    const mounts = await this.inspectSandboxServiceMounts(service);
-    const source = selectExactBindMountFileRepairSource(mounts, targetPath);
-    if (!source) return false;
-    const sourceState = await stat(source).catch((error: unknown) => {
-      if (isMissingFileError(error)) return undefined;
-      throw error;
-    });
-    if (sourceState?.isDirectory()) {
-      const entries = await readdir(source);
-      if (entries.length > 0) {
-        throw new Error(
-          `Refusing to replace non-empty bind-mount directory '${source}' for service target '${targetPath}'. Inspect and repair it explicitly.`,
-        );
-      }
-      await rm(source, { recursive: false });
-    } else if (sourceState && !sourceState.isFile()) {
-      throw new Error(`Refusing to replace non-file bind-mount source '${source}' for service target '${targetPath}'.`);
-    }
-    await mkdir(path.dirname(source), { recursive: true });
-    await writeFile(source, content, "utf8");
-    return true;
-  }
-
-  private async dockerOutput(
-    args: string[],
-    timeoutMs: number,
-    maxBuffer: number,
-    options?: { allowNonZero?: boolean },
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    try {
-      const result = await execFileAsync("docker", args, { timeout: timeoutMs, maxBuffer });
-      return { stdout: String(result.stdout), stderr: String(result.stderr), exitCode: 0 };
-    } catch (error) {
-      const err = error as Error & { stdout?: string | Buffer; stderr?: string | Buffer; code?: number | string; killed?: boolean };
-      const stdout = String(err.stdout ?? "");
-      const stderr = String(err.stderr ?? "");
-      const exitCode = typeof err.code === "number" ? err.code : 1;
-      if (options?.allowNonZero) return { stdout, stderr, exitCode };
-      throw new Error(
-        [
-          err.killed ? `docker ${args[0] ?? ""} timed out after ${timeoutMs}ms` : err.message,
-          `docker ${args.join(" ")}`,
-          `stdout: ${stdout.trim() || "<empty>"}`,
-          `stderr: ${stderr.trim() || "<empty>"}`,
-        ].join("\n"),
-      );
-    }
-  }
 
   private getComputerBrowserController(): ComputerBrowserController {
     if (!this.computerBrowserController) {
@@ -2236,30 +1514,6 @@ export class ToolExecutor {
   }
 }
 
-function requireServiceAppPath(targetPath: string | undefined, action: string): string {
-  if (!targetPath?.trim()) throw new Error(`sandbox_service_control ${action} requires targetPath`);
-  const normalized = path.posix.normalize(targetPath.replace(/\\/g, "/"));
-  if (!normalized.startsWith("/app/") && normalized !== "/app") {
-    throw new Error(`sandbox_service_control ${action} targetPath must be inside /app, got '${targetPath}'`);
-  }
-  return normalized;
-}
-
-function sanitizeSandboxServiceName(value: string): string {
-  return value.replace(/[^A-Za-z0-9_.-]/g, "_");
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function isMissingFileError(error: unknown): boolean {
-  return Boolean(error && typeof error === "object" && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT");
-}
-
-function assertNever(value: never): never {
-  throw new Error(`Unexpected value: ${String(value)}`);
-}
 
 function countLogicalLines(content: string): number {
   if (!content) return 0;
@@ -2377,91 +1631,6 @@ function rewriteWorkspaceRootInShellCommand(command: string, workspaceRoot: stri
   return command.split(normalizedWorkspace).join(normalizedReplacement);
 }
 
-function isStoppedContainerExecResult(result: { stdout: string; stderr: string; exitCode: number }): boolean {
-  return result.exitCode !== 0 && /container\s+[a-f0-9]+\s+is\s+not\s+running/i.test(`${result.stdout}\n${result.stderr}`);
-}
-
-export function isConclusiveServiceMountOrEntrypointFailure(logs: string): boolean {
-  return /(?:is a directory|not a directory|executable file not found|exec format error|permission denied|can't open file|cannot open file|no such file or directory|failed to create task|mount.*(?:failed|error)|entrypoint.*(?:failed|error))/i.test(
-    logs,
-  );
-}
-
-export function selectExactBindMountFileRepairSource(
-  mounts: Array<{ Type?: string; Source?: string; Destination?: string }>,
-  targetPath: string,
-): string | undefined {
-  if (!targetPath.startsWith("/app/") || targetPath.endsWith("/")) return undefined;
-  const exact = mounts.filter(
-    (mount) => mount.Type === "bind" && mount.Destination === targetPath && typeof mount.Source === "string" && path.isAbsolute(mount.Source),
-  );
-  return exact.length === 1 ? exact[0]!.Source : undefined;
-}
-
-export interface ServicePathTypeMismatch {
-  path: string;
-  mountedType: "file" | "directory" | "other" | "missing";
-  imageType: "file" | "directory" | "other" | "missing";
-  diagnosis: "mount_shadow_or_damage";
-}
-
-export function detectServicePathTypeMismatches(
-  mounted: Record<string, "file" | "directory" | "other">,
-  image: Record<string, "file" | "directory" | "other">,
-): ServicePathTypeMismatch[] {
-  const paths = new Set([...Object.keys(mounted), ...Object.keys(image)]);
-  return [...paths]
-    .filter((item) => (mounted[item] ?? "missing") !== (image[item] ?? "missing"))
-    .map((item) => ({
-      path: `/app/${item}`.replace(/\/+$/, ""),
-      mountedType: mounted[item] ?? "missing",
-      imageType: image[item] ?? "missing",
-      diagnosis: "mount_shadow_or_damage" as const,
-    }));
-}
-
-export function selectSandboxServiceName(
-  services: Array<{ name: string; role: "client" | "service" }>,
-  requested?: string,
-): string | undefined {
-  const siblings = services.filter((service) => service.role === "service");
-  if (!requested?.trim()) return siblings.length === 1 ? siblings[0]!.name : undefined;
-  const needle = requested.trim();
-  const exactSibling = siblings.find((service) => service.name === needle);
-  if (exactSibling) return exactSibling.name;
-  const partialSiblings = siblings.filter((service) => service.name.includes(needle));
-  if (partialSiblings.length === 1) return partialSiblings[0]!.name;
-  return undefined;
-}
-
-function rewriteServiceAppPathsForSnapshot(command: string, snapshotRoot: string): string {
-  return command.replace(/\/app(?=\/|[\s'"]|$)/g, shellQuote(snapshotRoot));
-}
-
-async function compareServiceSnapshotPathTypes(mountedRoot: string, imageRoot: string): Promise<ServicePathTypeMismatch[]> {
-  const [mounted, image] = await Promise.all([collectPathTypes(mountedRoot), collectPathTypes(imageRoot)]);
-  return detectServicePathTypeMismatches(mounted, image);
-}
-
-async function collectPathTypes(root: string): Promise<Record<string, "file" | "directory" | "other">> {
-  const output: Record<string, "file" | "directory" | "other"> = {};
-  const visit = async (current: string, depth: number): Promise<void> => {
-    if (depth > 4) return;
-    const entries = await readdir(current, { withFileTypes: true }).catch(() => []);
-    for (const entry of entries) {
-      const absolute = path.join(current, entry.name);
-      const relative = path.relative(root, absolute).replace(/\\/g, "/");
-      output[relative] = entry.isFile() ? "file" : entry.isDirectory() ? "directory" : "other";
-      if (entry.isDirectory()) await visit(absolute, depth + 1);
-    }
-  };
-  await visit(root, 0);
-  return output;
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
-}
 
 function isHostOnlyReaperArtifactInspectionCommand(command: string, workspaceRoot: string): boolean {
   const normalizedRoot = path.resolve(workspaceRoot).replace(/\\/g, "/");
@@ -2539,11 +1708,3 @@ function findExecUsesOnlyReadOnlyCommands(part: string): boolean {
   return matches.every((match) => allowed.has(path.posix.basename(String(match[1] ?? "").replace(/\\/g, "/"))));
 }
 
-function hasSandboxServiceContext(): boolean {
-  return Boolean(getSandboxTunables().tbenchContainerName?.trim() || getSandboxTunables().tbenchComposeProject?.trim());
-}
-
-function isDockerCliCommand(command: string): boolean {
-  const stripped = command.replace(/\\\n/g, " ").trim();
-  return /(?:^|[;&|]\s*)(?:sudo\s+)?docker(?:\s|$)/i.test(stripped);
-}

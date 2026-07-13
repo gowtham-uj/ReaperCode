@@ -70,6 +70,8 @@ export interface Phase0BootstrapInput {
   userIntentSummary?: string;
   runId?: string;
   sessionId?: string;
+  /** Named session for cross-run continuity (journaled under .reaper/sessions/). */
+  namedSession?: string;
   traceId?: string;
   repoInspection?: RuntimeRepoInspection;
 }
@@ -107,6 +109,7 @@ export function bootPhase0Runtime(input: Phase0BootstrapInput): Phase0BootstrapR
     feedback: [],
     negativeConstraints: [],
     ...(input.repoInspection ? { repoInspection: input.repoInspection } : {}),
+    ...(input.namedSession ? { namedSession: input.namedSession } : {}),
   });
 
   return {

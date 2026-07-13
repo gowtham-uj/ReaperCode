@@ -46,13 +46,15 @@ const regularFiles = existingFiles.filter((file) => !file.includes(perfSegment))
 
 function runNodeTests(testFiles, extraArgs = []) {
   if (testFiles.length === 0) return 0;
-  // node:test waits for the event loop to drain before exiting. With
-  // tsx + Reaper the test runner sometimes hangs on stdout/stderr pipe
-  // handles; this hard timeout kills the child once tests have reported
-  // their results, which is enough to surface pass/fail to CI without
-  // blocking the runner. Tests are not affected — they ran to
-  // completion before this fired.
-  const HANG_TIMEOUT_MS = 60_000;
+  // node:test can wait on leaked handles after reporting results, but the
+  // regular suite also runs hundreds of files serially. A 60-second
+  // wall-clock kill races legitimate Windows runs, so use a bounded,
+  // configurable watchdog that is long enough for the suite itself.
+  const configuredTimeout = Number(process.env.REAPER_TEST_HANG_TIMEOUT_MS);
+  const HANG_TIMEOUT_MS =
+    Number.isFinite(configuredTimeout) && configuredTimeout > 0
+      ? configuredTimeout
+      : 10 * 60_000;
   const child = spawn(process.execPath, ["--import", "tsx", "--test", "--test-concurrency=1", ...extraArgs, ...testFiles], {
     cwd: root,
     stdio: "inherit",

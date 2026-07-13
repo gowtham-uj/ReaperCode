@@ -11,6 +11,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 import { RuntimeEngine } from "../../src/runtime/engine.js";
 import { Hooks } from "../../src/adaptive/hooks.js";
@@ -35,10 +38,7 @@ class FakeGateway implements ModelGateway {
   }
 
   private buildJson(): string {
-    return JSON.stringify({
-      assistant_message: "Hello, world!",
-      tool_calls: [],
-    });
+    return "Hello, world!";
   }
 
   async generate(request: GenerateRequest): Promise<GenerateResult> {
@@ -85,20 +85,8 @@ function createFakeConfig() {
   return {
     logging: { sessionMetrics: false },
     runtime: {
-      completionGateMax: 3,
       voteAttempts: 1,
-      progressGuard: {
-        enabled: false,
-        actionRepeatLimit: 3,
-        observationRepeatLimit: 3,
-        sameFailedActionLimit: 3,
-        recoveryStrategyRepeatLimit: 3,
-        stallSteps: 3,
-      },
       recedingHorizonPlanContext: false,
-      artifactObligations: { enabled: false },
-      hypothesisRescue: { enabled: false },
-      serviceSupervisor: { enabled: false },
     },
     verification: {
       requireGroundedCompletion: false,
@@ -126,10 +114,12 @@ function createFakeConfig() {
   };
 }
 
-test("perf: Enter-to-first-delta <= API_LATENCY + 1.0s overhead on a conversational prompt", async () => {
+test("perf: Enter-to-first-delta <= API_LATENCY + 1.0s overhead on a conversational prompt", async (t) => {
   const config = createFakeConfig();
   const gateway = new FakeGateway(API_LATENCY_MS);
   const hooks = new Hooks({ securityFailClosed: false });
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "reaper-first-delta-"));
+  t.after(() => rm(workspaceRoot, { recursive: true, force: true }));
 
   let firstDeltaAt: number | undefined;
   let firstDeltaText: string | undefined;
@@ -146,7 +136,7 @@ test("perf: Enter-to-first-delta <= API_LATENCY + 1.0s overhead on a conversatio
   const startedAt = Date.now();
   const engine = new RuntimeEngine({
     config,
-    workspaceRoot: process.cwd(),
+    workspaceRoot,
     requestEnvelope: {
       connection_id: "perf-test",
       session_id: "perf-sess",
