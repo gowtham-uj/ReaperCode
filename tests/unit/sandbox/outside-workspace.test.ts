@@ -147,7 +147,7 @@ test("write_file rejects parent-traversal paths outside the workspace", async ()
   }
 });
 
-test("read_file rejects symlink traversal to outside the workspace", async () => {
+test("read_file rejects symlink traversal to outside the workspace", async (t) => {
   const ws = await tempWorkspace();
   const outside = await mkdtemp(path.join(tmpdir(), "reaper-sandbox-out-"));
   try {
@@ -155,7 +155,15 @@ test("read_file rejects symlink traversal to outside the workspace", async () =>
     const outsideFile = path.join(outside, "secret.txt");
     await writeFile(outsideFile, "secret", "utf8");
     const insideLink = path.join(ws, "link.txt");
-    await symlink(outsideFile, insideLink);
+    try {
+      await symlink(outsideFile, insideLink);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") {
+        t.skip("symlink creation requires elevated privileges on this platform");
+        return;
+      }
+      throw error;
+    }
 
     await expectPathEscape(
       () => readFileTool(ws, { path: "link.txt" }),

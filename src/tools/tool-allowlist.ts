@@ -29,7 +29,7 @@ const TOOL_ALLOWED_ARGS: Record<string, readonly string[]> = {
   edit_file: ["path", "edits"],
   replace_symbol: ["path", "symbolName", "newCode"],
   delete_file: ["path"],
-  bash: ["cmd", "command", "summary", "description", "barrier", "forceNonBarrier", "isBackground", "run_in_background", "timeoutMs", "timeout", "idleTimeoutMs"],
+  bash: ["cmd", "description", "timeout", "run_in_background"],
   read_background_output: ["pid", "lines", "waitForMatch", "minWaitMs"],
   signal_process: ["pid", "signal"],
   write_to_process: ["pid", "input"],

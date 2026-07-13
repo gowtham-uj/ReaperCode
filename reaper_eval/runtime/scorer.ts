@@ -130,6 +130,8 @@ async function evaluateGate(gate: EvalGateSpec, task: EvalTask, ctx: ScoreContex
         details: { count, minCount: gate.minCount },
       };
     }
+    case "system_prompt_stable_after_summary":
+      return evaluateSystemPromptStability(ctx);
     default: {
       const exhaustive: never = gate;
       return { type: "unknown", passed: false, details: { gate: exhaustive } };
@@ -153,4 +155,85 @@ async function countTrajectoryKinds(trajectoryPath: string | undefined): Promise
     }
   }
   return counts;
+}
+
+async function evaluateSystemPromptStability(ctx: ScoreContext): Promise<GateResult> {
+  const type = "system_prompt_stable_after_summary";
+  if (!ctx.trajectoryPath || !existsSync(ctx.trajectoryPath)) {
+    return { type, passed: false, details: { error: "trajectory missing" } };
+  }
+
+  let firstSummaryAt = Number.POSITIVE_INFINITY;
+  const trajectory = await readFile(ctx.trajectoryPath, "utf8");
+  for (const line of trajectory.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line) as { kind?: unknown; timestamp?: unknown };
+      if (event.kind !== "full_summary" || typeof event.timestamp !== "string") continue;
+      const timestamp = Date.parse(event.timestamp);
+      if (Number.isFinite(timestamp)) firstSummaryAt = Math.min(firstSummaryAt, timestamp);
+    } catch {
+      /* skip malformed trajectory rows */
+    }
+  }
+  if (!Number.isFinite(firstSummaryAt)) {
+    return { type, passed: false, details: { error: "no timestamped full_summary event" } };
+  }
+
+  const modelCallDir = path.join(ctx.workspaceRoot, ".reaper", "runs", ctx.runId, "model-calls");
+  let files: string[] = [];
+  try {
+    files = (await readdir(modelCallDir)).filter((file) => /^\d+-(?:stream|generate)\.json$/.test(file)).sort();
+  } catch {
+    return { type, passed: false, details: { error: "model-call directory missing" } };
+  }
+
+  let baselineSystem: string | undefined;
+  let calls = 0;
+  let postSummaryCalls = 0;
+  let mismatches = 0;
+  let missingSystems = 0;
+  for (const file of files) {
+    try {
+      const record = JSON.parse(await readFile(path.join(modelCallDir, file), "utf8")) as {
+        role?: unknown;
+        request?: { system?: unknown; source?: unknown; role?: unknown };
+        startedAt?: unknown;
+      };
+      // The model-call directory also contains judge and other auxiliary
+      // requests. They intentionally have no main-agent system prompt and
+      // must not count as prompt-loss failures.
+      if (
+        (typeof record.request?.source === "string" && record.request.source !== "main_agent") ||
+        (record.request?.source === undefined && (record.role === "judge" || record.request?.role === "judge"))
+      ) {
+        continue;
+      }
+      const system = record.request?.system;
+      if (typeof system !== "string" || system.length === 0) {
+        missingSystems += 1;
+        continue;
+      }
+      calls += 1;
+      baselineSystem ??= system;
+      if (system !== baselineSystem) mismatches += 1;
+      if (typeof record.startedAt === "string" && Date.parse(record.startedAt) > firstSummaryAt) {
+        postSummaryCalls += 1;
+      }
+    } catch {
+      missingSystems += 1;
+    }
+  }
+
+  return {
+    type,
+    passed: Boolean(baselineSystem) && calls > 0 && postSummaryCalls > 0 && mismatches === 0 && missingSystems === 0,
+    details: {
+      calls,
+      postSummaryCalls,
+      mismatches,
+      missingSystems,
+      baselineChars: baselineSystem?.length ?? 0,
+    },
+  };
 }

@@ -68,7 +68,7 @@ export interface ExtensionToolStats {
  */
 export function deriveRequiredPermission(name: string, metadata: ToolMetadata): ExtensionPermission {
   if (metadata.can_execute_code) {
-    // Shell commands go through `run_shell_command`, but extension
+    // Shell commands go through `bash`, but extension
     // tools that can execute code are higher-risk than read tools.
     if (metadata.risk_level === "high" || metadata.risk_level === "critical") return "shell:high";
     if (metadata.risk_level === "medium") return "shell:medium";

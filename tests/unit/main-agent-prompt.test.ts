@@ -5,6 +5,7 @@ import {
   buildMainAgentCockpit,
   buildMainAgentSystemPrompt,
 } from "../../src/runtime/main-agent-prompt.js";
+import { buildGeneralAgentTools } from "../../src/runtime/agent-tools.js";
 
 test("main-agent cockpit includes required OMP-aligned sections", () => {
   const cockpit = buildMainAgentCockpit(
@@ -35,8 +36,6 @@ test("main-agent cockpit includes required OMP-aligned sections", () => {
     "Changed Files / Current Diff",
     "Recent Tool Results",
     "Runtime Blockers",
-    "Running Subagents",
-    "Completed Subagent Results",
     "Budget",
   ]) {
     assert.match(cockpit, new RegExp(`## ${escapeRegExp(section)}`));
@@ -55,14 +54,16 @@ test("main-agent system prompt includes required requirements text", () => {
   for (const requiredText of [
     "You are Reaper's main agent.",
     "You own the task from user request to verified completion",
-    "STOP:",
+    "Response and STOP",
     "no tool_calls",
-    "Do not call complete_task",
     "Edit path",
     "file_view",
     "file_edit",
-    "Escape",
+    "Trust",
     "Delivery contract",
+    "Reasoning discipline",
+    "NEVER prefix the workspace directory",
+    "NEVER rationalize a mismatch",
   ]) {
     assert.match(system, new RegExp(escapeRegExp(requiredText), "i"));
   }
@@ -76,6 +77,19 @@ test("main-agent system prompt includes compact tool inventory when provided", (
   assert.match(system, /# Tool inventory/);
   assert.match(system, /- read_file\b/);
   assert.match(system, /- bash\b/);
+});
+
+test("main-agent system inventory exactly mirrors the offered API tools", () => {
+  const offered = buildGeneralAgentTools();
+  const system = buildMainAgentSystemPrompt({}, { availableTools: offered });
+  const inventory = system
+    .split("# Tool inventory\n")[1]!
+    .split("\n")
+    .filter((line) => line.startsWith("- "))
+    .map((line) => line.slice(2));
+
+  assert.deepEqual(inventory, offered.map((tool) => tool.name));
+  assert.doesNotMatch(system, /\b(?:run_command|run_shell_command|sandbox_service_control)\b/);
 });
 
 test("main-agent cockpit compacts long tool history instead of replaying full file contents", () => {

@@ -77,7 +77,7 @@ test("Phase 1: key tool descriptors have correct metadata", async () => {
 
   // Aliases should be populated for known tools
   assert.ok(bash!.aliases.includes("shell"), "bash should have 'shell' alias");
-  assert.ok(bash!.aliases.includes("run_command"), "bash should have 'run_command' alias");
+  assert.equal(bash!.aliases.includes("run_command"), false, "retired run_command must not be advertised");
   assert.ok(file_view!.aliases.includes("read"), "file_view should have 'read' alias");
   assert.ok(write_file!.aliases.includes("create_file"), "write_file should have 'create_file' alias");
 

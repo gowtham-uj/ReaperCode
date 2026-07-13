@@ -6,9 +6,6 @@ export const CONTROL_TOOLS: ReadonlySet<string> = new Set([
   "update_task_contract",
   "update_plan",
   "update_todo",
-  "poll_subagent",
-  "cancel_subagent",
-  "complete_task",
   "create_checkpoint",
   "restore_checkpoint",
 
@@ -32,12 +29,10 @@ export const REQUIRED_EXECUTABLE_TOOLS: ReadonlySet<string> = new Set([
   "bash",
   "run_test_command",
   "read_test_failure_summary",
-  "call_subagent",
 ]);
 
 export const MUTATING_TOOLS: ReadonlySet<string> = new Set([
   "update_task_contract",
-  "cancel_subagent",
   "create_checkpoint",
   "restore_checkpoint",
   "write_file",
@@ -49,7 +44,6 @@ export const MUTATING_TOOLS: ReadonlySet<string> = new Set([
   // Existing runtime mutation surfaces.
   "replace_symbol",
   "delete_file",
-  "sandbox_service_control",
   "browser_control",
   "computer_control",
   "mouse_move",
@@ -63,8 +57,6 @@ export const MUTATING_TOOLS: ReadonlySet<string> = new Set([
   "write_to_process",
   "task_create",
   "task_update",
-  "agent",
-  "agent_swarm",
   "create_skill",
   "test_skill",
   "approve_skill",
@@ -83,15 +75,7 @@ export const MUTATING_TOOLS: ReadonlySet<string> = new Set([
   "reload_hooks",
 ]);
 
-export const COMPLETION_TOOLS: ReadonlySet<string> = new Set(["complete_task"]);
 
-export const SUBAGENT_TOOLS: ReadonlySet<string> = new Set([
-  "call_subagent",
-  "poll_subagent",
-  "cancel_subagent",
-  "agent",
-  "agent_swarm",
-]);
 
 export function getToolKind(name: string): ToolKind {
   if (CONTROL_TOOLS.has(name)) return "control";
@@ -111,10 +95,4 @@ export function isMutatingTool(name: string): boolean {
   return MUTATING_TOOLS.has(name);
 }
 
-export function isCompletionTool(name: string): boolean {
-  return COMPLETION_TOOLS.has(name);
-}
 
-export function isSubagentTool(name: string): boolean {
-  return SUBAGENT_TOOLS.has(name);
-}

@@ -1,8 +1,6 @@
 {
   "type": "module",
   "scripts": {
-    "dev:ui": "vite --host 0.0.0.0",
-    "build:ui": "vite build",
     "test": "node scripts/run-node-tests.mjs",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
@@ -31,8 +29,6 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "express-validator": "^7.3.2",
-    "ink": "^7.1.0",
-    "ink-spinner": "^5.0.0",
     "jsonrepair": "^3.14.0",
     "jsonwebtoken": "^9.0.3",
     "lucide-react": "^1.14.0",
@@ -69,7 +65,6 @@
     "@types/three": "^0.184.1",
     "@typescript-eslint/eslint-plugin": "^8.59.3",
     "@typescript-eslint/parser": "^8.59.3",
-    "ink-testing-library": "^4.0.0",
     "jest": "^30.4.2",
     "ts-jest": "^29.4.9",
     "ts-node": "^10.9.2",
@@ -77,9 +72,8 @@
     "typescript": "^5.9.3"
   },
   "name": "reaper",
-  "version": "0.1.42",
+  "version": "0.1.47",
   "description": "Reaper agent runtime.",
-  "main": "vite.config.js",
   "directories": {
     "doc": "docs",
     "test": "tests"

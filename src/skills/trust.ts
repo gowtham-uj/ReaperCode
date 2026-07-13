@@ -26,7 +26,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { dirname, join, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type { ExtensionTrust } from "../extensions/types.js";
 import type { SkillTrust,  SkillTrustRecord } from "./types.js";
@@ -158,10 +158,13 @@ export class TrustResolver {
 }
 
 function isUnder(child: string, parent: string): boolean {
-  // Normalize both to remove trailing separators.
-  const a = child.endsWith(sep) ? child : child + sep;
-  const b = parent.endsWith(sep) ? parent : parent + sep;
-  return a.startsWith(b);
+  const relativePath = relative(resolve(parent), resolve(child));
+  return (
+    relativePath === "" ||
+    (relativePath !== ".." &&
+      !relativePath.startsWith(`..${sep}`) &&
+      !isAbsolute(relativePath))
+  );
 }
 
 function mapExtensionTrust(t: ExtensionTrust): SkillTrust {

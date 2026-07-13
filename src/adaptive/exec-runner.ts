@@ -3,16 +3,9 @@
  * prompt and yolo-level permissions. Used by `reaper exec` and by
  * ad-hoc scripts that want a self-contained Reaper run.
  *
- * "Yolo" here means the engine is launched with:
- *   - Permissive runtime controls (no progress/completion/editor guards)
- *   - no tool allowlist narrowing
- *   - one completion-gate attempt, no follow-up vote rounds
- *
- * The completion gate still requires an explicit `complete_task`
- * signal — we do NOT relax that, because silently declaring a run
- * "complete" is what causes synthetic completions and unreliable
- * success signals. Auto-approve is about the *gating* layer, not
- * the *evidence* layer.
+ * "Yolo" here means the engine is launched with permissive runtime controls
+ * and no tool allowlist narrowing. The model ends the run naturally by
+ * returning a final assistant message with no tool calls.
  *
  * The model gateway uses the Anthropic client. The auth token is
  * pulled from `ANTHROPIC_AUTH_TOKEN` first (so a proxy like
@@ -32,6 +25,7 @@ import { RuntimeEngine } from "../runtime/engine.js";
 import { ConfiguredModelGateway } from "../model/gateway.js";
 import { ProviderMultiplexerClient } from "../model/providers/provider-client.js";
 import type { ModelCapabilities } from "../model/types.js";
+import { isValidSessionName } from "../context/session-journal.js";
 
 type ExecProvider = "anthropic" | "openai" | "openai-codex" | "minimax" | "deepseek" | "nuralwatt" | "nuralwatt2";
 
@@ -64,6 +58,13 @@ export interface ExecRunnerOptions {
    * Default: "medium".
    */
   reasoningEffort?: "low" | "medium" | "high";
+  /**
+   * Named session for cross-run continuity. Runs sharing a --session
+   * name journal their user/assistant turns under
+   * `.reaper/sessions/<name>.jsonl` and rehydrate the prior
+   * conversation on the next boot.
+   */
+  session?: string;
 }
 
 export interface ExecRunnerResult {
@@ -310,11 +311,11 @@ export function buildConfigForProvider(args: {
  */
 const YOLO_SYSTEM_PROMPT = [
   "[exec environment — single-prompt run, no approval gate]",
-  "Workspace: ${WORKSPACE}",
+  "Workspace root: ${WORKSPACE}",
   "Tool rules:",
-  "  1. Stay inside the workspace. Every file path should resolve under ${WORKSPACE}.",
+  "  1. Stay inside the workspace. Tool paths resolve relative to the workspace root: pass paths like marker.txt or src/app.ts as-is, and never prefix the workspace directory onto them.",
   "  2. Use write_file for new files/full rewrites. For targeted edits to existing files, first inspect exact line numbers with file_view/file_find/file_scroll, then use file_edit. Do not create source files through shell heredocs or redirection.",
-  "  3. Shell calls start in ${WORKSPACE}; use relative paths from that root or chain commands explicitly.",
+  "  3. Shell commands also start at the workspace root; use the same relative paths.",
   "  4. Prefer file_view/file_find/file_scroll for source inspection; use bash for verification, package-manager commands, and commands that genuinely need a shell.",
   "  5. For simple file-creation tasks, create the required files directly, then run the requested test/check command. Do not re-read files you just wrote unless a check fails or you need specific missing information.",
   "  6. When the requested work is complete and the relevant test/check passes, finish with a concise final assistant message and no tool calls. Do not keep inspecting after completion.",
@@ -366,6 +367,17 @@ export async function runExec(opts: ExecRunnerOptions): Promise<ExecRunnerResult
       notices: [{ kind: "error", message: e instanceof Error ? e.message : String(e) }],
     };
   }
+  if (opts.session !== undefined && !isValidSessionName(opts.session)) {
+    return {
+      status: "failed",
+      assistantMessage: "",
+      toolResults: [],
+      trajectoryPath: "",
+      events: 0,
+      durationMs: Date.now() - startedAt,
+      notices: [{ kind: "error", message: `invalid --session name "${opts.session}" (allowed: letters, digits, ., _, - ; max 128 chars)` }],
+    };
+  }
   const client = new ProviderMultiplexerClient();
   const gateway = new ConfiguredModelGateway(config, client);
   const requestEnvelope = buildRequestEnvelope(opts);
@@ -376,6 +388,7 @@ export async function runExec(opts: ExecRunnerOptions): Promise<ExecRunnerResult
     requestEnvelope,
     modelGateway: gateway,
     abortSignal: abort.signal,
+    ...(opts.session ? { namedSession: opts.session } : {}),
   });
   // Default: no CLI-side wall-clock timer. The run is bounded by the
   // model's own natural-stop decision (an assistant turn with no tool

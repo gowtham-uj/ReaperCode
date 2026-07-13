@@ -3,7 +3,6 @@
  *  - write tools warn when no read has been done in the run
  *  - browser_control is preferred over computer_control
  *  - mouse/keyboard tools suggest a prior screenshot
- *  - complete_task suggests a prior test run
  *  - Empty history returns no advisories
  *  - hasOrderingRules is accurate
  */
@@ -75,24 +74,6 @@ test("keyboard_type without screenshot gets an advisory", () => {
   assert.ok(adv.some((a) => a.ruleId === "ordering.type_no_screenshot"));
 });
 
-test("complete_task with a prior shell run does not fire the no-test advisory", () => {
-  const adv = getOrderingAdvisories({
-    currentTool: "complete_task",
-    recentTools: ["read_file", "bash"],
-    isSubagentCall: false,
-  });
-  assert.ok(!adv.some((a) => a.ruleId === "ordering.complete_no_test"));
-});
-
-test("complete_task with no shell in history fires the no-test warning", () => {
-  const adv = getOrderingAdvisories({
-    currentTool: "complete_task",
-    recentTools: ["read_file", "view_file"],
-    isSubagentCall: false,
-  });
-  assert.ok(adv.some((a) => a.ruleId === "ordering.complete_no_test"));
-});
-
 test("empty history returns no advisories for tools that don't have rules", () => {
   // task_list has no rules
   assert.deepEqual(getOrderingAdvisories({ currentTool: "task_list", recentTools: [], isSubagentCall: false }), []);
@@ -110,7 +91,6 @@ test("hasOrderingRules returns true for ordered tools", () => {
   assert.equal(hasOrderingRules("write_file"), true);
   assert.equal(hasOrderingRules("edit_file"), true);
   assert.equal(hasOrderingRules("computer_control"), true);
-  assert.equal(hasOrderingRules("complete_task"), true);
 });
 
 test("metadata-driven advisories look at preferred_before", () => {

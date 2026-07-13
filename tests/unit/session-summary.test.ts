@@ -57,7 +57,7 @@ test("summarizeSessionForCompaction extracts intent, files, failures, verificati
   assert.match(summary.verification.bullets[0] ?? "", /FAIL npm test/);
   // First failed attempt is the npm test failure.
   const firstFailure = summary.failedAttempts.bullets[0] ?? "";
-  assert.match(firstFailure, /run_shell_command/);
+  assert.match(firstFailure, /bash/);
   assert.match(firstFailure, /1 failing/);
 });
 

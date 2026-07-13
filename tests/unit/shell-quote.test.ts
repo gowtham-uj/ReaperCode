@@ -1,7 +1,7 @@
 /**
  * Unit tests for src/runtime/shell-quote.ts.
  *
- * The 4 call sites (engine.ts, run-shell-command.ts x2, verify/runner.ts,
+ * The 4 call sites (engine.ts, global/bash.ts x2, verify/runner.ts,
  * tools/executor.ts) all delegate to this module. These tests pin the
  * contract: an arg with embedded newlines MUST NOT split into multiple
  * shell statements.

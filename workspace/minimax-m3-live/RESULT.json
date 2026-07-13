@@ -1,0 +1,33 @@
+{
+  "status": "pass",
+  "task": "Fix EventStore implementation in src/event-store.mjs so every existing test passes",
+  "verification": {
+    "command": "npm test",
+    "exitCode": 0,
+    "durationMs": 216.623,
+    "summary": {
+      "tests": 3,
+      "suites": 0,
+      "pass": 3,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "testsPassed": [
+      "append validates event shape and deduplicates by eventId",
+      "listAfter is chronological, exclusive, and bounded",
+      "snapshot is immutable and does not expose stored payload references"
+    ]
+  },
+  "modifiedFiles": [
+    "src/event-store.mjs"
+  ],
+  "modifiedTestFiles": [],
+  "notes": [
+    "append: validates eventId (non-empty string) and occurredAt (parseable date), deduplicates by eventId via a Set, returns { inserted: false } on duplicate, deep-clones payload on store.",
+    "listAfter: sorts by occurredAt chronologically, treats cursor as exclusive (start = idx + 1), throws if cursor is unknown, requires positive-integer limit (throws on non-positive or non-integer), caps limit at 1000, returns deep-cloned events.",
+    "snapshot: returns deep-cloned events so callers cannot mutate internal state through the snapshot.",
+    "Tests were not modified."
+  ]
+}

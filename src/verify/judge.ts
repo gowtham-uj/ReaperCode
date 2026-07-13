@@ -34,7 +34,7 @@ export async function runVerificationJudge(input: {
         content:
           `You are the verification judge for Reaper. ` +
           `Return strict JSON with shape {"feedback": string, "negativeConstraints": string[], "toolCalls": ToolCall[]}. ` +
-          `Available tool names: read_file, list_directory, grep_search, write_file, replace_in_file, delete_file, run_shell_command. ` +
+          `Available tool names: read_file, list_directory, grep_search, write_file, replace_in_file, delete_file, bash. ` +
           `Task prompt: ${input.prompt}. ` +
           `Verification command: ${input.verificationCommand}. ` +
           `Failure classification: ${JSON.stringify(input.classification ?? null)}. ` +

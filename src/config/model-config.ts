@@ -50,39 +50,12 @@ export const RuntimeControlConfigSchema = z
   .object({
     recedingHorizonPlanContext: z.boolean().default(true),
     voteAttempts: z.number().int().positive().default(1),
-    serviceSupervisor: z
-      .object({
-        enabled: z.boolean().default(true),
-        readinessTimeoutMs: z.number().int().positive().default(30_000),
-        minimumStableMs: z.number().int().nonnegative().default(1_500),
-        autoRecover: z.boolean().default(true),
-        maxAutoRecoveriesPerService: z.number().int().nonnegative().default(1),
-        crashLoopThreshold: z.number().int().positive().default(2),
-      })
-      .strict()
-      .optional()
-      .default({
-        enabled: true,
-        readinessTimeoutMs: 30_000,
-        minimumStableMs: 1_500,
-        autoRecover: true,
-        maxAutoRecoveriesPerService: 1,
-        crashLoopThreshold: 2,
-      }),
   })
   .strict()
   .optional()
   .default({
     recedingHorizonPlanContext: true,
     voteAttempts: 1,
-    serviceSupervisor: {
-      enabled: true,
-      readinessTimeoutMs: 30_000,
-      minimumStableMs: 1_500,
-      autoRecover: true,
-      maxAutoRecoveriesPerService: 1,
-      crashLoopThreshold: 2,
-    },
   });
 
 export const VerificationGateConfigSchema = z

@@ -13,7 +13,7 @@ export async function writeFileTool(workspaceRoot: string, args: { path: string;
     throw error;
   });
   if (existing?.isDirectory()) {
-    throw new Error(`write_file target '${args.path}' is a directory. Use a concrete file path such as '${path.posix.join(args.path, "index.js")}', or use run_shell_command for shell commands.`);
+    throw new Error(`write_file target '${args.path}' is a directory. Use a concrete file path such as '${path.posix.join(args.path, "index.js")}', or use bash for shell commands.`);
   }
   return globalFileMutationQueue.run(filePath, async () => {
     await mkdir(path.dirname(filePath), { recursive: true });

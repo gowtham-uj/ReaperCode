@@ -59,60 +59,6 @@ test("ingest applies passing and failing checks to the state", () => {
   assert.equal(state.completedChecks[0]?.status, "passed");
 });
 
-test("evaluateCompletion allows complete_task when no required checks are defined", () => {
-  const orch = new VerificationOrchestrator();
-  const state = orch.initialize();
-  const verdict = orch.evaluateCompletion(state);
-  assert.equal(verdict.allowed, true);
-});
-
-test("evaluateCompletion blocks complete_task when required checks have not run", () => {
-  const orch = new VerificationOrchestrator();
-  const state = orch.initialize(["npm test"]);
-  const verdict = orch.evaluateCompletion(state);
-  assert.equal(verdict.allowed, false);
-  assert.equal(verdict.missingRequiredChecks.length, 1);
-});
-
-test("evaluateCompletion allows complete_task after a passing required check", () => {
-  const orch = new VerificationOrchestrator();
-  let state = orch.initialize(["npm test"]);
-  ({ state } = orch.ingest(state, {
-    toolName: "bash",
-    args: { cmd: "npm test" },
-    ok: true,
-    output: { exitCode: 0 },
-  }));
-  const verdict = orch.evaluateCompletion(state);
-  assert.equal(verdict.allowed, true);
-});
-
-test("evaluateCompletion with requireAllChecks blocks when only one of two required checks has passed", () => {
-  const orch = new VerificationOrchestrator({ requireAllChecks: true });
-  let state = orch.initialize(["npm test", "pytest"]);
-  ({ state } = orch.ingest(state, {
-    toolName: "bash",
-    args: { cmd: "npm test" },
-    ok: true,
-    output: { exitCode: 0 },
-  }));
-  const verdict = orch.evaluateCompletion(state);
-  assert.equal(verdict.allowed, false);
-  assert.deepEqual(verdict.missingRequiredChecks, ["pytest"]);
-});
-
-test("evaluateCompletion matches prefix variants (npm test --watch=false)", () => {
-  const orch = new VerificationOrchestrator();
-  let state = orch.initialize(["npm test"]);
-  ({ state } = orch.ingest(state, {
-    toolName: "bash",
-    args: { cmd: "npm test --watch=false" },
-    ok: true,
-    output: { exitCode: 0 },
-  }));
-  const verdict = orch.evaluateCompletion(state);
-  assert.equal(verdict.allowed, true);
-});
 
 test("findVerificationChecks extracts all checks from a result list", () => {
   const orch = new VerificationOrchestrator();

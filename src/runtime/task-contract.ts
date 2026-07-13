@@ -37,7 +37,8 @@ const ACTION_VERBS = [
 ];
 
 export function extractTaskContract(request: string, repoInspection?: RepoInspection): TaskContract {
-  const userGoal = normalizeWhitespace(request) || "Unspecified user request";
+  const intent = extractUserIntentText(request);
+  const userGoal = normalizeWhitespace(intent) || "Unspecified user request";
   const taskKind = classifyTask(userGoal);
   const deliverables = extractDeliverables(userGoal, taskKind);
 
@@ -49,6 +50,23 @@ export function extractTaskContract(request: string, repoInspection?: RepoInspec
     forbiddenActions: unique([...DEFAULT_FORBIDDEN_ACTIONS, ...extractForbiddenActions(userGoal)]),
     likelyValidation: suggestValidation(userGoal, taskKind, repoInspection),
   };
+}
+
+/**
+ * Strip harness-injected environment preambles so the contract reflects the
+ * user's actual request. The exec runner wraps prompts as:
+ *   [exec environment ...]\n...\n[end exec environment]\n\nUser prompt:\n<intent>
+ * Deliverables extracted from that boilerplate poison the model's view of
+ * intent (e.g. a forbidden action parsed as a deliverable).
+ */
+export function extractUserIntentText(request: string): string {
+  const promptMarker = /(?:^|\n)\s*User prompt:\s*\n?/i.exec(request);
+  if (promptMarker) {
+    const after = request.slice(promptMarker.index + promptMarker[0].length).trim();
+    if (after) return after;
+  }
+  const withoutEnvBlocks = request.replace(/\[(?:exec|end exec) environment[^\]]*\]/gi, "");
+  return withoutEnvBlocks.trim() || request;
 }
 
 export function renderTaskContractForCockpit(contract: TaskContract): string {
@@ -78,7 +96,10 @@ function hasImplementationVerb(lower: string): boolean {
 
 function extractDeliverables(request: string, taskKind: TaskKind): string[] {
   const clauses = request
-    .split(/(?:\n+|[.;]|(?:\s+-\s+))/)
+    // Split on newlines, semicolons, list dashes, and sentence-ending periods.
+    // A period directly between non-space characters (marker.txt, v1.2) is
+    // part of a token, not a clause boundary.
+    .split(/(?:\n+|;|[.](?=\s|$)|(?:\s+-\s+))/)
     .map((part) => normalizeWhitespace(part))
     .filter(Boolean);
   const deliverables: string[] = [];

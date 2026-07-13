@@ -228,7 +228,13 @@ export function setDefaultWorkspaceRoot(workspaceRoot: string | undefined): void
 }
 
 function resolveWorkspaceRoot(explicit?: string): string | undefined {
-  return explicit ? path.resolve(explicit) : defaultWorkspaceRoot;
+  if (!explicit) return defaultWorkspaceRoot;
+  // Preserve container/WSL-style absolute roots when Reaper runs on
+  // Windows. path.resolve("/workspace") would otherwise rewrite the
+  // trusted root to the current drive (for example D:\workspace) while
+  // tool results still carry the portable /workspace path.
+  if (/^\/(?!\/)/.test(explicit)) return explicit.replace(/\/+$/, "");
+  return path.resolve(explicit);
 }
 
 export interface RenderToolResultForModelOptions {
@@ -260,8 +266,9 @@ export function renderToolResultForModel(result: ToolResult, options: RenderTool
 }
 
 function collectWorkspacePathAliases(result: ToolResult, renderedOutput: Record<string, unknown> | undefined): Record<string, string> | undefined {
-  const hostRoot = stripTrailingSlashes(getSandboxTunables().tbenchHostWorkspace ?? "");
-  const aliasRoot = (getSandboxTunables().workspacePathAliases ?? "")
+  const sandbox = getSandboxTunables();
+  const hostRoot = stripTrailingSlashes(sandbox.tbenchHostWorkspace || process.env.REAPER_TBENCH_HOST_WORKSPACE || "");
+  const aliasRoot = (sandbox.workspacePathAliases || process.env.REAPER_WORKSPACE_PATH_ALIASES || "")
     .split(/[:;]/)
     .map((item) => stripTrailingSlashes(item.trim()))
     .find((item) => item.startsWith("/"));

@@ -16,13 +16,15 @@ import type {
 import { createValidConfig, createValidRequestEnvelope } from "../fixtures/phase0.js";
 import { createTempWorkspace } from "../fixtures/workspace.js";
 
-test("final-looking model text alone completes autonomous runtime", async () => {
+test("final-looking model text completes even when runtime evidence is missing", async () => {
   const workspaceRoot = await createTempWorkspace();
   const request = createValidRequestEnvelope();
   request.payload = {
     prompt: "Create final-text.txt and verify it.",
+    verification: { maxIterations: 1 },
   };
   const config = createValidConfig();
+  config.verification.requireGroundedCompletion = true;
   const gateway = new StaticJsonGateway({
     assistant_message: "Task complete. final-text.txt has been saved and verified.",
     tool_calls: [],
@@ -37,62 +39,6 @@ test("final-looking model text alone completes autonomous runtime", async () => 
 
   assert.equal(result.events.some((event) => event.message_type === "task_completed"), true);
   assert.match(result.assistantMessage, /final-text\.txt has been saved/i);
-});
-
-test("explicit complete_task without verification returns a blocker", async () => {
-  const workspaceRoot = await createTempWorkspace();
-  const request = createValidRequestEnvelope();
-  request.payload = {
-    prompt: "Create blocked.txt and verify it.",
-  };
-  const config = createValidConfig();
-  config.verification.requireGroundedCompletion = true;
-  const gateway = new StaticJsonGateway({
-    assistant_message: "blocked.txt is done",
-    tool_calls: [{ id: "complete-without-evidence", name: "complete_task", args: { summary: "blocked.txt is done" } }],
-  });
-
-  const result = await new RuntimeEngine({
-    config,
-    workspaceRoot,
-    requestEnvelope: request,
-    modelGateway: gateway,
-  }).run();
-
-  assert.equal(result.events.some((event) => event.message_type === "task_completed"), false);
-  assert.match(result.assistantMessage, /without a valid complete_task|complete_task/i);
-});
-
-test("complete_task with verification evidence completes", async () => {
-  const workspaceRoot = await createTempWorkspace();
-  const request = createValidRequestEnvelope();
-  request.payload = {
-    prompt: "Check verified.txt and finish.",
-  };
-  const gateway = new StaticJsonGateway([
-    {
-      assistant_message: "",
-      tool_calls: [
-        { id: "write-verified", name: "write_file", args: { path: "verified.txt", content: "ok\n" } },
-        { id: "check-verified", name: "bash", args: { cmd: "test \"$(cat verified.txt)\" = ok" } },
-      ],
-    },
-    {
-      assistant_message: "verified.txt was checked",
-      tool_calls: [{ id: "complete-with-evidence", name: "complete_task", args: { summary: "verified.txt was checked" } }],
-    },
-  ]);
-
-  const result = await new RuntimeEngine({
-    config: createValidConfig(),
-    workspaceRoot,
-    requestEnvelope: request,
-    modelGateway: gateway,
-  }).run();
-
-  assert.equal(result.events.some((event) => event.message_type === "task_completed"), true);
-  assert.equal(result.toolResults.some((item) => item.toolCallId === "check-verified" && item.ok), true);
-  assert.equal(result.assistantMessage, "verified.txt was checked");
 });
 
 class StaticJsonGateway implements ModelGateway {

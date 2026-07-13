@@ -5,7 +5,6 @@
  *  - Write-capable roles can call write tools
  *  - Reviewer and critic cannot edit
  *  - Browser role is browser-only
- *  - Root is the only role with can_complete=true
  *  - shell_risk_tolerance is correctly enforced
  *  - roleAllowsTool is the documented matrix
  */
@@ -30,8 +29,6 @@ test("each role profile has a complete shape", () => {
     assert.equal(typeof p.can_write, "boolean");
     assert.equal(typeof p.can_run_commands, "boolean");
     assert.ok(["low-only", "medium", "high"].includes(p.shell_risk_tolerance));
-    assert.equal(typeof p.can_complete, "boolean");
-    assert.equal(typeof p.can_spawn_agents, "boolean");
   }
 });
 
@@ -83,26 +80,6 @@ test("browser is the only role allowed to call browser_control", () => {
   assert.equal(roleAllowsTool("browser", "browser_control"), true);
 });
 
-test("root is the only role with can_complete=true", () => {
-  for (const [name, p] of Object.entries(ROLE_PROFILES)) {
-    if (name === "root") {
-      assert.equal(p.can_complete, true);
-    } else {
-      assert.equal(p.can_complete, false, `${name} should not have can_complete=true`);
-    }
-  }
-});
-
-test("only root can call complete_task", () => {
-  for (const [name, p] of Object.entries(ROLE_PROFILES)) {
-    const allowed = roleAllowsTool(name as PolicyRole, "complete_task");
-    if (name === "root") {
-      assert.equal(allowed, true);
-    } else {
-      assert.equal(allowed, false, `${name} should not be allowed to call complete_task`);
-    }
-  }
-});
 
 test("shell_risk_tolerance matches shell risk level", () => {
   // low-only roles only accept low
@@ -127,9 +104,3 @@ test("getRoleProfile returns null for unknown role", () => {
   assert.equal(getRoleProfile("nope"), null);
 });
 
-test("subagents (non-root) cannot spawn agents by default", () => {
-  for (const [name, p] of Object.entries(ROLE_PROFILES)) {
-    if (name === "root") continue;
-    assert.equal(p.can_spawn_agents, false, `${name} should not spawn agents`);
-  }
-});

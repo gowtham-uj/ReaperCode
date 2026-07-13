@@ -2,35 +2,31 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  createVerificationState, 
-  applyReviewerVerdict, 
-  isReviewerBlocking, 
-  recordVerificationCheck} from "../../src/runtime/verification-state.js";
+  createVerificationState,
+  applyReviewerVerdict,
+  recordVerificationCheck,
+} from "../../src/runtime/verification-state.js";
 
 test("initial reviewer verdict is undefined", () => {
   const state = createVerificationState(["npm test"]);
   assert.equal(state.reviewerVerdict, undefined);
-  assert.equal(isReviewerBlocking(state), false);
   assert.deepEqual(state.missingEvidence, ["npm test"]);
 });
 
 test("approved reviewer verdict does not add missing evidence", () => {
   let state = createVerificationState(["npm test"]);
   state = applyReviewerVerdict(state, "approved", "LGTM");
-  assert.equal(isReviewerBlocking(state), false);
   assert.deepEqual(state.missingEvidence, ["npm test"]);
 });
 
-test("request_changes reviewer verdict adds missing evidence", () => {
+test("request_changes reviewer verdict remains advisory", () => {
   const state = applyReviewerVerdict(createVerificationState(), "request_changes", "needs docs");
-  assert.equal(isReviewerBlocking(state), false);
-  assert.deepEqual(state.missingEvidence, ["reviewer_request_changes"]);
+  assert.deepEqual(state.missingEvidence, []);
 });
 
-test("block reviewer verdict blocks completion and adds missing evidence", () => {
+test("block reviewer verdict remains advisory", () => {
   const state = applyReviewerVerdict(createVerificationState(), "block", "security hole");
-  assert.equal(isReviewerBlocking(state), true);
-  assert.deepEqual(state.missingEvidence, ["reviewer_block"]);
+  assert.deepEqual(state.missingEvidence, []);
 });
 
 test("missingEvidence stays stable after required evidence is satisfied", () => {

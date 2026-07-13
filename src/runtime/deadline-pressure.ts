@@ -31,7 +31,7 @@ export function getRuntimeDeadlinePressure(startedAt: number, now = Date.now()):
     feedback: [
       critical ? "Runtime deadline is critical." : "Runtime deadline pressure is active.",
       `Approximate time remaining: ${minutesLeft} minute(s).`,
-      "Switch to acceptance-first execution: produce required artifacts/outputs, run the narrowest real validation, and emit complete_task only after evidence. Avoid broad rewrites, repeated inspection, or large generated source payloads.",
+      "Switch to acceptance-first execution: produce required artifacts/outputs, run the narrowest real validation, then stop naturally with a final assistant message and no tool calls. Avoid broad rewrites, repeated inspection, or large generated source payloads.",
     ].join(" "),
     negativeConstraint:
       "Do not spend deadline-critical time on broad refactors, dependency upgrades, repeated reads, or deep internals unless they directly block the visible acceptance artifact/check.",

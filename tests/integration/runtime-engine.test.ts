@@ -78,7 +78,7 @@ test("runtime engine creates isolated run-local artifacts for placeholder trace 
 
   assert.match(result.state.runId, /^run-\d{14}-[a-f0-9]{8}$/);
   assert.notEqual(result.state.runId, "trace-1");
-  assert.match(result.trajectoryPath, new RegExp(`\\.reaper/runs/${result.state.runId}/logs/reaper-trajectory\\.jsonl$`));
+  assert.equal(path.normalize(result.trajectoryPath), path.join(workspaceRoot, ".reaper", "runs", result.state.runId, "logs", "reaper-trajectory.jsonl"));
 
   const runResult = JSON.parse(await readFile(path.join(workspaceRoot, ".reaper", "runs", result.state.runId, "result.json"), "utf8")) as {
     status: string;
@@ -114,7 +114,7 @@ test("runtime engine surfaces failed tools cleanly", async () => {
   assert.ok(typeof result.assistantMessage === "string");
 });
 
-test("runtime engine waits for complete_task before explicit verification", async () => {
+test("explicit tool runs do not trigger an automatic verification node", async () => {
   const workspaceRoot = await createTempWorkspace();
   const request = createValidRequestEnvelope();
   request.payload = {
@@ -158,27 +158,25 @@ test("runtime engine fails gracefully when no live model is configured for auton
   assert.match(result.assistantMessage, /requires a live LLM provider/i);
 });
 
-test("autonomous runtime executes simple tasks directly without planner subagent", async () => {
+test("autonomous runtime executes simple tasks directly and stops naturally", async () => {
   const workspaceRoot = await createTempWorkspace();
   const request = createValidRequestEnvelope();
   request.payload = {
     prompt: "Create simple.txt and verify it.",
   };
-  const gateway = new StaticJsonGateway({
-    assistant_message: "Executing simple task directly.",
-    tool_calls: [
-      { id: "write-simple", name: "write_file", args: { path: "simple.txt", content: "simple-ok\n" } },
-      { id: "verify-simple", name: "bash", args: { cmd: "test \"$(cat simple.txt)\" = simple-ok" } },
-      {
-        id: "complete-simple",
-        name: "complete_task",
-        args: {
-          summary: "simple.txt was created and verified",
-          verificationContract: { commands: [{ command: "test \"$(cat simple.txt)\" = simple-ok", required: true }] },
-        },
-      },
-    ],
-  });
+  const gateway = new StaticJsonGateway([
+    {
+      assistant_message: "Executing simple task directly.",
+      tool_calls: [
+        { id: "write-simple", name: "write_file", args: { path: "simple.txt", content: "simple-ok\n" } },
+        { id: "verify-simple", name: "bash", args: { cmd: "test \"$(cat simple.txt)\" = simple-ok" } },
+      ],
+    },
+    {
+      assistant_message: "simple.txt was created and verified",
+      tool_calls: [],
+    },
+  ]);
 
   const engine = new RuntimeEngine({
     config: createValidConfig(),
@@ -192,7 +190,7 @@ test("autonomous runtime executes simple tasks directly without planner subagent
   assert.equal(gateway.generateCount, 2);
   assert.equal(requestedToolResults(result.toolResults).length, 2);
   assert.equal(requestedToolResults(result.toolResults).every((item) => item.ok), true);
-  assert.equal(result.verification?.ok, true);
+  assert.equal(result.verification, undefined);
   assert.equal(await readFile(path.join(workspaceRoot, "simple.txt"), "utf8"), "simple-ok\n");
 });
 
@@ -266,11 +264,14 @@ test("autonomous runtime allows completion after python verification fixes earli
       ],
     },
     {
-      assistant_message: "Pip repair verified.",
+      assistant_message: "Verifying the pip repair.",
       tool_calls: [
         { id: "pip-fixed", name: "bash", args: { cmd: "python3 -c \"import pip; print(pip.__version__)\"" } },
-        { id: "complete-pip", name: "complete_task", args: { summary: "pip was repaired and verified" } },
       ],
+    },
+    {
+      assistant_message: "pip was repaired and verified",
+      tool_calls: [],
     },
   ]);
 
@@ -319,8 +320,11 @@ test("missing-artifact validation guard allows same-batch producers before verif
           name: "bash",
           args: { cmd: "test -s docker-compose.yml && test -s .dockerignore && grep -q services docker-compose.yml && grep -q node_modules .dockerignore" },
         },
-        { id: "complete-docker-files", name: "complete_task", args: { summary: "Docker files created and verified" } },
       ],
+    },
+    {
+      assistant_message: "Docker files created and verified",
+      tool_calls: [],
     },
   ]);
 
@@ -338,138 +342,38 @@ test("missing-artifact validation guard allows same-batch producers before verif
   assert.equal(result.events.some((event) => event.message_type === "task_completed"), true);
 });
 
-test("autonomous runtime requires grounded verification before completion when gate is enabled", async () => {
-  const workspaceRoot = await createTempWorkspace();
-  const request = createValidRequestEnvelope();
-  request.payload = {
-    prompt: "Create gated.txt and complete only after grounded verification.",
-  };
-  const config = createValidConfig();
-  config.verification.requireGroundedCompletion = true;
-  config.verification.selfDebugExplanation.enabled = false;
-  const gateway = new StaticJsonGateway([
-    {
-      assistant_message: "Trying to finish without evidence.",
-      tool_calls: [{ id: "early-complete", name: "complete_task", args: { summary: "gated.txt created" } }],
-    },
-    {
-      assistant_message: "Creating and verifying.",
-      tool_calls: [
-        { id: "write-gated", name: "write_file", args: { path: "gated.txt", content: "ok\n" } },
-        { id: "verify-gated", name: "bash", args: { cmd: "test \"$(cat gated.txt)\" = ok" } },
-        { id: "complete-gated", name: "complete_task", args: { summary: "gated.txt created" } },
-      ],
-    },
-  ]);
-
-  const engine = new RuntimeEngine({
-    config,
-    workspaceRoot,
-    requestEnvelope: request,
-    modelGateway: gateway,
-  });
-
-  const result = await engine.run();
-
-  assert.equal(gateway.generateCount, 3);
-  assert.equal(result.verification?.ok, true);
-  assert.equal(result.events.some((event) => event.message_type === "task_completed"), true);
-});
-
-test("autonomous runtime best-of-N mirrors the verified rollout over self-report", async () => {
-  const workspaceRoot = await createTempWorkspace();
-  const request = createValidRequestEnvelope();
-  request.payload = {
-    prompt: "Complex task: Create bon.txt and verify it.",
-  };
-  const config = createValidConfig();
-  config.runtime.voteAttempts = 2;
-  config.verification.selfDebugExplanation.enabled = false;
-  const gateway = new StaticJsonGateway([
-    {
-      installs: [],
-      testGuidance: "Verify bon.txt content.",
-      steps: [
-        {
-          id: "self-report",
-          title: "Self-report",
-          instructions: "Incorrectly finish without evidence.",
-          tool_calls: [{ id: "self-report", name: "complete_task", args: { summary: "bon.txt created" } }],
-        },
-      ],
-    },
-    {
-      installs: [],
-      testGuidance: "Verify bon.txt content.",
-      steps: [
-        {
-          id: "verified",
-          title: "Create and verify",
-          instructions: "Create bon.txt and verify its content.",
-          tool_calls: [
-            { id: "write-bon", name: "write_file", args: { path: "bon.txt", content: "verified\n" } },
-            { id: "verify-bon", name: "bash", args: { cmd: "test \"$(cat bon.txt)\" = verified" } },
-            {
-              id: "complete-bon",
-              name: "complete_task",
-              args: {
-                summary: "bon.txt created and verified",
-                verificationContract: { commands: [{ command: "test \"$(cat bon.txt)\" = verified", required: true }] },
-              },
-            },
-          ],
-        },
-      ],
-    },
-  ]);
-
-  const result = await new RuntimeEngine({
-    config,
-    workspaceRoot,
-    requestEnvelope: request,
-    modelGateway: gateway,
-  }).run();
-
-  assert.ok(gateway.generateCount >= 2);
-  assert.equal(result.verification?.ok, true);
-  assert.match(result.assistantMessage, /bon\.txt|verified|passing/i);
-  assert.equal(await readFile(path.join(workspaceRoot, "bon.txt"), "utf8"), "verified\n");
-});
-
 test("autonomous runtime plans once and drains durable execution steps", async () => {
   const workspaceRoot = await createTempWorkspace();
   const request = createValidRequestEnvelope();
   request.payload = {
     prompt: "Complex task: Create answer.txt and verify it.",
   };
-  const gateway = new StaticJsonGateway({
-    installs: [],
-    testGuidance: "Run npm test or relevant local checks.",
-    steps: [
-      {
-        id: "write-answer",
-        title: "Write answer",
-        instructions: "Create the requested file.",
-        tool_calls: [{ id: "write-answer-file", name: "write_file", args: { path: "answer.txt", content: "ok\n" } }],
-      },
-      {
-        id: "verify-answer",
-        title: "Verify answer",
-        instructions: "Run local verification and complete.",
-        tool_calls: [
-          { id: "verify-answer-command", name: "bash", args: { cmd: "test \"$(cat answer.txt)\" = ok" } },
-          {
-            id: "complete-answer",
-            name: "complete_task",
-            args: {
-              summary: "answer.txt was created and verified",
-              verificationContract: { commands: [{ command: "test \"$(cat answer.txt)\" = ok", required: true }] },
-            },
-          },
-        ],
-      },
-    ],
-  });
+  const gateway = new StaticJsonGateway([
+    {
+      installs: [],
+      testGuidance: "Run npm test or relevant local checks.",
+      steps: [
+        {
+          id: "write-answer",
+          title: "Write answer",
+          instructions: "Create the requested file.",
+          tool_calls: [{ id: "write-answer-file", name: "write_file", args: { path: "answer.txt", content: "ok\n" } }],
+        },
+        {
+          id: "verify-answer",
+          title: "Verify answer",
+          instructions: "Run local verification and finish.",
+          tool_calls: [
+            { id: "verify-answer-command", name: "bash", args: { cmd: "test \"$(cat answer.txt)\" = ok" } },
+          ],
+        },
+      ],
+    },
+    {
+      assistant_message: "answer.txt was created and verified",
+      tool_calls: [],
+    },
+  ]);
 
   const engine = new RuntimeEngine({
     config: createValidConfig(),
@@ -484,7 +388,7 @@ test("autonomous runtime plans once and drains durable execution steps", async (
   const durableRequested = requestedToolResults(result.toolResults);
   assert.equal(durableRequested.length, 2);
   assert.equal(durableRequested.every((item) => item.ok), true);
-  assert.equal(result.verification?.ok, true);
+  assert.equal(result.verification, undefined);
   assert.equal(await readFile(path.join(workspaceRoot, "answer.txt"), "utf8"), "ok\n");
 });
 
@@ -511,15 +415,11 @@ test("autonomous runtime can generate tool calls for a durable step without init
       tool_calls: [
         { id: "write-deferred", name: "write_file", args: { path: "deferred.txt", content: "deferred-ok\n" } },
         { id: "verify-deferred", name: "bash", args: { cmd: "test \"$(cat deferred.txt)\" = deferred-ok" } },
-        {
-          id: "complete-deferred",
-          name: "complete_task",
-          args: {
-            summary: "deferred.txt was created and verified",
-            verificationContract: { commands: [{ command: "test \"$(cat deferred.txt)\" = deferred-ok", required: true }] },
-          },
-        },
       ],
+    },
+    {
+      assistant_message: "deferred.txt was created and verified",
+      tool_calls: [],
     },
   ]);
 
@@ -536,17 +436,18 @@ test("autonomous runtime can generate tool calls for a durable step without init
   const deferredRequested = requestedToolResults(result.toolResults);
   assert.equal(deferredRequested.length, 2);
   assert.equal(deferredRequested.every((item) => item.ok), true);
-  assert.equal(result.verification?.ok, true);
+  assert.equal(result.verification, undefined);
   assert.equal(await readFile(path.join(workspaceRoot, "deferred.txt"), "utf8"), "deferred-ok\n");
 });
 
-test("autonomous runtime treats mid-plan verification as checkpoint, not completion", async () => {
+test("autonomous runtime completes work after a mid-plan verification checkpoint", async () => {
   const workspaceRoot = await createTempWorkspace();
   const request = createValidRequestEnvelope();
   request.payload = {
     prompt: "Complex task: Create two files with a checkpoint between them.",
   };
-  const gateway = new StaticJsonGateway({
+  const gateway = new StaticJsonGateway([
+    {
     installs: [],
     testGuidance: "Run checkpoint and final tests.",
     steps: [
@@ -594,25 +495,15 @@ test("autonomous runtime treats mid-plan verification as checkpoint, not complet
             },
           },
           { id: "final-verify-command", name: "bash", args: { cmd: "node --test tests/final.test.mjs" } },
-          {
-            id: "complete-checkpointed-task",
-            name: "complete_task",
-            args: {
-              summary: "Both files were created and verified.",
-              verificationContract: {
-                commands: [
-                  {
-                    command: "node --test tests/final.test.mjs",
-                    required: true,
-                  },
-                ],
-              },
-            },
-          },
         ],
       },
     ],
-  });
+    },
+    {
+      assistant_message: "Both files were created and verified.",
+      tool_calls: [],
+    },
+  ]);
 
   const engine = new RuntimeEngine({
     config: createValidConfig(),
@@ -623,14 +514,12 @@ test("autonomous runtime treats mid-plan verification as checkpoint, not complet
 
   const result = await engine.run();
 
-  // After the natural-stop change the runtime exits as soon as a passing
-  // verification runs (mid-plan is treated as a checkpoint, not task completion).
-  // The mock feeds three model responses, but the engine only needs the first
-  // verification batch before stopping, so generateCount is between 1 and 2.
-  assert.ok(gateway.generateCount >= 1);
-  assert.ok(gateway.generateCount <= 2);
+  assert.equal(gateway.generateCount, 2);
   assert.equal(result.events.some((event) => event.message_type === "tool_call_completed"), true);
+  assert.equal(result.verification, undefined);
   assert.equal(await readFile(path.join(workspaceRoot, "first.txt"), "utf8"), "ok\n");
+  assert.equal(await readFile(path.join(workspaceRoot, "second.txt"), "utf8"), "done\n");
+  assert.equal(await readFile(path.join(workspaceRoot, "tests", "final.test.mjs"), "utf8").then((text) => text.includes("both files exist")), true);
 });
 
 test("autonomous runtime executes canonical main-agent tool calls", async () => {
@@ -655,17 +544,8 @@ test("autonomous runtime executes canonical main-agent tool calls", async () => 
       ],
     },
     {
-      assistant_message: "",
-      tool_calls: [
-        {
-          id: "finish-alias",
-          name: "complete_task",
-          args: {
-            summary: "alias.txt was created and verified",
-            verificationContract: { commands: [{ command: "test \"$(cat alias.txt)\" = alias-replaced", required: true }] },
-          },
-        },
-      ],
+      assistant_message: "alias.txt was created and verified",
+      tool_calls: [],
     },
   ]);
 
@@ -678,95 +558,10 @@ test("autonomous runtime executes canonical main-agent tool calls", async () => 
 
   const result = await engine.run();
 
-  assert.ok(result.toolResults.length >= 11);
   assert.equal(requestedToolResults(result.toolResults).length, 9);
   assert.equal(requestedToolResults(result.toolResults).every((item) => item.ok), true);
   assert.equal(await readFile(path.join(workspaceRoot, "alias.txt"), "utf8"), "alias-replaced\n");
   assert.equal(await readFile(path.join(workspaceRoot, "alias-2.txt"), "utf8"), "alias-2-ok\n");
-});
-
-test("autonomous runtime ignores tool calls after complete_task in a model batch", async () => {
-  const workspaceRoot = await createTempWorkspace();
-  const request = createValidRequestEnvelope();
-  request.payload = {
-    prompt: "Complex task: Create only before.txt and complete.",
-  };
-  const gateway = new StaticJsonGateway({
-    installs: [],
-    testGuidance: "Verify only before file exists.",
-    steps: [
-      {
-        id: "complete-boundary",
-        title: "Complete before extra calls",
-        instructions: "Calls after complete_task must be ignored.",
-	        tool_calls: [
-	          { id: "write-before", name: "write_file", args: { path: "before.txt", content: "before\n" } },
-	          { id: "verify-before", name: "bash", args: { cmd: "test \"$(cat before.txt)\" = before" } },
-	          { id: "finish", name: "complete_task", args: { summary: "before.txt created" } },
-	          { id: "write-after", name: "write_file", args: { path: "after.txt", content: "after\n" } },
-	        ],
-      },
-    ],
-  });
-
-  const engine = new RuntimeEngine({
-    config: createValidConfig(),
-    workspaceRoot,
-    requestEnvelope: request,
-    modelGateway: gateway,
-  });
-
-  const result = await engine.run();
-
-	  const boundaryRequested = requestedToolResults(result.toolResults);
-	  assert.equal(boundaryRequested.length, 2);
-	  assert.equal(boundaryRequested[0]?.toolCallId, "write-before");
-	  assert.equal(boundaryRequested[1]?.toolCallId, "verify-before");
-  assert.equal(await readFile(path.join(workspaceRoot, "before.txt"), "utf8"), "before\n");
-  await assert.rejects(() => readFile(path.join(workspaceRoot, "after.txt"), "utf8"));
-});
-
-test("autonomous runtime stops when repair repeats the same failed tool pattern", async () => {
-  const workspaceRoot = await createTempWorkspace();
-  const request = createValidRequestEnvelope();
-  request.payload = {
-    prompt: "Complex task: Try a failing command, then avoid looping on the same repair.",
-  };
-  const failingCall = { id: "same-fail", name: "bash", args: { cmd: "node -e \"process.exit(7)\"" } } as const;
-  const gateway = new StaticJsonGateway([
-    {
-      installs: [],
-      testGuidance: "Do not repeat failing command.",
-    steps: [
-        {
-          id: "fail-step",
-          title: "Run failing command",
-          instructions: "This intentionally fails.",
-          tool_calls: [failingCall],
-        },
-      ],
-	    },
-	    {
-	      assistant_message: "Retrying the same failed command.",
-	      tool_calls: [failingCall],
-	    },
-	  ]);
-
-  const engine = new RuntimeEngine({
-    config: createValidConfig(),
-    workspaceRoot,
-    requestEnvelope: request,
-    modelGateway: gateway,
-  });
-
-  const result = await engine.run();
-
-  assert.equal(gateway.generateCount, 3);
-  const stuckRequested = requestedToolResults(result.toolResults);
-  assert.equal(stuckRequested.length, 3);
-  assert.equal(stuckRequested.every((item) => !item.ok), true);
-  assert.match(result.assistantMessage, /appears stuck|completion gate exhausted/i);
-  assert.equal(result.events.some((event) => event.message_type === "task_completed"), false);
 });
 
 test("runtime allows same-batch file inspection through the WAL view after state-changing tools", async () => {
@@ -796,7 +591,7 @@ test("runtime allows same-batch file inspection through the WAL view after state
   assert.equal(await readFile(path.join(workspaceRoot, "output.txt"), "utf8"), "ready\n");
 });
 
-test("autonomous runtime completes final output check only after explicit complete_task", async () => {
+test("autonomous runtime completes the final output check with a natural stop", async () => {
   const workspaceRoot = await createTempWorkspace();
   await writeFile(path.join(workspaceRoot, "output.txt"), "ready\n", "utf8");
   const request = createValidRequestEnvelope();
@@ -821,8 +616,8 @@ test("autonomous runtime completes final output check only after explicit comple
       tool_calls: [{ id: "check-output", name: "bash", args: { cmd: "cat output.txt" } }],
     },
     {
-      assistant_message: "",
-      tool_calls: [{ id: "complete-output", name: "complete_task", args: { summary: "output.txt verified" } }],
+      assistant_message: "output.txt verified",
+      tool_calls: [],
     },
   ]);
 
@@ -839,332 +634,6 @@ test("autonomous runtime completes final output check only after explicit comple
   assert.equal(requestedToolResults(result.toolResults).every((item) => item.ok), true);
   assert.equal(result.events.some((event) => event.message_type === "task_completed"), true);
   assert.equal(result.assistantMessage, "output.txt verified");
-});
-
-test("autonomous runtime rejects inconsistent stack-trace output counts before completion", async () => {
-  const workspaceRoot = await createTempWorkspace();
-  const request = createValidRequestEnvelope();
-  request.payload = {
-    prompt: "Complex task: analyze stack traces and write output.txt.",
-  };
-  const gateway = new StaticJsonGateway([
-    {
-      installs: [],
-      testGuidance: "Run the analyzer and inspect output.txt.",
-      steps: [
-        {
-          id: "finalize",
-          title: "Analyze stack traces",
-          type: "finalize",
-          instructions: "Generate output.txt and complete only if the counts are consistent.",
-        },
-      ],
-    },
-    {
-      assistant_message: "",
-      tool_calls: [
-        {
-          id: "bad-output",
-          name: "bash",
-          args: {
-            cmd:
-              "printf 'Found 285 stack traces\\nNumber of unique call sites (based on top 3 frames): 2503\\nTotal stack traces analyzed: 7406\\n'",
-          },
-        },
-        { id: "bad-complete", name: "complete_task", args: { summary: "analysis complete" } },
-      ],
-    },
-    {
-      assistant_message: "",
-      tool_calls: [
-        {
-          id: "good-output",
-          name: "bash",
-          args: {
-            cmd:
-              "printf 'Found 646 stack traces\\nNumber of unique call sites (based on top 3 frames): 317\\nTotal stack traces analyzed: 646\\n\\nMost common call sites:\\n'",
-          },
-        },
-        { id: "good-complete", name: "complete_task", args: { summary: "analysis complete" } },
-      ],
-    },
-  ]);
-
-  const engine = new RuntimeEngine({
-    config: createSemanticOutputFixtureConfig(),
-    workspaceRoot,
-    requestEnvelope: request,
-    modelGateway: gateway,
-  });
-
-  const result = await engine.run();
-
-  assert.ok(gateway.generateCount > 3);
-  assert.equal(result.events.some((event) => event.message_type === "task_completed"), true);
-  assert.equal(result.toolResults.some((item) => item.toolCallId === "bad-output" && item.ok), true);
-  assert.equal(result.toolResults.some((item) => item.toolCallId === "good-output" && item.ok), true);
-  assert.equal(result.assistantMessage, "analysis complete");
-});
-
-test("autonomous runtime rejects degenerate stack-trace call-site output", async () => {
-  const workspaceRoot = await createTempWorkspace();
-  const request = createValidRequestEnvelope();
-  request.payload = {
-    prompt: "Complex task: analyze stack traces and write output.txt.",
-  };
-  const gateway = new StaticJsonGateway([
-    {
-      installs: [],
-      testGuidance: "Run the analyzer and inspect output.txt.",
-      steps: [
-        {
-          id: "finalize",
-          title: "Analyze stack traces",
-          type: "finalize",
-          instructions: "Generate output.txt and complete only if the call-site distribution is meaningful.",
-        },
-      ],
-    },
-    {
-      assistant_message: "",
-      tool_calls: [
-        {
-          id: "degenerate-output",
-          name: "bash",
-          args: {
-            cmd:
-              "printf 'Found 285 stack traces\\nNumber of unique call sites (based on top 3 frames): 1\\nTotal stack traces analyzed: 285\\n\\nMost common call sites:\\n\\n1. Count: 285\\n  Frame 1: printStack()\\n  Frame 2: frame2\\n  Frame 3: frame3\\n'",
-          },
-        },
-        { id: "bad-complete", name: "complete_task", args: { summary: "analysis complete" } },
-      ],
-    },
-    {
-      assistant_message: "",
-      tool_calls: [
-        {
-          id: "good-output",
-          name: "bash",
-          args: {
-            cmd:
-              "printf 'Found 646 stack traces\\nNumber of unique call sites (based on top 3 frames): 317\\nTotal stack traces analyzed: 646\\n\\nMost common call sites:\\n'",
-          },
-        },
-        { id: "good-complete", name: "complete_task", args: { summary: "analysis complete" } },
-      ],
-    },
-  ]);
-
-  const engine = new RuntimeEngine({
-    config: createSemanticOutputFixtureConfig(),
-    workspaceRoot,
-    requestEnvelope: request,
-    modelGateway: gateway,
-  });
-
-  const result = await engine.run();
-
-  assert.ok(gateway.generateCount > 2);
-  assert.equal(result.events.some((event) => event.message_type === "task_completed"), true);
-  assert.equal(result.toolResults.some((item) => item.toolCallId === "degenerate-output" && item.ok), true);
-  assert.equal(result.toolResults.some((item) => item.toolCallId === "good-output" && item.ok), true);
-  assert.equal(result.assistantMessage, "analysis complete");
-});
-
-test("autonomous runtime rejects stack-trace output below observed numeric marker", async () => {
-  const workspaceRoot = await createTempWorkspace();
-  const request = createValidRequestEnvelope();
-  request.payload = {
-    prompt: "Complex task: analyze stack traces and write output.txt.",
-  };
-  const gateway = new StaticJsonGateway([
-    {
-      installs: [],
-      testGuidance: "Inspect log.stack and run the analyzer.",
-      steps: [
-        {
-          id: "finalize",
-          title: "Analyze stack traces",
-          type: "finalize",
-          instructions: "Generate output.txt and complete only if the trace count is plausible.",
-        },
-      ],
-    },
-    {
-      assistant_message: "",
-      tool_calls: [
-        { id: "inspect-log", name: "bash", args: { cmd: "printf '285\\n\\t in frame1\\n' # log.stack" } },
-        {
-          id: "too-few-output",
-          name: "bash",
-          args: {
-            cmd:
-              "printf 'Found 3 stack traces\\nNumber of unique call sites (based on top 3 frames): 2\\nTotal stack traces analyzed: 3\\n\\nMost common call sites:\\n'",
-          },
-        },
-        { id: "bad-complete", name: "complete_task", args: { summary: "analysis complete" } },
-      ],
-    },
-    {
-      assistant_message: "",
-      tool_calls: [
-        {
-          id: "good-output",
-          name: "bash",
-          args: {
-            cmd:
-              "printf 'Found 646 stack traces\\nNumber of unique call sites (based on top 3 frames): 317\\nTotal stack traces analyzed: 646\\n\\nMost common call sites:\\n'",
-          },
-        },
-        { id: "good-complete", name: "complete_task", args: { summary: "analysis complete" } },
-      ],
-    },
-  ]);
-
-  const engine = new RuntimeEngine({
-    config: createSemanticOutputFixtureConfig(),
-    workspaceRoot,
-    requestEnvelope: request,
-    modelGateway: gateway,
-  });
-
-  const result = await engine.run();
-
-  assert.ok(gateway.generateCount > 2);
-  assert.equal(result.events.some((event) => event.message_type === "task_completed"), true);
-  assert.equal(result.toolResults.some((item) => item.toolCallId === "too-few-output" && item.ok), true);
-  assert.equal(result.toolResults.some((item) => item.toolCallId === "good-output" && item.ok), true);
-  assert.equal(result.assistantMessage, "analysis complete");
-});
-
-test("autonomous runtime rejects stack-trace frame lines with raw in prefix", async () => {
-  const workspaceRoot = await createTempWorkspace();
-  const request = createValidRequestEnvelope();
-  request.payload = {
-    prompt: "Complex task: analyze stack traces and write output.txt.",
-  };
-  const gateway = new StaticJsonGateway([
-    {
-      installs: [],
-      testGuidance: "Strip raw stack-frame prefixes.",
-      steps: [
-        {
-          id: "finalize",
-          title: "Analyze stack traces",
-          type: "finalize",
-          instructions: "Generate output.txt and complete only if frame content is clean.",
-        },
-      ],
-    },
-    {
-      assistant_message: "",
-      tool_calls: [
-        {
-          id: "prefixed-output",
-          name: "bash",
-          args: {
-            cmd:
-              "printf 'Found 646 stack traces\\nNumber of unique call sites (based on top 3 frames): 317\\nTotal stack traces analyzed: 646\\n\\nMost common call sites:\\n\\n1. Count: 55\\n  Frame 1: in printStack()\\n'",
-          },
-        },
-        { id: "bad-complete", name: "complete_task", args: { summary: "analysis complete" } },
-      ],
-    },
-    {
-      assistant_message: "",
-      tool_calls: [
-        {
-          id: "good-output",
-          name: "bash",
-          args: {
-            cmd:
-              "printf 'Found 646 stack traces\\nNumber of unique call sites (based on top 3 frames): 317\\nTotal stack traces analyzed: 646\\n\\nMost common call sites:\\n\\n1. Count: 55\\n   Frame 1: printStack()\\n'",
-          },
-        },
-        { id: "good-complete", name: "complete_task", args: { summary: "analysis complete" } },
-      ],
-    },
-  ]);
-
-  const engine = new RuntimeEngine({
-    config: createSemanticOutputFixtureConfig(),
-    workspaceRoot,
-    requestEnvelope: request,
-    modelGateway: gateway,
-  });
-
-  const result = await engine.run();
-
-  assert.ok(gateway.generateCount > 2);
-  assert.equal(result.events.some((event) => event.message_type === "task_completed"), true);
-  assert.equal(result.toolResults.some((item) => item.toolCallId === "prefixed-output" && item.ok), true);
-  assert.equal(result.toolResults.some((item) => item.toolCallId === "good-output" && item.ok), true);
-  assert.equal(result.assistantMessage, "analysis complete");
-});
-
-test("autonomous runtime rejects two-space stack-trace frame indentation", async () => {
-  const workspaceRoot = await createTempWorkspace();
-  const request = createValidRequestEnvelope();
-  request.payload = {
-    prompt: "Complex task: analyze stack traces and write output.txt.",
-  };
-  const gateway = new StaticJsonGateway([
-    {
-      installs: [],
-      testGuidance: "Match exact stack-trace output formatting.",
-      steps: [
-        {
-          id: "finalize",
-          title: "Analyze stack traces",
-          type: "finalize",
-          instructions: "Generate output.txt and complete only if frame indentation is exact.",
-        },
-      ],
-    },
-    {
-      assistant_message: "",
-      tool_calls: [
-        {
-          id: "two-space-output",
-          name: "bash",
-          args: {
-            cmd:
-              "printf 'Found 646 stack traces\\nNumber of unique call sites (based on top 3 frames): 317\\nTotal stack traces analyzed: 646\\n\\nMost common call sites:\\n\\n1. Count: 55\\n  Frame 1: printStack()\\n'",
-          },
-        },
-        { id: "bad-complete", name: "complete_task", args: { summary: "analysis complete" } },
-      ],
-    },
-    {
-      assistant_message: "",
-      tool_calls: [
-        {
-          id: "good-output",
-          name: "bash",
-          args: {
-            cmd:
-              "printf 'Found 646 stack traces\\nNumber of unique call sites (based on top 3 frames): 317\\nTotal stack traces analyzed: 646\\n\\nMost common call sites:\\n\\n1. Count: 55\\n   Frame 1: printStack()\\n'",
-          },
-        },
-        { id: "good-complete", name: "complete_task", args: { summary: "analysis complete" } },
-      ],
-    },
-  ]);
-
-  const engine = new RuntimeEngine({
-    config: createSemanticOutputFixtureConfig(),
-    workspaceRoot,
-    requestEnvelope: request,
-    modelGateway: gateway,
-  });
-
-  const result = await engine.run();
-
-  assert.ok(gateway.generateCount > 2);
-  assert.equal(result.events.some((event) => event.message_type === "task_completed"), true);
-  assert.equal(result.toolResults.some((item) => item.toolCallId === "two-space-output" && item.ok), true);
-  assert.equal(result.toolResults.some((item) => item.toolCallId === "good-output" && item.ok), true);
-  assert.equal(result.assistantMessage, "analysis complete");
 });
 
 test("runtime engine can summarize with a live model when available", { skip: !(process.env.RUN_LIVE_LLM_TESTS === "1" && process.env.DEEPSEEK_API_KEY) }, async () => {
@@ -1188,14 +657,10 @@ test("runtime engine can summarize with a live model when available", { skip: !(
   assert.match(result.assistantMessage.toLowerCase(), /readme|workspace|temp/);
 });
 
-function createSemanticOutputFixtureConfig() {
-  return createValidConfig();
-}
 
 class StaticJsonGateway implements ModelGateway {
   generateCount = 0;
   private readonly responses: unknown[];
-  private readonly queuedResponses: unknown[] = [];
 
   constructor(response: unknown | unknown[]) {
     this.responses = Array.isArray(response) ? response : [response];
@@ -1219,7 +684,7 @@ class StaticJsonGateway implements ModelGateway {
 
   async generate(request: GenerateRequest): Promise<GenerateResult> {
     this.generateCount += 1;
-    const response = this.normalizeResponse(this.queuedResponses.shift() ?? this.responses[Math.min(this.generateCount - 1, this.responses.length - 1)]);
+    const response = this.normalizeResponse(this.responses[Math.min(this.generateCount - 1, this.responses.length - 1)]);
     return {
       role: request.role,
       profileName: request.role,
@@ -1235,27 +700,15 @@ class StaticJsonGateway implements ModelGateway {
     const record = response && typeof response === "object" ? (response as Record<string, unknown>) : undefined;
     if (!record) return response;
     if (!Array.isArray(record.tool_calls) && Array.isArray(record.steps)) {
-      return this.normalizeResponse({
+      return {
         assistant_message: "",
         tool_calls: record.steps.flatMap((step) => {
           const stepRecord = step && typeof step === "object" ? (step as Record<string, unknown>) : {};
           return Array.isArray(stepRecord.tool_calls) ? stepRecord.tool_calls : [];
         }),
-      });
+      };
     }
-    if (!Array.isArray(record.tool_calls)) return response;
-    const completionIndex = record.tool_calls.findIndex((call) => isToolCallNamed(call, "complete_task"));
-    if (completionIndex < 0) return response;
-    const beforeCompletion = record.tool_calls.slice(0, completionIndex);
-    if (!beforeCompletion.some(isMutatingFixtureToolCall)) return response;
-    this.queuedResponses.unshift({
-      assistant_message: "",
-      tool_calls: [record.tool_calls[completionIndex]],
-    });
-    return {
-      ...record,
-      tool_calls: beforeCompletion,
-    };
+    return response;
   }
 
   async *stream(_request: GenerateRequest): AsyncIterable<StreamEvent> {}
@@ -1276,12 +729,3 @@ class StaticJsonGateway implements ModelGateway {
   }
 }
 
-function isToolCallNamed(value: unknown, name: string): boolean {
-  return Boolean(value && typeof value === "object" && (value as { name?: unknown }).name === name);
-}
-
-function isMutatingFixtureToolCall(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
-  const name = (value as { name?: unknown }).name;
-  return typeof name === "string" && ["write_file", "replace_in_file", "edit_file", "delete_file", "bash"].includes(name);
-}

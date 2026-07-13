@@ -17,35 +17,6 @@ test("accepts a valid main-agent tool call batch", () => {
   assert.deepEqual(result.blockers, []);
 });
 
-test("complete_task can be batched with mutating tools", () => {
-  const result = validateToolCallBatch([
-    { name: "write_file", arguments: { path: "out.txt", content: "done" } },
-    { name: "complete_task", arguments: { summary: "finished" } },
-  ]);
-
-  assert.equal(result.ok, true);
-  assert.deepEqual(result.blockers, []);
-});
-
-test("complete_task can be batched with non-mutating inspection tools", () => {
-  const result = validateToolCallBatch([
-    { name: "read_file", arguments: { path: "README.md" } },
-    { name: "complete_task", arguments: { summary: "finished" } },
-  ]);
-
-  assert.equal(result.ok, true);
-});
-
-test("complete_task can be batched with advisory memory tools", () => {
-  const result = validateToolCallBatch([
-    { name: "update_plan", arguments: { markdown: "## Plan\n- done" } },
-    { name: "update_todo", arguments: { items: [{ id: "done", content: "Finish task", done: true }] } },
-    { name: "complete_task", arguments: { summary: "finished" } },
-  ]);
-
-  assert.equal(result.ok, true);
-});
-
 test("planning-only advisory batches are allowed", () => {
   const result = validateToolCallBatch([
     { name: "update_plan", arguments: { markdown: "## Plan\n- inspect" } },

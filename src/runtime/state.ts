@@ -44,6 +44,8 @@ export const RuntimeStateSchema = z
     feedback: z.array(z.string()),
     negativeConstraints: z.array(z.string()),
     repoInspection: RepoInspectionSchema.optional(),
+    /** Named-session journal key (.reaper/sessions/<name>.jsonl) for cross-run continuity. */
+    namedSession: z.string().min(1).max(128).optional(),
     verificationState: VerificationStateSchema.optional(),
     budgetState: BudgetStateSchema.optional(),
   })

@@ -17,6 +17,7 @@ export const EvalGateSchema = z.enum([
   "scratchpad_contains",
   "summary_exists",
   "model_calls_min",
+  "system_prompt_stable_after_summary",
 ]);
 
 export const EvalFileEqualsGateSchema = z
@@ -71,6 +72,12 @@ export const EvalModelCallsMinGateSchema = z
   })
   .strict();
 
+export const EvalSystemPromptStableAfterSummaryGateSchema = z
+  .object({
+    type: z.literal("system_prompt_stable_after_summary"),
+  })
+  .strict();
+
 export const EvalVerificationExitGateSchema = z
   .object({
     type: z.literal("verification_exit_0"),
@@ -87,6 +94,7 @@ export const EvalGateSpecSchema = z.discriminatedUnion("type", [
   EvalScratchpadContainsGateSchema,
   EvalSummaryExistsGateSchema,
   EvalModelCallsMinGateSchema,
+  EvalSystemPromptStableAfterSummaryGateSchema,
 ]);
 
 export const EvalTaskSchema = z

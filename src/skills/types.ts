@@ -44,9 +44,7 @@ export type SkillCategory =
   | "swe-bench-solving"
   | "agent-runtime-debugging"
   | "session-persistence"
-  | "completion-gate-debugging"
-  | "prompt-enhancement"
-  | "swarm-orchestration";
+  | "prompt-enhancement";
 
 export const ALL_SKILL_CATEGORIES: readonly SkillCategory[] = [
   "repo-understanding",
@@ -63,9 +61,7 @@ export const ALL_SKILL_CATEGORIES: readonly SkillCategory[] = [
   "swe-bench-solving",
   "agent-runtime-debugging",
   "session-persistence",
-  "completion-gate-debugging",
   "prompt-enhancement",
-  "swarm-orchestration",
 ];
 
 export interface SkillValidationCommand {

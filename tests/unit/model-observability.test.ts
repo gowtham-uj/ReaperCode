@@ -54,7 +54,7 @@ test("recordModelCall writes a generation event with prompt and response to the 
   assert.ok(contents.includes("planner_subagent"), "log should include the source label");
   const event = JSON.parse(contents.trim().split("\n").pop()!);
   assert.equal(event.metadata.source, "planner_subagent");
-  assert.equal(event.metadata.profile, "strong_model");
+  assert.equal(event.metadata.profile, "secondary_model");
   assert.equal(event.metadata.legacyRole, "secondary_model");
   assert.equal(event.metadata.role, "secondary_model");
   assert.equal(event.metadata.durationMs, 1000);

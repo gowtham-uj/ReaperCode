@@ -75,7 +75,7 @@ export async function buildBashResultOutput(
 
   const trust = classifyToolResultTrust({ name: "bash", args: { cmd: input.command } });
   if (trust === "untrusted") {
-    text = wrapUntrustedContent(text, `run_shell_command: ${input.command}`);
+    text = wrapUntrustedContent(text, `bash: ${input.command}`);
   }
 
   return { content: text, output: base };

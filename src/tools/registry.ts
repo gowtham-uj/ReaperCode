@@ -18,8 +18,7 @@ import {
   ReplaceInFileArgsSchema,
   EditFileArgsSchema,
   ReplaceSymbolArgsSchema,
-  RunShellCommandArgsSchema,
-  SandboxServiceControlArgsSchema,
+  BashArgsSchema,
   BrowserControlArgsSchema,
   ComputerControlArgsSchema,
   MouseMoveArgsSchema,
@@ -38,8 +37,6 @@ import {
   SearchToolsArgsSchema,
   ScratchpadArgsSchema,
   SearchMemoryArgsSchema,
-  CallSubagentArgsSchema,
-  PollSubagentArgsSchema,
 } from "./types.js";
 import {
   FileViewArgsSchema,
@@ -126,7 +123,7 @@ export const toolRegistry = {
     argsSchema: WebSearchArgsSchema,
   },
   write_file: {
-    description: "Write full file content",
+    description: "Write complete file content. Creates the file if it doesn't exist and automatically creates parent directories. Use for new files or intentional full rewrites; prefer many focused write_file calls over one giant generated blob when creating several independent files.",
     argsSchema: WriteFileArgsSchema,
   },
   replace_in_file: {
@@ -170,22 +167,13 @@ export const toolRegistry = {
   // -------------------------------------------------------------------------------
   bash: {
     description:
-      "Run a bash command in the workspace for real execution: package installs, tests, builds, typechecks, dev-server smoke checks, or concise environment probes. " +
-      "REQUIRED per call: a concise `description` and an explicit `timeout` (in SECONDS — e.g. 300 for ~5 minutes). The bash tool has NO DEFAULT TIMEOUT; if the model omits `timeout`, the call fails with a clear schema error. " +
-      "Do not use bash as a file reader (`cat`, `ls`, `find`) for files you just wrote; the cockpit's Changed Files section already summarizes shipped artifacts. " +
-      "Prefer `read_file` for targeted file inspection only when a write failed or a verifier points to a concrete line. " +
-      "If output is large, inspect the returned log/spillover path with `read_file` rather than re-running. " +
-      "SERVER LIFECYCLE: when you start a server for a smoke test or for active probing (e.g. `pnpm dev`, `node dist/index.js`, `python -m http.server`), it MUST be self-cleaning. " +
-      "Use one of: (a) `isBackground: true` / `run_in_background: true` to start it as a tracked background process you can stop later, or (b) a single-shot bounded command like `timeout 30 pnpm dev & sleep 5; curl ...; kill $! 2>/dev/null || true`, or (c) `trap 'kill $PID 2>/dev/null || true' EXIT` inside the command. " +
-      "Do not leave a foreground server attached to stdio — the wrapper cannot close until it does, and your own subsequent tool calls will hang. " +
-      "If the user explicitly asks you to keep a server running, use `isBackground: true` so the runtime tracks it; otherwise spin it down inside the same command. " +
-      "After a failed broad build/test, run a targeted diagnostic/check before repeating the broad command unchanged.",
-    argsSchema: RunShellCommandArgsSchema,
-  },
-  sandbox_service_control: {
-    description:
-      "Host-side control for provided sibling services: list lifecycle/provenance, read logs, snapshot the mounted /app view, inspect the underlying image without mounts, restore an image-provided /app file, exec, write/copy non-image-provided files, and readiness-gated start/restart/recreate/stop. Use inspect_image for file/directory entrypoint mismatches before editing. Running is not treated as ready.",
-    argsSchema: SandboxServiceControlArgsSchema,
+      "Run a shell command in the workspace for real execution: package installs, tests, builds, typechecks, dev-server smoke checks, or concise environment probes. " +
+      "Required argument: `cmd`. Optional `timeout` is in SECONDS (1-3600) and defaults to 60; `description` is optional. " +
+      "Use `run_in_background: true` only for a tracked process that must outlive the call, then stop it when finished. " +
+      "Do not use bash for file reads, listings, searches, or edits when file_view, list_directory, grep_search, file_edit, or write_file can do the work. " +
+      "Large output returns a bounded preview and persisted output path; inspect that path with file_view instead of rerunning. " +
+      "After a failed broad build or test, inspect the focused failure before repeating the command.",
+    argsSchema: BashArgsSchema,
   },
   browser_control: {
     description:
@@ -287,15 +275,6 @@ export const toolRegistry = {
     description:
       "Search prior session summaries persisted under `.reaper/summaries/`. Use after compaction or on resume to recall what the agent was doing earlier.",
     argsSchema: SearchMemoryArgsSchema,
-  },
-  call_subagent: {
-    description:
-      "Invoke an advisory subagent (planner/reviewer/repair/tester/researcher) that returns structured JSON. Use for parallel scouting or specialized review. Does not recurse into tools. Prefer blocking mode unless the task is long-running.",
-    argsSchema: CallSubagentArgsSchema,
-  },
-  poll_subagent: {
-    description: "Poll a background call_subagent job by jobId.",
-    argsSchema: PollSubagentArgsSchema,
   },
   /* ----- Skill authoring (5) ----- */
   create_skill: {
@@ -424,9 +403,7 @@ export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   "file_find",
   "file_edit",
   // ---- legacy fallbacks (Phase 4: demoted to on-demand; reach for the viewer equivalents) ----
-  "view_file",          // on-demand legacy alias for file_view
   "write_file",         // always-on: full-file rewrites for new files + intentional overrides
-  "edit_file",          // on-demand: legacy edit-by-edits tool (prefer file_edit)
   "delete_file",
   "list_directory",
   "grep_search",        // always-on: cross-file patterns

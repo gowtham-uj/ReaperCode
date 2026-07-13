@@ -2,15 +2,12 @@
  * run-reaper — entry point for the Reaper CLI.
  *
  * Usage:
- *   reaper                  # default → opens the interactive TUI
- *   reaper tui              # explicit TUI
  *   reaper exec run --prompt "..."
  *   reaper --help
  *
- * If the first non-flag arg is `exec`, `skill`, `memory`, `extensions`,
- * or `tui`, forward the rest to `cli.run()`. Otherwise (bare invocation
- * or top-level flags) default to the TUI for backwards compatibility
- * with the original single-mode entry script.
+ * The first non-flag arg picks the command group and the rest is
+ * forwarded to `cli.run()`. Bare invocations print usage — the Pi
+ * TUI is the interactive cockpit for Reaper.
  */
 
 import path from "node:path";
@@ -27,8 +24,9 @@ function loadEnvFiles(): void {
     try {
       const content = readFileSync(envPath, "utf8");
       for (const line of content.split("\n")) {
-        const trimmed = line.trim();
+        let trimmed = line.trim();
         if (!trimmed || trimmed.startsWith("#")) continue;
+        if (trimmed.startsWith("export ")) trimmed = trimmed.slice("export ".length).trim();
         const eqIdx = trimmed.indexOf("=");
         if (eqIdx === -1) continue;
         const key = trimmed.slice(0, eqIdx).trim();
@@ -56,12 +54,10 @@ const TOP_LEVEL_COMMANDS = new Set([
   "skills",
   "memory",
   "extensions",
-  "swarm",
   "visual",
   "capability",
   "redact",
   "slash",
-  "tui",
 ]);
 
 function pickWorkspaceRoot(argv: string[]): string {
@@ -90,8 +86,7 @@ async function main(): Promise<void> {
 
   const cli = new ReaperCLI({ workspaceRoot });
 
-  // --help / -h (anywhere in argv) → print usage and exit. Do this
-  // BEFORE the TUI default so the user always sees the help text.
+  // --help / -h (anywhere in argv) → print usage and exit.
   if (argv.includes("--help") || argv.includes("-h")) {
     const result = await cli.run(["--help"]);
     if (result.stdout) process.stdout.write(result.stdout);
@@ -99,10 +94,10 @@ async function main(): Promise<void> {
     process.exit(result.exitCode);
   }
 
-  // First non-flag arg decides the dispatch. With no args, default to TUI
-  // (matching the `reaper` → TUI expectation).
+  // First non-flag arg decides the dispatch. With no recognized command,
+  // print usage — the Pi TUI is the interactive cockpit for Reaper.
   const firstNonFlag = argv.find((a) => !a.startsWith("-"));
-  const dispatch = TOP_LEVEL_COMMANDS.has(firstNonFlag ?? "") ? argv : ["tui", ...argv];
+  const dispatch = TOP_LEVEL_COMMANDS.has(firstNonFlag ?? "") ? argv : ["--help"];
 
   const result = await cli.run(dispatch);
   if (result.stdout) process.stdout.write(result.stdout);

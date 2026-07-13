@@ -16,9 +16,8 @@
  *    safety net for grandchildren the parent didn't own.
  *  - `killTree(pid, signal)` for the `signal_process` tool.
  *
- * The manager does NOT spawn children — that's still the
- * `run_shell_command` tool. It only owns what happens after a pid
- * exists.
+ * The manager does NOT spawn children — that's still the `bash` tool.
+ * It only owns what happens after a pid exists.
  */
 
 import { type ChildProcess } from "node:child_process";

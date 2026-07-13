@@ -4,24 +4,17 @@ export const BashInputSchema = z
   .object({
     command: z.string().min(1).describe("Shell command to run in the workspace"),
     description: z.string().min(1).optional().describe("Short human-readable intent (shown in summaries)"),
-    // REQUIRED: per-command timeout in SECONDS (matching the
-    // model-facing schema in src/tools/types.ts and the reference-agent
-    // pattern, e.g. pi-mono). 1 second ≤ value ≤ 3600 seconds
-    // (1 hour). There is NO DEFAULT TIMEOUT — the model must
-    // pass an explicit value. If the model emits a bash call
-    // without `timeout`, the schema validation will fail and the
-    // call will return a clear error to the model, not a silent
-    // 60-second timeout.
+    // Per-command timeout in SECONDS. Preserve the historical 60-second
+    // default for callers that omit it while allowing longer explicit limits.
     timeout: z
       .number()
       .int()
       .min(1)
       .max(3600)
+      .optional()
       .describe(
-        "REQUIRED. Per-command timeout in SECONDS (1-3600). " +
-        "There is no default timeout; you must pass an explicit value. " +
-        "Use 60 for short probes, 300 for builds/installs/tests, " +
-        "larger for long-running jobs. The model is expected to pass this on every call.",
+        "Optional per-command timeout in SECONDS (1-3600); defaults to 60. " +
+        "Use 300 for builds/installs/tests and a larger value for long-running jobs.",
       ),
     run_in_background: z.boolean().optional().describe("Run as a background task (servers, blocking operations)"),
   })

@@ -32,8 +32,3 @@ test("build tasks start at 16k then rise to 32k after artifact momentum", () => 
   );
 });
 
-test("executor fallback structured planner still uses a 32k output budget", async () => {
-  const source = await readFile(ENGINE_PATH, "utf8");
-  assert.match(source, /source:\s*"executor_subagent"[\s\S]*?maxTokens:\s*32_000/);
-  assert.doesNotMatch(source, /source:\s*"executor_subagent"[\s\S]*?maxTokens:\s*8192/);
-});

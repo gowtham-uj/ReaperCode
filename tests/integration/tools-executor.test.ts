@@ -142,7 +142,7 @@ test("replace_in_file supports line-range replacement", async () => {
     args: { path: "src/app.ts", startLine: 1, endLine: 1, content: "export const value = 99;" },
   });
 
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, true, JSON.stringify(result.error));
   const content = await readFile(path.join(workspaceRoot, "src", "app.ts"), "utf8");
   assert.match(content, /value = 99/);
 });
@@ -356,7 +356,7 @@ test("background shell processes are logged and cleaned as process groups", asyn
   const start = await executor.execute({
     id: "bg",
     name: "bash",
-    args: { timeout: 60, cmd: "node -e \"console.log('server-ready'); setInterval(() => {}, 1000)\"", isBackground: true },
+    args: { timeout: 60, cmd: "node -e \"console.log('server-ready'); setInterval(() => {}, 1000)\"", run_in_background: true },
   });
 
   assert.equal(start.ok, true);
@@ -450,7 +450,7 @@ test("bash exposes scratchpad dependency cache env vars", async () => {
   const stdout = String((result.output as { stdout: string }).stdout);
   assert.match(stdout, /\.reaper/);
   assert.match(stdout, /cache\/npm/);
-  assert.match(stdout, new RegExp(escapeRegExp(workspaceRoot)));
+  assert.match(stdout, new RegExp(escapeRegExp(workspaceRoot.replace(/\\/g, "/"))));
 });
 
 test("bash flags vulnerable dependency output as quality warning", async () => {

@@ -134,6 +134,49 @@ test("onAfterModelCall: writes token_budget event with usage", async () => {
   const kinds = traj.events.map((e) => e.kind);
   assert.equal(kinds.includes("token_budget"), true);
   assert.ok(["ok", "warning", "error", "blocking"].includes(result.state.state));
+  const firstBudget = traj.events.find((event) => event.kind === "token_budget") as any;
+  assert.equal(firstBudget.turn_input_tokens, 5000);
+  assert.equal(firstBudget.turn_output_tokens, 200);
+  assert.equal(firstBudget.cumulative_input_tokens, 5000);
+  assert.equal(firstBudget.cumulative_call_count, 1);
+
+  await ctx.onAfterModelCall({
+    workspaceRoot: "/tmp/ws",
+    runId: "r1",
+    sessionId: "s1",
+    traceId: "t1",
+    messages,
+    modelResponse: {
+      usage: { inputTokens: 250, outputTokens: 25 },
+      assistantMessage: "done",
+    },
+    softCap: 20_000,
+    trajectoryLogger: traj,
+  });
+  const budgets = traj.events.filter((event) => event.kind === "token_budget") as any[];
+  assert.equal(budgets[1]?.turn_input_tokens, 250);
+  assert.equal(budgets[1]?.cumulative_input_tokens, 5250);
+  assert.equal(budgets[1]?.cumulative_output_tokens, 225);
+  assert.equal(budgets[1]?.cumulative_call_count, 2);
+});
+
+test("onAfterModelCall estimates output tokens when the provider omits usage", async () => {
+  loadFreshConfig();
+  const ctx = createContextEngineeringHooks();
+  const traj = makeTrajectoryLogger();
+  await ctx.onAfterModelCall({
+    workspaceRoot: "/tmp/ws",
+    runId: "fallback-usage",
+    sessionId: "s1",
+    traceId: "t1",
+    messages: [{ role: "user", content: "request" }],
+    modelResponse: { content: "x".repeat(40) },
+    softCap: 20_000,
+    trajectoryLogger: traj,
+  });
+  const budget = traj.events.find((event) => event.kind === "token_budget") as any;
+  assert.equal(budget.turn_output_tokens, 10);
+  assert.equal(budget.cumulative_output_tokens, 10);
 });
 
 test("onProviderTokenLimitError: drops the oldest oversized tool result", async () => {
@@ -160,6 +203,36 @@ test("onProviderTokenLimitError: drops the oldest oversized tool result", async 
     runId: "r-ptl",
   });
   assert.equal(result.savedChars >= 0, true);
+});
+
+test("onProviderTokenLimitError applies an in-flight full summary with system messages intact", async () => {
+  loadFreshConfig();
+  const runId = "r-ptl-summary";
+  delete (globalThis as any)[`${runId}::full-summary-applied`];
+  (globalThis as any)[`${runId}::full-summary`] = {
+    promise: Promise.resolve("<summary>resume from the verified state</summary>"),
+  };
+  const ctx = createContextEngineeringHooks();
+  const liveMessages = [
+    { role: "system", content: "stable system prompt" },
+    { role: "user", content: "current task" },
+    { role: "tool", tool_call_id: "t1", name: "bash", content: "x".repeat(20_000) },
+  ];
+  const result = await ctx.onProviderTokenLimitError({
+    messages: liveMessages,
+    softCap: 270_000,
+    runId,
+  });
+
+  assert.deepEqual(result.messages[0], { role: "system", content: "stable system prompt" });
+  assert.ok(result.messages.some((message: any) => String(message.content ?? "").includes("Summary of prior context")));
+  assert.equal(result.messages, liveMessages, "PTL recovery should replace the caller's live array");
+  assert.equal(
+    (globalThis as any)[`${runId}::full-summary-applied`],
+    undefined,
+    "immediate PTL recovery must not leave a stale next-call replacement",
+  );
+  delete (globalThis as any)[`${runId}::full-summary`];
 });
 
 test("onRunComplete: persists a summary metric event", async () => {
@@ -211,62 +284,183 @@ test("the wiring file imports all 21 layer modules", async () => {
   }
 });
 
-test("full-summary stashes post-compact messages on global slot for engine to apply", async () => {
+test("full-summary triggers at the 270k cap and preserves system instructions", async () => {
   loadFreshConfig();
-  const infer = async (prompt: string): Promise<string> => "SUMMARIZED";
-  const ctx = createContextEngineeringHooks({ infer });
-  const traj = makeTrajectoryLogger();
-  // Stash key
-  const runId = "r-stash";
-  // Clear any prior state
+  const runId = "r-270k-summary";
   delete (globalThis as any)[`${runId}::full-summary-applied`];
-  // Build a large conversation that triggers full-summary
-  const messages: any[] = [];
-  for (let i = 0; i < 20; i += 1) {
-    messages.push({
-      role: "assistant",
-      content: "",
-      tool_calls: [
-        { id: `t-${i}`, type: "function", function: { name: "bash", arguments: "{}" } },
-      ],
-    });
-    messages.push({
-      role: "tool",
-      tool_call_id: `t-${i}`,
-      content: "x".repeat(2_000),
-    });
-  }
-  // Use a softCap such that tokensAfterShake > softCap * 0.85
+  let summaryPrompt = "";
+  const ctx = createContextEngineeringHooks({
+    infer: async (prompt) => {
+      summaryPrompt = prompt;
+      return "<think>private analysis</think><summary>verified progress and next action</summary><tool_call>must not survive</tool_call>";
+    },
+  });
+  const traj = makeTrajectoryLogger();
   const result = await ctx.onBeforeModelCall({
     workspaceRoot: "/tmp/ws",
     runId,
     sessionId: "s1",
     traceId: "t1",
-    messages,
-    softCap: 500,
+    messages: [
+      { role: "system", content: "stable system prompt" },
+      { role: "user", content: "current task" },
+      { role: "assistant", content: "x".repeat(1_080_000) },
+    ],
+    softCap: 270_000,
     trajectoryLogger: traj,
   });
-  // The wiring's full-summary fires asynchronously. We must wait for
-  // it. The wiring stores the result in a per-runId slot.
-  // Wait up to 2s for the slot to be populated.
-  const start = Date.now();
-  while (Date.now() - start < 2000 && !(globalThis as any)[`${runId}::full-summary-applied`]) {
-    await new Promise((r) => setTimeout(r, 25));
-  }
-  const stashed = (globalThis as any)[`${runId}::full-summary-applied`];
-  if (stashed) {
-    // The wiring DID stash. Verify shape.
-    assert.ok(Array.isArray(stashed.messages), "stashed.messages is array");
-    assert.ok(typeof stashed.appliedAt === "number", "stashed.appliedAt is number");
-    // The post-compact shape: [boundary, summary, ...reattached, lastUserTask]
-    const roles = stashed.messages.map((m: any) => m.role);
-    assert.ok(roles.includes("user"), "post-compact has user messages (boundary + summary)");
-    assert.ok(typeof stashed.summaryText === "string", "summary text preserved");
-  }
-  // Cleanup
+
+  assert.equal(result.fullSummarized, true);
+  assert.deepEqual(result.messages[0], { role: "system", content: "stable system prompt" });
+  assert.ok(result.messages.some((message: any) => String(message.content ?? "").includes("Summary of prior context")));
+  assert.ok(traj.events.some((event: any) => event.kind === "full_summary"));
+  assert.match(summaryPrompt, /Primary Request and Intent/);
+  assert.match(summaryPrompt, /Conversation to summarize/);
+  const compactSummary = result.messages.find((message: any) =>
+    String(message.content ?? "").includes("Summary of prior context"),
+  );
+  assert.doesNotMatch(String((compactSummary as any)?.content ?? ""), /private analysis|tool_call/);
+  assert.equal(
+    (globalThis as any)[`${runId}::full-summary-applied`],
+    undefined,
+    "blocking compaction must not leave a stale next-call replacement",
+  );
+});
+
+test("handoff compaction accepts the four-section untagged response", async () => {
+  const cfg = loadFreshConfig();
+  cfg.contextManagement.handoffEnabled = true;
+  applyConfigToTunables(cfg);
+  let handoffPrompt = "";
+  const ctx = createContextEngineeringHooks({
+    infer: async (prompt) => {
+      handoffPrompt = prompt;
+      return [
+        "## Active Task",
+        "Finish the current implementation.",
+        "## Current State",
+        "Source inspected.",
+        "## Files Touched",
+        "src/app.ts",
+        "## Next Action",
+        "Edit src/app.ts.",
+      ].join("\n");
+    },
+  });
+  const traj = makeTrajectoryLogger();
+  const result = await ctx.onBeforeModelCall({
+    workspaceRoot: "/tmp/ws",
+    runId: "r-handoff-summary",
+    sessionId: "s1",
+    messages: [
+      { role: "user", content: "current task" },
+      { role: "assistant", content: "x".repeat(1_080_000) },
+    ],
+    softCap: 270_000,
+    trajectoryLogger: traj,
+  });
+
+  assert.equal(result.fullSummarized, true);
+  assert.match(handoffPrompt, /EXACTLY these 4 sections/);
+  assert.doesNotMatch(handoffPrompt, /Primary Request and Intent/);
+  assert.ok(result.messages.some((message: any) => String(message.content ?? "").includes("## Active Task")));
+  assert.ok(traj.events.some((event: any) => event.kind === "handoff_summary"));
+});
+
+test("failed full-summary inference arms cooldown instead of retrying every model call", async () => {
+  loadFreshConfig();
+  let inferCalls = 0;
+  const ctx = createContextEngineeringHooks({
+    infer: async () => {
+      inferCalls += 1;
+      return "untagged summary response";
+    },
+    countTokens: () => 270_000,
+  });
+  const input = {
+    workspaceRoot: "/tmp/ws",
+    runId: "r-summary-failure-cooldown",
+    sessionId: "s1",
+    messages: [
+      { role: "user", content: "current task" },
+      { role: "assistant", content: "x".repeat(20_000) },
+    ],
+    softCap: 270_000,
+    trajectoryLogger: makeTrajectoryLogger(),
+  };
+
+  await ctx.onBeforeModelCall(input);
+  const callsAfterFailure = inferCalls;
+  assert.ok(callsAfterFailure > 0);
+  await ctx.onBeforeModelCall(input);
+  assert.equal(inferCalls, callsAfterFailure);
+});
+
+test("async PTL recovery cannot leave a stale next-call summary replacement", async () => {
+  loadFreshConfig();
+  const runId = "r-async-ptl-summary";
+  let resolveSummary!: (value: string) => void;
+  const inferResult = new Promise<string>((resolve) => {
+    resolveSummary = resolve;
+  });
+  const ctx = createContextEngineeringHooks({
+    blockingFullSummary: false,
+    infer: async () => inferResult,
+    countTokens: () => 270_000,
+  });
+  const messages: any[] = [
+    { role: "system", content: "stable system prompt" },
+    { role: "user", content: "current task" },
+    { role: "assistant", content: "x".repeat(20_000) },
+  ];
+  await ctx.onBeforeModelCall({
+    workspaceRoot: "/tmp/ws",
+    runId,
+    sessionId: "s1",
+    messages,
+    softCap: 270_000,
+    trajectoryLogger: makeTrajectoryLogger(),
+  });
+
+  const recovery = ctx.onProviderTokenLimitError({ messages, softCap: 270_000, runId });
+  resolveSummary("<summary>verified state and next action</summary>");
+  const recovered = await recovery;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.ok(recovered.messages.some((message: any) => String(message.content ?? "").includes("Summary of prior context")));
+  assert.equal((globalThis as any)[`${runId}::full-summary-applied`], undefined);
+  delete (globalThis as any)[`${runId}::full-summary`];
+  delete (globalThis as any)[`${runId}::full-summary-ptl-consumed`];
+});
+
+test("full-summary rejects a replacement larger than its source conversation", async () => {
+  loadFreshConfig();
+  const runId = "r-non-shrinking-summary";
   delete (globalThis as any)[`${runId}::full-summary-applied`];
-  // We also need to assert result is a valid onBeforeModelCall return
-  assert.ok(Array.isArray(result.messages), "result.messages is array");
+  const originalMessages = [
+    { role: "system", content: "stable system prompt" },
+    { role: "user", content: "current task" },
+    { role: "tool", tool_call_id: "t1", name: "bash", content: "small result" },
+  ];
+  const ctx = createContextEngineeringHooks({
+    infer: async () => `<summary>${"verbose ".repeat(4_000)}</summary>`,
+    countTokens: () => 270_000,
+  });
+  const traj = makeTrajectoryLogger();
+  const result = await ctx.onBeforeModelCall({
+    workspaceRoot: "/tmp/ws",
+    runId,
+    sessionId: "s1",
+    traceId: "t1",
+    messages: originalMessages,
+    softCap: 270_000,
+    trajectoryLogger: traj,
+  });
+
+  assert.equal(result.fullSummarized, false);
+  assert.deepEqual(result.messages, originalMessages);
+  assert.equal(traj.events.some((event: any) => event.kind === "full_summary"), false);
+  assert.equal((globalThis as any)[`${runId}::full-summary-applied`], undefined);
 });
 
 test("onBeforeModelCall: consumes stashed full-summary on next call (OMP replaceMessages)", async () => {

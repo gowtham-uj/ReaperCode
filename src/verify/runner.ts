@@ -1,7 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
-import { runShellCommandTool, isBackgroundShellResult } from "../tools/global/run-shell-command.js";
+import { executeBashTool, isBackgroundShellResult } from "../tools/global/bash.js";
 import { detectSemanticFailureText } from "./semantic-failure.js";
 
 export interface VerificationCommand {
@@ -282,7 +282,7 @@ export async function runVerificationCommand(
     const commands = normalizeVerificationCommands(verification);
     const outputs: string[] = [];
     for (const item of commands) {
-      const result = await runShellCommandTool(workspaceRoot, { cmd: item.command, timeoutMs: verification.lite ? 30_000 : verificationTimeoutMs(item.command) }, "allow_all");
+      const result = await executeBashTool(workspaceRoot, { cmd: item.command, timeoutMs: verification.lite ? 30_000 : verificationTimeoutMs(item.command) }, "allow_all");
       if (isBackgroundShellResult(result)) {
         throw new Error("Verification command should not be run in background");
       }

@@ -315,10 +315,10 @@ test("buildRequestEnvelope: yolo system prompt is prepended to user prompt", () 
   }) as { payload: { prompt: string } };
   const p = env.payload.prompt;
   assert.match(p, /exec environment/i, "should announce exec environment");
-  assert.match(p, /Workspace:\s+\/tmp\/my-build/, "should interpolate workspace path");
+  assert.match(p, /Workspace root:\s+\/tmp\/my-build/, "should interpolate workspace path");
   assert.match(p, /write_file for new files\/full rewrites/, "should warn about source-edit rule");
   assert.match(p, /shell heredocs or redirection/, "should warn about heredoc or redirection source writes");
-  assert.match(p, /Shell calls start in \/tmp\/my-build/, "should warn about cwd");
+  assert.match(p, /never prefix the workspace directory/, "should pin workspace-relative path rule");
   assert.match(p, /finish with a concise final assistant message and no tool calls/, "should give the natural-stop rule");
   assert.match(p, /build me a thing/, "user prompt must still be present at the end");
   // ordering: system block first, user prompt last

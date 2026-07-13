@@ -108,9 +108,6 @@ test("defaults runtime controls without removed guard knobs", () => {
 
   assert.equal(parsed.runtime.recedingHorizonPlanContext, true);
   assert.equal(parsed.runtime.voteAttempts, 1);
-  assert.equal(parsed.runtime.serviceSupervisor.enabled, true);
-  assert.equal(parsed.runtime.serviceSupervisor.autoRecover, true);
-  assert.equal(parsed.runtime.serviceSupervisor.maxAutoRecoveriesPerService, 1);
   assert.equal("progressGuard" in parsed.runtime, false);
   assert.equal("completionGateMax" in parsed.runtime, false);
   assert.equal("artifactObligations" in parsed.runtime, false);

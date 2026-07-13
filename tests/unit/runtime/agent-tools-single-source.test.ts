@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { buildGeneralAgentTools } from "../../../src/runtime/agent-tools.js";
 import { CORE_TOOL_NAMES, toolRegistry, type ToolName } from "../../../src/tools/registry.js";
+import { ToolCallSchema } from "../../../src/tools/types.js";
 
 test("main-agent tool descriptors are derived from the registry core list", () => {
   const descriptors = buildGeneralAgentTools();
@@ -25,14 +26,21 @@ test("main-agent tool descriptors are derived from the registry core list", () =
   }
 });
 
-test("model-facing core surface does not expose complete_task", () => {
+test("complete_task is absent from the model surface and accepted call schema", () => {
   const descriptors = buildGeneralAgentTools();
   assert.ok(!descriptors.some((tool) => tool.name === "complete_task"));
   assert.ok(!CORE_TOOL_NAMES.has("complete_task"));
-  // Live loop stops on no tool_calls; complete_task is not a model-facing tool.
+  assert.equal(
+    ToolCallSchema.safeParse({
+      id: "legacy-complete",
+      name: "complete_task",
+      args: { summary: "legacy control signal" },
+    }).success,
+    false,
+  );
 });
 
-test("bash model-facing schema requires timeout in seconds from registry schema", () => {
+test("bash model-facing schema exposes optional timeout seconds from registry schema", () => {
   const bash = buildGeneralAgentTools().find((tool) => tool.name === "bash");
   assert.ok(bash, "bash tool must be in core tool surface");
   assert.equal(bash.description, toolRegistry.bash.description);
@@ -42,9 +50,9 @@ test("bash model-facing schema requires timeout in seconds from registry schema"
     properties?: Record<string, { description?: string; minimum?: number; maximum?: number }>;
   };
 
-  assert.ok(schema.required?.includes("timeout"), "bash timeout must be required in model-facing schema");
+  assert.ok(!schema.required?.includes("timeout"), "bash timeout must remain optional");
   assert.equal(schema.properties?.timeout?.minimum, 1);
   assert.equal(schema.properties?.timeout?.maximum, 3600);
   assert.match(schema.properties?.timeout?.description ?? "", /SECONDS/);
-  assert.match(bash.description, /NO DEFAULT TIMEOUT/);
+  assert.match(bash.description, /defaults to 60/);
 });

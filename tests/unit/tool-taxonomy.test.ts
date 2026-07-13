@@ -3,20 +3,15 @@ import assert from "node:assert/strict";
 
 import {
   getToolKind,
-  isCompletionTool,
   isControlTool,
   isExecutableTool,
   isMutatingTool,
-  isSubagentTool,
 } from "../../src/runtime/tool-taxonomy.js";
 
 const requiredControlTools = [
   "update_task_contract",
   "update_plan",
   "update_todo",
-  "poll_subagent",
-  "cancel_subagent",
-  "complete_task",
   "create_checkpoint",
   "restore_checkpoint",
 ];
@@ -57,7 +52,6 @@ test("classifies every required executable inspection or mutation tool", () => {
 test("detects mutating tools consistently across executable and control tools", () => {
   const mutatingTools = [
     "update_task_contract",
-    "cancel_subagent",
     "create_checkpoint",
     "restore_checkpoint",
     "write_file",
@@ -67,10 +61,8 @@ test("detects mutating tools consistently across executable and control tools", 
     "bash",
   ];
   const inspectionTools = [
-    "poll_subagent",
     "update_plan",
     "update_todo",
-    "complete_task",
     "inspect_project",
     "git_status",
     "git_diff",
@@ -80,7 +72,6 @@ test("detects mutating tools consistently across executable and control tools", 
     "list_package_scripts",
     "run_test_command",
     "read_test_failure_summary",
-    "call_subagent",
   ];
 
   for (const toolName of mutatingTools) {
@@ -91,15 +82,6 @@ test("detects mutating tools consistently across executable and control tools", 
   }
 });
 
-test("detects completion and subagent tools", () => {
-  assert.equal(isCompletionTool("complete_task"), true);
-  assert.equal(isCompletionTool("update_plan"), false);
-
-  assert.equal(isSubagentTool("call_subagent"), true);
-  assert.equal(isSubagentTool("poll_subagent"), true);
-  assert.equal(isSubagentTool("cancel_subagent"), true);
-  assert.equal(isSubagentTool("read_file"), false);
-});
 
 test("unknown tools remain unknown", () => {
   assert.equal(getToolKind("not_a_real_tool"), "unknown");

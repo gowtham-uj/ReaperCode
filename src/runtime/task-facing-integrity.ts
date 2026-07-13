@@ -86,7 +86,7 @@ export function getBoundaryPreflightCompletionBlocker(
     "Completion is blocked because the boundary preflight step is required for this legacy / binary / on-disk / cross-platform task, " +
     "and no tool result yet contains the BOUNDARY_EVIDENCE=..., BOUNDARY_COMPOSITE_CHECK=..., BOUNDARY_DECISION=..., BOUNDARY_STRATEGY=... markers. " +
     "Run one discriminating command-backed probe that exposes the decisive width / layout / alignment / encoding / version / ordering / offset / schema fact " +
-    "and prints all four markers, then re-emit complete_task."
+    "and prints all four markers before the model stops naturally."
   );
 }
 
@@ -109,7 +109,7 @@ export function getDeadlineAwareBoundaryProbeBlocker(
   if (results.some((r) => isSuccessfulFreshBoundaryCheck(r, requireSingleItemBoundary))) return undefined;
 
   return [
-    "Deadline is critical (>=60% elapsed); the public-boundary check is still missing. Run this one-liner probe NOW and only then emit complete_task:",
+    "Deadline is critical (>=60% elapsed); the public-boundary check is still missing. Run this one-liner probe now, then stop naturally when the requested work is complete:",
     "  cp <input-dir>/<basename>.<ext> .reaper/tmp/probe_out/<renamed-basename>.<ext> && \\",
     "    ./<producer-executable> .reaper/tmp/probe_out/<renamed-basename>.<ext> .reaper/tmp/probe_out/<renamed-basename>.json && \\",
     "    python3 -c 'import json,filecmp,sys; o=sys.argv[1]; c=sys.argv[2]; d=json.load(open(o)); assert all(k in d[\"header\"] for k in (\"version\",\"meshCount\",\"animCount\",\"textureCount\",\"byteAlignment\",\"totalDataSize\")) if \"header\" in d else True; assert filecmp.cmp(o,c,shallow=False); print(\"PUBLIC_BOUNDARY_OK\",o)' .reaper/tmp/probe_out/<renamed-basename>.json <canonical-output>.json",
@@ -331,10 +331,6 @@ function isSuccessfulSourceMutation(result: ToolResult): boolean {
 }
 
 function isVerificationLike(result: ToolResult): boolean {
-  if (result.name === "sandbox_service_control") {
-    const args = asRecord(result.args);
-    return args.action === "wait_ready" || args.action === "exec";
-  }
   if (result.name !== "bash") return false;
   return /\b(?:curl|wget|test|check|verify|pytest|unittest|jest|vitest|benchmark|bench|assert)\b/i.test(getCommand(result));
 }
@@ -342,9 +338,6 @@ function isVerificationLike(result: ToolResult): boolean {
 function isSuccessfulMutation(result: ToolResult): boolean {
   if (!result.ok) return false;
   if (["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file"].includes(result.name)) return true;
-  if (result.name === "sandbox_service_control") {
-    return ["start", "restart", "recreate", "restore_from_image", "write_file", "copy_to_service"].includes(String(asRecord(result.args).action ?? ""));
-  }
   if (result.name !== "bash") return false;
   return /\b(?:rm|mv|cp|touch|mkdir|patch|git\s+apply|sed\s+-i|tee|make|cmake|ninja|npm\s+(?:install|run\s+build)|pip\s+install)\b|(?:^|[^<>])>{1,2}[^&]/i.test(getCommand(result));
 }

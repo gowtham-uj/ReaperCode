@@ -47,6 +47,40 @@ test("rejects malformed shell command args", () => {
   );
 });
 
+test("bash exposes only the canonical OMP-style argument contract", () => {
+  const parsed = ToolCallSchema.parse({
+    id: "bash-1",
+    name: "bash",
+    args: {
+      cmd: "npm test",
+      description: "run focused tests",
+      timeout: 300,
+      run_in_background: false,
+    },
+  });
+  assert.equal(parsed.name, "bash");
+  assert.deepEqual(parsed.args, {
+    cmd: "npm test",
+    description: "run focused tests",
+    timeout: 300,
+    run_in_background: false,
+  });
+
+  for (const args of [
+    { cmd: "npm test", timeoutMs: 300_000 },
+    { cmd: "npm test", isBackground: true },
+    { command: "npm test", timeout: 300 },
+  ]) {
+    assert.throws(() => ToolCallSchema.parse({ id: "legacy", name: "bash", args }));
+  }
+});
+
+test("retired shell and sandbox tool names are rejected", () => {
+  for (const name of ["run_command", "run_shell_command", "sandbox_service_control"]) {
+    assert.throws(() => ToolCallSchema.parse({ id: name, name, args: { cmd: "true", timeout: 60 } }));
+  }
+});
+
 test("accepts web search with minimum ten-page scrape", () => {
   const toolCall = ToolCallSchema.parse({
     id: "research-1",

@@ -209,8 +209,12 @@ export function partitionsForParallelExecution(
     }
 
     const unsafeIntoParallel = current.some((c) => !c.resources.declared) || !resources.declared;
-    const collides = current.some((c) => sharesKey(c, item));
-    if (current.length > 0 && (unsafeIntoParallel || collides)) {
+    const unsafeCollision = current.some(
+      (candidate) =>
+        sharesKey(candidate, item) &&
+        (candidate.kind !== "read" || item.kind !== "read"),
+    );
+    if (current.length > 0 && (unsafeIntoParallel || unsafeCollision)) {
       flush();
     }
     current.push(item);

@@ -1,7 +1,7 @@
 import { access, readdir } from "node:fs/promises";
 import path from "node:path";
 import { getReaperScratchpadPaths, ensureReaperScratchpad } from "../../workspace/scratchpad.js";
-import { runShellCommandTool, isForegroundShellResult } from "../global/run-shell-command.js";
+import { executeBashTool, isForegroundShellResult } from "../global/bash.js";
 
 export async function inspectEnvironmentTool(workspaceRoot: string): Promise<Record<string, unknown>> {
   const scratchpad = await ensureReaperScratchpad(workspaceRoot);
@@ -30,7 +30,7 @@ export async function inspectEnvironmentTool(workspaceRoot: string): Promise<Rec
 async function toolVersion(workspaceRoot: string, cmd: string): Promise<{ name: string; version: string | null }> {
   const name = cmd.split(" ")[0]!;
   try {
-    const result = await runShellCommandTool(workspaceRoot, { cmd, timeoutMs: 10_000 }, "allow_all");
+    const result = await executeBashTool(workspaceRoot, { cmd, timeoutMs: 10_000 }, "allow_all");
     if (!isForegroundShellResult(result)) {
       return { name, version: null };
     }

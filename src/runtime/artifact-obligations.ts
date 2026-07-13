@@ -91,9 +91,6 @@ function isSuccessfulProducerForArtifact(result: ToolResult, artifact: string): 
   if (["write_file", "replace_in_file", "edit_file", "replace_symbol"].includes(result.name)) {
     return typeof args.path === "string" && artifactPathMatches(args.path, artifact);
   }
-  if (result.name === "sandbox_service_control" && ["write_file", "copy_to_service"].includes(String(args.action))) {
-    return typeof args.targetPath === "string" && artifactPathMatches(args.targetPath, artifact);
-  }
   if (result.name !== "bash") return false;
   const command = commandOf(result);
   return commandMentionsArtifact(command, artifact) && isProducerCommand(command);
@@ -112,10 +109,6 @@ function isSuccessfulArtifactObservation(result: ToolResult, artifact: string): 
 
 function isSuccessfulArtifactContractVerification(result: ToolResult, artifact: string): boolean {
   if (!result.ok || isSemanticFailure(result)) return false;
-  if (result.name === "sandbox_service_control") {
-    const args = recordArgs(result);
-    return args.action === "exec" && typeof args.command === "string" && isStrictCheck(args.command) && commandMentionsArtifact(args.command, artifact);
-  }
   if (result.name !== "bash") return false;
   const command = commandOf(result);
   if (isBroadAuthoritativeTest(command)) return true;

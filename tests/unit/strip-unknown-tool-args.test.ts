@@ -16,10 +16,9 @@ import assert from "node:assert/strict";
 test("S6: new audit kinds are registered in the schema", async () => {
   const schema = await import("../../src/logging/schema.js");
   const auditSchema = schema.AuditEntrySchema;
-  // The schema should accept the new S3/S6/S11 kinds. If any is
+  // The schema should accept the active S6/S11 kinds. If any is
   // missing, parsing a payload with that kind will fail.
   const parseableKinds = [
-    "complete_task_synthesis_blocked",
     "tool_args_strip_failed",
     "tool_args_stripped",
     "failure_memory_load_failed",

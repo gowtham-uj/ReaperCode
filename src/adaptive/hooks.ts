@@ -1,6 +1,5 @@
 /**
- * Hooks for skills, memory, and swarm.
- *
+ * Hooks for skills and memory.
  * Each hook handler receives a `HookEvent` and returns a `HookResult`.
  * The default policy is:
  *  - fail-open for observation-only events

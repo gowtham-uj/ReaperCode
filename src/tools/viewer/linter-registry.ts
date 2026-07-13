@@ -24,7 +24,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   LinterManifestSchema,
@@ -42,7 +42,7 @@ const LINTERS_DIR = "linters";
  * lints even when the workspace hasn't opted in. Workspaces can override
  * by writing their own `<workspace>/.reaper/linters/manifest.json`.
  */
-const defaultManifestPath = path.join(import.meta.dirname, "linters", "manifest.json");
+const defaultManifestPath = fileURLToPath(new URL("./linters/manifest.json", import.meta.url));
 
 export interface DispatchOptions {
   workspaceRoot: string;
@@ -468,7 +468,11 @@ interface RunResult {
 }
 
 async function runProcess(cmd: string[], cwd: string, ms: number): Promise<RunResult> {
-  const [bin, ...args] = cmd as [string, ...string[]];
+  const [requestedBin, ...requestedArgs] = cmd as [string, ...string[]];
+  const npmCli = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+  const useBundledNpm = process.platform === "win32" && requestedBin === "npm" && existsSync(npmCli);
+  const bin = useBundledNpm ? process.execPath : requestedBin;
+  const args = useBundledNpm ? [npmCli, ...requestedArgs] : requestedArgs;
   return await new Promise<RunResult>((resolve) => {
     let stdout = "";
     let stderr = "";

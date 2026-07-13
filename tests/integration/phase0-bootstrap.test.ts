@@ -17,7 +17,7 @@ test("boots Phase 0 runtime with one default model", () => {
   // lives on `config.models`. The fixture only ships a single
   // `default_model` profile; the rest of the routes fall through to
   // it at the resolver layer.
-  assert.equal(result.config.models.default_model.provider, "cerebras");
+  assert.equal(result.config.models.default_model.provider, "nuralwatt");
   assert.equal(result.state.userIntentSummary, "Bootstrap test run");
 });
 
@@ -58,11 +58,11 @@ test("boots Phase 0 runtime with role overrides while keeping the default model 
     requestEnvelope: createValidRequestEnvelope(),
   });
 
-  // Phase 2.5: judge role now resolves to a separate profile; default_model
-  // remains the cerebras profile for the rest.
+  // The judge role resolves separately; default_model remains the fixture's
+  // NuralWatt profile for all other roles.
   assert.ok(result.config.models.judge);
   assert.equal(result.config.models.judge.model, "claude-sonnet-4");
-  assert.equal(result.config.models.default_model.provider, "cerebras");
+  assert.equal(result.config.models.default_model.provider, "nuralwatt");
 });
 
 test("fails fast on invalid request envelopes during boot", () => {

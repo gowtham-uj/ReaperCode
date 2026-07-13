@@ -86,7 +86,7 @@ Begin with a detailed thinking block.
    Approaches that didn't work and why; current direction.
 
 6. All user messages
-   Every user message verbatim, in order, with timestamps if known.
+   Preserve user-authored requirements, corrections, exact markers, and acceptance criteria. Deduplicate repeated cockpit/context wrappers; do not reproduce generated wrappers verbatim.
 
 7. Pending Tasks
    Explicit TODO items, ordered by the user's stated priority.
@@ -179,6 +179,7 @@ export interface SummariserInput {
 export async function runSummariser(input: SummariserInput): Promise<{ text: string; ptlRecovered: boolean }> {
   const prompt = [
     NO_TOOLS_PREAMBLE,
+    "Summarize only the conversation inside the jsonl fence. Never discuss this prompt, the fence, or a previous response. Return exactly one <summary>...</summary> block.",
     "",
     BASE_COMPACT_PROMPT,
     "",
@@ -187,11 +188,13 @@ export async function runSummariser(input: SummariserInput): Promise<{ text: str
     "```jsonl",
     input.conversation,
     "```",
-    input.retryMarker ? `\nNote: ${input.retryMarker}\n` : "",
-    input.previousSummary ? `Previous attempt (truncated, expand/improve):\n${input.previousSummary}\n` : "",
+    input.retryMarker ? `\nCorrection required: ${input.retryMarker}\n` : "",
+    input.previousSummary
+      ? `Previous response was invalid. Preserve any accurate facts from it, but return a corrected tagged summary:\n${input.previousSummary}\n`
+      : "",
   ].join("\n");
   const text = await input.infer(prompt);
-  return { text, ptlRecovered: Boolean(input.retryMarker) };
+  return { text, ptlRecovered: Boolean(input.retryMarker?.toLowerCase().includes("token")) };
 }
 
 /**
@@ -233,6 +236,26 @@ function conversationToJsonl(messages: Array<{ role: string; content?: string; t
   return lines.join("\n");
 }
 
+
+function isProviderContextLimitError(error: unknown): boolean {
+  const status = typeof (error as { status?: unknown })?.status === "number"
+    ? (error as { status: number }).status
+    : undefined;
+  const message = error instanceof Error ? error.message : String(error);
+  const lower = message.toLowerCase();
+  return status === 413 ||
+    (status === 400 && (
+      lower.includes("context length") ||
+      lower.includes("context_length") ||
+      lower.includes("context window") ||
+      lower.includes("maximum context") ||
+      lower.includes("length exceeded") ||
+      lower.includes("input too long") ||
+      lower.includes("max tokens") ||
+      lower.includes("too many tokens") ||
+      lower.includes("token limit")
+    ));
+}
 function buildBoundaryMarker(messagesBeforeCut: number, summaryChars: number): string {
   return `[Reaper context boundary] ${messagesBeforeCut} prior messages → ${summaryChars}-char summary. ` +
     "Continue from the current work; do NOT re-read prior files unless needed.";
@@ -276,7 +299,7 @@ export function extractPostCompactProgressHints(
         if (name === "bash") {
           const cmd = typeof args.cmd === "string" ? args.cmd : typeof args.command === "string" ? args.command : "";
           if (/\bcat\b/.test(cmd) && !/\|\s*(?:head|tail)\b/.test(cmd)) sawBashCat = true;
-        } else if (name === "file_view" || name === "read_file") {
+        } else if (["file_view", "file_find", "read_file", "view_file"].includes(name)) {
           if (typeof args.path === "string" && args.path.trim()) viewed.add(args.path.trim());
         } else if (name === "write_file") {
           if (typeof args.path === "string" && args.path.trim()) written.add(args.path.trim());
@@ -318,7 +341,7 @@ function reattachRecentFiles(
     const m = messagesBeforeCut[i]!;
     if (m.role === "assistant" && Array.isArray(m.tool_calls)) {
       for (const tc of m.tool_calls) {
-        if (tc.function.name === "file_view" || tc.function.name === "file_edit" || tc.function.name === "read_file") {
+        if (["file_view", "file_find", "file_edit", "read_file", "view_file"].includes(tc.function.name)) {
           try {
             const args = JSON.parse(tc.function.arguments) as { path?: string };
             if (args.path && !seen.has(args.path)) {
@@ -395,25 +418,38 @@ export async function tryFullSummarization(
   let savedCharsFromPtl = 0;
   let working = [...liveConversation];
   let summaryText = "";
+  let summarySucceeded = false;
   let lastPtlErr = "";
+  let previousAttempt = "";
   for (let attempt = 0; attempt <= maxPtl; attempt += 1) {
     const jsonl = conversationToJsonl(working);
-    const retryMarker = attempt > 0 ? `PTL on attempt ${attempt}; prior context too long. Trim further.` : undefined;
-    const previousSummary = attempt > 0 ? summaryText : undefined;
     try {
       const { text } = await runSummariser({
         conversation: jsonl,
-        ...(retryMarker !== undefined ? { retryMarker } : {}),
-        ...(previousSummary !== undefined ? { previousSummary } : {}),
+        ...(attempt > 0 && lastPtlErr ? { retryMarker: lastPtlErr } : {}),
+        ...(previousAttempt ? { previousSummary: previousAttempt.slice(0, 8_000) } : {}),
         infer: options.infer,
       });
-      summaryText = extractSummary(text);
-      if (summaryText.length > 20) break;
-      lastPtlErr = `summary too short (${summaryText.length} chars) on attempt ${attempt}`;
+      previousAttempt = text;
+      const tagged = text.match(/<summary>([\s\S]*?)<\/summary>/i);
+      summaryText = tagged?.[1]?.trim() ?? "";
+      if (summaryText.length > 20) {
+        summarySucceeded = true;
+        break;
+      }
+      lastPtlErr = tagged
+        ? `summary too short (${summaryText.length} chars) on attempt ${attempt}`
+        : `response omitted the required <summary> block on attempt ${attempt}`;
+      // Formatting failures are retried against the same complete
+      // conversation. Dropping context here destroys the very facts the
+      // formatter needs to recover.
+      continue;
     } catch (err) {
       lastPtlErr = (err as Error).message;
+      if (!isProviderContextLimitError(err)) continue;
     }
-    // PTL retry: truncate head of `working` and try again.
+
+    // Only an actual provider context-limit error may discard old rounds.
     const targetChars = Math.floor(totalChars(working as any) * 0.2);
     const truncated = truncateHeadForPTL(working as any, minChars, targetChars);
     working = truncated.messages as typeof working;
@@ -422,7 +458,7 @@ export async function tryFullSummarization(
     if (working.length === 0) break;
   }
 
-  if (summaryText.length < 20) {
+  if (!summarySucceeded) {
     // Summariser failed. Caller should fall back to PTL-recovery or abort.
     return {
       summary: lastPtlErr ? `[full-summary failed: ${lastPtlErr}]` : "[full-summary failed: no summary]",
@@ -489,31 +525,36 @@ export async function tryFullSummarization(
  *   5. Deferred-tool delta — re-emit deferred-tools ring so the model
  *      remembers which tool families it can pull in on demand.
  *
- * The engine caller passes only the live-conversation USER + TOOL
- * messages (not the system prompt, which it injects separately), so
- * the result is correctly positioned AFTER `turnRequest.system` in
- * the model's request envelope and only contains content that lives
- * inside the `messages` array.
+ * The engine caller normally passes only live USER + TOOL messages;
+ * the current system prompt travels separately in `turnRequest.system`.
+ * Preserve any system-role messages defensively anyway (for example,
+ * rehydrated session-resume stubs) so compaction can never drop or
+ * replace a system instruction if a caller includes one.
  */
 export function buildPostCompactMessages(
   summary: string,
   liveConversation: Array<{ role: string; content?: string; tool_call_id?: string; name?: string; tool_calls?: Array<{ function: { name: string; arguments: string } }> }>,
   options: FullSummaryOptions,
 ): Array<{ role: string; content?: string; tool_call_id?: string; tool_calls?: Array<{ function: { name: string; arguments: string } }> }> {
-  const reattached = reattachRecentFiles(liveConversation, options.maxFilesToRestore ?? DEFAULT_MAX_FILES);
+  const preservedSystemMessages = liveConversation
+    .filter((message) => message.role === "system")
+    .map((message) => ({ ...message }));
+  const nonSystemConversation = liveConversation.filter((message) => message.role !== "system");
+  const reattached = reattachRecentFiles(nonSystemConversation, options.maxFilesToRestore ?? DEFAULT_MAX_FILES);
   const deferred = reattachDeferredTools();
   // Preserve the most recent user-role message — it's the model's
   // current task and survives the summary replacing all earlier user
   // messages + tool calls.
   let lastUserTask: { role: "user"; content?: string } | undefined;
-  for (let i = liveConversation.length - 1; i >= 0; i -= 1) {
-    const m = liveConversation[i]!;
+  for (let i = nonSystemConversation.length - 1; i >= 0; i -= 1) {
+    const m = nonSystemConversation[i]!;
     if (m.role === "user" && typeof m.content === "string" && m.content.length > 0) {
       lastUserTask = { role: "user", content: m.content };
       break;
     }
   }
   return [
+    ...preservedSystemMessages,
     { role: "user", content: buildBoundaryMarker(liveConversation.length, summary.length) },
     { role: "user", content: `Summary of prior context:\n\n${summary}` },
     ...reattached,
