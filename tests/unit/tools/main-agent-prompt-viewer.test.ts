@@ -5,7 +5,7 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 
 test("system prompt renders Preferred Edit Path with canonical tools", async () => {
-  const { buildMainAgentSystemPrompt } = await import("../../../src/runtime/main-agent-prompt.js");
+  const { buildMainAgentSystemPrompt } = await import("../../../src/runtime/system-prompt.js");
   const prompt = buildMainAgentSystemPrompt({});
   assert.match(prompt, /Preferred edit path/i);
   assert.match(prompt, /1\. file_view/);
@@ -18,7 +18,7 @@ test("system prompt renders Preferred Edit Path with canonical tools", async () 
 });
 
 test("system prompt directs the model to line-numbered file_edit", async () => {
-  const { buildMainAgentSystemPrompt } = await import("../../../src/runtime/main-agent-prompt.js");
+  const { buildMainAgentSystemPrompt } = await import("../../../src/runtime/system-prompt.js");
   const prompt = buildMainAgentSystemPrompt({});
   assert.match(prompt, /file_view/);
   assert.match(prompt, /file_edit/);

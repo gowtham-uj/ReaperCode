@@ -36,6 +36,40 @@ const ACTION_VERBS = [
   "write",
 ];
 
+const BUILD_TASK_KEYWORDS = [
+  "build",
+  "implement",
+  "create ",
+  "scaffold",
+  "monorepo",
+  "set up",
+  "set up ",
+  "add a ",
+  "set up the ",
+] as const;
+
+/** Classify build-heavy requests for runtime tool/output budgeting. */
+export function detectBuildLikeTask(request: unknown): boolean {
+  if (!request || typeof request !== "object" || Array.isArray(request)) return false;
+  const record = request as Record<string, unknown>;
+  const payload =
+    record.payload && typeof record.payload === "object" && !Array.isArray(record.payload)
+      ? record.payload as Record<string, unknown>
+      : undefined;
+  const prompt =
+    typeof payload?.prompt === "string"
+      ? payload.prompt
+      : typeof record.prompt === "string"
+        ? record.prompt
+        : "";
+  if (!prompt) return false;
+  const lower = prompt.toLowerCase();
+  if (/^\s*\d+\.\s/m.test(prompt)) return true;
+  if (/^\s*-\s*\[[ x]\]/m.test(prompt)) return true;
+  if (/^##\s+feature\s+\d+/im.test(prompt)) return true;
+  return BUILD_TASK_KEYWORDS.some((keyword) => lower.includes(keyword));
+}
+
 export function extractTaskContract(request: string, repoInspection?: RepoInspection): TaskContract {
   const intent = extractUserIntentText(request);
   const userGoal = normalizeWhitespace(intent) || "Unspecified user request";

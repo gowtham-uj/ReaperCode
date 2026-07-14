@@ -3,20 +3,29 @@
  *
  * Structure follows OMP (oh-my-pi): stable role, engineering policy,
  * tool discipline, execution workflow, and delivery invariants live in
- * the system prompt. Volatile run state stays in the cockpit user message.
+ * the system prompt. The user's request remains a normal user-role message.
  *
  * The tool inventory is assembled from the exact descriptors sent on the
  * wire each turn. Static prose names only the always-offered core tools;
  * every optional capability must be discovered through search_tools.
  */
+import {
+  DEFAULT_SUMMARIZE_PROMPT_TEXT,
+  SUMMARIZE_PROMPT_FILE,
+  SYSTEM_PROMPT_FILE,
+  ensureProjectPromptFile,
+  loadProjectPrompt,
+} from "../config/project-prompts.js";
 
 export interface MainAgentSystemPromptOptions {
   /** Compact tool name list (OMP toolListMode). Schemas ship on API tools[]. */
   availableTools?: Array<{ name: string; description?: string }>;
+  /** Project root containing `.reaper/.config/*.md` prompt overrides. */
+  workspaceRoot?: string;
 }
 
 export const MAIN_AGENT_SYSTEM_PROMPT_TEXT = `You are Reaper's main agent.
-You are a terse, evidence-first senior engineer trusted with load-bearing changes. You own the task from user request to verified completion. Use tools directly. PLAN/TODO cockpit memory is advisory and never controls routing.
+You are a terse, evidence-first senior engineer trusted with load-bearing changes. You own the task from user request to verified completion. Use tools directly.
 
 # Engineering principles
 - Optimize for correctness first, then for the next maintainer six months out.
@@ -41,10 +50,10 @@ Use tools whenever they improve correctness, completeness, or grounding.
 1. file_view / file_scroll / file_find for bounded, line-numbered inspection
 2. file_edit for one exact line range; new_content replaces exactly start_line..end_line, auto-lints, and rolls back on failure
 3. write_file for new files or intentional full rewrites; delete_file only when deletion is required
-4. bash only for real execution: tests, builds, installs, git, and bounded runtime checks
+4. bash only for real execution: tests, builds, installs, git, bounded runtime checks, or intentionally oversized-file streaming when bounded file tools are unsuitable
 - Use grep_search for content search and list_directory for directory structure.
 - bash accepts an optional timeout in SECONDS (1-3600; default 60). Use run_in_background=true only for a process that must outlive the call, then stop it when finished.
-- NEVER use bash as a substitute for file reads, listings, searches, or edits. No cat, ls, find, sed, or heredoc editing when a specialized tool can do the work.
+- NEVER use bash as a substitute for routine file reads, listings, searches, or edits. No cat, ls, find, sed, or heredoc editing when a specialized tool can safely handle the task. For an intentionally oversized file that bounded readers cannot handle, bash may stream it once; inspect any persisted spillover path with file_view.
 - Batch independent reads in one tool-call turn. Same-path edits serialize; command barriers run after prior mutations settle.
 - Large command output is returned as a bounded head/tail preview with a persisted output path. Inspect that path with file_view instead of rerunning the command.
 - After a verifier fails, inspect the narrow failure before rerunning a broad command.
@@ -93,10 +102,23 @@ export function buildMainAgentSystemPrompt(
   _state?: unknown,
   options: MainAgentSystemPromptOptions = {},
 ): string {
+  let basePrompt = MAIN_AGENT_SYSTEM_PROMPT_TEXT;
+  if (options.workspaceRoot) {
+    basePrompt = loadProjectPrompt(
+      options.workspaceRoot,
+      SYSTEM_PROMPT_FILE,
+      MAIN_AGENT_SYSTEM_PROMPT_TEXT,
+    );
+    ensureProjectPromptFile(
+      options.workspaceRoot,
+      SUMMARIZE_PROMPT_FILE,
+      DEFAULT_SUMMARIZE_PROMPT_TEXT,
+    );
+  }
   const tools = options.availableTools;
-  if (!tools || tools.length === 0) return MAIN_AGENT_SYSTEM_PROMPT_TEXT;
+  if (!tools || tools.length === 0) return basePrompt;
   const inventory = tools.map((t) => `- ${t.name}`).join("\n");
-  return `${MAIN_AGENT_SYSTEM_PROMPT_TEXT}
+  return `${basePrompt}
 
 # Tool inventory
 ${inventory}`;

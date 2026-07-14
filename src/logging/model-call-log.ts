@@ -46,12 +46,12 @@ export async function logModelCall(payload: ModelCallLogPayload): Promise<void> 
   const paths = getReaperScratchpadPaths(active.workspaceRoot);
   const dir = path.join(paths.runs, active.runId, "model-calls");
   await mkdir(dir, { recursive: true });
-  const safe = toJsonSafe({
+  const safe = redactSecrets(toJsonSafe({
     schema_version: 1,
     run_id: active.runId,
     call_id: callId,
     ...payload,
-  });
+  }));
   await writeFile(path.join(dir, `${callId}.json`), JSON.stringify(safe, null, 2), "utf8");
 
   // Human-readable transcript: exactly what the model sees (system + messages)

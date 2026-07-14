@@ -88,6 +88,17 @@ test("appendEntry + readEntries roundtrip", async () => {
   assert.equal(entries[1]!.id, child.id);
 });
 
+test("appendEntry redacts secrets before durable session persistence", async () => {
+  const ws = await freshWorkspace();
+  await initJournal({ name: "secure", workspaceRoot: ws, cwd: ws });
+  const fakeGithubToken = `ghp_${"F".repeat(36)}`;
+  await appendEntry(ws, "secure", msg(null, "user", `Use ${fakeGithubToken}`));
+  const entries = readEntries(ws, "secure");
+  const durableContent = (entries[0] as MessageEntry | undefined)?.payload.content ?? "";
+  assert.doesNotMatch(durableContent, new RegExp(fakeGithubToken));
+  assert.match(durableContent, /\[REDACTED:github-token\]/);
+});
+
 test("buildActiveBranchMessages returns the live conversation", async () => {
   const ws = await freshWorkspace();
   await initJournal({ name: "s", workspaceRoot: ws, cwd: ws });

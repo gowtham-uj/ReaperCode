@@ -20,6 +20,12 @@
  */
 
 import { loadSummaryBody, loadAllSummaries, type PersistentSummary } from "./persistent-summary.js";
+import {
+  COMPACTION_CHECKPOINT_MESSAGE_NAME,
+  COMPACTION_SUMMARY_MESSAGE_NAME,
+  COMPACTION_SUMMARY_PREFIX,
+  renderCompactionCheckpoint,
+} from "./compaction-checkpoint.js";
 
 export interface SessionResumeOptions {
   /** Filter by session_id. Default: most recent. */
@@ -29,7 +35,7 @@ export interface SessionResumeOptions {
 export interface SessionResumeResult {
   /** Re-anchor user message to prepend. Empty when nothing to resume. */
   reAnchor: string;
-  /** Raw prior messages. Always empty here — only the journal path rehydrates raw turns. */
+  /** Structured compacted context. Raw prior turns remain journal-only. */
   rehydratedMessages: Array<{ role: string; content?: string; name?: string; tool_call_id?: string }>;
   /** Persistent summary used (if any). */
   summary: PersistentSummary | null;
@@ -82,9 +88,31 @@ export async function buildSessionResumeWithBody(
 ): Promise<SessionResumeResult> {
   const r = buildSessionResume(workspaceRoot, options);
   if (r.summary) {
-    // Replace preview with full body.
     const full = await loadSummaryBody(workspaceRoot, r.summary.id);
     if (full) r.summary = { ...r.summary, body: full };
+    r.reAnchor = [
+      `[Reaper session re-anchor @ ${new Date().toISOString()}]`,
+      `Restored persistent summary ${r.summary.id} from epoch ${r.summary.epoch ?? 1}.`,
+    ].join("\n");
+    r.rehydratedMessages = [
+      ...(r.summary.checkpoint
+        ? [{
+            role: "user",
+            name: COMPACTION_CHECKPOINT_MESSAGE_NAME,
+            content: renderCompactionCheckpoint(r.summary.checkpoint),
+          }]
+        : []),
+      {
+        role: "user",
+        name: COMPACTION_SUMMARY_MESSAGE_NAME,
+        content: `${COMPACTION_SUMMARY_PREFIX}\n\n${r.summary.body}`,
+      },
+    ];
+    r.stats.recentTurns = r.rehydratedMessages.length;
+    r.stats.recentChars = r.rehydratedMessages.reduce(
+      (total, message) => total + (message.content?.length ?? 0),
+      0,
+    );
   }
   return r;
 }

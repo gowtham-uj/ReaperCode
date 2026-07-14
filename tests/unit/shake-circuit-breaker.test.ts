@@ -9,35 +9,64 @@ import {
 
 type ShakeMessages = Parameters<typeof shakeConversationWithBreaker>[0];
 
-test("circuit breaker aborts after MAX_CONSECUTIVE_FAILURES failed shake passes", () => {
-  // Build a conversation that exceeds the shake threshold but has no
-  // eligible replacements — i.e. shake always returns performed:false.
-  // The protect window will absorb everything so no shake happens, but
-  // shouldShake() reports the threshold exceeded → consecutiveFailures++.
-  const messages: ShakeMessages = [
-    { role: "user", content: "x".repeat(20_000) },
-  ];
-  // Two huge bash results inside the protect window.
-  for (let i = 0; i < 2; i += 1) {
-    messages.push({
+test("circuit breaker aborts after MAX_CONSECUTIVE_FAILURES execution errors", () => {
+  const messages: ShakeMessages = [{ role: "user", content: "small" }];
+  const { result, nextFailures } = shakeConversationWithBreaker(
+    messages,
+    200,
+    MAX_CONSECUTIVE_FAILURES,
+  );
+  assert.equal(nextFailures, MAX_CONSECUTIVE_FAILURES);
+  assert.equal(result.aborted, true);
+});
+
+test("healthy no-op passes cannot open the breaker before context becomes eligible", () => {
+  const small: ShakeMessages = [{ role: "user", content: "small" }];
+  let consecutive = 0;
+  for (let index = 0; index < MAX_CONSECUTIVE_FAILURES + 2; index += 1) {
+    const { result, nextFailures } = shakeConversationWithBreaker(small, 200, consecutive);
+    assert.equal(result.performed, false);
+    assert.equal(result.aborted, undefined);
+    consecutive = nextFailures;
+  }
+  assert.equal(consecutive, 0);
+
+  const eligible: ShakeMessages = [{ role: "user", content: "x".repeat(20_000) }];
+  const sha256 = "a".repeat(64);
+  for (let index = 0; index < 6; index += 1) {
+    eligible.push({
       role: "assistant",
       content: "",
-      tool_calls: [{ id: `b-${i}`, function: { name: "bash", arguments: JSON.stringify({ cmd: "echo hi" }) } }],
+      tool_calls: [{
+        id: `v-${index}`,
+        function: { name: "file_view", arguments: JSON.stringify({ path: "old" }) },
+      }],
     });
-    messages.push({ role: "tool", tool_call_id: `b-${i}`, content: "y".repeat(15_000) });
+    eligible.push({
+      role: "tool",
+      tool_call_id: `v-${index}`,
+      content: JSON.stringify({
+        kind: "file_view",
+        path: "old",
+        sha256,
+        mtimeMs: 1_700_000_000_000,
+        startLine: 1,
+        endLine: 101,
+        totalLines: 100,
+        truncated: false,
+        window: ["a".repeat(2_000)],
+      }),
+    });
   }
-  let consecutive = 0;
-  let last;
-  // One pass will succeed (first time, user msg shakes), then subsequent
-  // passes fail until the breaker trips at MAX_CONSECUTIVE_FAILURES.
-  for (let i = 0; i <= MAX_CONSECUTIVE_FAILURES + 2; i += 1) {
-    const { result, nextFailures } = shakeConversationWithBreaker(messages, 200, consecutive);
-    consecutive = nextFailures;
-    last = result;
-    if (result.aborted) break;
-  }
-  assert.equal(consecutive, MAX_CONSECUTIVE_FAILURES);
-  assert.equal(last?.aborted, true);
+
+  const { result, nextFailures } = shakeConversationWithBreaker(
+    eligible,
+    200,
+    consecutive,
+    { shakeMinSavingsChars: 1 },
+  );
+  assert.equal(result.performed, true);
+  assert.equal(nextFailures, 0);
 });
 
 test("circuit breaker resets when shake performs a successful pass", () => {

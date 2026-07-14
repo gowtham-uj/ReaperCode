@@ -63,6 +63,29 @@ export interface UnifiedEvalResult {
   verification: { exitCode: number; command: string };
 }
 
+/**
+ * Aggressive, eval-only context settings. All char-based thresholds derive
+ * from the token cap exactly once so the in-memory config and staged project
+ * config cannot drift and silently disable a required layer.
+ */
+export function buildStressContextManagement(softCap: number): Record<string, unknown> {
+  const softCapChars = softCap * 4;
+  return {
+    softCap,
+    shakeEnabled: true,
+    shakeTriggerPct: 30,
+    shakeProtectWindowChars: Math.min(64_000, Math.max(500, Math.floor(softCapChars * 0.02))),
+    shakeMinSavingsChars: Math.max(500, Math.min(16_000, Math.floor(softCapChars * 0.02))),
+    fullSummaryEnabled: true,
+    fullSummaryCooldownMinToolBatches: 2,
+    fullSummaryCooldownMinTokenGrowth: Math.max(1_500, Math.floor(softCap * 0.08)),
+    fullSummaryMaxFilesToRestore: 2,
+    fullSummaryFileTokenBudget: Math.max(1_000, Math.floor(softCap * 0.2)),
+    bashHeadTailEnabled: true,
+    bashPersistThresholdChars: Math.min(12_000, Math.max(4_000, Math.floor(softCapChars * 0.2))),
+  };
+}
+
 export async function runUnifiedEval(options: UnifiedEvalOptions): Promise<UnifiedEvalResult> {
   const started = Date.now();
   const task = parseEvalTask(options.task);
@@ -88,21 +111,9 @@ export async function runUnifiedEval(options: UnifiedEvalOptions): Promise<Unifi
     if (typeof task.softCap === "number") {
       // Stress calibration: force each layer without reducing the retained
       // working set below the prompt/tool-schema footprint.
-      const bashThreshold = Math.min(12_000, Math.max(4_000, Math.floor(task.softCap * 0.2)));
       (config as any).contextManagement = {
         ...((config as any).contextManagement ?? {}),
-        softCap: task.softCap,
-        shakeEnabled: true,
-        shakeTriggerPct: 30,
-        shakeProtectWindowChars: Math.min(64_000, Math.max(2_000, Math.floor(task.softCap * 0.1))),
-        shakeMinSavingsChars: Math.max(500, Math.min(16_000, Math.floor(task.softCap * 0.04))),
-        fullSummaryEnabled: true,
-        fullSummaryCooldownMinToolBatches: 2,
-        fullSummaryCooldownMinTokenGrowth: Math.max(1_500, Math.floor(task.softCap * 0.08)),
-        fullSummaryMaxFilesToRestore: 2,
-        fullSummaryFileTokenBudget: Math.max(1_000, Math.floor(task.softCap * 0.2)),
-        bashHeadTailEnabled: true,
-        bashPersistThresholdChars: bashThreshold,
+        ...buildStressContextManagement(task.softCap),
       };
     }
     applyConfigToTunables(config as any);
@@ -263,20 +274,9 @@ async function writeTaskSoftCap(workspaceRoot: string, task: EvalTask): Promise<
       existing = {};
     }
   }
-  const softCapChars = task.softCap * 4;
-  const bashThreshold = Math.min(12_000, Math.max(4_000, Math.floor(softCapChars * 0.2)));
   existing.contextManagement = {
     ...((existing.contextManagement as object) ?? {}),
-    softCap: task.softCap,
-    shakeEnabled: true,
-    shakeTriggerPct: 45,
-    shakeProtectWindowChars: Math.min(64_000, Math.max(8_000, Math.floor(softCapChars * 0.2))),
-    shakeMinSavingsChars: Math.min(16_000, Math.max(1_000, Math.floor(softCapChars * 0.05))),
-    fullSummaryEnabled: true,
-    fullSummaryCooldownMinToolBatches: 2,
-    fullSummaryCooldownMinTokenGrowth: Math.max(1_500, Math.floor(task.softCap * 0.08)),
-    bashHeadTailEnabled: true,
-    bashPersistThresholdChars: bashThreshold,
+    ...buildStressContextManagement(task.softCap),
   };
   await writeFile(configPath, JSON.stringify(existing, null, 2), "utf8");
 }

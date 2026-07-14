@@ -175,6 +175,13 @@ test("unnamed runs do not create session journals", async () => {
     modelGateway: gateway,
   });
   await engine.run();
+  assert.deepEqual(gateway.capturedMessages[0], [
+    { role: "user", content: "No session here." },
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(gateway.capturedMessages[0]),
+    /Main Agent Cockpit|Repo Snapshot|Prepared Context/,
+  );
   assert.equal(
     existsSync(path.join(workspaceRoot, ".reaper", "sessions")),
     false,
@@ -280,13 +287,14 @@ test("grown session context triggers full summary and writes compaction back to 
     assert.equal(compactions.length, 1, "run must write exactly one compaction entry back to the journal");
     assert.match(compactions[0]?.payload?.summary ?? "", /ZEBRA-PLUM-77/);
 
-    // Rehydration = summary anchor + this run's raw exchange; raw filler gone.
+    // Rehydration = boundary + checkpoint + canonical summary + this run's raw exchange.
     const rehydrated = buildActiveBranchMessages(workspaceRoot, sessionName);
     assert.match(rehydrated[0]?.content ?? "", /Prior session context \(compacted\)/);
-    assert.match(rehydrated[0]?.content ?? "", /ZEBRA-PLUM-77/);
+    assert.ok(rehydrated.some((message) => message.content.includes("[Reaper session checkpoint v1]")));
+    assert.ok(rehydrated.some((message) => message.content.includes("ZEBRA-PLUM-77")));
     assert.ok(
-      !rehydrated.some((m) => m.content.includes("FILLER-TURN-0-user")),
-      "pre-compaction raw turns must be summary-mediated, not raw",
+      !rehydrated.some((m) => m.content.includes("FILLER-TURN-7-user")),
+      "intermediate pre-compaction turns must be summary-mediated, not raw",
     );
 
     // ── Run 2: boots from the compacted state ───────────────────────────
@@ -307,8 +315,8 @@ test("grown session context triggers full summary and writes compaction back to 
     const firstCall = JSON.stringify(gateway2.capturedMessages[0] ?? []);
     assert.match(firstCall, /ZEBRA-PLUM-77/, "run 2 must see the summary");
     assert.ok(
-      !firstCall.includes("FILLER-TURN-0-user"),
-      "run 2 must NOT re-pay the raw pre-compaction history",
+      !firstCall.includes("FILLER-TURN-7-user"),
+      "run 2 must not re-pay intermediate raw pre-compaction history",
     );
   } finally {
     server.close();

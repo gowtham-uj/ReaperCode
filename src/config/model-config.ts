@@ -139,6 +139,12 @@ export const ContextManagementConfigSchema = z
     fullSummaryFileTokenBudget: z.number().int().positive().default(50_000),
     fullSummaryMaxPtlRetries: z.number().int().nonnegative().default(3),
     fullSummaryMinCharsForPtlDrop: z.number().int().positive().default(200),
+    /** Reject a summary body above the 4,096-token/16KiB output envelope. */
+    fullSummaryMaxOutputChars: z.number().int().positive().max(16_384).default(16_000),
+    /** Keep raw context unless compaction saves at least this fraction. */
+    fullSummaryMinSavingsRatio: z.number().min(0).max(1).default(0.10),
+    /** Bounded durable-fact registry embedded in each checkpoint. */
+    fullSummaryGoldenFactsMaxChars: z.number().int().nonnegative().max(16_000).default(4_000),
     /**
      * After a full_summary, suppress another until at least this many
      * tool batches complete (or token growth clears the cooldown).
@@ -269,6 +275,9 @@ export const ContextManagementConfigSchema = z
     fullSummaryFileTokenBudget: 50_000,
     fullSummaryMaxPtlRetries: 3,
     fullSummaryMinCharsForPtlDrop: 200,
+    fullSummaryMaxOutputChars: 16_000,
+    fullSummaryMinSavingsRatio: 0.10,
+    fullSummaryGoldenFactsMaxChars: 4_000,
     fullSummaryCooldownMinToolBatches: 2,
     fullSummaryCooldownMinTokenGrowth: 0,
     bashHeadTailEnabled: true,

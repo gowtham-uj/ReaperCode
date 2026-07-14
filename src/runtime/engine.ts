@@ -100,6 +100,7 @@ import { prepareRuntimeContent, type ContentPrepResult } from "./content-prep.js
 import { inspectProject, renderRepoInspectionForCockpit, type RepoInspection } from "./repo-inspection.js";
 import type { MiddlewareDefinition } from "./middleware.js";
 import { getReaperScratchpadPaths } from "../workspace/scratchpad.js";
+import { redactSecrets } from "../logging/redaction.js";
 import { createReaperRunContext, ensureReaperRunContext, writeLatestRunPointer, type ReaperRunContext } from "./run-manager.js";
 import { renderFingerprintForPrompt } from "./fingerprint.js";
 import { registerCleanup, runCleanupFunctions, setActiveRunDir, installCrashHandlers } from "./cleanup-registry.js";
@@ -110,18 +111,16 @@ import { getContractCoverageBlocker, renderContractCoverageMatrix } from "../ver
 import { renderArtifactObligationLedger } from "./artifact-obligations.js";
 import { buildRescueHypothesisLedger, renderRescueHypothesisLedger } from "./hypothesis-ledger.js";
 import { printToolCalls, printTurnHeader } from "./session-printer.js";
-import { buildMainAgentCockpit, buildMainAgentSystemPrompt, detectBuildLikeTask } from "./main-agent-prompt.js";
+import { buildMainAgentSystemPrompt } from "./system-prompt.js";
 import { validateToolCallBatch, type ToolValidationBlocker } from "./tool-validation.js";
 import { getRuntimeDeadlinePressure, type RuntimeDeadlinePressure } from "./deadline-pressure.js";
 import { hasRecentIncompleteGeneratedArtifact, hasRecentStructuredResponseFallbackFeedback } from "./generated-artifact-feedback.js";
-import { extractTaskContract, extractUserIntentText, renderTaskContractForCockpit, type TaskContract } from "./task-contract.js";
+import { detectBuildLikeTask, extractTaskContract, extractUserIntentText, type TaskContract } from "./task-contract.js";
 import {
   applyCandidatePlan, 
   createPlanState, 
   createTodoState, 
   planProgress, 
-  renderPlanForCockpit, 
-  renderTodoForCockpit, 
   setPlanSteps, 
   updateTodoItem, 
   type PlanState, 
@@ -129,7 +128,6 @@ import {
 import {
   createVerificationState, 
   recordVerificationCheck, 
-  renderVerificationStateForCockpit, 
   type VerificationState} from "./verification-state.js";
 import {
   createRescueWatchdogState, 
@@ -391,12 +389,53 @@ async function persistLiveConversationSnapshot(runDir: string, messages: Generat
   await mkdir(runDir, { recursive: true });
   await writeFile(
     path.join(runDir, LIVE_CONVERSATION_SNAPSHOT),
-    JSON.stringify({ updatedAt: new Date().toISOString(), messages }, null, 2),
+    JSON.stringify({
+      updatedAt: new Date().toISOString(),
+      messages: redactSecrets(messages),
+    }, null, 2),
     "utf8",
   );
 }
 
-console.error("engine.ts loaded; typeof getEngineTunables =", typeof getEngineTunables);
+function hasUnexecutedActionPromise(value: string): boolean {
+  const tail = value
+    .replace(/<(think|analysis|reasoning)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
+    .trim()
+    .slice(-1_000);
+  if (!tail) return false;
+  const action = "(?:create|write|run|apply|edit|verify|check|read|inspect|update|delete|rename|move|install|test)";
+  if (new RegExp(`\\b(?:I(?:'ll| will| am going to)|let me)\\s+(?:now\\s+)?${action}\\b`, "i").test(tail)) {
+    return true;
+  }
+  const lastSentence = tail.split(/(?:^|[.!?]\s+)/).at(-1)?.trim() ?? "";
+  return /^(?:creating|writing|running|applying|editing|verifying|checking|reading|inspecting|updating|deleting|renaming|moving|installing|testing)\b/i.test(
+    lastSentence.replace(/^[`*_~\s]+/, ""),
+  ) && !/\b(?:complete|completed|done|fixed|passed|verified|created|wrote|ran)\b/i.test(lastSentence);
+}
+
+function hasPassingGroundedVerification(
+  toolResults: ToolResult[],
+  request: AgentRequestEnvelope,
+): boolean {
+  const rawVerification = request.payload.verification;
+  if (!rawVerification || typeof rawVerification !== "object" || Array.isArray(rawVerification)) return false;
+  const requiredCommand = (rawVerification as Record<string, unknown>).command;
+  if (typeof requiredCommand !== "string") return false;
+  const requiredSignal = classifyGroundedVerificationSignal(requiredCommand);
+  if (!requiredSignal.grounded) return false;
+  for (let index = toolResults.length - 1; index >= 0; index -= 1) {
+    const result = toolResults[index];
+    if (!result || result.name !== "bash") continue;
+    const args = result.args && typeof result.args === "object" && !Array.isArray(result.args)
+      ? result.args as Record<string, unknown>
+      : {};
+    if (typeof args.cmd !== "string") continue;
+    const signal = classifyGroundedVerificationSignal(args.cmd);
+    if (signal.grounded && signal.kind === requiredSignal.kind) return result.ok;
+  }
+  return false;
+}
+
 export class RuntimeEngine {
   private readonly config: ReaperConfig;
   private trajectoryLogger: TrajectoryLogger;
@@ -761,38 +800,6 @@ export class RuntimeEngine {
         state,
         tools: allGeneralAgentTools,
       });
-      const cockpit = buildMainAgentCockpit(
-        {
-          ...state,
-          repoInspection: state.repoInspection,
-          taskContract: state.taskContract,
-          currentPlan: renderPlanForCockpit(state.planState),
-          todo: renderTodoForCockpit(state.todoState),
-          verificationState: state.verificationState,
-          runtimeBlockers: state.runtimeBlockers,
-          recentToolResults: state.toolResults,
-          feedback: state.feedback,
-          negativeConstraints: state.negativeConstraints,
-          // Wire the content-prep output (Repo Snapshot, Tool Shortlist, Skills,
-          // Mentions, Prepared Context chunks) so the model actually sees the
-          // output of the expensive prep pipeline that runs in contentPrepNode.
-          contentPrep: state.contentPrep,
-        },
-        getRequest(),
-        state.taskContract ? renderTaskContractForCockpit(state.taskContract) : undefined,
-        state.repoInspection ? renderRepoInspectionForCockpit(state.repoInspection) : undefined,
-        state.verificationState ? renderVerificationStateForCockpit(state.verificationState) : undefined,
-        {
-          iteration: state.iteration,
-          tokenBudget: getBoot().state.tokenBudget,
-          completionGateAttempts: state.completionGateAttempts,
-          runtimeDeadline: getRuntimeDeadlinePressure(startedAt),
-        },
-        {
-          workspaceRoot: this.input.workspaceRoot,
-          availableTools: generalAgentTools,
-        },
-      );
 
       await this.trajectoryLogger.write({
         event_id: randomUUID(),
@@ -821,11 +828,16 @@ export class RuntimeEngine {
         let lastAssistantMessage = "";
         let incompleteRecoveryAttempts = 0;
         let emptyStopRetries = 0;
+        let prematureStopNudges = 0;
         const EMPTY_STOP_MAX_RETRIES = 3;
+        const PREMATURE_STOP_MAX_NUDGES = 2;
         let terminalRuntimeBlocker: RuntimeBlocker | undefined;
+        const rawPromptValue = getRequest().payload.prompt;
+        const rawUserPrompt = typeof rawPromptValue === "string" ? rawPromptValue : "";
+        const userPrompt = extractUserIntentText(rawUserPrompt);
         const resumedConversation = await loadLiveConversationSnapshot(runContext.runDir);
         const liveConversation: GenerateRequest["messages"] = resumedConversation ?? [
-          { role: "user", content: cockpit },
+          { role: "user", content: userPrompt },
         ];
         if (resumedConversation) {
           await this.trajectoryLogger.write({
@@ -1042,6 +1054,7 @@ export class RuntimeEngine {
           });
           const currentSystem = buildMainAgentSystemPrompt(state, {
             availableTools: currentGeneralAgentTools,
+            workspaceRoot: this.input.workspaceRoot,
           });
 
           const turnRequest: GenerateRequest = {
@@ -1174,6 +1187,40 @@ export class RuntimeEngine {
                 code: "main_agent_transport_error",
                 message: assistantText || "Main-agent provider transport retries were exhausted.",
               };
+            }
+            if (
+              assistantText
+              && hasUnexecutedActionPromise(assistantText)
+              && prematureStopNudges < PREMATURE_STOP_MAX_NUDGES
+              && (!turn.finishReason || turn.finishReason === "stop" || turn.finishReason === "end_turn")
+            ) {
+              prematureStopNudges += 1;
+              liveConversation.push({ role: "assistant", content: turn.content ?? "" });
+              liveConversation.push({
+                role: "user",
+                content:
+                  "Your previous response promised a concrete action but emitted no structured tool_calls, " +
+                  "so that action did not occur. Do not narrate a future action. Emit the required tool_call now, " +
+                  "or, if every requested artifact and check already exists, return a final evidence summary with " +
+                  "no future-action language.",
+              });
+              await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
+              await this.trajectoryLogger
+                .write({
+                  event_id: randomUUID(),
+                  run_id: getBoot().state.runId,
+                  session_id: getBoot().state.sessionId,
+                  trace_id: getBoot().state.runId,
+                  timestamp: new Date().toISOString(),
+                  log_schema_version: 1,
+                  kind: "premature_stop_nudge",
+                  level: getBoot().state.logLevel,
+                  assistant_excerpt: assistantText.slice(-300),
+                  nudge_count: prematureStopNudges,
+                  reason: "promised_action_without_tool_call",
+                })
+                .catch(() => undefined);
+              continue;
             }
             // OMP #handleEmptyAssistantStop: empty stop is a harness glitch —
             // retry a few times. Non-empty text-only stop is model-owned.
@@ -1375,24 +1422,6 @@ export class RuntimeEngine {
               timestamp: Date.now(),
             } as any);
             await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
-            await this.trajectoryLogger.write({
-              event_id: randomUUID(),
-              run_id: getBoot().state.runId,
-              session_id: getBoot().state.sessionId,
-              trace_id: getBoot().state.runId,
-              timestamp: new Date().toISOString(),
-              log_schema_version: 1,
-              kind: "tool_call",
-              level: getBoot().state.logLevel,
-              status: result.ok ? "completed" : "failed",
-              tool_name: call.name,
-              decision_id: id,
-              args: call.args,
-              output: result.output,
-              ...(result.error
-                ? { error: { message: result.error.message, code: result.error.code } }
-                : {}),
-            });
           }
           if (scheduled.aborted) {
             break;
@@ -1959,9 +1988,15 @@ export class RuntimeEngine {
 	        toolResults: state.toolResults,
 	        completionGateAttempts: state.completionGateAttempts,
 	        taskCompleted,
-	        // Only true when verification explicitly succeeded. A natural
-	        // no-tool stop must not report verified_completion/solved.
-	        verifiedCompletion: Boolean(taskCompleted && state.explicitVerification?.ok === true),
+	        // A successful executor-backed command of the requested verification
+	        // kind is grounded evidence even when the model ran it directly.
+	        verifiedCompletion: Boolean(
+	          taskCompleted
+	          && (
+	            state.explicitVerification?.ok === true
+	            || hasPassingGroundedVerification(state.toolResults, getRequest())
+	          )
+	        ),
 	        stuckTripped: false,
 	        gateExhausted: state.completionGateExhausted,
 	        ...(transportRetryExhausted ? { stopReasonOverride: "infra_failed" as const } : {}),

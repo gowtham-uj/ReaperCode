@@ -133,7 +133,7 @@ test("shake does not touch the cockpit message", () => {
   }
 
   shakeConversation(messages, 500);
-  assert.equal(messages[0].content, cockpit, "cockpit message should be untouched");
+  assert.equal(messages[0]?.content, cockpit, "cockpit message should be untouched");
 });
 
 test("shake keeps error outputs intact", () => {

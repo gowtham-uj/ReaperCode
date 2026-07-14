@@ -71,6 +71,54 @@ test("onBeforeModelCall: shake fires when conversation exceeds softCap", async (
   assert.equal(kinds.includes("context_shake"), true);
 });
 
+test("onBeforeModelCall reports supersede pruning even when shake has no remaining candidate", async () => {
+  loadFreshConfig();
+  const ctx = createContextEngineeringHooks();
+  const traj = makeTrajectoryLogger();
+  const observation = (callId: string) => [
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [{
+        id: callId,
+        type: "function",
+        function: { name: "file_view", arguments: JSON.stringify({ path: "src/app.ts" }) },
+      }],
+    },
+    {
+      role: "tool",
+      tool_call_id: callId,
+      content: JSON.stringify({
+        kind: "file_view",
+        path: "src/app.ts",
+        sha256: "a".repeat(64),
+        startLine: 1,
+        endLine: 200,
+        totalLines: 200,
+        truncated: false,
+        window: ["x".repeat(3_000)],
+      }),
+    },
+  ];
+  const messages = [...observation("old-read"), ...observation("new-read")];
+
+  await ctx.onBeforeModelCall({
+    workspaceRoot: "/tmp/ws",
+    runId: "supersede-only",
+    sessionId: "s1",
+    traceId: "t1",
+    messages,
+    softCap: 100_000,
+    trajectoryLogger: traj,
+  });
+
+  const event = traj.events.find((entry) => entry.kind === "context_shake");
+  assert.ok(event, "the combined cheap-pruning phase must be observable");
+  assert.equal(event.shaken_results, 0);
+  assert.equal(event.superseded_results > 0, true);
+  assert.equal(event.supersede_saved_chars > 0, true);
+});
+
 test("onAfterToolResult: bash head+tail fires when persisted output is large", async () => {
   loadFreshConfig();
   const ctx = createContextEngineeringHooks();

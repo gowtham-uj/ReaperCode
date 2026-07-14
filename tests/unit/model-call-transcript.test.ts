@@ -48,6 +48,7 @@ test("renderModelCallTranscript includes system, messages, and output", () => {
 
 test("logModelCall writes json + txt + TRANSCRIPT.md", async () => {
   const root = mkdtempSync(path.join(tmpdir(), "reaper-model-io-"));
+  const fakeGithubToken = `ghp_${"D".repeat(36)}`;
   try {
     setModelCallLogContext({ workspaceRoot: root, runId: "run-test" });
     await logModelCall({
@@ -57,14 +58,14 @@ test("logModelCall writes json + txt + TRANSCRIPT.md", async () => {
       request: {
         role: "executor",
         system: "sys",
-        messages: [{ role: "user", content: "hi" }],
+        messages: [{ role: "user", content: `hi ${fakeGithubToken}` }],
       } as any,
       response: {
         role: "executor",
         profileName: "executor",
         provider: "mock",
         model: "mock",
-        content: "hello",
+        content: `hello ${fakeGithubToken}`,
         raw: {},
       } as any,
       durationMs: 1,
@@ -77,6 +78,10 @@ test("logModelCall writes json + txt + TRANSCRIPT.md", async () => {
     assert.match(txt, /hi/);
     assert.match(txt, /hello/);
     assert.match(transcript, /0001-generate/);
+    for (const persisted of [json, txt, transcript]) {
+      assert.doesNotMatch(persisted, new RegExp(fakeGithubToken));
+      assert.match(persisted, /\[REDACTED(?::[^\]]+)?\]/);
+    }
 
     const dest = path.join(root, "MODEL_IO.md");
     const collected = await collectModelCallTranscripts(root, "run-test", dest);

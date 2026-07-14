@@ -110,6 +110,9 @@ function resolveNewFileRealpath(target: string): string {
 function rewriteWorkspaceAliasPath(root: string, targetPath: string): string {
   if (!path.isAbsolute(targetPath)) return targetPath;
 
+  const shellWorkspacePath = rewriteShellWorkspacePath(root, targetPath);
+  if (shellWorkspacePath) return shellWorkspacePath;
+
   const aliases = (getSandboxTunables().workspacePathAliases ?? "")
     .split(path.delimiter)
     .map((item) => item.trim())
@@ -128,6 +131,26 @@ function rewriteWorkspaceAliasPath(root: string, targetPath: string): string {
   }
 
   return targetPath;
+}
+
+/**
+ * Git Bash/MSYS reports Windows temp workspaces as `/tmp/<workspace>/...`.
+ * Map that shell-visible path back to the configured root. The unique
+ * workspace directory name is the trust anchor; the normal containment and
+ * symlink checks below still reject `..` and link escapes.
+ */
+function rewriteShellWorkspacePath(root: string, targetPath: string): string | undefined {
+  const parts = targetPath.replace(/\\/g, "/").split("/").filter(Boolean);
+  const workspaceName = path.basename(root).toLocaleLowerCase();
+  let workspaceIndex = -1;
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    if (parts[index]?.toLocaleLowerCase() === workspaceName) {
+      workspaceIndex = index;
+      break;
+    }
+  }
+  if (workspaceIndex < 0) return undefined;
+  return path.join(root, ...parts.slice(workspaceIndex + 1));
 }
 
 export function relativeWorkspacePath(workspaceRoot: string, targetPath: string): string {

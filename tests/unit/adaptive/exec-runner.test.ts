@@ -308,21 +308,14 @@ test("runExec: returns failed status when no auth token is set (no network call)
   });
 });
 
-test("buildRequestEnvelope: yolo system prompt is prepended to user prompt", () => {
+test("buildRequestEnvelope passes the user prompt without instruction wrappers", () => {
   const env = buildRequestEnvelope({
     workspaceRoot: "/tmp/my-build",
     prompt: "build me a thing",
   }) as { payload: { prompt: string } };
-  const p = env.payload.prompt;
-  assert.match(p, /exec environment/i, "should announce exec environment");
-  assert.match(p, /Workspace root:\s+\/tmp\/my-build/, "should interpolate workspace path");
-  assert.match(p, /write_file for new files\/full rewrites/, "should warn about source-edit rule");
-  assert.match(p, /shell heredocs or redirection/, "should warn about heredoc or redirection source writes");
-  assert.match(p, /never prefix the workspace directory/, "should pin workspace-relative path rule");
-  assert.match(p, /finish with a concise final assistant message and no tool calls/, "should give the natural-stop rule");
-  assert.match(p, /build me a thing/, "user prompt must still be present at the end");
-  // ordering: system block first, user prompt last
-  assert.ok(p.indexOf("[exec environment") < p.indexOf("build me a thing"), "system block must precede user prompt");
+
+  assert.equal(env.payload.prompt, "build me a thing");
+  assert.doesNotMatch(env.payload.prompt, /Main Agent Cockpit|exec environment|Workspace root|Tool rules|User prompt:/i);
 });
 
 test("buildRequestEnvelope: user prompt is preserved verbatim and not double-wrapped", () => {

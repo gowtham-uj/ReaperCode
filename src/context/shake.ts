@@ -458,13 +458,13 @@ export function truncateHeadForPTLRecovery(
 }
 
 /**
- * Shake with a circuit breaker. After `MAX_CONSECUTIVE_FAILURES`
- * consecutive passes that did nothing, returns performed=false and
- * stops attempting. The breaker resets on any successful pass.
+ * Shake with a circuit breaker for actual execution errors.
  *
- * Returns `{ result, nextFailures }` so callers can thread the
- * failure counter through their own state without holding a mutable
- * object.
+ * A threshold miss or a pass with no eligible stale result is a healthy
+ * no-op, not a failure. Counting those no-ops permanently opened the breaker
+ * during the first few small model turns, before context ever became large
+ * enough to shake. The caller increments the counter only when this function
+ * throws; any completed pass resets that consecutive-error count.
  */
 export function shakeConversationWithBreaker(
   messages: Message[],
@@ -483,6 +483,5 @@ export function shakeConversationWithBreaker(
     };
   }
   const result = shakeConversation(messages, contextWindowTokens, t);
-  const nextFailures = result.performed ? 0 : consecutiveFailures + 1;
-  return { result, nextFailures };
+  return { result, nextFailures: 0 };
 }
