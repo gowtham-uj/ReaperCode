@@ -73,7 +73,7 @@
   },
   "name": "reaper",
   "version": "0.1.47",
-  "description": "Model-agnostic TypeScript harness for long-horizon coding agents: 270K-token context engineering, layered compaction (shake/microcompact/reactive-compact/full-summary), provider-agnostic model routing (Anthropic, OpenAI, LiteLLM, MiniMax), unified tool dispatch, ACI file tools, parallel tool islands, verified recovery, skills/hooks/extensions.",
+  "description": "Model-agnostic TypeScript harness for long-horizon coding agents: configurable-token context engineering, layered compaction (shake/microcompact/reactive-compact/full-summary), provider-agnostic model routing (Anthropic, OpenAI, LiteLLM, MiniMax), unified tool dispatch, ACI file tools, parallel tool islands, verified recovery, skills/hooks/extensions.",
   "directories": {
     "doc": "docs",
     "test": "tests"

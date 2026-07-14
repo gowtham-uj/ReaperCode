@@ -6,7 +6,7 @@ A model-agnostic TypeScript harness for long-horizon coding agents. Reaper is th
 
 Reaper runs an autonomous coding loop that survives very long tasks without losing its mind:
 
-- **Context engineering with a 270K token hard cap.** A layered pipeline of `token-budget` → `shake` (cheap safe-to-prune scrubbing) → `microcompact` → `reactive-compact` → `compaction-checkpoint` → `full-summary` → `persistent-summary` decides when and how to age out old turns. A single `should-compact` gate fires off OMP's `softCap − 16K reserve` heuristic. The system prompt is **never** replaced — only the surrounding history is compressed and rehydrated on the next call.
+- **Context engineering with a configurable hard cap.** A layered pipeline of `token-budget` → `shake` (cheap safe-to-prune scrubbing) → `microcompact` → `reactive-compact` → `compaction-checkpoint` → `full-summary` → `persistent-summary` decides when and how to age out old turns. A single `should-compact` gate fires off an OMP-style `softCap − reserve` heuristic. The system prompt is **never** replaced — only the surrounding history is compressed and rehydrated on the next call.
 - **Cockpit with prompt-cache-friendly tiers.** `buildMainAgentCockpit` lays out system / stable / volatile sections in prefix-stable order so the provider's prompt cache stays warm across turns.
 - **Proactive repo context.** `indexer` + `graph` + Aider-style PageRank ranking + SWE-pruner produce a budgeted repo map under a token ceiling, so the agent starts the turn knowing which files matter.
 - **ACI file tools and progressive tool disclosure.** `file_view` / `file_scroll` / `file_find` / `file_edit` give viewport-style reads. A core tool set (~12 names) ships by default; deeper tools surface via `search_tools` + BM25 descriptors.
@@ -28,7 +28,7 @@ Reaper runs an autonomous coding loop that survives very long tasks without losi
 4. Run each tool through policy (`policy/sandbox.ts`, `governance/shell-risk.ts`), the allowlist, the result normalizer, and the parallel scheduler (safe reads / shells in parallel islands).
 5. Apply `shake` + `ctxHooks` to the result.
 6. Return the tool result to the model.
-7. On overflow, fire the compaction pipeline. On hard cap (270K), trigger a full session summary and rehydrate cleanly on the next turn — without ever touching the system prompt.
+7. On overflow, fire the compaction pipeline. On hard cap, trigger a full session summary and rehydrate cleanly on the next turn — without ever touching the system prompt.
 
 ## Sub-agent delegation (in-progress)
 
@@ -36,7 +36,7 @@ A delegation substrate exists at `orchestration/sub-agents.ts` (`runDelegatedPla
 
 ## State of the project
 
-- **Context engineering**: 270K-cap stress runs green, 14/14 gates passing per the latest eval.
+- **Context engineering**: hard-cap stress runs green, 14/14 gates passing per the latest eval.
 - **Sub-agent architecture**: delegation substrate + hooks + logging in place; user-facing tool surface still pending.
 - **Web UI**: planned, single-page cockpit similar to OpenHands' agent canvas.
 - **Offensive-security fork**: a red-team operator agent is being spun off this runtime in a separate repo.
