@@ -32,6 +32,10 @@ cd ReaperCode
 npm install
 npm run build
 
-# Run the agent
-npm run reaper
+# Create a .env file in the root directory with your provider API keys:
+# ANTHROPIC_API_KEY=your_key_here
+# OPENAI_API_KEY=your_key_here
+
+# Execute a task using the agent
+npm run reaper:exec -- "Analyze the src directory and give me a summary"
 ```
