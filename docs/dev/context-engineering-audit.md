@@ -1,21 +1,21 @@
-# Reaper Coding-Agent Audit — vs Pi / OMP Context Engineering
+# Reaper Coding-Agent Audit — vs Reaper / internal-harness Context Engineering
 
-> Scouted 2026-07-09 against current `main` (`v0.1.45: complete OMP context-engineering port`).
-> Benchmarks: Pi / Oh-My-Pi (OMP), Claude Code, Aider, Cursor-style cloud agents.
+> Scouted 2026-07-09 against current `main` (`v0.1.45: complete internal-harness context-engineering port`).
+> Benchmarks: open coding-agent harnesses, other agent harnesses, an established agent harness, established agent harnesses-style cloud agents.
 > Scope: context engineering first, then agent loop / tools / memory / subagents.
 
 ---
 
 ## Verdict
 
-Reaper already has a **strong OMP-aligned compaction stack** (21 wired layers, shake validated under stress, progressive tool disclosure, ACI file viewer). It is **not yet a reliable long-running agent loop** because too much of the soft context layer is **built but unwired**, the hot path is concentrated in a 6k-line `@ts-nocheck` engine, and several Pi/OMP techniques that matter most for long autonomous coding runs are missing or incomplete.
+Reaper already has a **strong internal-harness compaction stack** (21 wired layers, shake validated under stress, progressive tool disclosure, ACI file viewer). It is **not yet a reliable long-running agent loop** because too much of the soft context layer is **built but unwired**, the hot path is concentrated in a 6k-line `@ts-nocheck` engine, and several reaper/internal-harness techniques that matter most for long autonomous coding runs are missing or incomplete.
 
 **Bottom line:** Fix wiring and config truth first. Then close the mid-run / supersede / session-resume gaps. Only then reintroduce model-driven swarm + worktrees.
 
 ```json
 {
   "verdict": "request_changes",
-  "summary": "Context compaction is competitive with OMP on paper and partially validated; agent-loop orchestration, session continuity, and subagent/worktree surfaces lag Pi/Cursor. Highest ROI is connecting existing modules, not inventing new ones.",
+  "summary": "Context compaction is competitive with internal-harness on paper and partially validated; agent-loop orchestration, session continuity, and subagent/worktree surfaces lag established agent harnesses. Highest ROI is connecting existing modules, not inventing new ones.",
   "confidence": 0.88
 }
 ```
@@ -26,16 +26,16 @@ Reaper already has a **strong OMP-aligned compaction stack** (21 wired layers, s
 
 | Area | Evidence | Why it matters |
 |---|---|---|
-| Layered compaction | `src/runtime/context-engineering-wiring.ts` — shake → time-microcompact → tool-history compact → async full-summary → PTL recovery → model promotion | Matches OMP's cheap-then-expensive philosophy |
+| Layered compaction | `src/runtime/context-engineering-wiring.ts` — shake → time-microcompact → tool-history compact → async full-summary → PTL recovery → model promotion | Matches Reaper's cheap-then-expensive philosophy |
 | Shake + envelope | `src/context/shake.ts` + `src/tools/tool-result.ts` (`safeToPrune` / `pruneReplacement`) | A/B: 38 shakes, ~130K chars saved, 100/100 edits at 30K softCap |
-| Compaction gate | `src/context/should-compact.ts` — OMP `softCap - 16K reserve` | Single decision function, testable |
+| Compaction gate | `src/context/should-compact.ts` — internal-harness `softCap - 16K reserve` | Single decision function, testable |
 | Cockpit cache tiers | `src/runtime/main-agent-prompt.ts` — system/stable/volatile section ordering | Prompt-cache friendly prefix design |
-| Proactive repo context | `indexer.ts` + `graph.ts` + `ranking.ts` + `pruner.ts` + SWE-pruner | Aider-like PageRank discovery under token budget |
+| Proactive repo context | `indexer.ts` + `graph.ts` + `ranking.ts` + `pruner.ts` + SWE-pruner | an established agent harness-like PageRank discovery under token budget |
 | Progressive tools | `CORE_TOOL_NAMES` (~12) + `search_tools` + BM25 descriptors | Keeps per-turn tool schema lean |
 | ACI file tools | `file_view` / `file_scroll` / `file_find` / `file_edit` | Viewport edits beat dump-entire-file agents |
 | Parallel tool islands | `src/execution/scheduler.ts` + `resource-keys.ts` | Safe read/shell parallelism with resource keys |
 | WAL / shadow checkpoints | `src/recovery/` | Barrier shells flush writes before mutating commands |
-| Skills progressive disclosure | summaries in cockpit; bodies via `activate_skill` | Pi-style skill loading pattern |
+| Skills progressive disclosure | summaries in cockpit; bodies via `activate_skill` | Reaper-style skill loading pattern |
 
 ---
 
@@ -70,15 +70,15 @@ flowchart TB
 
 ### A. Context engineering (highest leverage)
 
-| Gap | Reaper today | Pi / OMP | Impact |
+| Gap | Reaper today | Reaper / internal-harness | Impact |
 |---|---|---|---|
 | **Config lies** | `shake.ts` hardcodes `PROTECT_WINDOW_CHARS=12000`, `SHAKE_TRIGGER_PCT=50`; tunables in `config-tunables.ts` unused. Engine softCap (~200K from `tokenBudget`) vs tunables default `270_000` | Single settings object drives prune/shake | Silent mis-triggers; A/B needed 30K softCap to force shake |
 | **Duplicate shake** | `engine.ts` ~1294 calls `shakeConversation` **and** `ctxHooks.onBeforeModelCall` shakes again | One prune path | Double mutation, inconsistent telemetry/breaker |
-| **Async full-summary** | Fire-and-forget; applied on *next* call; 30s staleness drop | OMP `runAutoCompaction` blocks + `replaceMessages()` before continue | Same-turn overflow → PTL races |
-| **No mid-run maintain** | `onAfterToolResult` mostly bash head+tail telemetry | OMP `maintainContextMidRun` after each tool when continuing | Context balloons inside a long tool batch |
-| **No supersede prune** | Microcompact dedupes identical reads; no path-aware drop of stale `file_view` when same file re-read | OMP `pruneStaleToolResults` + useless-flag + prompt-cache guard | Cheapest win for read-heavy coding loops |
+| **Async full-summary** | Fire-and-forget; applied on *next* call; 30s staleness drop | internal-harness `runAutoCompaction` blocks + `replaceMessages()` before continue | Same-turn overflow → PTL races |
+| **No mid-run maintain** | `onAfterToolResult` mostly bash head+tail telemetry | internal-harness `maintainContextMidRun` after each tool when continuing | Context balloons inside a long tool batch |
+| **No supersede prune** | Microcompact dedupes identical reads; no path-aware drop of stale `file_view` when same file re-read | internal-harness `pruneStaleToolResults` + useless-flag + prompt-cache guard | Cheapest win for read-heavy coding loops |
 | **chars/4 tokens** | Default `countTokens` is `chars/4`; shake uses similar heuristics | Token-native decisions from provider usage | Mis-fire shake/summary vs real limits |
-| **No incomplete recovery** | Layer audit: `stopReason === length` not handled | OMP incomplete compaction | Truncated assistant turns leave incoherent state |
+| **No incomplete recovery** | Layer audit: `stopReason === length` not handled | internal-harness incomplete compaction | Truncated assistant turns leave incoherent state |
 | **Bash spillover tail-only** | A/B: needles in head of 1.5MB logs missing from artifact | Head+tail or full indexed spill | Wasted re-runs of generators |
 | **Time-microcompact inert** | Needs per-message `timestamp`; tool results often lack them | Timestamps on every tool message | Days-long cache rollover never fires |
 | **No snapcompact / stable prefix** | In-place mutation of tool results | Append-only / snapcompact / cache-warm guard | Cache invalidation + summarizer cost |
@@ -92,7 +92,7 @@ flowchart TB
 | **`buildSessionResume` never called from engine** | zero imports in `engine.ts` | Days-long autonomy modules are test-only |
 | **Three session models** | `session-manager`, `session-journal`, `session-store` | Fragmentation; none is the runtime source of truth |
 | **Dual skill systems** | `context/skills.ts` vs `skills/*`; `.pi/skills` not discovered | Prompt-listed skills may not activate |
-| **AGENTS.md root-only + tight caps** | `loadContextFiles`: 4KB/file, 16KB total; no ancestor walk | Pi walks cwd→root with monorepo dedup |
+| **AGENTS.md root-only + tight caps** | `loadContextFiles`: 4KB/file, 16KB total; no ancestor walk | Reaper walks cwd→root with monorepo dedup |
 | **Keyword memory only** | `memory-search.ts` | Weak paraphrase recall vs embeddings |
 | **No model-facing scratchpad** | `.reaper/` dirs exist; no append/read working-notes tool | Long tasks lose intermediate decisions |
 
@@ -101,12 +101,12 @@ flowchart TB
 | Gap | Evidence | Impact |
 |---|---|---|
 | **God engine** | `engine.ts` ~6048 lines, `@ts-nocheck` | High regression risk; hard to evolve loop |
-| **Subagents orphaned** | `AgentSwarmTool`, `call_subagent`, `SubagentPool`, `runDelegatedPlan` exist; roadmap says removed until redesigned; docs still describe them | Cannot parallel scout/write like Pi/Cursor |
+| **Subagents orphaned** | `AgentSwarmTool`, `call_subagent`, `SubagentPool`, `runDelegatedPlan` exist; roadmap says removed until redesigned; docs still describe them | Cannot parallel scout/write like established agent harnesses |
 | **Worktrees orphaned** | `orchestration/sub-agents.ts` `runDelegatedPlan` — no callers | No isolated parallel writers |
 | **Capability router unused** | `routeForCapabilities` never imported | Model-agnostic claim incomplete |
 | **Governance unwired** | `evaluateToolCall` not in `ToolExecutor` | Metadata investment is dead code |
-| **Verification not auto on live loop** | Model must `bash` tests; `verifyNode` is legacy path | Weaker than Pi/Cursor post-edit verify |
-| **Narrow core tools** | 12 always-on; `glob`/`apply_patch`/`diagnostics` discoverable-only | Extra discovery turn vs Claude Code defaults |
+| **Verification not auto on live loop** | Model must `bash` tests; `verifyNode` is legacy path | Weaker than established agent harnesses post-edit verify |
+| **Narrow core tools** | 12 always-on; `glob`/`apply_patch`/`diagnostics` discoverable-only | Extra discovery turn vs other agent harnesses defaults |
 | **Docs drift** | `docs/subagents.md` vs v0.1.4 roadmap | Operator/benchmark confusion |
 
 ---
@@ -129,10 +129,10 @@ flowchart TB
 4. **Stamp tool-result timestamps**
    - Set `timestamp` at tool-result creation so time-microcompact can fire.
 
-### P1 — Close OMP mid-run / prune gaps (context quality)
+### P1 — Close internal-harness mid-run / prune gaps (context quality)
 
 5. **Blocking or mid-run full-summary**
-   - When `shouldCompact` fires, either await summary before next model call (OMP semantics) or run `maintainContextMidRun` after each tool result in a continuing batch.
+   - When `shouldCompact` fires, either await summary before next model call (compaction semantics) or run `maintainContextMidRun` after each tool result in a continuing batch.
 
 6. **Supersede pruning**
    - Drop stale `file_view` / read results when the same path is re-read later.
@@ -153,14 +153,14 @@ flowchart TB
     - Replace `onBoot` no-op: `initJournal` / named session load + `buildSessionResumeWithBody`.
     - Emit `recordUserTurn` / `recordAssistantTurn` / `recordToolTurn` each turn.
 
-11. **Pick one session source of truth**
-    - Prefer `session-journal.ts` (OMP tree semantics) **or** `session-store.ts` (named brain layout); deprecate the other for runtime.
+11. **Reaperck one session source of truth**
+    - Prefer `session-journal.ts` (compaction tree semantics) **or** `session-store.ts` (named brain layout); deprecate the other for runtime.
 
 12. **Unify skills discovery**
     - One discoverer feeds prompt XML **and** `SkillMemoryRegistry`.
     - Include `.reaper/skills` + optional `.pi/skills` (or symlink) so listed skills are activatable.
 
-13. **AGENTS.md Pi parity**
+13. **AGENTS.md Reaper parity**
     - Ancestor walk with monorepo dedup; separate trusted project-rules budget from volatile cockpit caps.
 
 14. **Model-facing scratchpad tool**
@@ -176,7 +176,7 @@ flowchart TB
     - Read-only scouts by default; writers require worktree + file leases (`orchestration/sandbox.ts` + leases).
 
 17. **Connect `runDelegatedPlan`**
-    - Model-invoked parallel subtasks with git worktrees; parent integrates one branch at a time (Pi cockpit pattern).
+    - Model-invoked parallel subtasks with git worktrees; parent integrates one branch at a time (Reaper cockpit pattern).
 
 18. **Wire `routeForCapabilities`**
     - Native tools vs JSON envelope fallback for non-tool models.
@@ -198,8 +198,8 @@ flowchart TB
 23. Snapcompact or append-only stable prefix for long sessions.
 24. Embedding memory over `.reaper/summaries/`.
 25. Turn-aware compaction (parallel history + turn-prefix summaries).
-26. Prompt-cache warming / ephemeral breakpoints (Aider-style).
-27. Larger Aider-style repo map budget (~15% window) coordinated with live pressure.
+26. Prompt-cache warming / ephemeral breakpoints (an established agent harness-style).
+27. Larger an established agent harness-style repo map budget (~15% window) coordinated with live pressure.
 
 ---
 
@@ -209,7 +209,7 @@ flowchart TB
 |---|---|---|
 | 1 | `fix(context): wire shake tunables + single softCap + remove duplicate shake` | Stops silent config lies; low risk; unlocks reliable A/B |
 | 2 | `feat(context): provider token counts + tool-result timestamps + incomplete recovery` | Makes gates token-native; activates time-microcompact |
-| 3 | `feat(context): supersede prune + mid-run maintain / blocking full-summary` | Biggest quality jump vs OMP for coding loops |
+| 3 | `feat(context): supersede prune + mid-run maintain / blocking full-summary` | Biggest quality jump vs internal-harness for coding loops |
 
 Do **not** start with swarm/worktree reintroduction until P0–P1 land — otherwise parallel agents amplify context bugs.
 
@@ -239,7 +239,7 @@ Changes in this roadmap touch tool execution, compaction mutation, session persi
       "severity": "medium",
       "file": "src/runtime/context-engineering-wiring.ts",
       "issue": "In-place shake/time-microcompact can invalidate provider prompt cache without a warm-prefix guard",
-      "fix": "Port OMP prompt-cache guard before mutating protected prefix"
+      "fix": "Port internal-harness prompt-cache guard before mutating protected prefix"
     },
     {
       "severity": "low",
@@ -258,7 +258,7 @@ Changes in this roadmap touch tool execution, compaction mutation, session persi
 
 ```json
 {
-  "summary": "Reaper has a competitive OMP-ported compaction stack and solid ACI/tool-island foundations, but soft context (resume/journal/skills), mid-run maintenance, supersede pruning, and subagent/worktree wiring lag Pi/Cursor. Highest ROI is connecting and correcting existing modules.",
+  "summary": "Reaper has a competitive internal-harness-ported compaction stack and solid ACI/tool-island foundations, but soft context (resume/journal/skills), mid-run maintenance, supersede pruning, and subagent/worktree wiring lag established agent harnesses. Highest ROI is connecting and correcting existing modules.",
   "relevant_files": [
     "src/runtime/engine.ts",
     "src/runtime/context-engineering-wiring.ts",
@@ -293,7 +293,7 @@ Changes in this roadmap touch tool execution, compaction mutation, session persi
     "evaluateToolCall"
   ],
   "existing_patterns": [
-    "OMP-aligned layered compaction with single shouldCompact gate",
+    "internal-harness layered compaction with single shouldCompact gate",
     "Normalized tool-result envelope driving shake eligibility",
     "Cache-tier cockpit + progressive skills/tools disclosure",
     "PageRank discovery + SWE-pruner for large files",
@@ -316,9 +316,9 @@ Changes in this roadmap touch tool execution, compaction mutation, session persi
 
 ## References
 
-- `docs/dev/context-engineering-research.md` — Aider / Claude Code / Pi-OMP / OpenHands comparative research
-- `docs/dev/context-engineering-layer-audit.md` — 21-layer trigger map vs OMP
+- `docs/dev/context-engineering-research.md` — an established agent harness / other agent harnesses / Reaper-internal-harness / open-source agent harnesses comparative research
+- `docs/dev/context-engineering-layer-audit.md` — 21-layer trigger map vs internal-harness
 - `docs/context-management-ab-report.md` — shake A/B validation
 - `docs/days-long-autonomy-report.md` — continuity design (partially unwired)
 - `docs/dev/roadmap-v0.1.4-omp-tool-port.md` — tool-port phases; subagents deferred
-- `Reaper Implementation Research.md` — product philosophy (advisory, no forced routing)
+- `Reaper Tool Port Research.md` — product philosophy (advisory, no forced routing)

@@ -1,12 +1,12 @@
-# Reaper v0.1.4 Implementation Roadmap — OMP Tool Architecture Port
+# Reaper v0.1.4 Implementation Roadmap — internal-harness Tool Architecture Port
 
-**Source research:** `Reaper Implementation Research.md`
+**Source research:** `Reaper Tool Port Research.md`
 **Target release:** v0.1.4
 **Baseline:** v0.1.3 (subagents/MCP/guards removed; single-source tool surface)
 
 ## Goal
 
-Port Oh My Pi core tool-system capabilities into Reaper to improve efficiency, discoverability, reliability, and context control — without reintroducing blocking, forcing, or guard behavior. Each phase is validated by a small A/B smoke test that exercises the new behavior, then a final full A/B test against the no-Docker RepoPilot prompt.
+Port Reaper core tool-system capabilities into Reaper to improve efficiency, discoverability, reliability, and context control — without reintroducing blocking, forcing, or guard behavior. Each phase is validated by a small A/B smoke test that exercises the new behavior, then a final full A/B test against the no-Docker RepoReaperlot prompt.
 
 ## Hard rules
 
@@ -174,7 +174,7 @@ Find all function declarations named "handleError" across the codebase using the
 
 ---
 
-## Phase 7: Full A/B regression — no-Docker RepoPilot prompt
+## Phase 7: Full A/B regression — no-Docker RepoReaperlot prompt
 
 **What**
 Run the same prompt used for v0.1.3 verification and compare.

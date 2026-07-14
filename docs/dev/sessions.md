@@ -8,7 +8,7 @@ stop and extend `src/context/session-journal.ts` instead.
 
 ## Design intent
 
-Reaper is a multi-turn coding agent in the OMP/Pi mold: the user types a
+Reaper is a multi-turn coding agent in the internal-harness/Reaper mold: the user types a
 prompt, the model works (tools, edits, verification), the user types the
 next prompt, and the model continues **with the same context**. The session
 is the durable form of that conversation.
@@ -55,7 +55,7 @@ One JSONL file per session. Line 1 is an optional padded title slot, then a
 - `compaction` — payload `{ preChars, postChars, savedChars, resultsShaken,
   summary?, summaryPath?, query? }`. **When `summary` is present, rehydration
   starts here**: the summary REPLACES every message before this entry; only
-  messages after it are kept raw (OMP semantics: summary + raw tail).
+  messages after it are kept raw (compaction semantics: summary + raw tail).
 - `branch`, `branch_summary`, `title_change`, `init` — tree/bookkeeping.
 
 ## Lifecycle of a named run
@@ -86,7 +86,7 @@ One JSONL file per session. Line 1 is an optional padded title slot, then a
 Consequence: **what the layers did to the context is what the session
 carries forward.** Shaken tool results persist shaken; superseded reads stay
 dropped; a summary becomes the session's new base. The next run does not
-re-pay work the layers already did — the OMP property.
+re-pay work the layers already did — the internal-harness property.
 
 ## Context-engineering layers × sessions
 
@@ -147,7 +147,7 @@ Cheap layers persist implicitly through the post-transform delta.
 Deleted 2026-07-13 to enforce the single mechanism:
 
 - `src/session/session-manager.ts` (`ReaperSessionManager`) — a parallel
-  Pi-parity session tree that was never wired to the engine.
+  Reaper-parity session tree that was never wired to the engine.
 - `src/context/session-store.ts` — a directory-per-session store
   (`sessions/<name>/conversation.jsonl`), never wired.
 - `src/context/turn-index.ts` — a dead-write turn log; nothing recorded

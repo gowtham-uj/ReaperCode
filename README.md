@@ -6,9 +6,9 @@ A model-agnostic TypeScript harness for long-horizon coding agents. Reaper is th
 
 Reaper runs an autonomous coding loop that survives very long tasks without losing its mind:
 
-- **Context engineering with a configurable hard cap.** A layered pipeline of `token-budget` → `shake` (cheap safe-to-prune scrubbing) → `microcompact` → `reactive-compact` → `compaction-checkpoint` → `full-summary` → `persistent-summary` decides when and how to age out old turns. A single `should-compact` gate fires off an OMP-style `softCap − reserve` heuristic. The system prompt is **never** replaced — only the surrounding history is compressed and rehydrated on the next call.
+- **Context engineering with a configurable hard cap.** A layered pipeline of `token-budget` → `shake` (cheap safe-to-prune scrubbing) → `microcompact` → `reactive-compact` → `compaction-checkpoint` → `full-summary` → `persistent-summary` decides when and how to age out old turns. A single `should-compact` gate fires a `softCap − reserve` heuristic. The system prompt is **never** replaced — only the surrounding history is compressed and rehydrated on the next call.
 - **Cockpit with prompt-cache-friendly tiers.** `buildMainAgentCockpit` lays out system / stable / volatile sections in prefix-stable order so the provider's prompt cache stays warm across turns.
-- **Proactive repo context.** `indexer` + `graph` + Aider-style PageRank ranking + SWE-pruner produce a budgeted repo map under a token ceiling, so the agent starts the turn knowing which files matter.
+- **Proactive repo context.** `indexer` + `graph` + PageRank-style ranking + SWE-pruner produce a budgeted repo map under a token ceiling, so the agent starts the turn knowing which files matter.
 - **ACI file tools and progressive tool disclosure.** `file_view` / `file_scroll` / `file_find` / `file_edit` give viewport-style reads. A core tool set (~12 names) ships by default; deeper tools surface via `search_tools` + BM25 descriptors.
 - **Parallel tool islands.** `execution/scheduler.ts` + `resource-keys.ts` let safe reads and shells run concurrently without colliding on shared resources.
 - **Provider-agnostic model routing.** Anthropic, OpenAI, LiteLLM-gateway, and MiniMax / HyperAgent providers share one `model/gateway.ts` with stream normalization, structured tool-call events, and a `node-watcher` that kills stuck model streams.
@@ -38,7 +38,7 @@ A delegation substrate exists at `orchestration/sub-agents.ts` (`runDelegatedPla
 
 - **Context engineering**: hard-cap stress runs green, 14/14 gates passing per the latest eval.
 - **Sub-agent architecture**: delegation substrate + hooks + logging in place; user-facing tool surface still pending.
-- **Web UI**: planned, single-page cockpit similar to OpenHands' agent canvas.
+- **Web UI**: planned, single-page cockpit for visual agent control.
 - **Offensive-security fork**: a red-team operator agent is being spun off this runtime in a separate repo.
 
 ## Lessons baked in
