@@ -32,13 +32,13 @@ cd ReaperCode
 npm install
 npm run build
 
-# Create a .env file in the root directory with your provider API keys:
-# ANTHROPIC_API_KEY=your_key_here
-# OPENAI_API_KEY=your_key_here
+# Create a .env file in the root directory. 
+# Note: The OPENAI_API_KEY variable is used for all providers that support 
+# the OpenAI API format (e.g., OpenAI, MiniMax, DeepSeek).
+# For example, to use MiniMax, set your MiniMax key here:
+echo "OPENAI_API_KEY=your_minimax_key_here" > .env
 
-# Execute a task using the default configured model
-npm run reaper:exec -- "Analyze the src directory and give me a summary"
-
-# Or specify a particular provider and model:
-npm run reaper:exec -- "Add error handling to the server" --provider anthropic --model claude-3-5-sonnet-latest
+# Execute a task using the agent with a specific provider and model.
+# Example using MiniMax-M3:
+npm run reaper:exec -- "Analyze the src directory and give me a summary" --provider minimax --model MiniMax-M3
 ```
