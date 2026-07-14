@@ -29,11 +29,29 @@
  * ported from cc-haha (`src/services/compact/prompt.ts:61-143`).
  */
 
+import { redactSecrets } from "../adaptive/redact.js";
 import { normalizeToolResult } from "../tools/tool-result.js";
+import {
+  buildCompactionCheckpoint,
+  COMPACTION_CHECKPOINT_MESSAGE_NAME,
+  COMPACTION_SUMMARY_MESSAGE_NAME,
+  COMPACTION_SUMMARY_PREFIX,
+  renderCompactionCheckpoint,
+  splitSummaryEpoch,
+  type CompactionCheckpoint,
+} from "./compaction-checkpoint.js";
+import {
+  DEFAULT_SUMMARIZE_PROMPT_TEXT,
+  SUMMARIZE_PROMPT_FILE,
+  loadProjectPrompt,
+  renderSummarizePrompt,
+} from "../config/project-prompts.js";
 
 export interface FullSummaryOptions {
   /** Token softCap (e.g. 270_000). Used for cache-sharing fork. */
   softCap: number;
+  /** Project root containing `.reaper/.config/summarizePrompt.md`. */
+  workspaceRoot?: string;
   /** Max most-recent files to re-attach (default 5). */
   maxFilesToRestore?: number;
   /** Token budget for re-attached files (default 50_000). */
@@ -42,6 +60,14 @@ export interface FullSummaryOptions {
   maxPtlRetries?: number;
   /** Minimum chars before a tool result is eligible for head/tail drop. */
   minCharsForPtlDrop?: number;
+  /** Minimum fractional character savings required before replacing context. */
+  minSavingsRatio?: number;
+  /** Absolute character ceiling for the canonical summary body. */
+  maxSummaryChars?: number;
+  /** Total character budget for durable golden facts in the checkpoint. */
+  goldenFactsMaxChars?: number;
+  /** Precomputed checkpoint used when rebuilding an already-accepted summary. */
+  checkpoint?: CompactionCheckpoint;
 }
 
 export interface FullSummaryResult {
@@ -59,6 +85,14 @@ export interface FullSummaryResult {
   reattachedFiles: number;
   /** Number of new context messages after the cut. */
   newContextMessages: number;
+  /** Structured durable state injected before the summary. */
+  checkpoint?: CompactionCheckpoint;
+  /** Monotonic summary epoch (first compaction = 1). */
+  epoch?: number;
+  /** Characters from only the post-epoch delta sent to the summarizer. */
+  deltaInputChars?: number;
+  /** Why a syntactically valid summary was not applied. */
+  rejectionReason?: string;
 }
 
 const DEFAULT_MAX_FILES = 5;
@@ -66,44 +100,9 @@ const DEFAULT_POST_COMPACT_FILE_BUDGET = 50_000;
 const DEFAULT_MAX_PTL_RETRIES = 3;
 const DEFAULT_MIN_PTL_DROP = 200;
 
-const BASE_COMPACT_PROMPT = `<analysis>
-Begin with a detailed thinking block.
-</analysis>
-<summary>
-1. Primary Request and Intent
-   The user's overarching request, the task they gave you, and the high-level goal.
-
-2. Key Technical Concepts
-   Key technical decisions, frameworks, language versions, important patterns.
-
-3. Files and Code Sections
-   Critical file paths, line ranges, function names, with brief purpose notes.
-
-4. Errors and fixes
-   Any errors encountered and the specific fixes applied.
-
-5. Problem Solving
-   Approaches that didn't work and why; current direction.
-
-6. All user messages
-   Preserve user-authored requirements, corrections, exact markers, and acceptance criteria. Deduplicate repeated cockpit/context wrappers; do not reproduce generated wrappers verbatim.
-
-7. Pending Tasks
-   Explicit TODO items, ordered by the user's stated priority.
-
-8. Current Work
-   The very latest thing you were doing right before this summary; what file you were touching, what command you just ran, what you were about to do next.
-
-9. Optional Next Step
-   The single concrete next thing you would do, given the conversation. Not "the user said to" — the actual action.
-</summary>`;
-
-const NO_TOOLS_PREAMBLE = "Respond with text only. Do not call any tools.";
-
 /**
- * Group messages into API rounds. Mirrors cc-haha's `groupMessagesByApiRound`:
- * a round is an assistant message + its tool calls + the tool results.
- * Used by PTL head-truncation.
+ * Group messages into API rounds. A round is an assistant message, its
+ * tool calls, and the corresponding tool results. Used by PTL truncation.
  */
 function groupMessagesByApiRound(messages: Array<{ role: string }>): Array<{ start: number; end: number }> {
   const rounds: Array<{ start: number; end: number }> = [];
@@ -153,11 +152,8 @@ function truncateHeadForPTL(messages: Array<{ role: string; content?: string; to
 }
 
 /**
- * The summarizer call. We do not have a child-agent fork in Reaper's
- * `mainAgent` path yet, so we summarize inline. The summarizer prompt is
- * built from `BASE_COMPACT_PROMPT` plus the actual conversation
- * serialized as a JSONL of role+content. The summary must be returned
- * wrapped in <summary>…</summary> blocks.
+ * Render the project-local summarizer template with the current epoch
+ * inputs. The summary must be returned in <summary>…</summary> blocks.
  *
  * NOTE: this function is called by `tryFullSummarization` and expects an
  * `infer` callback that can call the model. The caller wires the model's
@@ -168,43 +164,62 @@ export interface SummariserInput {
   conversation: string;
   /** Previous attempts (for retry prompts). */
   previousSummary?: string;
+  /** Canonical summary from the preceding epoch; merge it with the delta. */
+  priorCanonicalSummary?: string;
+  /** Structured checkpoint from the preceding epoch. */
+  priorCheckpoint?: CompactionCheckpoint;
+  /** Monotonic epoch number used to make delta semantics explicit. */
+  epoch?: number;
   /** Optional retry marker (e.g. PTL marker). */
   retryMarker?: string;
   /** Model-inference callback returning a single text completion. */
   infer: (prompt: string) => Promise<string>;
   /** Max output tokens for the summarizer. */
   maxOutputTokens?: number;
+  /** Fully editable project-local prompt template. */
+  promptTemplate?: string;
 }
 
 export async function runSummariser(input: SummariserInput): Promise<{ text: string; ptlRecovered: boolean }> {
-  const prompt = [
-    NO_TOOLS_PREAMBLE,
-    "Summarize only the conversation inside the jsonl fence. Never discuss this prompt, the fence, or a previous response. Return exactly one <summary>...</summary> block.",
-    "",
-    BASE_COMPACT_PROMPT,
-    "",
-    "## Conversation to summarize",
-    "",
-    "```jsonl",
-    input.conversation,
-    "```",
-    input.retryMarker ? `\nCorrection required: ${input.retryMarker}\n` : "",
-    input.previousSummary
-      ? `Previous response was invalid. Preserve any accurate facts from it, but return a corrected tagged summary:\n${input.previousSummary}\n`
-      : "",
-  ].join("\n");
+  const modeInstructions = input.priorCanonicalSummary
+    ? `This is delta compaction epoch ${input.epoch ?? 2}. Merge the prior canonical summary with ONLY the new events in the JSONL fence. Preserve prior requirements and golden facts verbatim unless the delta explicitly supersedes them.`
+    : `This is compaction epoch ${input.epoch ?? 1}. Summarize the complete source conversation in the JSONL fence.`;
+  const priorSummarySection = input.priorCanonicalSummary
+    ? `## Prior canonical summary\n\n<prior-summary>\n${input.priorCanonicalSummary}\n</prior-summary>`
+    : "";
+  const checkpointSection = input.priorCheckpoint
+    ? `## Durable session checkpoint\n\nThe original task and goldenFacts below are hard anchors. Preserve them verbatim unless the user's delta explicitly supersedes them.\n\n${JSON.stringify(input.priorCheckpoint, null, 2)}`
+    : "";
+  const retrySection = input.retryMarker
+    ? `Correction required: ${input.retryMarker}`
+    : "";
+  const previousAttemptSection = input.previousSummary
+    ? `Previous response was invalid. Preserve its accurate facts, but return a corrected bounded summary:\n${input.previousSummary}`
+    : "";
+  const prompt = renderSummarizePrompt(
+    input.promptTemplate ?? DEFAULT_SUMMARIZE_PROMPT_TEXT,
+    {
+      modeInstructions,
+      checkpointSection,
+      priorSummarySection,
+      conversation: input.conversation,
+      retrySection,
+      previousAttemptSection,
+    },
+  );
   const text = await input.infer(prompt);
   return { text, ptlRecovered: Boolean(input.retryMarker?.toLowerCase().includes("token")) };
 }
 
 /**
- * Format a normalised compact summary block, stripping analysis block.
+ * Format a normalised compact summary block, stripping provider reasoning.
  */
 export function extractSummary(text: string): string {
   const m = text.match(/<summary>([\s\S]*?)<\/summary>/i);
   if (m) return m[1]!.trim();
-  // Fall back: strip the analysis block if present, return rest.
-  return text.replace(/<analysis>[\s\S]*?<\/analysis>/gi, "").trim();
+  return text
+    .replace(/<(?:think|analysis|reasoning)\b[^>]*>[\s\S]*?<\/(?:think|analysis|reasoning)>/gi, "")
+    .trim();
 }
 
 function totalChars(messages: Array<{ content?: string; tool_calls?: Array<{ function: { arguments: string } }> }>): number {
@@ -256,9 +271,9 @@ function isProviderContextLimitError(error: unknown): boolean {
       lower.includes("token limit")
     ));
 }
-function buildBoundaryMarker(messagesBeforeCut: number, summaryChars: number): string {
-  return `[Reaper context boundary] ${messagesBeforeCut} prior messages → ${summaryChars}-char summary. ` +
-    "Continue from the current work; do NOT re-read prior files unless needed.";
+function buildBoundaryMarker(messagesBeforeCut: number, summaryChars: number, epoch: number): string {
+  return `[Reaper context boundary] Epoch ${epoch} replaces ${messagesBeforeCut} prior messages with a ${summaryChars}-char canonical summary. ` +
+    "Continue from the checkpoint and current task; do NOT redo completed work or re-read unchanged files.";
 }
 
 /**
@@ -390,33 +405,46 @@ function reattachDeferredTools(): Array<{ role: "user"; content: string }> {
 /**
  * Try full summarization on `liveConversation`. If the conversation
  * exceeds `thresholdTokens` (50% of `softCap` by default) and the
- * summarizer succeeds, return the new compact conversation. Otherwise
+ * summarizer succeeds, return the compact state metadata. Otherwise
  * return null.
  *
- * This is the "auto-compact" path; the caller (engine) decides when to
- * trigger it. We do NOT trigger from the shake path — the shake path is
- * the cheap, non-LLM prune; full-summarization is the expensive fallback
- * that runs when shake has done all it can.
+ * The caller owns the live-array replacement. Full-summary is the
+ * expensive fallback after cheaper deterministic pruning.
  */
 export async function tryFullSummarization(
   liveConversation: Array<{ role: string; content?: string; tool_call_id?: string; name?: string; tool_calls?: Array<{ function: { name: string; arguments: string } }> }>,
   options: FullSummaryOptions & { infer: (prompt: string) => Promise<string>; thresholdTokens?: number },
 ): Promise<FullSummaryResult | null> {
   const maxFiles = options.maxFilesToRestore ?? DEFAULT_MAX_FILES;
-  const postBudget = options.postCompactFileTokenBudget ?? DEFAULT_POST_COMPACT_FILE_BUDGET;
   const maxPtl = options.maxPtlRetries ?? DEFAULT_MAX_PTL_RETRIES;
   const minChars = options.minCharsForPtlDrop ?? DEFAULT_MIN_PTL_DROP;
   const threshold = options.thresholdTokens ?? Math.floor(options.softCap * 0.5);
+  const minSavingsRatio = Math.max(0, Math.min(1, options.minSavingsRatio ?? 0.10));
+  const maxSummaryChars =
+    options.maxSummaryChars ??
+    Math.max(2_000, Math.min(16_000, Math.floor(options.softCap * 4 * 0.04)));
+  const promptTemplate = options.workspaceRoot
+    ? loadProjectPrompt(
+        options.workspaceRoot,
+        SUMMARIZE_PROMPT_FILE,
+        DEFAULT_SUMMARIZE_PROMPT_TEXT,
+      )
+    : DEFAULT_SUMMARIZE_PROMPT_TEXT;
 
   // Pre-cut stats
   const preChars = totalChars(liveConversation);
   const preTokens = Math.ceil(preChars / 4);
   if (preTokens < threshold) return null;
 
+  // Epoch compaction sends the prior canonical summary plus only events
+  // added after it. The first epoch still sees the complete conversation.
+  const epochInput = splitSummaryEpoch(liveConversation);
+  const deltaInputChars = totalChars(epochInput.deltaMessages as any);
+
   // Run summarizer (with PTL retry loop).
   let ptlDrops = 0;
   let savedCharsFromPtl = 0;
-  let working = [...liveConversation];
+  let working = [...epochInput.deltaMessages] as typeof liveConversation;
   let summaryText = "";
   let summarySucceeded = false;
   let lastPtlErr = "";
@@ -426,13 +454,21 @@ export async function tryFullSummarization(
     try {
       const { text } = await runSummariser({
         conversation: jsonl,
+        epoch: epochInput.epoch,
+        ...(epochInput.priorSummary
+          ? { priorCanonicalSummary: epochInput.priorSummary }
+          : {}),
+        ...(epochInput.priorCheckpoint
+          ? { priorCheckpoint: epochInput.priorCheckpoint }
+          : {}),
         ...(attempt > 0 && lastPtlErr ? { retryMarker: lastPtlErr } : {}),
         ...(previousAttempt ? { previousSummary: previousAttempt.slice(0, 8_000) } : {}),
+        promptTemplate,
         infer: options.infer,
       });
       previousAttempt = text;
       const tagged = text.match(/<summary>([\s\S]*?)<\/summary>/i);
-      summaryText = tagged?.[1]?.trim() ?? "";
+      summaryText = redactSecrets(tagged?.[1]?.trim() ?? "").redacted;
       if (summaryText.length > 20) {
         summarySucceeded = true;
         break;
@@ -468,29 +504,65 @@ export async function tryFullSummarization(
       savedCharsFromPtl,
       reattachedFiles: 0,
       newContextMessages: 0,
+      epoch: epochInput.epoch,
+      deltaInputChars,
     };
   }
 
-  // Build the new conversation: [boundary, summary, attachments...].
-  const reattached = reattachRecentFiles(liveConversation, maxFiles);
-  const deferred = reattachDeferredTools();
-  const newMessages: Array<{ role: string; content?: string }> = [
-    { role: "user", content: buildBoundaryMarker(liveConversation.length, summaryText.length) },
-    { role: "user", content: `Summary of prior context:\n\n${summaryText}` },
-    ...reattached,
-    ...deferred,
-  ];
+  if (summaryText.length > maxSummaryChars) {
+    return {
+      summary: summaryText,
+      performed: false,
+      ptlDrops,
+      savedChars: 0,
+      savedCharsFromPtl,
+      reattachedFiles: 0,
+      newContextMessages: 0,
+      epoch: epochInput.epoch,
+      deltaInputChars,
+      rejectionReason: `summary exceeded ${maxSummaryChars} character cap`,
+    };
+  }
 
+  const checkpoint = buildCompactionCheckpoint(summaryText, liveConversation, {
+    ...(options.goldenFactsMaxChars !== undefined
+      ? { goldenFactsMaxChars: options.goldenFactsMaxChars }
+      : {}),
+    maxFiles,
+  });
+  const newMessages = buildPostCompactMessages(summaryText, liveConversation, {
+    ...options,
+    checkpoint,
+  });
   const newChars = totalChars(newMessages as any);
   const savedChars = Math.max(0, preChars - newChars);
+  const requiredSavings = Math.ceil(preChars * minSavingsRatio);
+  if (savedChars < requiredSavings) {
+    return {
+      summary: summaryText,
+      performed: false,
+      ptlDrops,
+      savedChars: 0,
+      savedCharsFromPtl,
+      reattachedFiles: 0,
+      newContextMessages: 0,
+      checkpoint,
+      epoch: checkpoint.epoch,
+      deltaInputChars,
+      rejectionReason: `summary saved ${savedChars} chars; ${requiredSavings} required`,
+    };
+  }
   return {
     summary: summaryText,
     performed: true,
     ptlDrops,
     savedChars,
     savedCharsFromPtl,
-    reattachedFiles: reattached.length,
+    reattachedFiles: Math.min(maxFiles, checkpoint.files.length),
     newContextMessages: newMessages.length,
+    checkpoint,
+    epoch: checkpoint.epoch,
+    deltaInputChars,
   };
 }
 
@@ -535,28 +607,40 @@ export function buildPostCompactMessages(
   summary: string,
   liveConversation: Array<{ role: string; content?: string; tool_call_id?: string; name?: string; tool_calls?: Array<{ function: { name: string; arguments: string } }> }>,
   options: FullSummaryOptions,
-): Array<{ role: string; content?: string; tool_call_id?: string; tool_calls?: Array<{ function: { name: string; arguments: string } }> }> {
+): Array<{ role: string; content?: string; name?: string; tool_call_id?: string; tool_calls?: Array<{ function: { name: string; arguments: string } }> }> {
   const preservedSystemMessages = liveConversation
     .filter((message) => message.role === "system")
     .map((message) => ({ ...message }));
   const nonSystemConversation = liveConversation.filter((message) => message.role !== "system");
   const reattached = reattachRecentFiles(nonSystemConversation, options.maxFilesToRestore ?? DEFAULT_MAX_FILES);
   const deferred = reattachDeferredTools();
-  // Preserve the most recent user-role message — it's the model's
-  // current task and survives the summary replacing all earlier user
-  // messages + tool calls.
-  let lastUserTask: { role: "user"; content?: string } | undefined;
-  for (let i = nonSystemConversation.length - 1; i >= 0; i -= 1) {
-    const m = nonSystemConversation[i]!;
-    if (m.role === "user" && typeof m.content === "string" && m.content.length > 0) {
-      lastUserTask = { role: "user", content: m.content };
-      break;
-    }
-  }
+  const checkpoint =
+    options.checkpoint ??
+    buildCompactionCheckpoint(summary, nonSystemConversation, {
+      ...(options.goldenFactsMaxChars !== undefined
+        ? { goldenFactsMaxChars: options.goldenFactsMaxChars }
+        : {}),
+      maxFiles: options.maxFilesToRestore ?? DEFAULT_MAX_FILES,
+    });
+  const lastUserTask = checkpoint.currentTask
+    ? { role: "user" as const, content: checkpoint.currentTask }
+    : undefined;
   return [
     ...preservedSystemMessages,
-    { role: "user", content: buildBoundaryMarker(liveConversation.length, summary.length) },
-    { role: "user", content: `Summary of prior context:\n\n${summary}` },
+    {
+      role: "user",
+      content: buildBoundaryMarker(liveConversation.length, summary.length, checkpoint.epoch),
+    },
+    {
+      role: "user",
+      name: COMPACTION_CHECKPOINT_MESSAGE_NAME,
+      content: renderCompactionCheckpoint(checkpoint),
+    },
+    {
+      role: "user",
+      name: COMPACTION_SUMMARY_MESSAGE_NAME,
+      content: `${COMPACTION_SUMMARY_PREFIX}\n\n${summary}`,
+    },
     ...reattached,
     ...deferred,
     ...(lastUserTask ? [lastUserTask] : []),

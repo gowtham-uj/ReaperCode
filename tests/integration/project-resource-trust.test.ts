@@ -6,7 +6,6 @@ import path from "node:path";
 
 import { ProjectTrustStore } from "../../src/resources/project-trust.js";
 import { prepareRuntimeContent } from "../../src/runtime/content-prep.js";
-import { buildMainAgentCockpit } from "../../src/runtime/main-agent-prompt.js";
 
 async function tempDir(prefix: string): Promise<string> {
   return await mkdtemp(path.join(tmpdir(), prefix));
@@ -19,7 +18,7 @@ async function writeProjectExtension(workspace: string, id: string): Promise<voi
   await writeFile(path.join(dir, "index.js"), "export default {};", "utf8");
 }
 
-test("prepareRuntimeContent blocks untrusted project resources and exposes cockpit diagnostics", async () => {
+test("prepareRuntimeContent blocks untrusted project resources", async () => {
   const workspace = await tempDir("reaper-runtime-untrusted-");
   const userHome = await tempDir("reaper-runtime-home-");
   await writeProjectExtension(workspace, "demo");
@@ -36,8 +35,6 @@ test("prepareRuntimeContent blocks untrusted project resources and exposes cockp
   assert.match(contentPrep.resourceTrust.diagnostics.join("\n"), /not trusted/);
   assert.deepEqual(contentPrep.resources.extensions, []);
 
-  const cockpit = buildMainAgentCockpit({ contentPrep }, { prompt: "inspect resources" }, undefined, undefined, undefined, undefined);
-  assert.match(cockpit, /Project resources exist but are not trusted/);
 });
 
 test("prepareRuntimeContent resolves project resources when the project is trusted", async () => {

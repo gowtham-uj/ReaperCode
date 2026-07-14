@@ -56,6 +56,21 @@ test("runtime engine executes real tool calls and writes trajectory logs", async
   assert.match(trajectory, /session_start/);
   assert.match(trajectory, /tool_call/);
   assert.match(trajectory, /session_metrics/);
+  const trajectoryEvents = trajectory
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as {
+      kind?: string;
+      decision_id?: string;
+      status?: string;
+    });
+  for (const toolCallId of ["1", "2", "3"]) {
+    const terminalEvents = trajectoryEvents.filter((event) =>
+      event.kind === "tool_call"
+      && event.decision_id === toolCallId
+      && (event.status === "completed" || event.status === "failed"));
+    assert.equal(terminalEvents.length, 1, `tool call ${toolCallId} must have one terminal trajectory event`);
+  }
   assert.ok(typeof result.assistantMessage === "string" && result.assistantMessage.length > 0);
   assert.equal(result.events.some((event) => event.message_type === "tool_call_completed"), true);
 });
@@ -562,6 +577,104 @@ test("autonomous runtime executes canonical main-agent tool calls", async () => 
   assert.equal(requestedToolResults(result.toolResults).every((item) => item.ok), true);
   assert.equal(await readFile(path.join(workspaceRoot, "alias.txt"), "utf8"), "alias-replaced\n");
   assert.equal(await readFile(path.join(workspaceRoot, "alias-2.txt"), "utf8"), "alias-2-ok\n");
+});
+
+test("autonomous runtime retries a promised action that omitted its tool call", async () => {
+  const workspaceRoot = await createTempWorkspace();
+  const request = createValidRequestEnvelope();
+  const fakeGithubToken = `ghp_${"G".repeat(36)}`;
+  request.payload = {
+    prompt: `Create promised.txt containing done. Credential: ${fakeGithubToken}`,
+  };
+  const gateway = new StaticJsonGateway([
+    {
+      assistant_message: "Creating `promised.txt` now.",
+      tool_calls: [],
+    },
+    {
+      assistant_message: "",
+      tool_calls: [
+        { id: "write-promised", name: "write_file", args: { path: "promised.txt", content: "done\n" } },
+      ],
+    },
+    {
+      assistant_message: "promised.txt was created.",
+      tool_calls: [],
+    },
+  ]);
+
+  const engine = new RuntimeEngine({
+    config: createValidConfig(),
+    workspaceRoot,
+    requestEnvelope: request,
+    modelGateway: gateway,
+  });
+  const result = await engine.run();
+
+  assert.equal(gateway.generateCount, 3);
+  assert.equal(await readFile(path.join(workspaceRoot, "promised.txt"), "utf8"), "done\n");
+  const trajectory = await readFile(result.trajectoryPath, "utf8");
+  assert.match(trajectory, /"kind":"premature_stop_nudge"/);
+  const snapshot = await readFile(
+    path.join(workspaceRoot, ".reaper", "runs", result.state.runId, "live-conversation.json"),
+    "utf8",
+  );
+  assert.doesNotMatch(snapshot, new RegExp(fakeGithubToken));
+  assert.match(snapshot, /\[REDACTED:github-token\]/);
+});
+
+test("autonomous runtime ignores future-action language inside hidden reasoning", async () => {
+  const workspaceRoot = await createTempWorkspace();
+  const request = createValidRequestEnvelope();
+  request.payload = { prompt: "Report whether the task is complete." };
+  const gateway = new StaticJsonGateway([{
+    assistant_message: "<think>Let me inspect one more file.</think>All requested checks are complete.",
+    tool_calls: [],
+  }]);
+  const engine = new RuntimeEngine({
+    config: createValidConfig(),
+    workspaceRoot,
+    requestEnvelope: request,
+    modelGateway: gateway,
+  });
+  const result = await engine.run();
+  assert.equal(gateway.generateCount, 1);
+  assert.doesNotMatch(await readFile(result.trajectoryPath, "utf8"), /"kind":"premature_stop_nudge"/);
+});
+
+test("autonomous runtime records a passing requested verifier as solved", async () => {
+  const workspaceRoot = await createTempWorkspace();
+  await writeFile(
+    path.join(workspaceRoot, "smoke.test.mjs"),
+    "import test from 'node:test';\nimport assert from 'node:assert/strict';\ntest('smoke', () => assert.equal(2 + 2, 4));\n",
+    "utf8",
+  );
+  const request = createValidRequestEnvelope();
+  const verifyCommand = "node --test smoke.test.mjs";
+  request.payload = {
+    prompt: "Run the requested verifier, then report completion.",
+    verification: { command: verifyCommand, maxIterations: 1 },
+  };
+  const gateway = new StaticJsonGateway([
+    {
+      assistant_message: "",
+      tool_calls: [{ id: "verify-smoke", name: "bash", args: { cmd: verifyCommand } }],
+    },
+    {
+      assistant_message: "The requested verifier passed.",
+      tool_calls: [],
+    },
+  ]);
+  const engine = new RuntimeEngine({
+    config: createValidConfig(),
+    workspaceRoot,
+    requestEnvelope: request,
+    modelGateway: gateway,
+  });
+  const result = await engine.run();
+  const trajectory = await readFile(result.trajectoryPath, "utf8");
+  assert.match(trajectory, /"verified_completion":true/);
+  assert.match(trajectory, /"stop_reason":"solved"/);
 });
 
 test("runtime allows same-batch file inspection through the WAL view after state-changing tools", async () => {

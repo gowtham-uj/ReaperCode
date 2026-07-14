@@ -1,7 +1,4 @@
-const secretPatterns = [
-  /([A-Z0-9_]*(?:KEY|TOKEN|SECRET)[A-Z0-9_]*)\s*[=:]\s*['"]?([A-Za-z0-9_\-]{12,})['"]?/gi,
-  /(Bearer\s+)([A-Za-z0-9_\-]{12,})/gi,
-];
+import { redactSecrets as redactSecretText } from "../adaptive/redact.js";
 
 export function redactSecrets(value: unknown): unknown {
   if (typeof value === "string") {
@@ -25,11 +22,7 @@ export function redactSecrets(value: unknown): unknown {
 }
 
 function redactString(value: string): string {
-  let redacted = value;
-  for (const pattern of secretPatterns) {
-    redacted = redacted.replace(pattern, (_match, prefix: string, secret: string) => `${prefix}${mask(secret)}`);
-  }
-  return redacted.replace(/[A-Za-z0-9_\-]{40,}/g, (token) => mask(token));
+  return redactSecretText(value).redacted;
 }
 
 function mask(input: string): string {

@@ -32,6 +32,15 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, statSync, readdirSync, writeFileSync, unlinkSync } from "node:fs";
 import { appendFile, mkdir, readFile, writeFile, rename } from "node:fs/promises";
 import path from "node:path";
+import { redactSecrets } from "../logging/redaction.js";
+import {
+  buildCompactionCheckpoint,
+  COMPACTION_CHECKPOINT_MESSAGE_NAME,
+  COMPACTION_SUMMARY_MESSAGE_NAME,
+  COMPACTION_SUMMARY_PREFIX,
+  renderCompactionCheckpoint,
+  type CompactionCheckpoint,
+} from "./compaction-checkpoint.js";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Entry types
@@ -102,6 +111,8 @@ export interface CompactionEntry extends SessionEntryBase {
     summary?: string;
     /** Optional query that triggered this compaction. */
     query?: string;
+    /** Structured continuity state paired with the canonical summary. */
+    checkpoint?: CompactionCheckpoint;
   };
 }
 
@@ -311,7 +322,8 @@ export async function appendEntry(
   if (!existsSync(jp)) {
     throw new Error(`Session "${name}" does not exist.`);
   }
-  await appendFile(jp, `${JSON.stringify(entry)}\n`, "utf8");
+  const safeEntry = redactSecrets(entry) as SessionEntry;
+  await appendFile(jp, `${JSON.stringify(safeEntry)}\n`, "utf8");
 }
 
 export async function setTitle(
@@ -556,16 +568,33 @@ export function buildActiveBranchMessages(workspaceRoot: string, name: string): 
     .filter((e): e is MessageEntry => e.type === "message")
     .map((e) => e.payload);
   if (cutIdx < 0) return tail;
-  const summary = (chain[cutIdx] as CompactionEntry).payload.summary!;
-  const anchor: SessionMessage = {
+  const compaction = chain[cutIdx] as CompactionEntry;
+  const summary = compaction.payload.summary!;
+  const sourceMessages = chain
+    .slice(0, cutIdx)
+    .filter((entry): entry is MessageEntry => entry.type === "message")
+    .map((entry) => entry.payload);
+  const checkpoint =
+    compaction.payload.checkpoint ??
+    buildCompactionCheckpoint(summary, sourceMessages, { maxFiles: 20 });
+  const boundary: SessionMessage = {
     role: "user",
     content:
       "# Prior session context (compacted)\n" +
       "The earlier conversation in this session was summarized to stay within the context budget. " +
-      "Treat this summary as the authoritative record of everything before the turns that follow.\n\n" +
-      summary,
+      "The checkpoint and canonical summary below replace every earlier turn.",
   };
-  return [anchor, ...tail];
+  const checkpointMessage: SessionMessage = {
+    role: "user",
+    name: COMPACTION_CHECKPOINT_MESSAGE_NAME,
+    content: renderCompactionCheckpoint(checkpoint),
+  };
+  const summaryMessage: SessionMessage = {
+    role: "user",
+    name: COMPACTION_SUMMARY_MESSAGE_NAME,
+    content: `${COMPACTION_SUMMARY_PREFIX}\n\n${summary}`,
+  };
+  return [boundary, checkpointMessage, summaryMessage, ...tail];
 }
 
 // ─────────────────────────────────────────────────────────────────────────

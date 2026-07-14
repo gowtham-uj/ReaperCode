@@ -2,6 +2,7 @@ import { mkdir, appendFile } from "node:fs/promises";
 import path from "node:path";
 
 import { getReaperScratchpadPaths } from "../workspace/scratchpad.js";
+import { redactSecrets } from "./redaction.js";
 
 export type LangfuseObservationType = "span" | "generation" | "event" | "tool" | "agent";
 
@@ -29,6 +30,7 @@ export function isLangfuseRemoteEnabled(): false {
 
 export async function logLangfuseEvent(event: ReaperLangfuseEvent): Promise<void> {
   const scratchpad = getReaperScratchpadPaths(event.workspaceRoot);
+  const safeEvent = redactSecrets(event) as ReaperLangfuseEvent;
   const runId = event.trace?.runId;
   const logPath = runId
     ? path.join(scratchpad.runs, runId, "logs", "langfuse-events.jsonl")
@@ -36,7 +38,7 @@ export async function logLangfuseEvent(event: ReaperLangfuseEvent): Promise<void
   await mkdir(path.dirname(logPath), { recursive: true });
   await appendFile(
     logPath,
-    `${JSON.stringify({ timestamp: new Date().toISOString(), exportMode: "local_only", ...event })}\n`,
+    `${JSON.stringify({ timestamp: new Date().toISOString(), exportMode: "local_only", ...safeEvent })}\n`,
     "utf8",
   );
   if (runId) {
@@ -44,7 +46,7 @@ export async function logLangfuseEvent(event: ReaperLangfuseEvent): Promise<void
     await mkdir(path.dirname(legacyPath), { recursive: true });
     await appendFile(
       legacyPath,
-      `${JSON.stringify({ timestamp: new Date().toISOString(), exportMode: "local_only", ...event, runLocalPath: logPath })}\n`,
+      `${JSON.stringify({ timestamp: new Date().toISOString(), exportMode: "local_only", ...safeEvent, runLocalPath: logPath })}\n`,
       "utf8",
     );
   }

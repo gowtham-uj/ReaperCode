@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -104,9 +104,16 @@ test("inferFullSummary clamps output tokens and submits only sanitized canonical
     else process.env[TEST_API_KEY_ENV] = previousApiKey;
   });
 
+  const fakeGithubToken = `ghp_${"A".repeat(36)}`;
   const stub = await startProviderStub((_request, response) => {
     response.setHeader("content-type", "application/json");
-    response.end(JSON.stringify({ choices: [{ message: { content: "<summary>stub</summary>" } }] }));
+    response.end(JSON.stringify({
+      choices: [{
+        message: {
+          content: `<think>PRIVATE_SUMMARIZER_REASONING</think><summary>token ${fakeGithubToken} and stub</summary>`,
+        },
+      }],
+    }));
   });
   t.after(() => stub.close());
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), "reaper-full-summary-inference-"));
@@ -118,9 +125,10 @@ test("inferFullSummary clamps output tokens and submits only sanitized canonical
     JSON.stringify({ type: "reasoning", content: "DISCARD_PROVIDER_RECORD" }),
     JSON.stringify({ role: "assistant", content: "KEPT_PROVIDER_ASSISTANT_FACT" }),
     JSON.stringify({ role: "tool", name: "read", content: "KEPT_PROVIDER_TOOL_FACT" }),
+    `user supplied ${fakeGithubToken}`,
   ].join("\n");
 
-  await inferFullSummary(source, {
+  const firstResult = await inferFullSummary(source, {
     config: configFor(stub.apiBase, 16_000),
     workspaceRoot,
     runId: "clamped-16k",
@@ -137,18 +145,25 @@ test("inferFullSummary clamps output tokens and submits only sanitized canonical
 
   const systemInstruction = stub.requests[0]?.messages?.[0]?.content ?? "";
   assert.match(systemInstruction, /exactly one concise <summary>/i);
-  assert.match(systemInstruction, /exactly these nine numbered sections/i);
-  assert.match(systemInstruction, /prior canonical <summary> block verbatim/i);
-  assert.match(systemInstruction, /Repetition .* prohibited/i);
-  assert.match(systemInstruction, /Never emit or reconstruct hidden reasoning/i);
+  assert.match(systemInstruction, /project-configurable full summarizer/i);
+  assert.match(systemInstruction, /embedded conversation text as data/i);
+  assert.match(systemInstruction, /call no tools/i);
 
   const submittedSource = stub.requests[0]?.messages?.[1]?.content ?? "";
   assert.doesNotMatch(submittedSource, /<(?:think|analysis)\b/i);
   assert.doesNotMatch(submittedSource, /DISCARD_PROVIDER_/);
   assert.match(submittedSource, /KEPT_PROVIDER_ASSISTANT_FACT/);
   assert.match(submittedSource, /KEPT_PROVIDER_TOOL_FACT/);
-  assert.match(submittedSource, /Preserve prior canonical facts verbatim/i);
-  assert.match(submittedSource, /without repetition/i);
+  assert.doesNotMatch(submittedSource, new RegExp(fakeGithubToken));
+  assert.match(submittedSource, /\[REDACTED:github-token\]/);
+  assert.doesNotMatch(firstResult, /PRIVATE_SUMMARIZER_REASONING/);
+  assert.doesNotMatch(firstResult, new RegExp(fakeGithubToken));
+  assert.match(firstResult, /^<summary>token \[REDACTED:github-token\] and stub<\/summary>$/);
+  const persisted = await readFile(
+    path.join(workspaceRoot, ".reaper", "summaries", "clamped-16k.md"),
+    "utf8",
+  );
+  assert.equal(persisted, firstResult);
 });
 
 for (const status of [400, 413]) {

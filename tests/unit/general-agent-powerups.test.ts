@@ -1,47 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildMainAgentCockpit, buildMainAgentSystemPrompt } from "../../src/runtime/main-agent-prompt.js";
+import { buildMainAgentSystemPrompt } from "../../src/runtime/system-prompt.js";
 import { composeAbortSignals } from "../../src/util/abort-signal.js";
 
-test("main-agent cockpit surfaces prepared context and skills sections", () => {
-  const cockpit = buildMainAgentCockpit(
-    {
-      contentPrep: {
-        preparedContext: {
-          fingerprint: "fp-123",
-          fileTree: ["src/index.ts", "src/runtime/engine.ts", "src/agent/types.ts"],
-          chunks: [
-            { path: "src/index.ts", score: 0.91, reason: "main entry", content: "export {}" },
-            { path: "src/runtime/engine.ts", score: 0.74, reason: "orchestrator", content: "class RuntimeEngine {}" },
-          ],
-          summary: "small TS project with engine, agents, tools",
-        },
-        toolShortlist: [
-          { name: "read_file", description: "Read a file", score: 0.88 },
-          { name: "bash", description: "Run a shell command", score: 0.71 },
-        ],
-        skillsPrompt: "Use compact summary mode for large files. Prefer replace_in_file.",
-        mentions: ["RuntimeEngine", "call_subagent"],
-        environmentFingerprint: "node 20 / linux / x86_64",
-      },
-    },
-    { payload: { prompt: "Wire up content prep" } },
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    { availableTools: [{ name: "read_file", description: "Read a file" }] },
-  );
-
-  assert.match(cockpit, /## Prepared Context/);
-  assert.match(cockpit, /## Skills \/ Mentions/);
-  assert.match(cockpit, /fp-123/);
-  assert.match(cockpit, /RuntimeEngine/);
-  assert.match(cockpit, /Use compact summary mode/);
-  assert.doesNotMatch(cockpit, /## Tool Shortlist/);
-  assert.doesNotMatch(cockpit, /## Available Tools/);
-});
 
 test("main-agent system prompt tool inventory matches the provider tool list", () => {
   const tools = [

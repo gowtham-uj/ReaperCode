@@ -176,3 +176,46 @@ test("loadFullSummary returns body and metadata", async () => {
   assert.equal(full!.body, "alpha\nbeta");
   assert.equal(full!.preChars, 1000);
 });
+
+test("persistSummary redacts secrets from every durable summary field", async () => {
+  const ws = await freshWorkspace();
+  const secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
+  const summary = await persistSummary(ws, {
+    sessionId: "s1",
+    runId: "r1",
+    preChars: 1000,
+    postChars: 200,
+    savedChars: 800,
+    ptlDrops: 0,
+    reattachedFiles: 0,
+    body: `Body leaked ${secret}`,
+    query: `Query leaked ${secret}`,
+    epoch: 1,
+    checkpoint: {
+      schemaVersion: 1,
+      epoch: 1,
+      originalTask: `Task leaked ${secret}`,
+      currentTask: "continue safely",
+      goldenFacts: [`Fact leaked ${secret}`],
+      completedSteps: [],
+      decisions: [],
+      failures: [],
+      files: [],
+      nextAction: "verify persistence",
+      summarySha256: "not-a-real-hash",
+    },
+  });
+
+  const dir = path.join(ws, ".reaper", "summaries");
+  const index = await readFile(path.join(dir, "index.jsonl"), "utf8");
+  const mdFiles = await (await import("node:fs/promises")).readdir(dir);
+  const mdName = mdFiles.find((file) => file.endsWith(".md"));
+  assert.ok(mdName);
+  const markdown = await readFile(path.join(dir, mdName), "utf8");
+  const returned = JSON.stringify(summary);
+
+  for (const durableValue of [index, markdown, returned]) {
+    assert.doesNotMatch(durableValue, new RegExp(secret));
+    assert.match(durableValue, /\[REDACTED:github-token\]/);
+  }
+});

@@ -36,6 +36,24 @@ test("executeScratchpad append then read round-trips", async () => {
   assert.ok(read.content?.includes("decision"));
 });
 
+test("executeScratchpad deduplicates an identical labeled note", async () => {
+  const ws = await tempWs();
+  const note = "tenant identity is the pair (tenantId, eventId)";
+  const first = await executeScratchpad(
+    { action: "append", note, label: "architecture" },
+    { workspaceRoot: ws },
+  );
+  const second = await executeScratchpad(
+    { action: "append", note, label: "architecture" },
+    { workspaceRoot: ws },
+  );
+  const onDisk = await readFile(scratchpadPath(ws), "utf8");
+  assert.equal(first.appended, true);
+  assert.equal(second.appended, false);
+  assert.equal(second.deduplicated, true);
+  assert.equal(onDisk.match(/tenant identity/g)?.length, 1);
+});
+
 test("executeScratchpad clear empties the file", async () => {
   const ws = await tempWs();
   await executeScratchpad({ action: "append", note: "temp" }, { workspaceRoot: ws });

@@ -40,6 +40,8 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile, appendFile } from "node:fs/promises";
 import path from "node:path";
+import type { CompactionCheckpoint } from "./compaction-checkpoint.js";
+import { redactSecrets as redactPersistedSecrets } from "../adaptive/redact.js";
 
 export interface PersistentSummary {
   id: string;
@@ -53,6 +55,8 @@ export interface PersistentSummary {
   reattachedFiles: number;
   query?: string;
   body: string;
+  epoch?: number;
+  checkpoint?: CompactionCheckpoint;
 }
 
 export interface PersistSummaryInput {
@@ -65,6 +69,8 @@ export interface PersistSummaryInput {
   reattachedFiles: number;
   body: string;
   query?: string;
+  epoch?: number;
+  checkpoint?: CompactionCheckpoint;
 }
 
 function summaryDir(workspaceRoot: string): string {
@@ -77,6 +83,18 @@ function indexPath(workspaceRoot: string): string {
 
 function safeTimestamp(): string {
   return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+function redactTextForPersistence(value: string): string {
+  return redactPersistedSecrets(value).redacted;
+}
+
+function redactCheckpointForPersistence(checkpoint: CompactionCheckpoint): CompactionCheckpoint {
+  return JSON.parse(
+    JSON.stringify(checkpoint, (_key, value: unknown) =>
+      typeof value === "string" ? redactTextForPersistence(value) : value,
+    ),
+  ) as CompactionCheckpoint;
 }
 
 export async function persistSummary(
@@ -97,8 +115,12 @@ export async function persistSummary(
     savedChars: input.savedChars,
     ptlDrops: input.ptlDrops,
     reattachedFiles: input.reattachedFiles,
-    ...(input.query !== undefined ? { query: input.query } : {}),
-    body: input.body,
+    ...(input.query !== undefined ? { query: redactTextForPersistence(input.query) } : {}),
+    ...(input.epoch !== undefined ? { epoch: input.epoch } : {}),
+    ...(input.checkpoint !== undefined
+      ? { checkpoint: redactCheckpointForPersistence(input.checkpoint) }
+      : {}),
+    body: redactTextForPersistence(input.body),
   };
   // Write the .md file (frontmatter + body).
   const fileBase = safeTimestamp();
@@ -114,10 +136,11 @@ export async function persistSummary(
     `saved_chars: ${input.savedChars}`,
     `ptl_drops: ${input.ptlDrops}`,
     `reattached_files: ${input.reattachedFiles}`,
-    ...(input.query ? `query: ${JSON.stringify(input.query)}` : []),
+    ...(input.epoch !== undefined ? [`epoch: ${input.epoch}`] : []),
+    ...(summary.query ? `query: ${JSON.stringify(summary.query)}` : []),
     "---",
   ].join("\n");
-  await writeFile(filePath, `${frontmatter}\n\n${input.body}\n`, "utf8");
+  await writeFile(filePath, `${frontmatter}\n\n${summary.body}\n`, "utf8");
   // Append a row to index.jsonl for cheap search.
   const indexRow = {
     id,
@@ -130,8 +153,10 @@ export async function persistSummary(
     savedChars: input.savedChars,
     ptlDrops: input.ptlDrops,
     reattachedFiles: input.reattachedFiles,
-    ...(input.query !== undefined ? { query: input.query } : {}),
-    bodyPreview: input.body.slice(0, 500),
+    ...(summary.query !== undefined ? { query: summary.query } : {}),
+    ...(summary.epoch !== undefined ? { epoch: summary.epoch } : {}),
+    ...(summary.checkpoint !== undefined ? { checkpoint: summary.checkpoint } : {}),
+    bodyPreview: summary.body.slice(0, 500),
   };
   await appendFile(indexPath(workspaceRoot), `${JSON.stringify(indexRow)}\n`, "utf8");
   return summary;
@@ -157,6 +182,8 @@ export function loadAllSummaries(workspaceRoot: string): PersistentSummary[] {
         reattachedFiles: number;
         query?: string;
         bodyPreview: string;
+        epoch?: number;
+        checkpoint?: CompactionCheckpoint;
       };
       // Read the body lazily — for index lookup we just need the frontmatter.
       // Body is loaded from the .md file on demand.
@@ -171,6 +198,8 @@ export function loadAllSummaries(workspaceRoot: string): PersistentSummary[] {
         ptlDrops: r.ptlDrops,
         reattachedFiles: r.reattachedFiles,
         ...(r.query !== undefined ? { query: r.query } : {}),
+        ...(r.epoch !== undefined ? { epoch: r.epoch } : {}),
+        ...(r.checkpoint !== undefined ? { checkpoint: r.checkpoint } : {}),
         body: r.bodyPreview, // not the full body, lazy-loaded below
       });
     } catch {

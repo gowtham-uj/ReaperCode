@@ -66,6 +66,12 @@ interface TunablesCache {
     fullSummaryMaxPtlRetries: number;
     /** Min chars before a tool result can be PTL-dropped during summary (default 200). */
     fullSummaryMinCharsForPtlDrop: number;
+    /** Absolute character ceiling for an accepted summary body. */
+    fullSummaryMaxOutputChars: number;
+    /** Required fractional context savings before applying a summary. */
+    fullSummaryMinSavingsRatio: number;
+    /** Total character budget for checkpoint golden facts. */
+    fullSummaryGoldenFactsMaxChars: number;
     /** Min tool batches after a full_summary before another may fire (default 2). */
     fullSummaryCooldownMinToolBatches: number;
     /**
@@ -206,6 +212,9 @@ const DEFAULTS: TunablesCache = {
     fullSummaryFileTokenBudget: 50_000,
     fullSummaryMaxPtlRetries: 3,
     fullSummaryMinCharsForPtlDrop: 200,
+    fullSummaryMaxOutputChars: 16_000,
+    fullSummaryMinSavingsRatio: 0.10,
+    fullSummaryGoldenFactsMaxChars: 4_000,
     fullSummaryCooldownMinToolBatches: 2,
     fullSummaryCooldownMinTokenGrowth: 0,
     bashHeadTailEnabled: true,
@@ -307,6 +316,9 @@ export function applyConfigToTunables(config: ReaperConfig): TunablesCache {
       fullSummaryFileTokenBudget: Number(cm.fullSummaryFileTokenBudget ?? 50_000),
       fullSummaryMaxPtlRetries: Number(cm.fullSummaryMaxPtlRetries ?? 3),
       fullSummaryMinCharsForPtlDrop: Number(cm.fullSummaryMinCharsForPtlDrop ?? 200),
+      fullSummaryMaxOutputChars: Math.min(16_384, Math.max(1, Number(cm.fullSummaryMaxOutputChars ?? 16_000))),
+      fullSummaryMinSavingsRatio: Math.min(1, Math.max(0, Number(cm.fullSummaryMinSavingsRatio ?? 0.10))),
+      fullSummaryGoldenFactsMaxChars: Math.min(16_000, Math.max(0, Number(cm.fullSummaryGoldenFactsMaxChars ?? 4_000))),
       fullSummaryCooldownMinToolBatches: Number(cm.fullSummaryCooldownMinToolBatches ?? 2),
       fullSummaryCooldownMinTokenGrowth: Number(cm.fullSummaryCooldownMinTokenGrowth ?? 0),
       bashHeadTailEnabled: Boolean(cm.bashHeadTailEnabled ?? true),

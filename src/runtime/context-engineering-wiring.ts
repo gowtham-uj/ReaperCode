@@ -13,6 +13,10 @@ import { compactionContextTokens } from "../config/context-budget.js";
 import { getContextTunables } from "../config/config-tunables.js";
 import { TokenBudgetTracker, tokenUsageFromResponse } from "../context/token-budget.js";
 import { TrajectoryLogger } from "../logging/trajectory.js";
+import {
+  buildCompactionCheckpoint,
+  type CompactionCheckpoint,
+} from "../context/compaction-checkpoint.js";
 
 export interface ContextEngineeringHooksOptions {
   /** LLM inference callback used by full-summarization. Without this, full-summary is skipped. */
@@ -451,7 +455,10 @@ export function createContextEngineeringHooks(
       }
       const tokensForCompactGate = compactionContextTokens(providerInputTokens, tokensAfterShake);
 
-      if (cmTunablesBefore.shakeEnabled && shaken > 0) {
+      if (
+        cmTunablesBefore.shakeEnabled
+        && (shaken > 0 || superseded > 0 || toolOutputsPruned > 0)
+      ) {
         try {
           await (trajectoryLogger as TrajectoryLogger).write({
             event_id: randomUUID(),
@@ -509,6 +516,17 @@ export function createContextEngineeringHooks(
       let fullSummarized = false;
       const blockingFullSummary = options.blockingFullSummary !== false;
       const useHandoff = cmTunablesBefore.handoffEnabled === true;
+      const fullSummaryOptions = {
+        softCap,
+        workspaceRoot,
+        maxFilesToRestore: cmTunablesBefore.fullSummaryMaxFilesToRestore,
+        postCompactFileTokenBudget: cmTunablesBefore.fullSummaryFileTokenBudget,
+        maxPtlRetries: cmTunablesBefore.fullSummaryMaxPtlRetries,
+        minCharsForPtlDrop: cmTunablesBefore.fullSummaryMinCharsForPtlDrop,
+        maxSummaryChars: cmTunablesBefore.fullSummaryMaxOutputChars,
+        minSavingsRatio: cmTunablesBefore.fullSummaryMinSavingsRatio,
+        goldenFactsMaxChars: cmTunablesBefore.fullSummaryGoldenFactsMaxChars,
+      };
       if (fireFullSummary && infer) {
         const inflightKey = `${runId}::full-summary`;
         const ptlConsumedKey = `${runId}::full-summary-ptl-consumed`;
@@ -537,22 +555,33 @@ export function createContextEngineeringHooks(
         const summarizeWorkingConversation = async (): Promise<string> => {
           const { tryFullSummarization } = await import("../context/full-summary.js");
           const result = await tryFullSummarization(working as any[], {
-            softCap,
+            ...fullSummaryOptions,
             // The outer gate already decided to compact, including forced
             // idle/incomplete paths. Do not apply a second threshold here.
             thresholdTokens: 0,
             infer: runInfer,
           });
           if (!result?.performed) {
-            throw new Error(result?.summary ?? "full-summary inference produced no usable summary");
+            throw new Error(
+              result?.rejectionReason ??
+              result?.summary ??
+              "full-summary inference produced no usable summary",
+            );
           }
           return result.summary;
         };
         const applySummary = async (summaryText: string): Promise<void> => {
           const { persistSummary } = await import("../context/persistent-summary.js");
           const { buildPostCompactMessages } = await import("../context/full-summary.js");
+          const checkpoint = buildCompactionCheckpoint(summaryText, working as any[], {
+            goldenFactsMaxChars: cmTunablesBefore.fullSummaryGoldenFactsMaxChars,
+            maxFiles: cmTunablesBefore.fullSummaryMaxFilesToRestore,
+          });
           const preChars = estimateLiveConversationChars(working);
-          const newMsgs = buildPostCompactMessages(summaryText, working as any, { softCap } as any);
+          const newMsgs = buildPostCompactMessages(summaryText, working as any, {
+            ...fullSummaryOptions,
+            checkpoint,
+          });
           const postChars = estimateLiveConversationChars(newMsgs as unknown[]);
           const savedChars = preChars - postChars;
           if (savedChars <= 0) {
@@ -574,6 +603,7 @@ export function createContextEngineeringHooks(
               (globalThis as any)[`${runId}::full-summary-applied`] = {
                 messages: newMsgs,
                 summaryText,
+                checkpoint,
                 appliedAt: Date.now(),
               };
             }
@@ -590,6 +620,8 @@ export function createContextEngineeringHooks(
             summaryText,
             preChars,
             postChars,
+            checkpoint,
+            epoch: checkpoint.epoch,
             appliedAt: Date.now(),
           };
           await persistSummary(workspaceRoot, {
@@ -601,6 +633,8 @@ export function createContextEngineeringHooks(
             ptlDrops: 0,
             reattachedFiles: 0,
             body: summaryText,
+            epoch: checkpoint.epoch,
+            checkpoint,
           } as any).catch(() => undefined);
           await (trajectoryLogger as TrajectoryLogger).write({
             event_id: randomUUID(),
@@ -615,6 +649,9 @@ export function createContextEngineeringHooks(
             kept_messages: newMsgs.length,
             ptl_drops: 0,
             saved_chars: Math.max(0, preChars - postChars),
+            summary_epoch: checkpoint.epoch,
+            checkpoint_chars: JSON.stringify(checkpoint).length,
+            golden_fact_count: checkpoint.goldenFacts.length,
             blocking: blockingFullSummary,
             ...(useHandoff ? { handoff_kind: "omp-4-section" } : {}),
           } as any).catch(() => undefined);
@@ -1001,7 +1038,22 @@ export function createContextEngineeringHooks(
           ]);
           if (typeof summary === "string" && summary.length > 0) {
             const { buildPostCompactMessages } = await import("../context/full-summary.js");
-            const postCompactMessages = buildPostCompactMessages(summary, messages as any[], { softCap });
+            const cmTunables = getContextTunables();
+            const checkpoint = buildCompactionCheckpoint(summary, messages as any[], {
+              goldenFactsMaxChars: cmTunables.fullSummaryGoldenFactsMaxChars,
+              maxFiles: cmTunables.fullSummaryMaxFilesToRestore,
+            });
+            const postCompactMessages = buildPostCompactMessages(summary, messages as any[], {
+              softCap,
+              maxFilesToRestore: cmTunables.fullSummaryMaxFilesToRestore,
+              postCompactFileTokenBudget: cmTunables.fullSummaryFileTokenBudget,
+              maxPtlRetries: cmTunables.fullSummaryMaxPtlRetries,
+              minCharsForPtlDrop: cmTunables.fullSummaryMinCharsForPtlDrop,
+              maxSummaryChars: cmTunables.fullSummaryMaxOutputChars,
+              minSavingsRatio: cmTunables.fullSummaryMinSavingsRatio,
+              goldenFactsMaxChars: cmTunables.fullSummaryGoldenFactsMaxChars,
+              checkpoint,
+            });
             const savedChars = Math.max(
               0,
               estimateLiveConversationChars(messages) - estimateLiveConversationChars(postCompactMessages),
@@ -1066,7 +1118,13 @@ export function createContextEngineeringHooks(
               // all prior journaled turns on the next rehydration; this run's
               // own final exchange is then appended raw after it.
               const summarySlot = (globalThis as any)[`${runId}::last-full-summary`] as
-                | { summaryText: string; preChars: number; postChars: number }
+                | {
+                    summaryText: string;
+                    preChars: number;
+                    postChars: number;
+                    checkpoint: CompactionCheckpoint;
+                    epoch: number;
+                  }
                 | undefined;
               if (summarySlot && typeof summarySlot.summaryText === "string" && summarySlot.summaryText.length > 0) {
                 await appendEntry(workspaceRoot, namedSession, {
@@ -1081,6 +1139,7 @@ export function createContextEngineeringHooks(
                     savedChars: Math.max(0, summarySlot.preChars - summarySlot.postChars),
                     resultsShaken: 0,
                     summary: summarySlot.summaryText,
+                    checkpoint: summarySlot.checkpoint,
                   },
                 });
               }
@@ -1096,8 +1155,11 @@ export function createContextEngineeringHooks(
                   const m = wire[i]!;
                   if (
                     m.role === "user" &&
-                    typeof m.content === "string" &&
-                    m.content.startsWith("Summary of prior context:")
+                    (
+                      m.name === "reaper_compaction_summary" ||
+                      (typeof m.content === "string" &&
+                        m.content.startsWith("Summary of prior context:"))
+                    )
                   ) {
                     cut = i;
                     break;
@@ -1114,6 +1176,7 @@ export function createContextEngineeringHooks(
               const SKIP_PREFIXES = [
                 "[Reaper context boundary]",
                 "Summary of prior context:",
+                "[Reaper session checkpoint v1]",
                 "[Post-compact progress]",
                 "[Post-compact re-anchor]",
               ];

@@ -310,7 +310,7 @@ export class ToolExecutor {
     // Normalize tool call aliases before validation
     const normalizedCall = normalizeToolCall(call) as ToolCall;
     const start = Date.now();
-    const decisionId = randomUUID();
+    const decisionId = normalizedCall.id || call.id || randomUUID();
 
     // Unknown-tool loop guard
     const isKnownTool = normalizedCall.name in toolRegistry || (this.mcpRegistry?.isMcpTool(normalizedCall.name) ?? false);
@@ -321,29 +321,34 @@ export class ToolExecutor {
       const suggestionText = discovery.matches.length
         ? ` Closest discoverable tools: ${discovery.matches.map((item) => `${item.name} (${item.description})`).join("; ")}. Use search_tools with 'select:${discovery.matches.map((item) => item.name).join(",")}' if one of these is intended.`
         : " No close tool match was found; call search_tools with capability keywords before retrying.";
-      if (this.consecutiveUnknownTools >= 3) {
-        return {
-          toolCallId: call.id,
-          name: call.name,
-          ok: false,
-          durationMs: 0,
-          args: call.args,
-          error: {
-            message: `Unknown tool '${call.name}' called ${this.consecutiveUnknownTools} times in a row.${suggestionText} Available core tools: ${Object.keys(toolRegistry).join(", ")}. Please use only registered tools.`,
-            code: "UNKNOWN_TOOL_LOOP",
-          },
-        };
-      }
+      const error = {
+        message: this.consecutiveUnknownTools >= 3
+          ? `Unknown tool '${call.name}' called ${this.consecutiveUnknownTools} times in a row.${suggestionText} Available core tools: ${Object.keys(toolRegistry).join(", ")}. Please use only registered tools.`
+          : `Unknown tool '${call.name}'.${suggestionText} Available core tools: ${Object.keys(toolRegistry).join(", ")}.`,
+        code: this.consecutiveUnknownTools >= 3 ? "UNKNOWN_TOOL_LOOP" : "UNKNOWN_TOOL",
+      };
+      await this.trajectoryLogger.write({
+        event_id: randomUUID(),
+        run_id: this.options.runId,
+        session_id: this.options.sessionId,
+        trace_id: this.options.traceId,
+        timestamp: new Date(start).toISOString(),
+        log_schema_version: 1,
+        kind: "tool_call",
+        level: this.options.logLevel,
+        tool_name: normalizedCall.name,
+        decision_id: decisionId,
+        status: "failed",
+        args: normalizedCall.args,
+        error,
+      });
       return {
         toolCallId: call.id,
         name: call.name,
         ok: false,
-        durationMs: 0,
+        durationMs: Date.now() - start,
         args: call.args,
-        error: {
-          message: `Unknown tool '${call.name}'.${suggestionText} Available core tools: ${Object.keys(toolRegistry).join(", ")}.`,
-          code: "UNKNOWN_TOOL",
-        },
+        error,
       };
     }
     this.consecutiveUnknownTools = 0;
@@ -374,12 +379,26 @@ export class ToolExecutor {
           (this.fileWriteCounts.get(dirForViewer) ?? 0) + 1,
         );
       }
+      await this.trajectoryLogger.write({
+        event_id: randomUUID(),
+        run_id: this.options.runId,
+        session_id: this.options.sessionId,
+        trace_id: this.options.traceId,
+        timestamp: new Date(start).toISOString(),
+        log_schema_version: 1,
+        kind: "tool_call",
+        level: this.options.logLevel,
+        tool_name: callNameRaw,
+        decision_id: decisionId,
+        status: "started",
+        args: callAnyBypass.args,
+      });
       const r = await dispatchViewerTool(callAnyBypass, {
         workspaceRoot: this.options.workspaceRoot,
         viewerRegistry: this.viewerRegistry,
         linterRegistry: this.linterRegistry,
       });
-      return {
+      const result: ToolResult = {
         toolCallId: call.id,
         name: callNameRaw,
         ok: r.ok,
@@ -388,6 +407,23 @@ export class ToolExecutor {
         output: r.output,
         ...(r.error ? { error: r.error } : {}),
       };
+      await this.trajectoryLogger.write({
+        event_id: randomUUID(),
+        run_id: this.options.runId,
+        session_id: this.options.sessionId,
+        trace_id: this.options.traceId,
+        timestamp: new Date().toISOString(),
+        log_schema_version: 1,
+        kind: "tool_call",
+        level: this.options.logLevel,
+        tool_name: callNameRaw,
+        decision_id: decisionId,
+        status: r.ok ? "completed" : "failed",
+        args: callAnyBypass.args,
+        output: r.output,
+        ...(r.error ? { error: r.error } : {}),
+      });
+      return result;
     }
 
     // Validate params — return error instead of throwing so model sees feedback

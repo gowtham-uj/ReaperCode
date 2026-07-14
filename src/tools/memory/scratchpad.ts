@@ -9,7 +9,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { redactSecrets } from "../../logging/redaction.js";
+import { redactSecrets } from "../../adaptive/redact.js";
 
 export type ScratchpadAction = "append" | "read" | "clear";
 
@@ -26,6 +26,7 @@ export interface ScratchpadResult {
   bytes: number;
   appended?: boolean;
   cleared?: boolean;
+  deduplicated?: boolean;
 }
 
 const SCRATCH_RELATIVE = path.join(".reaper", "memory", "scratch.md");
@@ -33,6 +34,19 @@ const MAX_SCRATCH_BYTES = 64 * 1024;
 
 export function scratchpadPath(workspaceRoot: string): string {
   return path.join(workspaceRoot, SCRATCH_RELATIVE);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function alreadyContainsNote(existing: string, label: string | undefined, note: string): boolean {
+  const labelSuffix = label ? ` ${escapeRegExp(label)}` : "";
+  const pattern = new RegExp(
+    `^## \\[[^\\]\\r\\n]+\\]${labelSuffix}\\r?\\n${escapeRegExp(note)}\\r?\\n(?:\\r?\\n|$)`,
+    "m",
+  );
+  return pattern.test(existing);
 }
 
 export async function executeScratchpad(
@@ -47,16 +61,25 @@ export async function executeScratchpad(
       if (typeof args.note !== "string" || args.note.trim().length === 0) {
         throw new Error("scratchpad append requires a non-empty note");
       }
-      const redacted = String(redactSecrets(args.note));
+      const redacted = redactSecrets(args.note).redacted.trim();
       const label = typeof args.label === "string" && args.label.trim() ? args.label.trim() : undefined;
-      const stamp = new Date().toISOString();
-      const header = label ? `## [${stamp}] ${label}` : `## [${stamp}]`;
-      const block = `${header}\n${redacted.trim()}\n\n`;
-
       let existing = "";
       if (existsSync(filePath)) {
         existing = await readFile(filePath, "utf8");
       }
+      if (alreadyContainsNote(existing, label, redacted)) {
+        return {
+          action: "append",
+          path: SCRATCH_RELATIVE,
+          bytes: Buffer.byteLength(existing, "utf8"),
+          appended: false,
+          deduplicated: true,
+        };
+      }
+
+      const stamp = new Date().toISOString();
+      const header = label ? `## [${stamp}] ${label}` : `## [${stamp}]`;
+      const block = `${header}\n${redacted}\n\n`;
       let next = existing + block;
       if (Buffer.byteLength(next, "utf8") > MAX_SCRATCH_BYTES) {
         // Keep the newest tail within the cap.

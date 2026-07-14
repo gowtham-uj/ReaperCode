@@ -69,14 +69,16 @@ test("days-long scenario: day 1 journal, compact, day 2 rehydrate summary + tail
   await appendMessage(ws, name, "user", "Wrap up for today.");
   await appendMessage(ws, name, "assistant", "Done for day 1; search module remains.");
 
-  // --- Day 2: rehydration = summary anchor + raw tail only ---
+  // --- Day 2: rehydration = boundary + checkpoint + summary + raw tail ---
   const rehydrated = buildActiveBranchMessages(ws, name);
-  assert.equal(rehydrated.length, 3, "summary anchor + 2 raw tail turns");
+  assert.equal(rehydrated.length, 5, "boundary + checkpoint + summary + 2 raw tail turns");
   assert.match(rehydrated[0]!.content, /Prior session context \(compacted\)/);
-  assert.match(rehydrated[0]!.content, /Refactored 5 modules/);
-  assert.match(rehydrated[2]!.content, /day 1/);
+  assert.match(rehydrated[1]!.content, /Reaper session checkpoint v1/);
+  assert.match(rehydrated[2]!.content, /Summary of prior context/);
+  assert.match(rehydrated[2]!.content, /Refactored 5 modules/);
+  assert.match(rehydrated[4]!.content, /day 1/);
   // The 60 pre-compaction turns are summary-mediated, not raw.
-  assert.ok(!rehydrated.some((m) => m.content.includes("User turn 0:")));
+  assert.ok(!rehydrated.slice(3).some((m) => m.content.includes("User turn 0:")));
 
   // --- Day 2: memory search recalls the workspace summaries ---
   await persistSummary(ws, {

@@ -30,6 +30,19 @@ async function tempWorkspace(): Promise<string> {
   return await mkdtemp(path.join(tmpdir(), "reaper-sandbox-test-"));
 }
 
+test("file paths accept the workspace alias reported by a POSIX shell", async () => {
+  const ws = await tempWorkspace();
+  try {
+    await writeFile(path.join(ws, "inside.txt"), "inside", "utf8");
+    const shellPath = `/tmp/${path.basename(ws)}/inside.txt`;
+    const result = await readFileTool(ws, { path: shellPath });
+    assert.equal(result.kind, "text");
+    if (result.kind === "text") assert.match(result.content, /inside/);
+  } finally {
+    await rm(ws, { recursive: true, force: true });
+  }
+});
+
 async function expectPathEscape(
   fn: () => Promise<unknown>,
   label: string,
