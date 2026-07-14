@@ -91,3 +91,6 @@ workspace/
 # Ignore all docs except docs/dev/
 docs/*
 !docs/dev/
+
+# Ignored agent skills
+.agent/skills/
