@@ -6,23 +6,23 @@ A model-agnostic TypeScript harness for long-horizon coding agents. Reaper is th
 
 Reaper runs an autonomous coding loop that survives very long tasks without losing its mind:
 
-- **Context engineering with a configurable hard cap.** A layered pipeline of `token-budget` → `shake` (cheap safe-to-prune scrubbing) → `microcompact` → `reactive-compact` → `compaction-checkpoint` → `full-summary` → `persistent-summary` decides when and how to age out old turns. A single `should-compact` gate fires a `softCap − reserve` heuristic. The system prompt is **never** replaced — only the surrounding history is compressed and rehydrated on the next call.
-- **Cockpit with prompt-cache-friendly tiers.** `buildMainAgentCockpit` lays out system / stable / volatile sections in prefix-stable order so the provider's prompt cache stays warm across turns.
+- **Context engineering with a configurable hard cap.** A layered hook chain in `runtime/context-engineering-wiring.ts` orders per-call transforms: `token-budget` → `tool-output-prune` → `supersede-prune` → `shake` (cheap safe-to-prune scrubbing, with a circuit breaker) → `time-microcompact` (clears stale tool results once the provider's prompt-cache prefix would have rolled) → `microcompact` → `reactive-compact` → `history-compaction` → `compaction-checkpoint` → `full-summary` → `persistent-summary`. A single `should-compact` gate fires a `softCap − reserve` heuristic. The system prompt is **never** replaced — only the surrounding history is compressed and rehydrated on the next call.
+- **Cockpit with prompt-cache-friendly tiers.** `prepareRuntimeContent` in `runtime/content-prep.ts` composes the cockpit from per-section renderers (`renderBudgetStateForCockpit`, `renderPlanForCockpit`, `renderTodoForCockpit`, `renderRepoInspectionForCockpit`, `renderTaskContractForCockpit`, `renderVerificationStateForCockpit`, `renderSessionSummaryForCockpit`) in a prefix-stable order so the provider's prompt cache stays warm across turns.
 - **Proactive repo context.** `indexer` + `graph` + PageRank-style ranking + SWE-pruner produce a budgeted repo map under a token ceiling, so the agent starts the turn knowing which files matter.
-- **ACI file tools and progressive tool disclosure.** `file_view` / `file_scroll` / `file_find` / `file_edit` give viewport-style reads. A core tool set (~12 names) ships by default; deeper tools surface via `search_tools` + BM25 descriptors.
+- **ACI file tools and progressive tool disclosure.** `file_view` / `file_scroll` / `file_find` / `file_edit` give viewport-style reads. A core tool set of 10 names — `file_view`, `file_scroll`, `file_find`, `file_edit`, `write_file`, `delete_file`, `list_directory`, `grep_search`, `bash`, `search_tools` — ships by default; deeper tools surface via `search_tools` + BM25 descriptors.
 - **Parallel tool islands.** `execution/scheduler.ts` + `resource-keys.ts` let safe reads and shells run concurrently without colliding on shared resources.
-- **Provider-agnostic model routing.** Anthropic, OpenAI, LiteLLM-gateway, and MiniMax providers share one `model/gateway.ts` with stream normalization, structured tool-call events, and a `node-watcher` that kills stuck model streams.
+- **Provider-agnostic model routing.** Anthropic, OpenAI, LiteLLM-gateway, DeepSeek (native client), Cerebras (native client), OpenRouter, the MiniMax OpenAI-compatible endpoint (`MiniMax-M3`, `MiniMax-M2.7`, …), and the NeuralWatt multi-model gateway (Kimi-K2.7, GLM-5.2, Qwen3.5/3.6) all share one `model/gateway.ts` with stream normalization, structured tool-call events, and a per-provider stream idle timeout (`streamIdleTimeoutMs` tunable) that aborts stuck streams.
 - **Unified tool dispatch.** One `executor` + `registry` pair (`src/tools/`) wraps bash, file read / write / edit / delete, ast-grep, web search / fetch, browser, computer-use, MCP, memory search, and 16+ built-in skills behind a single allowlist-gated, permission-checked, shell-risk-classified surface.
-- **WAL / shadow checkpoints.** `recovery/` flushes writes through a write-ahead-log shell before mutating commands touch real state.
+- **WAL / shadow checkpoints.** `recovery/wal.ts` flushes writes through a write-ahead log before mutating commands touch real state.
 - **Verified recovery.** `recovery/verified-memory.ts` and `verify/` (judge, runner, contract-coverage, semantic-failure) catch hallucinations and force the agent to re-derive claims from real artifacts.
 - **Hooks, skills, extensions.** First-class `hooks/`, `skills/`, and `extensions/` subsystems for runtime customization without forking the runtime.
-- **Internal task tracking.** `task.ts` exposes a TodoWrite-style `createTask` / `updateTask` / `listTasks` API scoped per run, so the agent can manage its own in-progress work without polluting global state.
+- **Internal task tracking.** `src/tools/write/task.ts` exposes a TodoWrite-style `createTask` / `updateTask` / `listTasks` API scoped per run, so the agent can manage its own in-progress work without polluting global state.
 
 ## Architecture in one breath
 
 `runtime/engine.ts` owns the loop. Each turn:
 
-1. Build the request — **system prompt** (`runtime/system-prompt.ts`) + budgeted context (repo map + skills + AGENTS.md + microcompacted history) via `buildMainAgentCockpit`.
+1. Build the request — **system prompt** (`runtime/system-prompt.ts`) + budgeted context (repo map + skills + AGENTS.md + microcompacted history) via `prepareRuntimeContent`.
 2. Route it through the model gateway to a provider.
 3. Stream structured tool-call events back through the dispatcher.
 4. Run each tool through policy (`policy/sandbox.ts`, `governance/shell-risk.ts`), the allowlist, the result normalizer, and the parallel scheduler (safe reads / shells in parallel islands).
