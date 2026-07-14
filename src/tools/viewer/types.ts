@@ -68,6 +68,8 @@ export const FileViewResultSchema = z
     startLine: z.number().int().positive(),
     endLine: z.number().int().positive(),
     totalLines: z.number().int().nonnegative(),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/i),
+    mtimeMs: z.number().nonnegative(),
     truncated: z.boolean(),
     window: z.array(z.string()),
   })

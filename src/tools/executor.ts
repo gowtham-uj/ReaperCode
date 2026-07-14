@@ -20,7 +20,7 @@ import { normalizeToolCall } from "./normalize.js";
 import { grepSearchTool } from "./read/grep-search.js";
 import { getToolOutputTool } from "./read/get-tool-output.js";
 import { listDirectoryTool } from "./read/list-directory.js";
-import { readFileTool } from "./read/read-file.js";
+import { readFileTool, type ReadFileToolResult } from "./read/read-file.js";
 import { skimFileTool } from "./read/skim-file.js";
 import { inspectEnvironmentTool } from "./read/inspect-env.js";
 import { activateSkillTool } from "./read/activate-skill.js";
@@ -150,6 +150,22 @@ type ReplaceInFileCandidateArgs =
 
 type EditFileCandidateArgs = { path: string; edits: Array<{ oldString: string; newString: string }> };
 
+interface FileFreshnessMetadata {
+  sha256: string;
+  mtimeMs: number | null;
+}
+
+type FreshReadFileResult = ReadFileToolResult & FileFreshnessMetadata;
+type FreshnessSnapshot = { sha256: string | null; mtimeMs: number | null };
+
+function isTruncatedTextRead(result: ReadFileToolResult): boolean {
+  return result.kind === "text" && result.truncated;
+}
+
+function isStableSnapshot(before: FreshnessSnapshot, after: FreshnessSnapshot): before is FileFreshnessMetadata {
+  return before.sha256 !== null && before.sha256 === after.sha256 && before.mtimeMs === after.mtimeMs;
+}
+
 /**
  * Maximum stdout length (in characters) that the executor returns inline.
  * Anything larger is written to a file under `<workspace>/.reaper/spillover/<callId>.log`
@@ -212,7 +228,7 @@ export class ToolExecutor {
   private readonly authoringTools: AuthoringToolDeps | undefined;
   private readonly permissionClassifier: PermissionClassifier;
   private readonly readFileState = new Map<string, { sha256: string | null; mtimeMs: number | null; fullyRead: boolean }>();
-  private readonly readOutputCache = new Map<string, { sha256: string | null; mtimeMs: number | null; output: unknown; hits: number }>();
+  private readonly readOutputCache = new Map<string, FileFreshnessMetadata & { output: FreshReadFileResult; hits: number }>();
   // Phase 3 — viewer state. Lives on the executor so it shares lifetime
   // with the run. Cleared at run end (see `resetViewerState`).
   private readonly viewerRegistry = new FileViewerRegistry();
@@ -768,29 +784,33 @@ export class ToolExecutor {
           const cached = this.readOutputCache.get(cacheKey);
           if (
             cached &&
-            cached.sha256 !== null &&
             cached.sha256 === beforeReadSnapshot.sha256 &&
             cached.mtimeMs === beforeReadSnapshot.mtimeMs
           ) {
             cached.hits += 1;
-            await this.recordReadState(args.path, unboundedRead && !(cached.output as { truncated?: boolean }).truncated);
-            const baseOutput = this.withReadCacheNote(cached.output, cached.hits);
-            return baseOutput;
+            await this.recordReadState(args.path, unboundedRead && !isTruncatedTextRead(cached.output), beforeReadSnapshot);
+            return this.withReadCacheNote(cached.output, cached.hits);
           }
           const result = await readFileTool(this.options.workspaceRoot, {
             path: args.path,
             ...(args.startLine !== undefined ? { startLine: args.startLine } : {}),
             ...(args.endLine !== undefined ? { endLine: args.endLine } : {}),
           });
-          if (unboundedRead && (result as { truncated?: boolean }).truncated) {
+          if (unboundedRead && isTruncatedTextRead(result)) {
             this.fullReadPaths.delete(args.path);
           }
-          await this.recordReadState(args.path, unboundedRead && !(result as { truncated?: boolean }).truncated);
           const afterReadSnapshot = await this.getFreshnessSnapshot(args.path, absolutePath);
-          if (afterReadSnapshot.sha256 !== null) {
-            this.readOutputCache.set(cacheKey, { ...afterReadSnapshot, output: result, hits: 0 });
+          await this.recordReadState(args.path, unboundedRead && !isTruncatedTextRead(result), afterReadSnapshot);
+          if (!isStableSnapshot(beforeReadSnapshot, afterReadSnapshot)) {
+            return result;
           }
-          return result;
+          const observedResult: FreshReadFileResult = {
+            ...result,
+            sha256: beforeReadSnapshot.sha256,
+            mtimeMs: beforeReadSnapshot.mtimeMs,
+          };
+          this.readOutputCache.set(cacheKey, { ...beforeReadSnapshot, output: observedResult, hits: 0 });
+          return observedResult;
         }
       case "list_directory":
         {
@@ -1377,9 +1397,13 @@ export class ToolExecutor {
     return;
   }
 
-  private async recordReadState(targetPath: string, fullyRead: boolean): Promise<void> {
+  private async recordReadState(
+    targetPath: string,
+    fullyRead: boolean,
+    knownSnapshot?: FreshnessSnapshot,
+  ): Promise<void> {
     const absolutePath = normalizeWorkspacePath(this.options.workspaceRoot, targetPath);
-    const snapshot = await this.getFreshnessSnapshot(targetPath, absolutePath);
+    const snapshot = knownSnapshot ?? await this.getFreshnessSnapshot(targetPath, absolutePath);
     this.readFileState.set(absolutePath, { ...snapshot, fullyRead });
   }
 
