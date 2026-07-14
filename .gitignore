@@ -87,3 +87,7 @@ reaper_eval/
 AGENTS.md
 Reaper Implementation Research.md
 workspace/
+
+# Ignore all docs except docs/dev/
+docs/*
+!docs/dev/
