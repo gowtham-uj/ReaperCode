@@ -12,6 +12,7 @@ const child = spawn("npx", args, {
   stdio: "inherit",
   cwd: resolve(__dirname, ".."),
   env: process.env,
+  shell: true,
 });
 
 child.on("exit", (code) => {
