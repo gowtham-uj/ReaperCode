@@ -94,3 +94,6 @@ docs/*
 
 # Ignored agent skills
 .agent/skills/
+
+# Temporary smoke tests
+scripts/*.mts
