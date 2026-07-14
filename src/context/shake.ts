@@ -17,6 +17,7 @@
 
 import { getContextTunables } from "../config/config-tunables.js";
 import { normalizeToolResult } from "../tools/tool-result.js";
+import { findSupersededReadIndices, isReadObservationTool } from "./supersede-prune.js";
 
 /** Fallback minimum savings (in chars) when tunables are unavailable.
  * OMP shake minSavings ≈ 4_000 tokens → ~16_000 chars. */
@@ -25,6 +26,9 @@ const DEFAULT_MIN_SAVINGS_CHARS = 16_000;
 /** Fallback protect window (chars) when tunables are unavailable.
  * OMP protectTokens ≈ 16_000 → ~64_000 chars. */
 const DEFAULT_PROTECT_WINDOW_CHARS = 64_000;
+const MIN_PROTECT_WINDOW_CHARS = 200;
+/** 256k active tokens reaches the default 64k-character protection ceiling. */
+const PROTECT_WINDOW_TOKEN_DIVISOR = 4;
 
 /** Minimum tool result size (in chars) to be eligible for shake. */
 const FENCE_MIN_CHARS = 200;
@@ -264,9 +268,11 @@ function getShakeReplacement(
   // bash: install/build outputs are stale immediately, so prune when small.
   if (size < FENCE_MIN_CHARS) return null;
 
-  if (parsedArgs && typeof parsedArgs === "object") {
-    const cmd = ((parsedArgs as Record<string, unknown>).cmd ?? (parsedArgs as Record<string, unknown>).command ?? "") as string;
-    const lower = String(cmd).toLowerCase();
+  if (parsedArgs && typeof parsedArgs === "object" && !Array.isArray(parsedArgs)) {
+    const command =
+      ("cmd" in parsedArgs ? parsedArgs.cmd : undefined) ??
+      ("command" in parsedArgs ? parsedArgs.command : undefined);
+    const lower = typeof command === "string" ? command.toLowerCase() : "";
     const isInstallOrBuild =
       lower.includes("install") ||
       lower.includes("build") ||
@@ -335,15 +341,17 @@ export function shakeConversation(
     break;
   }
 
-  // Extend protection backwards up to the configured character window. If
-  // there is no trailing batch, protect at least the newest tool result even
-  // when that single result exceeds the nominal window.
-  const toolResultChars = messages
-    .filter(m => m.role === "tool")
-    .reduce((sum, m) => sum + (m.content?.length ?? 0), 0);
+  // Extend protection backwards using the active token budget rather than
+  // total historical output. Low-cap runs get a small usable floor; production
+  // caps grow to (but never beyond) the configured character ceiling.
+  // A trailing unobserved batch remains protected even when it alone exceeds
+  // this adaptive window.
   const protectWindow = Math.min(
     t.shakeProtectWindowChars,
-    Math.max(200, Math.floor(toolResultChars / 3)),
+    Math.max(
+      MIN_PROTECT_WINDOW_CHARS,
+      Math.floor(effectiveContextWindowTokens(contextWindowTokens) / PROTECT_WINDOW_TOKEN_DIVISOR),
+    ),
   );
   let protectedFromEnd = messages
     .slice(latestBatchStart)
@@ -370,6 +378,7 @@ export function shakeConversation(
   const replacements: Array<{ index: number; content: string; savedChars: number }> = [];
   let savedChars = 0;
   const seenToolCallIds = new Set<string>();
+  const supersededReadIndices = findSupersededReadIndices(messages);
 
   for (let i = 0; i < Math.min(firstUnprotectedIdx, messages.length); i += 1) {
     const msg = messages[i];
@@ -384,6 +393,9 @@ export function shakeConversation(
     if (content.startsWith("[") && content.endsWith("]")) continue;
 
     const { name: toolName, args: toolArgs } = findToolNameForCall(messages, i);
+    // File observations require same-version coverage proof. Age alone is
+    // never sufficient to discard a read result.
+    if (isReadObservationTool(toolName) && !supersededReadIndices.has(i)) continue;
     const replacement = getShakeReplacement(toolName, content, toolArgs);
     if (replacement === null) continue;
 
