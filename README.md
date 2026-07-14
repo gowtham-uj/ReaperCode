@@ -36,6 +36,9 @@ npm run build
 # ANTHROPIC_API_KEY=your_key_here
 # OPENAI_API_KEY=your_key_here
 
-# Execute a task using the agent
+# Execute a task using the default configured model
 npm run reaper:exec -- "Analyze the src directory and give me a summary"
+
+# Or specify a particular provider and model:
+npm run reaper:exec -- "Add error handling to the server" --provider anthropic --model claude-3-5-sonnet-latest
 ```
