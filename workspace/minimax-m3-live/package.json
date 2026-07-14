@@ -1,8 +1,0 @@
-{
-  "name": "minimax-m3-live-coding-agent-eval",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "test": "node --test tests/**/*.test.mjs"
-  }
-}

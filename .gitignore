@@ -82,3 +82,8 @@ logs/
 # Evaluation and benchmarks
 benchmarks/
 reaper_eval/
+
+# Local temporary files and research
+AGENTS.md
+Reaper Implementation Research.md
+workspace/
