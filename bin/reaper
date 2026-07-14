@@ -7,12 +7,11 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const script = resolve(__dirname, "..", "scripts", "run-reaper.ts");
 
-const args = ["tsx", script, ...process.argv.slice(2)];
-const child = spawn("npx", args, {
+const args = ["--import=tsx", script, ...process.argv.slice(2)];
+const child = spawn(process.execPath, args, {
   stdio: "inherit",
   cwd: resolve(__dirname, ".."),
   env: process.env,
-  shell: true,
 });
 
 child.on("exit", (code) => {

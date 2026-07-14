@@ -78,3 +78,7 @@ oh-my-pi/
 .hermes/
 .snapshots/
 logs/
+
+# Evaluation and benchmarks
+benchmarks/
+reaper_eval/
