@@ -32,11 +32,9 @@ cd ReaperCode
 npm install
 npm run build
 
-# Create a .env file in the root directory. 
-# Note: The OPENAI_API_KEY variable is used for all providers that support 
-# the OpenAI API format (e.g., OpenAI, MiniMax, DeepSeek).
-# For example, to use MiniMax, set your MiniMax key here:
-echo "OPENAI_API_KEY=your_minimax_key_here" > .env
+# Create a .env file in the root directory with your provider's API key.
+# Reaper supports native provider keys. For example, to use MiniMax:
+echo "MINIMAX_API_KEY=your_minimax_key_here" > .env
 
 # Execute a task using the agent with a specific provider and model.
 # Example using MiniMax-M3:
