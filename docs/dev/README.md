@@ -6,10 +6,9 @@ appropriate for end users.
 | File | What it covers |
 |---|---|
 | `adding-tools.md` | The full checklist for adding a new tool to Reaper's main-agent surface. Lists every file that has to know the tool name, the silent failure modes we have already hit, and a verification recipe. |
-| `context-engineering-audit.md` | Self-audit of Reaper's context engineering: gaps, unwired modules, and a prioritized improvement roadmap. |
-| `context-engineering-layer-audit.md` | Trigger map for Reaper's 21 context-engineering layers. |
-| `roadmap-v0.1.4-tool-port.md` | Tool-architecture port phases. |
+| `roadmap-v0.1.4-tool-port.md` | Tool-architecture evolution phases. |
 | `sessions.md` | **The single session mechanism** — journal format, `exec --session` lifecycle, context-engineering × session sync, compaction write-back, TUI contract, and the deleted duplicates that must not come back. |
+| `tier-5-branch-summary-deferred.md` | Branch-summarization layer — currently deferred; explains why and what porting it would take. |
 
 ## Why this directory exists
 

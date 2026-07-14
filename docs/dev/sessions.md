@@ -8,7 +8,7 @@ stop and extend `src/context/session-journal.ts` instead.
 
 ## Design intent
 
-Reaper is a multi-turn coding agent in the internal-harness/Reaper mold: the user types a
+Reaper is a multi-turn coding agent: the user types a
 prompt, the model works (tools, edits, verification), the user types the
 next prompt, and the model continues **with the same context**. The session
 is the durable form of that conversation.
@@ -86,7 +86,7 @@ One JSONL file per session. Line 1 is an optional padded title slot, then a
 Consequence: **what the layers did to the context is what the session
 carries forward.** Shaken tool results persist shaken; superseded reads stay
 dropped; a summary becomes the session's new base. The next run does not
-re-pay work the layers already did — the internal-harness property.
+re-pay work the layers already did — a single property the session must guarantee.
 
 ## Context-engineering layers × sessions
 

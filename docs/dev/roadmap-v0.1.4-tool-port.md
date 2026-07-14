@@ -1,4 +1,4 @@
-# Reaper v0.1.4 Implementation Roadmap — internal-harness Tool Architecture Port
+# Reaper v0.1.4 Implementation Roadmap — Tool Architecture Evolution
 
 **Source research:** `Reaper Tool Port Research.md`
 **Target release:** v0.1.4
@@ -6,7 +6,7 @@
 
 ## Goal
 
-Port Reaper core tool-system capabilities into Reaper to improve efficiency, discoverability, reliability, and context control — without reintroducing blocking, forcing, or guard behavior. Each phase is validated by a small A/B smoke test that exercises the new behavior, then a final full A/B test against the no-Docker RepoReaperlot prompt.
+Port Reaper core tool-system capabilities to improve efficiency, discoverability, reliability, and context control — without reintroducing blocking, forcing, or guard behavior. Each phase is validated by a small A/B smoke test that exercises the new behavior, then a final full A/B test against the no-Docker prompt.
 
 ## Hard rules
 
@@ -174,12 +174,12 @@ Find all function declarations named "handleError" across the codebase using the
 
 ---
 
-## Phase 7: Full A/B regression — no-Docker RepoReaperlot prompt
+## Phase 7: Full A/B regression — no-Docker prompt
 
 **What**
 Run the same prompt used for v0.1.3 verification and compare.
 
-**Prompt file:** `/tmp/reaper-task-repopilot-nodocker-prompt.md`
+**Prompt file:** `/tmp/reaper-task-nodocker-prompt.md`
 
 **Comparison metrics**
 - Model calls

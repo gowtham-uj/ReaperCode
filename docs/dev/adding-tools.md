@@ -298,7 +298,7 @@ PATH=/opt/node22/bin:$PATH \
     tests/integration/file-edit-rollback.test.ts
 
 # 4. Smoke A/B on a small task
-/tmp/reaper-pi-ab-repopilot.sh
+/tmp/reaper-pi-ab-smoke.sh
 ```
 
 Step 4 is the actual integration test that proves the model sees the tool, emits

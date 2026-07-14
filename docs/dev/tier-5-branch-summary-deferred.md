@@ -1,6 +1,6 @@
 # T5: Branch Summarization — Deferred
 
-## What internal-harness does
+## What this layer would do
 
 Reaper's `compaction/branch-summarization.ts` implements a multi-branch conversation model:
 
@@ -18,7 +18,7 @@ Reaper's runtime is currently **single-branch**:
 
 1. **No fork/merge primitives.** The `liveConversation` is a single `Array<GenerateRequest["messages"]>`. There's no `BranchSession` class, no `fork()` / `merge()` operations, no branch-tree data structure.
 
-2. **No session-manager abstraction.** internal-harness has `SessionManager` with `appendMessage`, `getBranch`, `setBranch`. Reaper's `runtime-state.ts` has `liveConversation` directly without the indirection.
+2. **No session-manager abstraction.** A session-manager with `appendMessage`, `getBranch`, `setBranch` would be needed to support multi-branch trees. Reaper's `runtime-state.ts` has `liveConversation` directly without the indirection.
 
 3. **Schema impact.** Branch-summarization requires a new `branch_entry` trajectory event kind and changes to the persistence layer (`session-store.ts` currently writes a linear stream).
 
