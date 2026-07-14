@@ -70,3 +70,11 @@ scratchpad/
 source_codes/
 pi-mono-main
 oh-my-pi/
+
+# Ignored IDE and harness metadata
+.omp/
+.cursor/
+.pi/
+.hermes/
+.snapshots/
+logs/

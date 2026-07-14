@@ -1,9 +1,0 @@
-# Marker file: presence opts this project in to OMP's cwd-aware shim.
-#
-# The omp.cmd / omp shim in ~/.bun/bin checks for this file (among others)
-# and, when found, sets PI_CODING_AGENT_DIR to this .omp/ directory so OMP
-# loads models.yml, config.yml, themes/, tools/, commands/, prompts/,
-# modules/, memories/, agent.db, history.db, and sessions/ from here instead
-# of the global ~/.omp/agent.
-#
-# Delete this file to opt the project out without removing the rest of .omp/.
