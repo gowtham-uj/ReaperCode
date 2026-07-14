@@ -6,7 +6,7 @@ My primary goal with this project is to use it as a personal testing ground for 
 
 ## The Philosophy & Lessons Learned
 
-I learned a lot while building this—mostly **how *not* to build a coding agent in 100 different ways**. I ended up ripping out 90% of the initial stuff to dramatically simplify the architecture, and it worked great. 
+I learned a lot while building this project, mostly **how *not* to build a coding agent in 100 different ways**. I ended up ripping out 90% of the initial stuff to dramatically simplify the architecture, and it worked great. 
 
 As I continue to use the agent daily, I will keep iterating and improving it based on my own dogfooding experience. 
 
@@ -14,7 +14,7 @@ As I continue to use the agent daily, I will keep iterating and improving it bas
 
 - **Sub-Agent Architecture**: Reaper can currently be used as a sub-agent for other agents. As I learn more about sub-agent architectures and best patterns, I will continue to refine and implement them here.
 - **Web UI (Planned)**: I am planning to implement a Web UI for this agent, similar to the agent canvas/workspace in OpenHands.
-- **Offensive Security Fork (WIP)**: I am also building a red-team operator/offensive coding agent forked from this project. It will include specific pieces for offensive cybersecurity and red-team operations (currently pre-MVP).
+- **Offensive Security Fork (WIP)**: I am also building a red-team operator/offensive coding agent forked from this project. It will include specific pieces for offensive cybersecurity and red-team operations.
 
 ## Disclaimer & Maintenance
 
