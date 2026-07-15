@@ -1,4 +1,4 @@
-# Reaper
+# ReaperCode
 
 A model-agnostic TypeScript harness for long-horizon coding agents. Reaper is the testing ground where I throw every harness-engineering idea at the wall to see what actually survives a real session — context compression, provider routing, structured recovery, progressive tool disclosure. It's dogfooded daily, and most of what gets built here ends up ripped out again in the name of simplicity.
 
