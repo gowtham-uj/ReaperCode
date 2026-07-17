@@ -1,86 +1,71 @@
 # ReaperCode
 
-**A model-agnostic TypeScript coding agent built to survive long-horizon autonomous work** — layered context compaction, multi-provider routing, viewport-style file tools, and verified recovery.
+Reaper is my model-agnostic coding agent, written in TypeScript. I built it to do one thing well: keep working on a real task for a long time without falling apart when the conversation outgrows the model's context window.
 
+Most agents lose the plot on long runs. They forget the original task, re-read the same files over and over, or start making things up once the history gets big. Reaper is basically all the machinery I've written to stop that from happening, plus a normal tool-using agent loop wrapped around it. I use it every day, and I rip things out of it just as often as I add them.
+
+![License](https://img.shields.io/badge/license-MIT-green)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178c6?logo=typescript&logoColor=white)
-![Node](https://img.shields.io/badge/Node-%E2%89%A520-339933?logo=node.js&logoColor=white)
-![models](https://img.shields.io/badge/models-agnostic-4c8bf5)
 ![status](https://img.shields.io/badge/status-experimental-orange)
-![license](https://img.shields.io/badge/license-MIT-green)
 
-Reaper is my testing ground for one question: **what does it actually take to keep a coding agent coherent across a very long session?** Most agents fall apart when the conversation outgrows the context window — they forget the task, re-read the same files, or hallucinate. Reaper is the pile of machinery that keeps that from happening. It's dogfooded daily, and most of what gets built here ends up ripped out again in the name of simplicity.
+## What it does
 
-> **TL;DR** — Point it at a repo, give it a task, pick any provider. It plans, edits, runs tests, and verifies its own work — and it keeps going long after a normal agent would have run out of context.
+You point it at a repo, give it a task, and pick a provider. It builds a picture of the codebase, plans, edits files, runs tests, checks its own work, and keeps going. The interesting part is everything that keeps it coherent across a long session.
 
----
+- **Context engineering.** This is the core of the project. Before each model call the runtime prunes and compacts the conversation; only when it is genuinely over budget does it pay for an LLM summary. The system prompt is never rewritten, only the surrounding history gets compressed and rehydrated. More on this below.
+- **Provider-agnostic routing.** One gateway (`model/gateway.ts`) talks to Anthropic, OpenAI, a LiteLLM gateway, DeepSeek, Cerebras, OpenRouter, the MiniMax OpenAI-compatible endpoint, and the NeuralWatt gateway (Kimi, GLM, Qwen). Streams get normalized into the same tool-call events, and a per-provider idle timeout kills a stuck stream instead of hanging.
+- **ACI file tools.** `file_view`, `file_scroll`, `file_find`, and `file_edit` give the model bounded, line-numbered views and exact-range edits instead of dumping whole files. Ten tools ship in the model's default surface; everything else is discovered on demand through `search_tools` (BM25 over the tool catalog).
+- **Proactive repo map.** On each turn it builds a codebase index and hands the model a budgeted, ranked map of the files that actually matter, so it does not start every task blind.
+- **Parallel tool islands.** Safe reads and independent shells run at the same time without stepping on each other (`execution/scheduler.ts` plus per-tool resource keys).
+- **Verified recovery.** The `verify/` modules (runner, judge, classifiers, contract coverage, semantic-failure, diff review) push back when the model claims something works without evidence, and `recovery/` keeps a write-ahead log and verified lessons so a failed step does not corrupt the workspace.
+- **Skills, hooks, extensions.** 17 built-in skills plus first-class hook and extension subsystems, so you can change behavior without forking the runtime.
+- **Its own task list.** A small per-run task API (`createTask` / `updateTask` / `listTasks` in `tools/write/task.ts`) so the model tracks its own work instead of leaning on the conversation.
 
-## How a turn works
+## How a turn runs
 
-Every turn runs through the same loop in `runtime/engine.ts`:
+The loop lives in `runtime/engine.ts`. Roughly:
 
 ```mermaid
 flowchart TD
-    U([User prompt]) --> B[Build request<br/>system prompt + budgeted context<br/>prepareRuntimeContent]
-    B --> R[Route to a provider<br/>model/gateway.ts]
-    R --> S[Stream structured<br/>tool-call events]
-    S --> P{Policy + allowlist<br/>+ shell-risk check}
-    P -->|approved| X[Execute tools<br/>parallel islands]
-    X --> C[Normalize result<br/>+ shake + context hooks]
-    C --> D{Over the<br/>soft cap?}
-    D -->|yes| K[Compaction pipeline<br/>→ full session summary]
-    D -->|no| M[Return result to model]
-    K --> M
-    M -->|more work to do| R
-    M -->|done| E([Final answer])
+    U([Your prompt]) --> P[Prepare content: repo map, skills,<br/>tool shortlist via content-prep.ts]
+    P --> B[Assemble the cockpit + stable system prompt via engine.ts]
+    B --> R[Route to a provider via model/gateway.ts]
+    R --> S[Stream tool calls back]
+    S --> G[Guard each call: policy, allowlist, shell-risk]
+    G --> X[Run tools in parallel islands via execution/scheduler.ts]
+    X --> H[Context hooks: prune, shake, maybe summarize]
+    H --> D{More work to do?}
+    D -->|yes| R
+    D -->|no| E([Answer])
 ```
 
-The one rule that never changes: **the system prompt is never rewritten.** Only the surrounding history is compressed and rehydrated, so the agent's identity and instructions stay stable no matter how long the run gets.
+Two things worth calling out. The system prompt (`runtime/system-prompt.ts`) is stable and never gets rewritten, which keeps the provider's prompt cache warm. And `prepareRuntimeContent` only prepares the raw material (the index, the budgeted repo map, skills, context files, the tool shortlist). The engine is what stitches those into the cockpit message the model actually sees.
 
----
+## The context engineering
 
-## Context engineering, in one picture
-
-This is the heart of the project. Before every model call, the live conversation flows through a layered hook chain (`runtime/context-engineering-wiring.ts`). Cheap prunes run first; the expensive LLM summary only fires when a single gate says the budget is actually blown.
+This is the part I've rewritten the most. It is not one linear pipeline, it is a set of hooks that fire at different points in the loop (`runtime/context-engineering-wiring.ts`). Cheap passes run first, and the expensive summary only happens when a single gate says the budget is blown.
 
 ```mermaid
-flowchart LR
-    A([Live history]) --> B[token-budget]
-    B --> C[tool-output-prune]
-    C --> D[supersede-prune]
-    D --> E[shake<br/>safe-to-prune scrub]
-    E --> F[time-microcompact]
-    F --> G[microcompact]
-    G --> H[reactive-compact]
-    H --> I[history-compaction]
-    I --> J{should-compact?<br/>softCap − reserve}
-    J -->|no| L([Send to model])
-    J -->|yes| K[full-summary<br/>+ compaction checkpoint]
-    K --> P[persistent-summary<br/>survives restarts]
-    P --> L
+flowchart TD
+    A[Before each model call] --> A1[apply any pending summary]
+    A1 --> A2[promote to a bigger-context model if needed]
+    A2 --> A3[prune superseded reads]
+    A3 --> A4[prune old tool output]
+    A4 --> A5[shake stale results]
+    A5 --> A6{over softCap - reserve?}
+    A6 -->|yes| A7[full summary + checkpoint]
+    B[After each tool result] --> B1[bash head/tail spill to disk]
+    C[After each model call] --> C1[time-based microcompact]
+    C1 --> C2[flag idle / length-stop for recovery]
+    F[On a provider context-limit error] --> F1[await the summary, truncate the head, retry]
+    G[On run complete] --> G1[persist the summary to the session journal]
 ```
 
-Each layer is cheap-then-expensive: drop stale tool output, collapse superseded reads, then — only if still over budget — pay for a real summary that gets written to disk so the next run doesn't re-do the work.
+The one rule I never break: a full summary replaces old conversation history, never the system prompt. When a summary fires it also writes a checkpoint to disk (`context/persistent-summary.ts`), so a resumed session does not re-do work the layers already did.
 
----
+## Running it
 
-## What's inside
-
-| Capability | Why it matters | Where it lives |
-|---|---|---|
-| **Context engineering** | Runs for hours without blowing the context window. Old turns get pruned, summarized, and rehydrated — the system prompt is never touched. | `context/`, `runtime/context-engineering-wiring.ts` |
-| **Prompt-cache-friendly cockpit** | Orders the request in a prefix-stable layout so the provider's prompt cache stays warm — cheaper, faster repeat turns. | `runtime/content-prep.ts` |
-| **Proactive repo map** | Starts each task already knowing which files matter (PageRank-style ranking under a token budget) instead of blindly grepping. | `context/indexer.ts`, `graph.ts`, `ranking.ts`, `swe-pruner.ts` |
-| **ACI file tools** | Viewport-style, line-numbered reads and edits that beat dumping whole files. 10 core tools ship by default; the rest are discovered on demand via BM25 search. | `tools/viewer/`, `tools/registry.ts` |
-| **Parallel tool islands** | Safe reads and shells run concurrently without colliding on shared files. | `execution/scheduler.ts`, `tools/resource-keys.ts` |
-| **Provider-agnostic routing** | One gateway, many providers: Anthropic, OpenAI, LiteLLM, DeepSeek, Cerebras, OpenRouter, MiniMax, NeuralWatt. Stuck streams get aborted automatically. | `model/gateway.ts` |
-| **Verified recovery** | Catches hallucinations and forces the agent to re-derive claims from real artifacts before it calls something "done." | `verify/`, `recovery/` |
-| **WAL / shadow checkpoints** | Flushes writes through a write-ahead log before mutating commands touch real state. | `recovery/wal.ts` |
-| **Skills, hooks, extensions** | Customize behavior without forking the runtime. 17 built-in skills; first-class hook and extension subsystems. | `skills/`, `hooks/`, `extensions/` |
-| **Internal task tracking** | A TodoWrite-style `createTask` / `updateTask` / `listTasks` API scoped per run, so the agent manages its own work list. | `tools/write/task.ts` |
-
----
-
-## Quickstart
+You need Node (I run 22) and npm.
 
 ```bash
 git clone https://github.com/gowtham-uj/ReaperCode.git
@@ -88,65 +73,45 @@ cd ReaperCode
 npm install
 npm run build
 
-# Add a provider key (MiniMax shown; any supported provider works)
+# Drop in a provider key. MiniMax shown, any supported provider works.
 echo "MINIMAX_API_KEY=your_key_here" > .env
 
-# Run a one-shot task
+# Run a task
 npm run reaper:exec -- "Analyze src/ and summarize the context-engineering layer" \
   --provider minimax --model MiniMax-M3
 ```
 
-**Other handy scripts** (`package.json`):
+Keys are read from `./.env`, `~/.reaper/.env`, or `~/.hermes/.env`. Swap `--provider` and `--model` for Anthropic, OpenAI, DeepSeek, and the rest.
+
+Handy scripts (`package.json`):
 
 | Script | What it does |
 |---|---|
-| `npm run reaper:exec -- "<prompt>"` | One-shot task run (the main entry point) |
-| `npm run reaper:dev` | Watch-mode dev runner — rebuilds on change while you iterate |
-| `npm test` | Node test suite |
-| `npm run typecheck` | `tsc --noEmit` |
-| `npm run stress` | Context-engineering stress harness |
+| `npm run reaper:exec -- "<prompt>"` | Run a one-shot task. This is the main entry point. |
+| `npm run reaper:dev` | Watch-mode dev runner, rebuilds while I iterate. There is no interactive TUI in this repo. |
+| `npm test` | Node test suite. |
+| `npm run typecheck` | `tsc --noEmit`. |
+| `npm run stress` | Context-engineering stress harness. |
 
-Reaper loads provider keys from `./.env`, `~/.reaper/.env`, or `~/.hermes/.env`. Any provider in the catalog works — swap `--provider` / `--model` for Anthropic, OpenAI, DeepSeek, and the rest.
+## Sub-agent delegation (not finished)
 
----
+There is a delegation substrate in `orchestration/sub-agents.ts` (`runDelegatedPlan`) with depth limits, plan-cycle detection, sandbox workspaces, and file leases. The `subagent` skill mode, the `subagent_prompt` log kind, and the `subagent_result` validation path are all wired. What is not shipped is a user-facing swarm tool. I'm deliberately holding that back until the context layer is rock solid, because parallel agents multiply context bugs instead of adding them.
 
-## Architecture in one breath
-
-`runtime/engine.ts` owns the loop. Each turn:
-
-1. **Build the request** — system prompt (`runtime/system-prompt.ts`) + budgeted context (repo map + skills + `AGENTS.md` + microcompacted history) via `prepareRuntimeContent`.
-2. **Route** it through the model gateway to a provider.
-3. **Stream** structured tool-call events back through the dispatcher.
-4. **Guard** each tool through policy (`policy/sandbox.ts`, `governance/shell-risk.ts`), the allowlist, the result normalizer, and the parallel scheduler.
-5. **Apply** `shake` + context hooks to the result.
-6. **Return** the tool result to the model.
-7. **On overflow**, fire the compaction pipeline; on hard cap, take a full session summary and rehydrate cleanly next turn — without ever touching the system prompt.
-
-### Sub-agent delegation (in progress)
-
-A delegation substrate exists at `orchestration/sub-agents.ts` (`runDelegatedPlan`) with depth limits, plan-cycle detection, sandbox workspaces, and file leases. The `subagent` skill-usage mode, `subagent_prompt` log kind, and `subagent_result` validation path are wired. A **user-facing swarm tool is planned but not shipped** — swarm reintroduction is deliberately deferred until the context layer is fully solid, because parallel agents amplify context bugs.
-
----
-
-## Project status
+## Where things stand
 
 | Area | State |
 |---|---|
-| **Context engineering** | Stable. Hard-cap stress runs green — 14/14 gates passing on the latest eval. |
-| **Sub-agent architecture** | Substrate + hooks + logging in place; user-facing tool surface pending. |
-| **Web UI** | Planned — a single-page cockpit for visual agent control. |
-| **Offensive-security fork** | A red-team operator agent is being spun off this runtime in a separate repo. |
+| Context engineering | Solid. Hard-cap stress runs pass, 14/14 gates on the latest eval. |
+| Sub-agent delegation | Substrate, hooks, and logging are in. No user-facing tool yet. |
+| Web UI | Planned. A single-page cockpit to watch a run. |
+| Red-team fork | A separate operator agent is being spun off this runtime in its own repo. |
 
----
+## Why it looks the way it does
 
-## Design philosophy
-
-I've learned how *not* to build a coding agent in about 100 different ways. Most of what you see in `src/` is what survived that winnowing — the boring parts are boring on purpose. When a clever layer stops earning its keep, it gets ripped out. Simplicity wins over cleverness every time.
+I've built this loop wrong in about a hundred different ways. Most of what is in `src/` is just what survived. When a clever layer stops earning its place, it goes. The boring parts are boring on purpose, and I'd rather delete code than keep something I don't understand anymore.
 
 ## License
 
-[MIT](LICENSE) © gowtham ujjineni. Take the code and run.
+MIT. See [LICENSE](LICENSE). Take it and do whatever you want.
 
-## Disclaimer
-
-I maintain Reaper for as long as I personally use it. No guarantees.
+I maintain this for as long as I personally use it, so no promises.
