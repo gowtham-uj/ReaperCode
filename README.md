@@ -6,6 +6,7 @@
 ![Node](https://img.shields.io/badge/Node-%E2%89%A520-339933?logo=node.js&logoColor=white)
 ![models](https://img.shields.io/badge/models-agnostic-4c8bf5)
 ![status](https://img.shields.io/badge/status-experimental-orange)
+![license](https://img.shields.io/badge/license-MIT-green)
 
 Reaper is my testing ground for one question: **what does it actually take to keep a coding agent coherent across a very long session?** Most agents fall apart when the conversation outgrows the context window — they forget the task, re-read the same files, or hallucinate. Reaper is the pile of machinery that keeps that from happening. It's dogfooded daily, and most of what gets built here ends up ripped out again in the name of simplicity.
 
@@ -142,6 +143,10 @@ A delegation substrate exists at `orchestration/sub-agents.ts` (`runDelegatedPla
 
 I've learned how *not* to build a coding agent in about 100 different ways. Most of what you see in `src/` is what survived that winnowing — the boring parts are boring on purpose. When a clever layer stops earning its keep, it gets ripped out. Simplicity wins over cleverness every time.
 
+## License
+
+[MIT](LICENSE) © gowtham ujjineni. Take the code and run.
+
 ## Disclaimer
 
-I maintain Reaper for as long as I personally use it. No guarantees. You're welcome to take the code and run.
+I maintain Reaper for as long as I personally use it. No guarantees.
