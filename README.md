@@ -27,16 +27,16 @@ The loop lives in `runtime/engine.ts`. Roughly:
 
 ```mermaid
 flowchart TD
-    U([Your prompt]) --> P[Prepare content: repo map, skills,<br/>tool shortlist via content-prep.ts]
-    P --> B[Assemble the cockpit + stable system prompt via engine.ts]
-    B --> R[Route to a provider via model/gateway.ts]
-    R --> S[Stream tool calls back]
-    S --> G[Guard each call: policy, allowlist, shell-risk]
-    G --> X[Run tools in parallel islands via execution/scheduler.ts]
-    X --> H[Context hooks: prune, shake, maybe summarize]
-    H --> D{More work to do?}
+    U(["Your prompt"]) --> P["Prepare content: repo map, skills, tool shortlist (content-prep.ts)"]
+    P --> B["Assemble the cockpit and stable system prompt (engine.ts)"]
+    B --> R["Route to a provider (model/gateway.ts)"]
+    R --> S["Stream tool calls back"]
+    S --> G["Guard each call: policy, allowlist, shell-risk"]
+    G --> X["Run tools in parallel islands (execution/scheduler.ts)"]
+    X --> H["Context hooks: prune, shake, maybe summarize"]
+    H --> D{"More work to do?"}
     D -->|yes| R
-    D -->|no| E([Answer])
+    D -->|no| E(["Answer"])
 ```
 
 Two things worth calling out. The system prompt (`runtime/system-prompt.ts`) is stable and never gets rewritten, which keeps the provider's prompt cache warm. And `prepareRuntimeContent` only prepares the raw material (the index, the budgeted repo map, skills, context files, the tool shortlist). The engine is what stitches those into the cockpit message the model actually sees.
@@ -47,18 +47,18 @@ This is the part I've rewritten the most. It is not one linear pipeline, it is a
 
 ```mermaid
 flowchart TD
-    A[Before each model call] --> A1[apply any pending summary]
-    A1 --> A2[promote to a bigger-context model if needed]
-    A2 --> A3[prune superseded reads]
-    A3 --> A4[prune old tool output]
-    A4 --> A5[shake stale results]
-    A5 --> A6{over softCap - reserve?}
-    A6 -->|yes| A7[full summary + checkpoint]
-    B[After each tool result] --> B1[bash head/tail spill to disk]
-    C[After each model call] --> C1[time-based microcompact]
-    C1 --> C2[flag idle / length-stop for recovery]
-    F[On a provider context-limit error] --> F1[await the summary, truncate the head, retry]
-    G[On run complete] --> G1[persist the summary to the session journal]
+    A["Before each model call"] --> A1["apply any pending summary"]
+    A1 --> A2["promote to a bigger-context model if needed"]
+    A2 --> A3["prune superseded reads"]
+    A3 --> A4["prune old tool output"]
+    A4 --> A5["shake stale results"]
+    A5 --> A6{"over softCap minus reserve?"}
+    A6 -->|yes| A7["full summary and checkpoint"]
+    B["After each tool result"] --> B1["bash head/tail spill to disk"]
+    C["After each model call"] --> C1["time-based microcompact"]
+    C1 --> C2["flag idle or length-stop for recovery"]
+    F["On a provider context-limit error"] --> F1["await the summary, truncate the head, retry"]
+    G["On run complete"] --> G1["persist the summary to the session journal"]
 ```
 
 The one rule I never break: a full summary replaces old conversation history, never the system prompt. When a summary fires it also writes a checkpoint to disk (`context/persistent-summary.ts`), so a resumed session does not re-do work the layers already did.
