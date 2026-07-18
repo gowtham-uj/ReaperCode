@@ -27,7 +27,6 @@ const TOOL_ALLOWED_ARGS: Record<string, readonly string[]> = {
   write_file: ["path", "content"],
   replace_in_file: ["path", "oldString", "newString", "allowMultiple", "startLine", "endLine", "content"],
   edit_file: ["path", "edits"],
-  replace_symbol: ["path", "symbolName", "newCode"],
   delete_file: ["path"],
   bash: ["cmd", "description", "timeout", "run_in_background"],
   read_background_output: ["pid", "lines", "waitForMatch", "minWaitMs"],
@@ -36,6 +35,7 @@ const TOOL_ALLOWED_ARGS: Record<string, readonly string[]> = {
   activate_skill: ["name"],
   get_tool_output: ["artifactId"],
   web_fetch: ["url", "extractText"],
+  diagnostics: ["path", "kind"],
 };
 
 export const KNOWN_TOOLS: ReadonlySet<string> = new Set(Object.keys(TOOL_ALLOWED_ARGS));

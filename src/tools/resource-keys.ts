@@ -41,7 +41,6 @@ export function declaredResourcesForToolCall(call: ToolCall): ResourceKeys {
     case "replace_in_file":
     case "edit_file":
     case "file_edit":
-    case "replace_symbol":
     case "delete_file":
       return { declared: true, keys: fileKey(stringArg(args, "path", "filePath")) };
 

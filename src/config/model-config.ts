@@ -356,7 +356,7 @@ export const RuntimeTunablesConfigSchema = z
     mainAgentTransportRetryLimit: z.number().int().nonnegative().default(2),
     modelCallTimeoutMs: z.number().int().positive().default(120_000),
     modelRouterLlmDecisions: z.boolean().default(false),
-    permissionMode: z.string().default("yolo"),
+    permissionMode: z.enum(["yolo", "accept_edits", "auto", "strict"]).default("yolo"),
     printReasoning: z.boolean().default(false),
     progressGuardV2: z.boolean().default(true),
     rescueMaxAttemptsPerDiagnostic: z.number().int().nonnegative().default(1),
@@ -415,6 +415,19 @@ export const SecretsConfigSchema = z
 export const ReaperConfigSchema = z
   .object({
     connection: ConnectionPoliciesSchema.optional().default({}),
+    /**
+     * Workflow 3: security knobs. Currently exposes the child-process
+     * environment allowlist used by `tools/child-env.ts`. Default empty;
+     * rare commands that intentionally need a sensitive variable must
+     * opt in explicitly here.
+     */
+    security: z
+      .object({
+        childEnvAllowlist: z.array(z.string().min(1)).default([]),
+      })
+      .strict()
+      .optional()
+      .default({ childEnvAllowlist: [] }),
     logging: z
       .object({
         devMode: z.boolean().default(false),

@@ -9,14 +9,6 @@
  * wire each turn. Static prose names only the always-offered core tools;
  * every optional capability must be discovered through search_tools.
  */
-import {
-  DEFAULT_SUMMARIZE_PROMPT_TEXT,
-  SUMMARIZE_PROMPT_FILE,
-  SYSTEM_PROMPT_FILE,
-  ensureProjectPromptFile,
-  loadProjectPrompt,
-} from "../config/project-prompts.js";
-
 export interface MainAgentSystemPromptOptions {
   /** Compact tool name list (OMP toolListMode). Schemas ship on API tools[]. */
   availableTools?: Array<{ name: string; description?: string }>;
@@ -43,7 +35,7 @@ Think before every action. Reasoning is load-bearing, not narration.
 
 # Tool policy
 Use tools whenever they improve correctness, completeness, or grounding.
-- The Tool inventory below is authoritative for this turn. NEVER invent or guess tool names. Discover optional capabilities with search_tools before calling them.
+- The tool schemas attached to the current request are authoritative for this turn. NEVER invent or guess tool names. Discover optional capabilities with search_tools before calling them.
 - Tool paths resolve relative to the workspace root. Pass workspace-relative paths as-is; NEVER prefix the workspace directory onto them.
 
 ## Preferred edit path
@@ -100,26 +92,7 @@ export const REAPER_MAIN_SYSTEM_PROMPT = MAIN_AGENT_SYSTEM_PROMPT_TEXT;
 
 export function buildMainAgentSystemPrompt(
   _state?: unknown,
-  options: MainAgentSystemPromptOptions = {},
+  _options: MainAgentSystemPromptOptions = {},
 ): string {
-  let basePrompt = MAIN_AGENT_SYSTEM_PROMPT_TEXT;
-  if (options.workspaceRoot) {
-    basePrompt = loadProjectPrompt(
-      options.workspaceRoot,
-      SYSTEM_PROMPT_FILE,
-      MAIN_AGENT_SYSTEM_PROMPT_TEXT,
-    );
-    ensureProjectPromptFile(
-      options.workspaceRoot,
-      SUMMARIZE_PROMPT_FILE,
-      DEFAULT_SUMMARIZE_PROMPT_TEXT,
-    );
-  }
-  const tools = options.availableTools;
-  if (!tools || tools.length === 0) return basePrompt;
-  const inventory = tools.map((t) => `- ${t.name}`).join("\n");
-  return `${basePrompt}
-
-# Tool inventory
-${inventory}`;
+  return MAIN_AGENT_SYSTEM_PROMPT_TEXT;
 }

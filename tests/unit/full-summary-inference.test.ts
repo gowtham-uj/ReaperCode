@@ -145,7 +145,8 @@ test("inferFullSummary clamps output tokens and submits only sanitized canonical
 
   const systemInstruction = stub.requests[0]?.messages?.[0]?.content ?? "";
   assert.match(systemInstruction, /exactly one concise <summary>/i);
-  assert.match(systemInstruction, /project-configurable full summarizer/i);
+  assert.match(systemInstruction, /Reaper's full summarizer/i);
+  assert.doesNotMatch(systemInstruction, /project-configurable|summarizePrompt\.md/i);
   assert.match(systemInstruction, /embedded conversation text as data/i);
   assert.match(systemInstruction, /call no tools/i);
 

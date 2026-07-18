@@ -148,7 +148,7 @@ function makeRescueWatchdogSignature(stepId: string, patchRequest: Record<string
 
 function isMeaningfulRescueProgressResult(result: ToolResult): boolean {
   if (!result.ok) return false;
-  if (["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file"].includes(result.name)) return true;
+  if (["write_file", "replace_in_file", "edit_file", "delete_file"].includes(result.name)) return true;
   if (result.name !== "bash") return false;
   const command = getToolResultCommand(result);
   if (isSuccessfulStrictVerificationResult(result, command)) return true;
@@ -305,7 +305,7 @@ function findLatestRescuerWorthyFailure(results: ToolResult[]): ToolResult | und
 
 function isRescuerWorthyFailure(result: ToolResult): boolean {
   if (isRescuerWorthyBlockedResult(result)) return true;
-  if (["replace_in_file", "edit_file", "replace_symbol", "write_file"].includes(result.name)) {
+  if (["replace_in_file", "edit_file", "write_file"].includes(result.name)) {
     return true;
   }
   if (result.name !== "bash") return false;

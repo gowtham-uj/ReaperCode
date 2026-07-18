@@ -42,8 +42,6 @@ import {
 } from "./compaction-checkpoint.js";
 import {
   DEFAULT_SUMMARIZE_PROMPT_TEXT,
-  SUMMARIZE_PROMPT_FILE,
-  loadProjectPrompt,
   renderSummarizePrompt,
 } from "../config/project-prompts.js";
 
@@ -423,13 +421,7 @@ export async function tryFullSummarization(
   const maxSummaryChars =
     options.maxSummaryChars ??
     Math.max(2_000, Math.min(16_000, Math.floor(options.softCap * 4 * 0.04)));
-  const promptTemplate = options.workspaceRoot
-    ? loadProjectPrompt(
-        options.workspaceRoot,
-        SUMMARIZE_PROMPT_FILE,
-        DEFAULT_SUMMARIZE_PROMPT_TEXT,
-      )
-    : DEFAULT_SUMMARIZE_PROMPT_TEXT;
+  const promptTemplate = DEFAULT_SUMMARIZE_PROMPT_TEXT;
 
   // Pre-cut stats
   const preChars = totalChars(liveConversation);

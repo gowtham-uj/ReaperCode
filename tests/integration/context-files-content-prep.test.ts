@@ -25,7 +25,7 @@ test("content-prep loads context files when project is trusted", async () => {
   assert.equal(result.contextFiles.diagnostics.length, 0);
 });
 
-test("content-prep keeps AGENTS/CLAUDE context files when project resources are not trusted", async () => {
+test("content-prep omits project instructions when project resources are not trusted", async () => {
   const workspaceRoot = await tempDir("reaper-content-prep-ctx-");
   const userHome = await tempDir("reaper-user-home-");
   await mkdir(path.join(workspaceRoot, ".reaper"), { recursive: true });
@@ -42,8 +42,8 @@ test("content-prep keeps AGENTS/CLAUDE context files when project resources are 
     { workspaceRoot, userHome, prompt: "hello", maxContextTokens: 100_000 },
     { memoize: false },
   );
-  assert.deepEqual(result.contextFiles.files.map((f) => f.source), ["AGENTS.md"]);
-  assert.ok(result.contextFiles.combined.includes("Always run npm test"));
+  assert.deepEqual(result.contextFiles.files.map((f) => f.source), []);
+  assert.ok(!result.contextFiles.combined.includes("Always run npm test"));
   assert.ok(!result.contextFiles.combined.includes("protected secret"));
   assert.ok(result.contextFiles.diagnostics.some((d) => d.includes("not trusted")));
 });

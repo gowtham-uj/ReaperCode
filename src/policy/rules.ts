@@ -13,8 +13,15 @@ export interface RuleEvaluationContext {
   };
 }
 
+// Trailing-character class for shell-segment boundaries: whitespace,
+// common shell metacharacters, end-of-string, or start-of-string.
+// Anchoring on these avoids missing `rm -rf /;`, `rm -rf /| ...`,
+// `echo a && rm -rf /` and similar concatenations that the naive
+// `(\s|$)` regex silently allowed.
+const SHELL_BOUNDARY = String.raw`(?:^|[;\s&|()<>])`;
+const SHELL_BOUNDARY_END = String.raw`(?:[;\s&|()<>]|$)`;
 const hardDenyRules: Array<{ ruleId: string; test: RegExp; message: string }> = [
-  { ruleId: "hard_deny_rm_root", test: /(^|\s)rm\s+-rf\s+\/(\s|$)/, message: "Refusing catastrophic root deletion" },
+  { ruleId: "hard_deny_rm_root", test: new RegExp(`${SHELL_BOUNDARY}rm\\s+-rf\\s+\\/${SHELL_BOUNDARY_END}`), message: "Refusing catastrophic root deletion" },
   { ruleId: "hard_deny_disk_dd", test: /(^|\s)dd\s+.*\bof=\/dev\//, message: "Refusing raw disk write command" },
   {
     ruleId: "hard_deny_host_package_manager",
@@ -36,15 +43,19 @@ export function evaluateCommandPolicy(command: string, safetyProfile: SafetyProf
     }
   }
 
+  // Local rules (rules.local.md) are explicit user-authored policy.
+  // They must be honored in EVERY safety profile — including
+  // `allow_all` (yolo). A local `deny` is a hard denial; an `allow`
+  // permits the command even if a built-in standard rule would block
+  // it.
   for (const rule of context?.localRules?.rules ?? []) {
     if (!rule.pattern.test(command)) {
       continue;
     }
-    return {
-      outcome: rule.outcome === "allow" ? "allow" : "deny",
-      ruleId: rule.ruleId,
-      message: `Local rule matched: ${rule.raw}`,
-    };
+    if (rule.outcome === "allow") {
+      return { outcome: "allow", ruleId: rule.ruleId, message: `Local rule matched: ${rule.raw}` };
+    }
+    return { outcome: "deny", ruleId: rule.ruleId, message: `Local rule matched: ${rule.raw}` };
   }
 
   for (const rule of standardRules) {
@@ -53,6 +64,10 @@ export function evaluateCommandPolicy(command: string, safetyProfile: SafetyProf
     }
 
     if (safetyProfile === "allow_all") {
+      // Built-in standard rules remain advisory in yolo so the
+      // trusted-local-use default is unchanged. Local denies above
+      // already promoted to a real deny; this branch only fires for
+      // built-in standard rules.
       return { outcome: "would_block", ruleId: rule.ruleId, message: rule.message };
     }
 

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { classifyTestFileDiff } from "../../reaper_eval/runtime/test-diff.js";
+import { classifyTestFileDiff } from "../../src/eval/test-diff.js";
 
 const ORIGINAL = `import { test } from "node:test";
 import assert from "node:assert/strict";

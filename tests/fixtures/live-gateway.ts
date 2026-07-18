@@ -2,7 +2,6 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { ConfiguredModelGateway } from "../../src/model/gateway.js";
-import { ResilientModelGateway } from "../../src/model/retry-orchestrator.js";
 import { ProviderMultiplexerClient } from "../../src/model/providers/provider-client.js";
 import type { ModelGateway } from "../../src/model/types.js";
 import { createValidConfig } from "./phase0.js";
@@ -358,7 +357,7 @@ function resolveFallbackMaxTokens(defaults: LiveProviderDefaults): number {
   return defaults.maxTokens;
 }
 
-function createGatewayFromConfig(config: ReturnType<typeof createLiveReaperConfig>, testName: string) {
+function createGatewayFromConfig(config: ReturnType<typeof createLiveReaperConfig>, testName: string, defaults?: LiveProviderDefaults) {
   const baseGateway = createModelGateway(
     config,
     new ProviderMultiplexerClient({
@@ -386,34 +385,25 @@ function createGatewayFromConfig(config: ReturnType<typeof createLiveReaperConfi
     }),
   );
 
-  const gateway = new ResilientModelGateway(baseGateway, {
-    onAttempt: (event) =>
-      writeLiveLlmLog({
-        testName,
-        operation: "retry_attempt",
-        provider: event.provider,
-        model: event.model,
-        role: event.role,
-        request: {
-          attempt: event.attempt,
-          maxAttempts: event.maxAttempts,
-          retrying: event.retrying,
-          ...(event.kind !== undefined ? { kind: event.kind } : {}),
-          ...(event.fallbackTriggered !== undefined ? { fallbackTriggered: event.fallbackTriggered } : {}),
-        },
-        response: {
-          ok: event.ok,
-          durationMs: event.durationMs,
-          ...(event.errorMessage ? { error: event.errorMessage } : {}),
-          profileName: event.profileName,
-        },
-        timestamp: new Date().toISOString(),
-      }),
-  });
+  // The canonical ConfiguredModelGateway owns retry + fallback internally.
+  // Live tests just receive the gateway and log a "generate_attempt" event
+  // so the trajectory shows which provider/model was selected for this run.
+  if (defaults) {
+    writeLiveLlmLog({
+      testName,
+      operation: "generate_attempt",
+      provider: defaults.provider,
+      model: defaults.model,
+      role: "default_model",
+      request: { strategy: "configured", reason: "live_provider_selected" },
+      response: { ok: true, profileName: defaults.provider },
+      timestamp: new Date().toISOString(),
+    });
+  }
 
   return {
     config,
-    gateway: wrapGatewayWithLogging(gateway, testName),
+    gateway: wrapGatewayWithLogging(baseGateway, testName),
   };
 }
 

@@ -11,6 +11,7 @@ import { loadLocalRules } from "../policy/local-rules.js";
 import { PathPolicyError } from "../policy/paths.js";
 import { evaluateCommandPolicy, type SafetyProfile } from "../policy/rules.js";
 import { PermissionClassifier, type PermissionMode, type PermissionClassification } from "../policy/classifier.js";
+import { resolveEffectivePermissionMode } from "../policy/mode.js";
 import type { RecoverySession } from "../recovery/session.js";
 import { classifyToolCall } from "../execution/planner.js";
 import { ArtifactStore } from "../artifacts/store.js";
@@ -29,16 +30,15 @@ import { ComputerBrowserController } from "./browser/computer-browser.js";
 import { NativeComputerController, type NativeComputerToolName } from "./computer/native-computer.js";
 import { toolRegistry } from "./registry.js";
 import { deleteFileTool } from "./write/delete-file.js";
-import { applyEditFileContent, editFileTool } from "./write/edit-file.js";
-import { replaceExactString, replaceInFileTool, replaceLineRange } from "./write/replace-in-file.js";
-import { replaceSymbolTool } from "./write/replace-symbol.js";
+import { editFileTool } from "./write/edit-file.js";
+import { replaceInFileTool } from "./write/replace-in-file.js";
 import { writeFileTool } from "./write/write-file.js";
 import { executeSearchTools } from "./write/search-tools.js";
 import { executeApplyPatch } from "./apply-patch.js";
 import { executeGlob } from "./glob.js";
 import { executeEval } from "./eval.js";
 import { executeJob } from "./job.js";
-import { executeAstGrep, executeDiagnostics } from "./ast-grep.js";
+import { executeDiagnostics } from "./diagnostics.js";
 import { webFetchTool } from "./read/web-fetch.js";
 import { executeScratchpad } from "./memory/scratchpad.js";
 import type { Hooks } from "../adaptive/hooks.js";
@@ -51,6 +51,36 @@ import { normalizeWorkspacePath, relativeWorkspacePath } from "../policy/paths.j
 import { BackgroundProcessManager } from "./background-process-manager.js";
 import { createCheckpoint, restoreCheckpoint } from "../runtime/checkpoints.js";
 import { getGitDiffState, getGitStatusState, summarizeGitDiffState } from "../runtime/diff-state.js";
+
+/**
+ * Workflow 3 structured error types. The outer `catch` block in
+ * `execute()` switches on `code` to surface a stable error envelope
+ * to the model. Anything not in this set falls through to the
+ * existing generic `tool_error` path.
+ */
+export class PermissionDeniedError extends Error {
+  readonly code = "permission_denied";
+  constructor(readonly ruleId: string, message: string) {
+    super(message);
+    this.name = "PermissionDeniedError";
+  }
+}
+
+export class ApprovalRequiredError extends Error {
+  readonly code = "approval_required";
+  constructor(readonly reason: string, message: string) {
+    super(message);
+    this.name = "ApprovalRequiredError";
+  }
+}
+
+export class HookBlockedError extends Error {
+  readonly code = "hook_blocked";
+  constructor(readonly hookReason: string, message: string) {
+    super(message);
+    this.name = "HookBlockedError";
+  }
+}
 
 
 export interface ToolExecutorOptions {
@@ -69,6 +99,15 @@ export interface ToolExecutorOptions {
   runDir?: string;
   artifactsDir?: string;
   shellRunner?: ShellRunner;
+  /**
+   * Workflow 3: optional allowlist forwarded to the child-env builder
+   * for any Reaper-spawned child (foreground bash, background bash,
+   * JavaScript eval, Python eval). Names on this list survive even
+   * when the sensitive-name classifier would otherwise strip them.
+   * Default `[]`. Use only when a command intentionally needs a
+   * specific sensitive variable; never enable by default.
+   */
+  childEnvAllowlist?: ReadonlyArray<string>;
   /**
    * Hooks adapter — when provided, the executor emits
    * `PreToolUse` / `PostToolUse` / `PostToolUseFailure` around
@@ -143,12 +182,6 @@ interface ManagedBackgroundProcess {
 // Kept as a local alias so existing call sites still typecheck; the
 // canonical definition lives in `background-process-manager.ts`.
 
-
-type ReplaceInFileCandidateArgs =
-  | { path: string; oldString: string; newString: string; allowMultiple?: boolean | undefined }
-  | { path: string; startLine: number; endLine: number; content: string };
-
-type EditFileCandidateArgs = { path: string; edits: Array<{ oldString: string; newString: string }> };
 
 interface FileFreshnessMetadata {
   sha256: string;
@@ -242,6 +275,11 @@ export class ToolExecutor {
   private currentWorkingDirectory: string;
   private consecutiveUnknownTools = 0;
   private lastUnknownToolName?: string;
+  /** Workflow 3: permission mode and child-env allowlist (typed enum,
+   *  not arbitrary string). Used by the classifier enforcement and the
+   *  sanitized child environment builder. */
+  private readonly permissionMode: PermissionMode;
+  private readonly childEnvAllowlist: ReadonlyArray<string>;
 
   constructor(private readonly options: ToolExecutorOptions) {
     void ensureReaperScratchpad(options.workspaceRoot);
@@ -252,7 +290,10 @@ export class ToolExecutor {
     this.config = options.config;
     this.mcpRegistry = options.mcpRegistry;
     this.authoringTools = options.authoringTools;
-    this.permissionClassifier = new PermissionClassifier(options.permissionMode ?? "yolo");
+    const resolvedMode = resolveEffectivePermissionMode(options.permissionMode ?? "yolo");
+    this.permissionMode = resolvedMode;
+    this.permissionClassifier = new PermissionClassifier(resolvedMode);
+    this.childEnvAllowlist = options.childEnvAllowlist ?? [];
     this.currentWorkingDirectory = options.workspaceRoot;
     this.backgroundProcessManager = new BackgroundProcessManager({
       runId: options.runId,
@@ -475,18 +516,65 @@ export class ToolExecutor {
     });
 
     try {
-      // Permission classifier — in yolo mode (default), never blocks.
-      // Only truly dangerous patterns (rm -rf /, dd of=/dev/) are caught,
-      // and even those return a real error to the model instead of blocking.
+      // Permission classifier — runs in every mode. In yolo the
+      // fast-path returns `safe` for almost everything, but the hard-
+      // deny patterns still trip and surface a real
+      // permission_denied result so the model can see why. In other
+      // modes we follow the classifier's verdict: `dangerous` is a
+      // hard denial, `needs_confirmation` is an explicit
+      // approval_required result (the model is expected to ask the
+      // user via the existing approval channel).
       const classification = this.permissionClassifier.classifyToolCall(parsedCall);
-      // Never throw — just log if the classifier flags something.
-      // The model gets real results for every tool call.
+      if (classification.outcome === "dangerous") {
+        await this.trajectoryLogger.write({
+          event_id: randomUUID(),
+          run_id: this.options.runId,
+          session_id: this.options.sessionId,
+          trace_id: this.options.traceId,
+          timestamp: new Date().toISOString(),
+          log_schema_version: 1,
+          kind: "policy_decision",
+          level: this.options.logLevel,
+          decision_id: decisionId,
+          policy_id: classification.ruleMatch ?? "classifier_dangerous",
+          outcome: "deny",
+        });
+        throw new PermissionDeniedError(
+          classification.ruleMatch ?? "classifier_dangerous",
+          `Permission classifier refused tool '${parsedCall.name}': ${classification.reasoning}`,
+        );
+      }
+      if (classification.outcome === "needs_confirmation" && this.permissionMode !== "yolo") {
+        // Strict / auto / accept_edits demand a real approval for
+        // anything not in the fast-path safe list. We surface an
+        // approval_required result instead of executing, so the
+        // model can route to whatever real approval path exists
+        // (CLI prompt, human_intervention tool, etc.). We do NOT
+        // invent an approval path or silently downgrade.
+        await this.trajectoryLogger.write({
+          event_id: randomUUID(),
+          run_id: this.options.runId,
+          session_id: this.options.sessionId,
+          trace_id: this.options.traceId,
+          timestamp: new Date().toISOString(),
+          log_schema_version: 1,
+          kind: "policy_decision",
+          level: this.options.logLevel,
+          decision_id: decisionId,
+          policy_id: "classifier_needs_confirmation",
+          outcome: "approval_required",
+        });
+        throw new ApprovalRequiredError(
+          "classifier",
+          `Tool '${parsedCall.name}' requires explicit user approval in mode '${this.permissionMode}': ${classification.reasoning}`,
+        );
+      }
 
       // PreToolUse hook envelope. A handler returning { allow: false }
-      // blocks the dispatch with the hook's reason.
+      // blocks the dispatch with the hook's reason. The hook
+      // engine's own exception is non-blocking (preserved historical
+      // policy) but an actual negative decision is a hard block.
       const hooks = this.options.hooks;
-      let preHookAllow = true;
-      let preHookReason: string | undefined;
       let preHookMessage: string | undefined;
       if (hooks) {
         try {
@@ -495,15 +583,28 @@ export class ToolExecutor {
             payload: { toolName: parsedCall.name, args: parsedCall.args },
             blockable: true,
           });
-          preHookAllow = preHookResult.allow !== false;
-          if (!preHookAllow) {
-            // Hook says block — but Reaper never blocks tool calls.
-            // Log the hook's reason as an advisory note and continue.
-            preHookMessage = preHookResult.reason ?? preHookResult.message ?? "hook advised blocking";
+          if (preHookResult.allow === false) {
+            const hookReason = preHookResult.reason ?? preHookResult.message ?? "hook blocked";
+            await this.trajectoryLogger.write({
+              event_id: randomUUID(),
+              run_id: this.options.runId,
+              session_id: this.options.sessionId,
+              trace_id: this.options.traceId,
+              timestamp: new Date().toISOString(),
+              log_schema_version: 1,
+              kind: "policy_decision",
+              level: this.options.logLevel,
+              decision_id: decisionId,
+              policy_id: "pre_tool_use_hook",
+              outcome: "deny",
+            });
+            throw new HookBlockedError(hookReason, `PreToolUse hook blocked '${parsedCall.name}': ${hookReason}`);
           }
-          preHookMessage = preHookMessage ?? preHookResult.message;
-        } catch {
-          // Hook engine errors never block tool execution.
+          preHookMessage = preHookResult.message;
+        } catch (error) {
+          if (error instanceof HookBlockedError) throw error;
+          // Hook engine exceptions remain non-blocking (existing
+          // established policy) — the tool still dispatches.
         }
       }
 
@@ -1009,7 +1110,6 @@ export class ToolExecutor {
       case "write_file":
         {
           const args = toolRegistry.write_file.argsSchema.parse(call.args);
-          await this.assertEditorGuard(args.path, args.content, "write_file");
           await this.snapshotBeforeMutation(args.path, "write_file");
           this.fileWriteCounts.set(args.path, (this.fileWriteCounts.get(args.path) ?? 0) + 1);
           return writeFileTool(this.options.workspaceRoot, args);
@@ -1018,8 +1118,6 @@ export class ToolExecutor {
         {
           const parsedArgs = toolRegistry.replace_in_file.argsSchema.parse(call.args);
           const args = { ...parsedArgs, path: await this.resolveExistingPathCase(parsedArgs.path) } as typeof parsedArgs;
-          await this.assertSafeEditGuard(args.path, args);
-          await this.assertEditorGuard(args.path, await this.buildReplaceCandidateContent(args), "replace_in_file");
           await this.snapshotBeforeMutation(args.path, "replace_in_file");
           this.fileWriteCounts.set(args.path, (this.fileWriteCounts.get(args.path) ?? 0) + 1);
           return replaceInFileTool(this.options.workspaceRoot, args);
@@ -1028,19 +1126,9 @@ export class ToolExecutor {
         {
           const parsedArgs = toolRegistry.edit_file.argsSchema.parse(call.args);
           const args = { ...parsedArgs, path: await this.resolveExistingPathCase(parsedArgs.path) };
-          await this.assertSafeEditGuard(args.path, args);
-          await this.assertEditorGuard(args.path, await this.buildEditCandidateContent(args), "edit_file");
           await this.snapshotBeforeMutation(args.path, "edit_file");
           this.fileWriteCounts.set(args.path, (this.fileWriteCounts.get(args.path) ?? 0) + 1);
           return editFileTool(this.options.workspaceRoot, args);
-        }
-      case "replace_symbol":
-        {
-          const parsedArgs = toolRegistry.replace_symbol.argsSchema.parse(call.args);
-          const args = { ...parsedArgs, path: await this.resolveExistingPathCase(parsedArgs.path) };
-          await this.snapshotBeforeMutation(args.path, "replace_symbol");
-          this.fileWriteCounts.set(args.path, (this.fileWriteCounts.get(args.path) ?? 0) + 1);
-          return replaceSymbolTool(this.options.workspaceRoot, args);
         }
       case "delete_file":
         {
@@ -1079,6 +1167,39 @@ export class ToolExecutor {
         };
 
         const decision = evaluateCommandPolicy(effectiveCommand, this.options.safetyProfile, localRules ? { localRules } : undefined);
+
+        if (decision.outcome === "deny") {
+          // Hard-deny + local-deny path. The command MUST NOT execute.
+          // Audit + trajectory record the refusal; we throw a structured
+          // PermissionDeniedError that the outer try/catch converts to a
+          // tool-result error with a stable `permission_denied` code.
+          await this.auditLogger.write({
+            event_id: randomUUID(),
+            run_id: this.options.runId,
+            session_id: this.options.sessionId,
+            trace_id: this.options.traceId,
+            timestamp: new Date().toISOString(),
+            log_schema_version: 1,
+            kind: "policy_block",
+            severity: "error",
+            rule_id: decision.ruleId,
+            message: decision.message,
+          });
+          await this.trajectoryLogger.write({
+            event_id: randomUUID(),
+            run_id: this.options.runId,
+            session_id: this.options.sessionId,
+            trace_id: this.options.traceId,
+            timestamp: new Date().toISOString(),
+            log_schema_version: 1,
+            kind: "policy_decision",
+            level: this.options.logLevel,
+            decision_id: decisionId,
+            policy_id: decision.ruleId,
+            outcome: "deny",
+          });
+          throw new PermissionDeniedError(decision.ruleId, decision.message);
+        }
 
         if (decision.outcome === "would_block") {
           await this.auditLogger.write({
@@ -1120,6 +1241,7 @@ export class ToolExecutor {
             artifactDir: this.options.artifactsDir ?? path.join(getReaperScratchpadPaths(this.options.workspaceRoot).runs, this.options.runId, "artifacts"),
             toolCallId: call.id,
           },
+          ...(this.childEnvAllowlist.length > 0 ? { childEnvAllowlist: this.childEnvAllowlist } : {}),
         };
 
         if (this.options.shellRunner && isHostOnlyReaperArtifactInspectionCommand(effectiveCommand, this.options.workspaceRoot)) {
@@ -1279,7 +1401,10 @@ export class ToolExecutor {
       }
       case "eval": {
         const evalArgs = toolRegistry.eval.argsSchema.parse(call.args);
-        return executeEval(evalArgs.code, evalArgs.language, evalArgs.timeout);
+        return executeEval(evalArgs.code, evalArgs.language, evalArgs.timeout, {
+          workspaceRoot: this.options.workspaceRoot,
+          ...(this.childEnvAllowlist.length > 0 ? { allowlist: this.childEnvAllowlist } : {}),
+        });
       }
       case "job": {
         const jobArgs = toolRegistry.job.argsSchema.parse(call.args);
@@ -1288,10 +1413,6 @@ export class ToolExecutor {
           runId: this.options.runId,
           processManager: this.backgroundProcessManager,
         });
-      }
-      case "ast_grep": {
-        const grepArgs = toolRegistry.ast_grep.argsSchema.parse(call.args);
-        return executeAstGrep(grepArgs.pattern, this.options.workspaceRoot, grepArgs.path, grepArgs.kind, grepArgs.language);
       }
       case "diagnostics": {
         const diagArgs = toolRegistry.diagnostics.argsSchema.parse(call.args);
@@ -1425,14 +1546,6 @@ export class ToolExecutor {
     };
   }
 
-  private async assertSafeEditGuard(
-    _targetPath: string,
-    _editArgs?: { startLine?: number; endLine?: number; oldString?: string; edits?: Array<{ oldString: string; newString: string }> },
-  ): Promise<void> {
-    // Guard removed: let the model edit any file without pre-reading.
-    return;
-  }
-
   private async recordReadState(
     targetPath: string,
     fullyRead: boolean,
@@ -1462,32 +1575,6 @@ export class ToolExecutor {
       ...record,
       note: `${note}Read cache hit ${hits}; file hash and mtime are unchanged, so this is the cached observation. Use a different line range or search target if more context is needed.`,
     };
-  }
-  private async buildReplaceCandidateContent(args: ReplaceInFileCandidateArgs): Promise<string> {
-    const currentContent = await this.readCurrentWorkspaceText(args.path);
-    if ("startLine" in args) {
-      return replaceLineRange(currentContent, args.startLine, args.endLine, args.content, args.path).next;
-    }
-    return replaceExactString(currentContent, args.oldString, args.newString, args.allowMultiple ?? false, args.path).next;
-  }
-
-  private async buildEditCandidateContent(args: EditFileCandidateArgs): Promise<string> {
-    const currentContent = await this.readCurrentWorkspaceText(args.path);
-    return applyEditFileContent(currentContent, args).content;
-  }
-
-  private async readCurrentWorkspaceText(targetPath: string): Promise<string> {
-    if (this.recoverySession) {
-      return this.recoverySession.wal.readText(targetPath);
-    }
-    return readFile(normalizeWorkspacePath(this.options.workspaceRoot, targetPath), "utf8");
-  }
-
-  private async assertEditorGuard(_targetPath: string, _nextContent: string, _operation: string): Promise<void> {
-    // Editor guard removed: Reaper should let
-    // the model edit, then verify with explicit tool/test results instead of
-    // pre-blocking candidate source changes.
-    return;
   }
 
   private async recordStagedWriteState(targetPath: string): Promise<void> {

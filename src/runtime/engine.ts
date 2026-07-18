@@ -16,6 +16,8 @@ import {
   inferTransport, extractIntentSummary, makeEvent, splitControlToolCalls,
   persistRunResult, logAssistantMessageTrace, logModelResponseTrace,
 } from "./runtime-state.js";
+import { clearRunState, getRunState } from "./run-state.js";
+import type { ContextEngineeringHooks } from "./context-engineering-wiring.js";
 import { renderToolResultForModel, summarizeToolResult } from "../context/history-compaction.js";
 import { executeToolCalls } from "../execution/scheduler.js";
 import {
@@ -25,6 +27,7 @@ import {
   type TransportKind,
 } from "../connection/schemas.js";
 import { classifyToolCall } from "../execution/planner.js";
+import { resolveEffectivePermissionMode } from "../policy/mode.js";
 import { AuditLogger } from "../logging/audit.js";
 import { logLangfuseEvent } from "../logging/langfuse.js";
 import { TrajectoryLogger } from "../logging/trajectory.js";
@@ -63,6 +66,7 @@ import {
 } from "../tools/write/task.js";
 import { getDiscoveredTools, discoverTools, clearDiscoveredTools } from "../tools/discovery.js";
 import { toolRegistry, CORE_TOOL_NAMES } from "../tools/registry.js";
+import { isKnownToolName, stripUnknownToolArgs } from "./tool-args.js";
 import {
   getShellCommandArg} from "./tool-call-utils.js";
 import {
@@ -97,7 +101,13 @@ import { detectSemanticFailureText, type SemanticFailureSignal } from "../verify
 import { createVerificationSummary } from "../verify/summary.js";
 import { bootPhase0Runtime, type Phase0BootstrapResult } from "./bootstrap.js";
 import { prepareRuntimeContent, type ContentPrepResult } from "./content-prep.js";
-import { inspectProject, renderRepoInspectionForCockpit, type RepoInspection } from "./repo-inspection.js";
+import { renderContextCockpit, stripCockpitFromMessages, containsCockpitMarker, COCKPIT_OPEN, COCKPIT_CLOSE, CURRENT_REQUEST_MESSAGE_NAME, type CockpitInput } from "./context-cockpit.js";
+import { MAIN_AGENT_SYSTEM_PROMPT_TEXT } from "./system-prompt.js";
+import { classifyReadFileTrust, markTrust } from "../context/trust.js";
+// repo-inspection removed: the engine no longer pre-scans the workspace.
+// The model discovers test/build/lint commands itself via grep_search /
+// list_package_scripts. See task-contract.ts for the lightweight validation
+// hints that replaced the eager scan.
 import type { MiddlewareDefinition } from "./middleware.js";
 import { getReaperScratchpadPaths } from "../workspace/scratchpad.js";
 import { redactSecrets } from "../logging/redaction.js";
@@ -107,11 +117,8 @@ import { registerCleanup, runCleanupFunctions, setActiveRunDir, installCrashHand
 import { buildDerivedSecretEncodingFeedback } from "./derived-secret-encoding.js";
 import { buildSessionMetricsSummary } from "./session-metrics.js";
 import { collectWorkspaceDiff, runFreshContextDiffReview } from "../verify/diff-review.js";
-import { getContractCoverageBlocker, renderContractCoverageMatrix } from "../verify/contract-coverage.js";
-import { renderArtifactObligationLedger } from "./artifact-obligations.js";
 import { buildRescueHypothesisLedger, renderRescueHypothesisLedger } from "./hypothesis-ledger.js";
 import { printToolCalls, printTurnHeader } from "./session-printer.js";
-import { buildMainAgentSystemPrompt } from "./system-prompt.js";
 import { validateToolCallBatch, type ToolValidationBlocker } from "./tool-validation.js";
 import { getRuntimeDeadlinePressure, type RuntimeDeadlinePressure } from "./deadline-pressure.js";
 import { hasRecentIncompleteGeneratedArtifact, hasRecentStructuredResponseFallbackFeedback } from "./generated-artifact-feedback.js";
@@ -164,6 +171,8 @@ export interface RuntimeEngineInput {
   requestEnvelope: unknown;
   /** Named session for cross-run continuity; journaled under .reaper/sessions/. */
   namedSession?: string;
+  /** Optional user-home override for trusted context and project-trust stores. */
+  userHome?: string;
   modelGateway?: ModelGateway;
   abortSignal?: AbortSignal;
   middlewares?: Array<MiddlewareDefinition<unknown>>;
@@ -252,7 +261,6 @@ type GraphState = {
   prompt: string;
   mode?: GraphMode;
   orchestrationMode?: OrchestrationMode;
-  repoInspection?: RepoInspection;
   taskContract?: TaskContract;
   planState: PlanState;
   todoState: TodoState;
@@ -439,6 +447,7 @@ function hasPassingGroundedVerification(
 export class RuntimeEngine {
   private readonly config: ReaperConfig;
   private trajectoryLogger: TrajectoryLogger;
+  private ctxHooks?: ContextEngineeringHooks;
 
   constructor(private readonly input: RuntimeEngineInput) {
     this.config = parseReaperConfig(mergeWorkspaceConfigSync(input.config, input.workspaceRoot));
@@ -467,9 +476,18 @@ export class RuntimeEngine {
     setActiveRunDir(runContext.runDir);
     installCrashHandlers();
     // Cache-friendly system-prompt prefix for provider prompt caching. Set
-    // once per run so runtime model calls share the same cacheable prefix. supported providers
-    // use the literal prefix bytes as the cache key.
-    const systemPromptPrefix = buildRuntimeAgentSystemPrompt("executor");
+    // once per run so runtime model calls share the same cacheable prefix.
+    //
+    // WORKFLOW 2 INVARIANT: GenerateRequest.system must remain
+    // byte-identical across compaction and cockpit refresh. Tool
+    // inventory is dynamic — to keep system bytes truly stable we
+    // build the inventory once at run start and reuse the exact bytes
+    // on every model call. We pass an empty tools snapshot here so the
+    // inventory block is omitted entirely; the actual API tool[]
+    // schemas still ship on the wire via `turnRequest.tools` so the
+    // model has every capability, but the system-prompt prefix stays
+    // identical across turns.
+    const systemPromptPrefix = MAIN_AGENT_SYSTEM_PROMPT_TEXT;
     // Ensure per-call JSON + readable .txt transcripts are written under
     // `.reaper/runs/<runId>/model-calls/` for every generate/stream.
     setModelCallLogContext({
@@ -487,7 +505,7 @@ export class RuntimeEngine {
       system: systemPromptPrefix,
     });
     try {
-      return await this.runInner({ startedAt, initialRequest, runContext });
+      return await this.runInner({ startedAt, initialRequest, runContext, systemPromptPrefix });
     } finally {
       releaseModelCallContext();
       setModelCallLogContext(undefined);
@@ -498,8 +516,9 @@ export class RuntimeEngine {
     startedAt: number;
     initialRequest: AgentRequestEnvelope;
     runContext: ReturnType<typeof createReaperRunContext>;
+    systemPromptPrefix: string;
   }): Promise<RuntimeEngineResult> {
-    const { initialRequest, runContext } = params;
+    const { initialRequest, runContext, systemPromptPrefix } = params;
     const startedAt = params.startedAt;
 
     let request: AgentRequestEnvelope | undefined;
@@ -534,7 +553,6 @@ export class RuntimeEngine {
       request = { ...initialRequest, session_id: runContext.sessionId, trace_id: runContext.traceId };
       const prompt = typeof request.payload.prompt === "string" ? request.payload.prompt : "Execute requested coding task";
       const hasExplicitToolCalls = Array.isArray(request.payload.tool_calls) && request.payload.tool_calls.length > 0;
-      const repoInspection = await inspectProject(this.input.workspaceRoot).catch(() => undefined);
 
       boot = bootPhase0Runtime({
         config: this.config,
@@ -546,7 +564,6 @@ export class RuntimeEngine {
         sessionId: runContext.sessionId,
         traceId: runContext.traceId,
         ...(this.input.namedSession ? { namedSession: this.input.namedSession } : {}),
-        ...(repoInspection ? { repoInspection } : {}),
       });
       const mode: GraphMode = hasExplicitToolCalls ? "explicit_tools" : this.input.modelGateway ? "autonomous" : "needs_model";
 
@@ -562,6 +579,7 @@ export class RuntimeEngine {
 
       if (this.config.mcp?.enabled) {
         mcpRegistry = new MergedToolRegistry();
+        mcpRegistry.setWorkspaceRoot(this.input.workspaceRoot);
         const serverConfigs = [...(this.config.mcp.servers ?? []), ...loadMcpServersFromFile(this.input.workspaceRoot)];
         for (const serverConfig of serverConfigs) {
           await mcpRegistry.addMcpServer(serverConfig).catch((error) => {
@@ -576,7 +594,8 @@ export class RuntimeEngine {
         traceId: boot.state.runId,
         logLevel: boot.state.logLevel,
         safetyProfile: boot.state.safetyProfile,
-        permissionMode: (getEngineTunables().permissionMode as any) ?? "yolo",
+        permissionMode: resolveEffectivePermissionMode(getEngineTunables().permissionMode),
+        ...(this.config?.security?.childEnvAllowlist ? { childEnvAllowlist: this.config.security.childEnvAllowlist } : {}),
         recoverySession,
         config: this.config,
         trajectoryLogger: this.trajectoryLogger,
@@ -632,7 +651,6 @@ export class RuntimeEngine {
         boot,
         prompt,
         mode,
-        ...(repoInspection ? { repoInspection } : {}),
         planState: createPlanState(),
         todoState: createTodoState(),
         toolResults: [],
@@ -657,25 +675,8 @@ export class RuntimeEngine {
       } satisfies Partial<GraphState>;
     };
 
-    const inspectProjectNode = async (state: GraphState) => {
-      const repoInspection = state.repoInspection ?? getBoot().state.repoInspection;
-      await this.trajectoryLogger.write({
-        event_id: randomUUID(),
-        run_id: getBoot().state.runId,
-        session_id: getBoot().state.sessionId,
-        trace_id: getBoot().state.runId,
-        timestamp: new Date().toISOString(),
-        log_schema_version: 1,
-        kind: "state_transition",
-        level: getBoot().state.logLevel,
-        from_step: "Bootstrap",
-        to_step: "Inspect Project",
-      });
-      return repoInspection ? { repoInspection } satisfies Partial<GraphState> : {};
-    };
-
     const extractTaskContractNode = async (state: GraphState) => {
-      const taskContract = extractTaskContract(state.prompt, state.repoInspection);
+      const taskContract = extractTaskContract(state.prompt);
       const verificationState = createVerificationState(taskContract.likelyValidation);
       await this.trajectoryLogger.write({
         event_id: randomUUID(),
@@ -686,7 +687,7 @@ export class RuntimeEngine {
         log_schema_version: 1,
         kind: "state_transition",
         level: getBoot().state.logLevel,
-        from_step: "Inspect Project",
+        from_step: "Bootstrap",
         to_step: "Extract Task Contract",
       });
       return { taskContract, verificationState } satisfies Partial<GraphState>;
@@ -701,9 +702,11 @@ export class RuntimeEngine {
       });
       const prepared = await prepareRuntimeContent({
         workspaceRoot: this.input.workspaceRoot,
+        ...(this.input.userHome ? { userHome: this.input.userHome } : {}),
         prompt: state.prompt,
         maxContextTokens: Math.max(2000, Math.floor(getBoot().state.tokenBudget.softCap * 0.1)),
         compactToolResults: prePrepShouldCompact,
+        forceIndexRefresh: state.iteration === 0,
         prunerConfig: this.config.pruner,
         toolResults: state.toolResults,
         backgroundProcesses: getExecutor().getBackgroundProcesses(),
@@ -737,6 +740,7 @@ export class RuntimeEngine {
     };
 
     const mainAgentNode = async (state: GraphState) => {
+      const runState = getRunState(getBoot().state.runId);
       // Context-engineering wiring: boot, before-model-call, after-model-call,
       // after-tool-result, provider-token-limit-error, run-complete.
       //
@@ -746,13 +750,13 @@ export class RuntimeEngine {
       // the main agent, with `stream: false`, the "summarizer" role, and
       // a high maxTokens ceiling (so the LLM can produce the full summary
       // without hitting the per-turn cap).
-      const { createContextEngineeringHooks } = await import("./context-engineering-wiring.js");
-      let ctxHooks = (this as any).ctxHooks as ReturnType<typeof createContextEngineeringHooks> | undefined;
+      let ctxHooks: ContextEngineeringHooks | undefined = this.ctxHooks;
       if (!ctxHooks) {
         // The full-summarizer runs OUT-OF-BAND via `fetch` against the
         // summarizer-profile endpoint. It does NOT touch the engine's
         // stream buffer, so there's zero recursion risk. See
         // `context/full-summary-inference.ts` for the design.
+        const { createContextEngineeringHooks } = await import("./context-engineering-wiring.js");
         const { inferFullSummary } = await import("../context/full-summary-inference.js");
         const inferSummariser = async (prompt: string): Promise<string> => {
           return await inferFullSummary(prompt, {
@@ -767,20 +771,20 @@ export class RuntimeEngine {
           config: this.config as { models?: unknown } as any,
           // Prefer last provider-reported input tokens as a floor so
           // shake/full-summary gates track real usage, not only chars/4.
-          countTokens: (msgs) => {
+          countTokens: (msgs: unknown[]) => {
             const charsEst = Math.ceil(
               (typeof msgs === "object" && msgs !== null
                 ? JSON.stringify(msgs).length
                 : 0) / 4,
             );
-            const last = (globalThis as any)[`${getBoot().state.runId}::last-input-tokens`];
+            const last = runState.lastInputTokens;
             if (typeof last === "number" && Number.isFinite(last) && last > 0) {
               return Math.max(charsEst, Math.floor(last));
             }
             return charsEst;
           },
         });
-        (this as any).ctxHooks = ctxHooks;
+        this.ctxHooks = ctxHooks;
       }
 
       const bootNamedSession = getBoot().state.namedSession;
@@ -834,12 +838,20 @@ export class RuntimeEngine {
         let terminalRuntimeBlocker: RuntimeBlocker | undefined;
         const rawPromptValue = getRequest().payload.prompt;
         const rawUserPrompt = typeof rawPromptValue === "string" ? rawPromptValue : "";
-        const userPrompt = extractUserIntentText(rawUserPrompt);
         const resumedConversation = await loadLiveConversationSnapshot(runContext.runDir);
-        const liveConversation: GenerateRequest["messages"] = resumedConversation ?? [
-          { role: "user", content: userPrompt },
-        ];
+        const liveConversation: GenerateRequest["messages"] = resumedConversation ?? [];
         if (resumedConversation) {
+          // The persisted cockpit from the prior run reflects the END of that
+          // run (potentially stale content_fingerprint / workspace map /
+          // excerpts / runtime facts). Strip it so the first iteration of
+          // the cockpit insert branch below fires a FRESH cockpit against
+          // THIS run's ContentPrepResult. Without this, the first model
+          // call after resume would see stale workspace context until the
+          // next mutation batch triggered an in-place refresh.
+          replaceConversationMessages(
+            liveConversation,
+            stripCockpitFromMessages(liveConversation),
+          );
           await this.trajectoryLogger.write({
             event_id: randomUUID(),
             run_id: getBoot().state.runId,
@@ -856,7 +868,7 @@ export class RuntimeEngine {
         // Soft-context continuity: prepend session-resume re-anchor when
         // onBoot stashed one and this is a fresh (non-snapshot) conversation.
         if (!resumedConversation) {
-          const resumeSlot = (globalThis as any)[`${getBoot().state.runId}::session-resume`];
+          const resumeSlot = runState.sessionResume;
           const resume = resumeSlot?.resume;
           const reAnchor =
             resume && typeof resume.reAnchor === "string" ? resume.reAnchor.trim() : "";
@@ -880,8 +892,8 @@ export class RuntimeEngine {
             resumeMessages.push(...(rehydratedMessages as unknown[]));
             liveConversation.unshift(...(resumeMessages as any[]));
             // Session journaling slices the run's NEW turns off this prefix.
-            (globalThis as any)[`${getBoot().state.runId}::rehydrated-count`] = resumeMessages.length;
-            delete (globalThis as any)[`${getBoot().state.runId}::session-resume`];
+            runState.rehydratedCount = resumeMessages.length;
+            runState.sessionResume = undefined;
             await this.trajectoryLogger.write({
               event_id: randomUUID(),
               run_id: getBoot().state.runId,
@@ -905,7 +917,7 @@ export class RuntimeEngine {
         // compaction. Without this, the wiring would compute the
         // replacement and never use it.
         const SUMMARY_STALE_MS = 30_000;
-        const appliedSlot = (globalThis as any)[`${runContext.runId}::full-summary-applied`];
+        const appliedSlot = getRunState(runContext.runId).fullSummaryApplied;
         if (appliedSlot && appliedSlot.messages && Array.isArray(appliedSlot.messages) && appliedSlot.messages.length > 0) {
           const ageMs = Date.now() - (appliedSlot.appliedAt ?? 0);
           if (ageMs <= SUMMARY_STALE_MS) {
@@ -922,7 +934,7 @@ export class RuntimeEngine {
               to_step: "Summary Replaced",
             });
             replaceConversationMessages(liveConversation, appliedSlot.messages as any[]);
-            delete (globalThis as any)[`${runContext.runId}::full-summary-applied`];
+            getRunState(runContext.runId).fullSummaryApplied = undefined;
             await this.trajectoryLogger.write({
               event_id: randomUUID(),
               run_id: runContext.runId,
@@ -936,7 +948,7 @@ export class RuntimeEngine {
             });
           } else {
             // Stale: drop without applying.
-            delete (globalThis as any)[`${runContext.runId}::full-summary-applied`];
+            getRunState(runContext.runId).fullSummaryApplied = undefined;
           }
         }
         const latestVerificationBlocker = [...state.runtimeBlockers]
@@ -1052,10 +1064,41 @@ export class RuntimeEngine {
             state: { toolResults: [...state.toolResults, ...liveToolResults] },
             tools: buildGeneralAgentTools(getDiscoveredTools(getBoot().state.runId)),
           });
-          const currentSystem = buildMainAgentSystemPrompt(state, {
-            availableTools: currentGeneralAgentTools,
-            workspaceRoot: this.input.workspaceRoot,
-          });
+          // WORKFLOW 2: System bytes are built ONCE per autonomous run
+          // (see `run()` -> `systemPromptPrefix`) and reused on every
+          // model call. Dynamic tool inventory ships on the wire via
+          // `turnRequest.tools`; the system string itself stays byte-
+          // identical so provider prompt caches hit reliably across
+          // compaction and cockpit refresh.
+          const currentSystem = systemPromptPrefix;
+
+          // ─── Cockpit insert (once per run) ─────────────────────────
+          // The cockpit is the model's anchor for the run's environment,
+          // trust posture, trusted project context, and trusted skill
+          // names. It is inserted ONCE per run on the first iteration;
+          // subsequent iterations do NOT rebuild the cockpit (no mutation
+          // refresh, no read-only rebuild). The model receives fresh tool
+          // results on each turn and tool discovery still flows via the
+          // API `tools` field. Keeping the cockpit stable across turns
+          // also keeps its byte representation stable, which lets
+          // provider prompt caches reuse the prefix.
+          const rawPromptValue = getRequest().payload.prompt;
+          const rawUserPrompt = typeof rawPromptValue === "string" ? rawUserPromptValueSafe(rawPromptValue) : "";
+          const liveCockpit = liveConversation.find(
+            (m) => m.role === "user" && typeof m.content === "string" && containsCockpitMarker(m.content),
+          );
+          if (!liveCockpit) {
+            // First iteration OR compaction/replace stripped the
+            // cockpit — reinsert exactly one. The system bytes are
+            // untouched either way.
+            insertCockpitIntoConversation({
+              messages: liveConversation,
+              contentPrep: state.contentPrep as ContentPrepResult,
+              currentUserRequest: rawUserPrompt,
+              activeWorkspaceRoot: this.input.workspaceRoot,
+            });
+            await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
+          }
 
           const turnRequest: GenerateRequest = {
             role: effectiveMainAgentRole,
@@ -1132,7 +1175,7 @@ export class RuntimeEngine {
                   ? (turn as any).raw.usage.inputTokens
                   : undefined;
             if (typeof inputTokens === "number" && inputTokens > 0) {
-              (globalThis as any)[`${getBoot().state.runId}::last-input-tokens`] = inputTokens;
+              runState.lastInputTokens = inputTokens;
             }
           } catch { /* best-effort */ }
 
@@ -1410,15 +1453,17 @@ export class RuntimeEngine {
               }
             } catch { /* swallow */ }
 
+            const rawToolContent = result.ok
+              ? (typeof result.output === "string" ? result.output : JSON.stringify(result.output ?? ""))
+              : (result.error?.message
+                  ? `Error: ${result.error.message}${result.error.code ? ` (code=${result.error.code})` : ""}`
+                  : "Error: tool returned a non-ok result");
+            const toolContentTrust = classifyReadFileTrust(result, this.input.workspaceRoot);
             liveConversation.push({
               role: "tool",
               tool_call_id: id,
               is_error: !result.ok,
-              content: result.ok
-                ? (typeof result.output === "string" ? result.output : JSON.stringify(result.output ?? ""))
-                : (result.error?.message
-                    ? `Error: ${result.error.message}${result.error.code ? ` (code=${result.error.code})` : ""}`
-                    : "Error: tool returned a non-ok result"),
+              content: markTrust(rawToolContent, toolContentTrust, result.name),
               timestamp: Date.now(),
             } as any);
             await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
@@ -1556,6 +1601,7 @@ export class RuntimeEngine {
       });
       const compacted = await prepareRuntimeContent({
         workspaceRoot: this.input.workspaceRoot,
+        ...(this.input.userHome ? { userHome: this.input.userHome } : {}),
         prompt: state.prompt,
         maxContextTokens: Math.max(2000, Math.floor(getBoot().state.tokenBudget.softCap * 0.1)),
         compactToolResults: true,
@@ -1946,6 +1992,7 @@ export class RuntimeEngine {
       const finalVerification = state.explicitVerification;
       const contentPrep = await prepareRuntimeContent({
         workspaceRoot: this.input.workspaceRoot,
+        ...(this.input.userHome ? { userHome: this.input.userHome } : {}),
         prompt: state.prompt,
         maxContextTokens: Math.max(2000, Math.floor(getBoot().state.tokenBudget.softCap * 0.1)),
         prunerConfig: this.config.pruner,
@@ -2038,9 +2085,8 @@ export class RuntimeEngine {
     const routeAfterBootstrap = (state: GraphState) => {
       if (state.mode === "needs_model") return "no_model";
       if (state.mode === "explicit_tools") return "categorize_tools";
-      return "inspect_project";
+      return "extract_task_contract";
     };
-    const routeAfterInspectProject = () => "extract_task_contract";
     const routeAfterExtractTaskContract = () => "content_prep";
     const routeAfterContentPrep = (state: GraphState) => {
       if (state.mode !== "autonomous") return "categorize_tools";
@@ -2060,7 +2106,6 @@ export class RuntimeEngine {
 
     type RuntimeNodeName =
       | "bootstrap"
-      | "inspect_project"
       | "extract_task_contract"
       | "content_prep"
       | "main_agent"
@@ -2075,7 +2120,6 @@ export class RuntimeEngine {
 
     const nodes: Record<RuntimeNodeName, (state: GraphState) => Promise<Partial<GraphState>> | Partial<GraphState>> = {
       bootstrap: bootstrapNode,
-      inspect_project: inspectProjectNode,
       extract_task_contract: extractTaskContractNode,
       content_prep: contentPrepNode,
       main_agent: mainAgentNode,
@@ -2092,7 +2136,6 @@ export class RuntimeEngine {
     const nextNode = (node: RuntimeNodeName, state: GraphState): RuntimeNodeName | undefined => {
       switch (node) {
         case "bootstrap": return routeAfterBootstrap(state) as RuntimeNodeName;
-        case "inspect_project": return routeAfterInspectProject() as RuntimeNodeName;
         case "extract_task_contract": return routeAfterExtractTaskContract() as RuntimeNodeName;
         case "content_prep": return routeAfterContentPrep(state) as RuntimeNodeName;
         case "main_agent": return routeAfterMainAgent(state) as RuntimeNodeName;
@@ -2179,7 +2222,7 @@ export class RuntimeEngine {
 
       // ─── Context-engineering: RUN-COMPLETE ───────────────────────────────
       try {
-        const ctxHooks = (this as any).ctxHooks;
+        const ctxHooks = this.ctxHooks;
         if (ctxHooks) {
           const usedChars = JSON.stringify(finalState.toolResults ?? []).length
             + (finalState.assistantMessage ?? "").length;
@@ -2218,6 +2261,10 @@ export class RuntimeEngine {
       return result;
     } catch (error) {
       await persistRunFailure(runContext, error);
+      // Drop any cached typed slots + the idle-compaction timer even
+      // on failure; the wiring's onRunComplete path is the happy-path
+      // cleanup but exceptions bypass it.
+      clearRunState(runContext.runId);
       throw error;
     } finally {
       unregisterExecutorCleanup?.();
@@ -2245,7 +2292,7 @@ export function selectGeneralAgentToolsForTurn(input: {
   if (!detectBuildLikeTask(input.request)) return tools;
 
   const writeCount = input.state.toolResults.filter((result) =>
-    result.ok && ["write_file", "file_edit", "edit_file", "replace_symbol", "delete_file"].includes(result.name),
+    result.ok && ["write_file", "file_edit", "edit_file", "delete_file"].includes(result.name),
   ).length;
 
   // Build-like tasks still get a compact fast-start surface, but keep canonical
@@ -2282,7 +2329,7 @@ export function selectMainAgentMaxTokensForTurn(input: {
 }): number {
   if (!detectBuildLikeTask(input.request)) return 32_000;
   const writeCount = input.state.toolResults.filter((result) =>
-    result.ok && ["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file"].includes(result.name),
+    result.ok && ["write_file", "replace_in_file", "edit_file", "delete_file"].includes(result.name),
   ).length;
   // Large build tasks need more than the old 8192 cap, but an all-at-once
   // 32k first response can exceed the provider's request timeout before any
@@ -2382,7 +2429,7 @@ export function isReadOnlyToolResult(result: ToolResult): boolean {
 }
 
 function isMutationOrProducerResult(result: ToolResult): boolean {
-  if (["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file", "task_create", "task_update"].includes(result.name)) return true;
+  if (["write_file", "replace_in_file", "edit_file", "delete_file", "task_create", "task_update"].includes(result.name)) return true;
   if (result.name !== "bash") return false;
   const command = getToolResultCommand(result);
   return isMutatingShellCommand(command) || isProducerOrVerificationCommand(command);
@@ -2425,7 +2472,7 @@ function getRepeatedDiagnosticFailure(results: ToolResult[]):
   const repeatedCount = diagnosticFailures.filter((result) => makeDiagnosticFailureSignature(result) === latestSignature).length;
   const recentFailedEdits = results
     .slice(-10)
-    .filter((result) => !result.ok && ["replace_in_file", "edit_file", "replace_symbol", "write_file"].includes(result.name)).length;
+    .filter((result) => !result.ok && ["replace_in_file", "edit_file", "write_file"].includes(result.name)).length;
   if (repeatedCount < 2 && recentFailedEdits < 2) return undefined;
   const related = diagnosticFailures.filter((result) => makeDiagnosticFailureSignature(result) === latestSignature).slice(-3);
   const errorLogs = related.map((result) => renderToolResultSnippet(result)).join("\n\n---\n\n").slice(0, 9000);
@@ -2880,7 +2927,7 @@ function collectExplicitStepFileReferences(step: ExecutionPlanStep, results: Too
   }
   for (const result of results.slice(-12)) {
     const args = result.args && typeof result.args === "object" ? (result.args as Record<string, unknown>) : {};
-    if (result.ok && ["write_file", "replace_in_file", "edit_file", "replace_symbol"].includes(result.name) && typeof args.path === "string") {
+    if (result.ok && ["write_file", "replace_in_file", "edit_file", ].includes(result.name) && typeof args.path === "string") {
       const normalized = normalizeWorkspaceRelativeReference(args.path);
       if (normalized && stepText.includes(normalized) && isUsefulExplicitFileReference(normalized)) {
         paths.add(normalized);
@@ -3279,7 +3326,7 @@ function makeToolResultActionSignature(result: ToolResult): string | undefined {
     if (typeof args.oldString !== "string") return undefined;
     return `${result.name}:${JSON.stringify(Object.fromEntries(Object.entries(args).filter(([key]) => ["path", "oldString"].includes(key))))}`;
   }
-  if (["edit_file", "replace_symbol"].includes(result.name)) {
+  if (["edit_file", ].includes(result.name)) {
     return `${result.name}:${JSON.stringify(Object.fromEntries(Object.entries(args).filter(([key]) => ["path", "symbolName"].includes(key))))}`;
   }
   return undefined;
@@ -3907,7 +3954,7 @@ function shouldAdvanceBuildConfigStepToLaterImplementation(input: {
   const ids = new Set(input.toolCalls.map((call) => call.id));
   const currentResults = input.results.filter((result) => ids.has(result.toolCallId));
   const wroteBuildConfig = currentResults.some((result) => {
-    if (!result.ok || !["write_file", "replace_in_file", "edit_file", "replace_symbol"].includes(result.name)) return false;
+    if (!result.ok || !["write_file", "replace_in_file", "edit_file", ].includes(result.name)) return false;
     const args = result.args && typeof result.args === "object" ? (result.args as Record<string, unknown>) : {};
     const target = typeof args.path === "string" ? args.path.replace(/\\/g, "/") : "";
     return /(?:^|\/)(?:CMakeLists\.txt|Makefile|GNUMakefile|meson\.build|BUILD(?:\.bazel)?|WORKSPACE|configure\.ac|package\.json|pyproject\.toml|Cargo\.toml|go\.mod)$/i.test(
@@ -4031,100 +4078,110 @@ function isMutatingShellCommand(command: string): boolean {
   if (/(?:^|[^<>])>{1,2}[^&]|\btee\s+/.test(command)) return true;
   return false;
 }
-function buildSimpleExecutorPrompt(input: {
-  prompt: string;
-  contentPrep: ContentPrepResult;
-  repoInspection?: RepoInspection;
-  toolResults: ToolResult[];
-  feedback: string[];
-  negativeConstraints: string[];
-  blockingFacts?: RuntimeBlockingFacts;
-  runId: string;
-}): string {
-  const recentResults = renderRecentToolResultsForPromptCompact(input.toolResults, input.feedback, 10);
-  const fileTree = input.contentPrep.preparedContext.fileTree.slice(0, 160).join("\n");
-  const context = input.contentPrep.preparedContext.chunks
-    .slice(0, 6)
-    .map((chunk) => chunk.content.slice(0, 4000))
-    .join("\n\n---\n\n");
-  const environment = renderFingerprintForPrompt(input.contentPrep.environmentFingerprint);
 
-  return [
-    "# Reaper Simple Task Executor",
-    "You are the main Reaper agent executing a simple task directly. Do not invoke orchestration or subagents.",
-    "Return ONLY JSON with shape {\"assistant_message\": string, \"tool_calls\": ToolCall[]}.",
-    renderToolCallContract(input.runId),
-    "For intermediate steps, assistant_message should usually be empty. When the whole requested task is complete and no work remains, return a concise final assistant_message with no tool_calls.",
-    "Use one small batch of concrete tool calls.",
-    "After a relevant build/test/lint/runtime smoke check passes and no work remains, stop instead of re-reading files or repeating checks.",
-    "Run a real build/test/lint/runtime smoke check before stopping when one is available. Placeholder commands such as echo success, true, or exit 0 are not testing.",
-    "",
-	    renderOptimizationFrame({
-	      prompt: input.prompt,
-	      toolResults: input.toolResults,
-	      feedback: input.feedback,
-	      negativeConstraints: input.negativeConstraints,
-	      mode: "simple",
-	    }),
-	    "",
-	    renderEpicStateForPrompt({
-	      runId: input.runId,
-	      prompt: input.prompt,
-	      toolResults: input.toolResults,
-	      feedback: input.feedback,
-	      negativeConstraints: input.negativeConstraints,
-	    }),
-	    "",
-	    "# Tool Rules",
-    "Use specific tools for file work: read_file/list_directory/grep_search/write_file/replace_in_file/edit_file/replace_symbol/delete_file.",
-    "Use bash only for installs, tests, build/runtime checks, or operations the specialized tools cannot express.",
-    "For dependency discovery, run package-specific checks instead of dumping directories: npm ls <package>, npm view <package> version, node -e \"require.resolve('<package>')\", python -m pip show <package>, cargo tree -p <package>, go list -m <module>, or equivalent for the active ecosystem.",
-    "For inspection-only commands, do not make optional utilities such as file, tree, realpath, readlink, du, or stat mandatory. If one is missing but you already got useful stdout from ls/find/read tools, advance the inspection step with that evidence or use a simpler built-in command.",
-    "Use the package manager for the active ecosystem only. Do not install a C/C++ header or source library with npm/pnpm/yarn; do not install JavaScript packages with pip/cargo/go. For header-only/source-only dependencies, prefer existing vendored files, system packages, documented direct source/header downloads, or a small local implementation when that satisfies the task.",
-    "Do not use broad recursive listings for dependency discovery. If structure is needed, use list_directory or a pruned command that excludes dependency/build/cache directories.",
-    "If a build cache points at a different source root/configuration, remove only the task-local build/cache directory and reconfigure from the intended source root before retrying. This is allowed cleanup, not destructive source deletion.",
-    "Long-running servers must be started as managed background processes. After health/runtime checks prove they work, stop them with signal_process when no longer needed.",
-    "Before mutating an existing file, reading it first is recommended but not required. New files may be created with write_file.",
-    "For quick runtime/import/compile checks, prefer non-destructive one-off commands from the workspace root. If you create a temporary check file, resolve imports/paths relative to that file and runtime, not by assumption.",
-    "When any check fails, read the exact failing file/config/log and fix the cited artifact before rerunning the same command. Repeating an unchanged failing command is not progress.",
-    "If build/test/runtime is currently failing, enter repair-only mode: make the smallest diagnostic fix, then rerun the same or narrower check before expanding features.",
-    "Create or update the task-local test/check script as part of the model-managed testing step when useful.",
-    "For complex app tasks, add or run a behavioral smoke/test check for the requested workflow. Do not keep rerunning only the build as final proof.",
-    "For targeted npm tests, inspect package.json and run the actual test runner directly or use 'npm test -- <path>' only when the script forwards arguments. Do not use 'npm test <path>' blindly.",
-    "Test imports must not start long-running servers as side effects. Export app/module construction separately from process startup and guard listen/start code behind the language's main-entry check.",
-    "Do not assume external services such as databases or caches are running. Check availability first; if unavailable and Docker is unavailable, use a test-safe in-process, file-backed, mocked, or static verification path.",
-    "Never cd to or install into the host repository root. Commands start in the task workspace; use relative paths or $WORKSPACE only.",
-    "If the environment says Docker is unavailable, do not run docker/docker-compose. Create or inspect Docker files and validate them statically instead.",
-    "",
-    "# Task",
-    input.prompt,
-    "",
-    "# Workspace",
-    fileTree || "(empty)",
-    "",
-    input.repoInspection ? renderRepoInspectionForCockpit(input.repoInspection) : "Repository inspection: unavailable.",
-    "",
-    `# Environment\n${environment}`,
-    "",
-    `# Relevant Context\n${context || "(no indexed context)"}`,
-    "",
-    `# Recent Tool Results\n${JSON.stringify(recentResults)}`,
-    "",
-    renderDiagnosticTargeting(input.toolResults),
-    "",
-    renderRuntimeBlockingFacts(input.blockingFacts),
-    "",
-    renderArtifactObligationLedger(input.prompt, input.toolResults),
-    "",
-    renderContractCoverageMatrix(input.prompt, input.toolResults),
-    "",
-    input.feedback.length ? `# Verification Feedback\n${capFeedbackForContext(input.feedback).join("\n\n---\n\n")}` : "# Verification Feedback\nnone",
-    "",
-    input.negativeConstraints.length
-      ? `# Do Not Repeat\n${input.negativeConstraints.map((item) => `- ${item}`).join("\n")}`
-      : "# Do Not Repeat\nNo negative constraints recorded.",
-  ].join("\n\n");
+/**
+ * Build the cockpit input bundle from the current ContentPrepResult
+ * plus the exact current user request and bounded runtime facts.
+ *
+ * The cockpit is the single harness-authored user message the engine
+ * inserts after prior named-session history. It is byte-stable across
+ * the run for the same inputs; the model sees it as data (rendered
+ * via `renderContextCockpit`), not as system authority.
+ */
+function buildCockpitInput(input: {
+  contentPrep: ContentPrepResult;
+  runtimeFacts: {
+    activeWorkspaceRoot: string;
+    latestVerificationFailure?: string;
+  };
+}): CockpitInput {
+  const { contentPrep } = input;
+  const trustedSkills = contentPrep.resourceTrust.trusted
+    ? contentPrep.skills
+    : [];
+  return {
+    preparedContext: contentPrep.preparedContext,
+    contextFiles: contentPrep.contextFiles,
+    skills: contentPrep.skills,
+    trustedSkills,
+    resourceTrust: contentPrep.resourceTrust,
+    environmentFingerprint: contentPrep.environmentFingerprint,
+    mentions: contentPrep.mentions,
+    runtimeFacts: input.runtimeFacts,
+    contentFingerprint: contentPrep.preparedContext.fingerprint,
+  };
 }
+
+/**
+ * Insert (or replace in place) exactly one harness-authored cockpit
+ * user message after prior named-session history and before any
+ * new turn. Guarantees:
+ *   - exactly one cockpit marker pair exists in the conversation,
+ *   - the cockpit appears AFTER all prior user/assistant/tool
+ *     messages that came before this run's turn,
+ *   - the current task intent is preserved verbatim at the recency
+ *     edge (last section of the cockpit).
+ */
+export function insertCockpitIntoConversation(input: {
+  messages: GenerateRequest["messages"];
+  contentPrep: ContentPrepResult;
+  currentUserRequest: string;
+  activeWorkspaceRoot: string;
+  latestVerificationFailure?: string;
+}): void {
+  const cockpit = renderContextCockpit(buildCockpitInput({
+    contentPrep: input.contentPrep,
+    runtimeFacts: {
+      activeWorkspaceRoot: input.activeWorkspaceRoot,
+      ...(input.latestVerificationFailure ? { latestVerificationFailure: input.latestVerificationFailure } : {}),
+    },
+  }));
+  // Strip any prior cockpit to keep exactly one.
+  const existingCockpitIndex = input.messages.findIndex(
+    (message) => message.role === "user" && typeof message.content === "string" && containsCockpitMarker(message.content),
+  );
+  const existingRequestIndex = input.messages.findIndex(
+    (message) => message.role === "user" && message.name === CURRENT_REQUEST_MESSAGE_NAME,
+  );
+  const insertionIndex = existingCockpitIndex >= 0
+    ? existingCockpitIndex
+    : existingRequestIndex >= 0
+      ? existingRequestIndex
+      : input.messages.length;
+  const stripped = stripCockpitFromMessages(input.messages as GenerateRequest["messages"])
+    .filter((message) => !(message.role === "user" && message.name === CURRENT_REQUEST_MESSAGE_NAME));
+  stripped.splice(
+    Math.min(insertionIndex, stripped.length),
+    0,
+    { role: "user", content: cockpit },
+    { role: "user", name: CURRENT_REQUEST_MESSAGE_NAME, content: input.currentUserRequest },
+  );
+  // Replace in-place to preserve the live conversation array identity.
+  input.messages.length = 0;
+  input.messages.push(...stripped);
+}
+
+function extractShellCmd(result: ToolResult): string {
+  const args = (result.args ?? {}) as { cmd?: unknown; command?: unknown };
+  return typeof args.cmd === "string"
+    ? args.cmd
+    : typeof args.command === "string"
+      ? args.command
+      : "";
+}
+
+/**
+ * Defensive extractor for `request.payload.prompt`. Returns the
+ * raw user-request bytes (a string) verbatim. We never regex-extract
+ * or strip "User prompt:" / "[exec environment]" segments — those
+ * substrings may legitimately appear inside a user's request.
+ * If a legacy transport preamble truly needs stripping, gate it on
+ * explicit envelope metadata.
+ */
+function rawUserPromptValueSafe(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
 /**
  * Cap feedback for context budget. Keep last N entries; cap each entry to
  * maxChars. Without this, accumulated feedback from multiple replan cycles
@@ -4414,7 +4471,7 @@ export function computeEditLocalityScore(results: ToolResult[]): number {
   const touched = collectRecentlyTouchedFiles(results);
   const edited = uniqueStrings(
     results
-      .filter((result) => ["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file"].includes(result.name))
+      .filter((result) => ["write_file", "replace_in_file", "edit_file", "delete_file"].includes(result.name))
       .flatMap((result) => {
         const args = result.args && typeof result.args === "object" ? (result.args as Record<string, unknown>) : {};
         return typeof args.path === "string" ? [stripWorkspacePrefix(args.path)] : [];
@@ -4477,7 +4534,7 @@ function buildTrajectoryEfficiencyMetrics(input: {
   const uniqueCommands = new Set(commands);
   const editedFiles = uniqueStrings(
     toolResults
-      .filter((result) => ["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file"].includes(result.name))
+      .filter((result) => ["write_file", "replace_in_file", "edit_file", "delete_file"].includes(result.name))
       .flatMap((result) => {
         const args = result.args && typeof result.args === "object" ? (result.args as Record<string, unknown>) : {};
         return typeof args.path === "string" ? [stripWorkspacePrefix(args.path)] : [];
@@ -4564,7 +4621,7 @@ function toolResultPath(result: ToolResult): string | undefined {
 export function renderAgentSourceReliabilityPatterns(role: "planner" | "executor" | "patcher" | "repair" | "recovery"): string {
   const common = [
     "# Agent Reliability Patterns",
-    "Use repo-local instructions when they appear in indexed context, especially AGENTS.md, REAPER.md, CLAUDE.md, GEMINI.md, and .cursorrules. Treat them as project guidance unless they conflict with the user's request or higher-priority Reaper rules.",
+    "Use repo-local instructions when they appear in indexed context, especially AGENTS.md, REAPER.md, CLAUDE.md, and .cursorrules. Treat them as project guidance unless they conflict with the user's request or higher-priority Reaper rules.",
     "Operate from current state: task, workspace tree, environment, current step, compacted observations, recent tool results, feedback, and negative constraints. Do not rediscover facts already shown unless a diagnostic or changed file makes them stale.",
     "Use a linear observe-act-check loop. Make one bounded discovery or mutation batch, observe the result, then choose the next dependent action from evidence.",
     "Prefer high-signal bounded reads/searches over whole-repository dumps. Inspect the exact spec, test, config, stack frame, symbol, or artifact that determines acceptance.",
@@ -4922,7 +4979,11 @@ function normalizeToolCallInput(input: unknown): unknown {
     name = "read_file";
     delete args.instructions;
   }
-  stripUnknownToolArgs(typeof name === "string" ? name : "", args);
+  const stripResult = stripUnknownToolArgs(typeof name === "string" ? name : "", args);
+  if ("cleaned" in stripResult) {
+    for (const key of Object.keys(args)) delete args[key];
+    Object.assign(args, stripResult.cleaned);
+  }
   const id =
     typeof raw.id === "string" && raw.id.trim() && raw.id !== rawName
       ? raw.id
@@ -5057,42 +5118,6 @@ function extractTopLevelToolArgs(raw: Record<string, unknown>): Record<string, u
   return Object.fromEntries(Object.entries(raw).filter(([key]) => !excluded.has(key)));
 }
 
-function stripUnknownToolArgs(name: string, args: Record<string, unknown>): void {
-  const allowedByTool: Record<string, string[]> = {
-    read_file: ["path", "startLine", "endLine"],
-    view_file: ["path", "startLine", "endLine"],
-    list_directory: ["path", "includeHidden"],
-    grep_search: ["pattern", "path", "include"],
-    skim_file: ["path", "goalHint"],
-    inspect_environment: [],
-    web_search: ["query", "engine", "maxResults", "scrapePages"],
-    write_file: ["path", "content"],
-    replace_in_file: ["path", "oldString", "newString", "allowMultiple", "startLine", "endLine", "content"],
-    edit_file: ["path", "edits"],
-    replace_symbol: ["path", "symbolName", "newCode"],
-    delete_file: ["path"],
-    bash: ["cmd", "description", "timeout", "run_in_background"],
-    read_background_output: ["pid", "lines", "waitForMatch", "minWaitMs"],
-    signal_process: ["pid", "signal"],
-    write_to_process: ["pid", "input"],
-    activate_skill: ["name"],
-    get_tool_output: ["artifactId"],
-    advance_step: ["summary", "stepId", "evidence"],
-    web_fetch: ["url", "extractText"],
-    task_create: ["subject", "description", "status"],
-    task_update: ["taskId", "status", "subject", "description"],
-    task_list: ["status"],
-  };
-  const allowed = allowedByTool[name];
-  if (!allowed) return;
-  const allowedSet = new Set(allowed);
-  for (const key of Object.keys(args)) {
-    if (!allowedSet.has(key)) {
-      delete args[key];
-    }
-  }
-}
-
 
 function normalizeToolName(name: string): string {
   const normalized = name.trim();
@@ -5119,33 +5144,6 @@ function normalizeToolName(name: string): string {
     line_range_replace: "replace_in_file",
   };
   return aliases[normalizedLower] ?? aliases[normalized.toLowerCase()] ?? normalized;
-}
-
-function isKnownToolName(name: string): boolean {
-  return new Set([
-    "read_file",
-    "list_directory",
-    "grep_search",
-    "skim_file",
-    "inspect_environment",
-    "web_search",
-    "write_file",
-    "replace_in_file",
-    "edit_file",
-    "replace_symbol",
-    "delete_file",
-    "bash",
-    "read_background_output",
-    "signal_process",
-    "write_to_process",
-    "activate_skill",
-    "get_tool_output",
-    "advance_step",
-    "web_fetch",
-    "task_create",
-    "task_update",
-    "task_list",
-  ]).has(name);
 }
 
 

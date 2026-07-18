@@ -1,8 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildMainAgentSystemPrompt } from "../../src/runtime/system-prompt.js";
-import { buildGeneralAgentTools } from "../../src/runtime/agent-tools.js";
+import { MAIN_AGENT_SYSTEM_PROMPT_TEXT, buildMainAgentSystemPrompt } from "../../src/runtime/system-prompt.js";
 
 
 test("main-agent system prompt includes required requirements text", () => {
@@ -28,38 +27,22 @@ test("main-agent system prompt includes required requirements text", () => {
   assert.doesNotMatch(system, /Main Agent Cockpit|cockpit memory/i);
 });
 
-test("main-agent system prompt includes compact tool inventory when provided", () => {
+test("main-agent system prompt ignores dynamic tool inventory", () => {
   const system = buildMainAgentSystemPrompt({}, {
     availableTools: [{ name: "read_file" }, { name: "bash" }],
   });
-  assert.match(system, /# Tool inventory/);
-  assert.match(system, /- read_file\b/);
-  assert.match(system, /- bash\b/);
+  assert.equal(system, MAIN_AGENT_SYSTEM_PROMPT_TEXT);
+  assert.doesNotMatch(system, /# Tool inventory/);
+  assert.doesNotMatch(system, /^- read_file$/m);
 });
 
-test("main-agent system inventory exactly mirrors the offered API tools", () => {
-  const offered = buildGeneralAgentTools();
-  const system = buildMainAgentSystemPrompt({}, { availableTools: offered });
-  const inventory = system
-    .split("# Tool inventory\n")[1]!
-    .split("\n")
-    .filter((line) => line.startsWith("- "))
-    .map((line) => line.slice(2));
-
-  assert.deepEqual(inventory, offered.map((tool) => tool.name));
-  assert.doesNotMatch(system, /\b(?:run_command|run_shell_command|sandbox_service_control)\b/);
-});
-
-
-test("main-agent system prompt lists tools without long descriptions", () => {
+test("main-agent system prompt ignores tool descriptions", () => {
   const longDescription = "word ".repeat(120);
   const system = buildMainAgentSystemPrompt({}, {
     availableTools: [{ name: "very_verbose_tool", description: longDescription }],
   });
-
-  assert.match(system, /- very_verbose_tool\b/);
-  // Descriptions are omitted from system inventory (API tools[] carries schemas).
-  assert.doesNotMatch(system, /word word word/);
+  assert.equal(system, MAIN_AGENT_SYSTEM_PROMPT_TEXT);
+  assert.doesNotMatch(system, /very_verbose_tool|word word word/);
 });
 
 

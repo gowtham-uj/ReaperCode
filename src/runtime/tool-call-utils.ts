@@ -6,6 +6,6 @@ export function getShellCommandArg(call: ToolCall): string {
 
 
 export function isMutatingToolCall(call: ToolCall): boolean {
-  return call.name === "write_file" || call.name === "edit_file" || call.name === "replace_in_file" || call.name === "replace_symbol" || call.name === "delete_file";
+  return call.name === "write_file" || call.name === "edit_file" || call.name === "replace_in_file" || call.name === "delete_file";
 }
 

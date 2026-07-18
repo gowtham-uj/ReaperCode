@@ -363,7 +363,7 @@ export function isLikelyFinalOutputPath(filePath: string): boolean {
 
 
 export function isTaskFacingDeliverableMutation(filePath: string, call: ToolCall, combinedText: string): boolean {
-  if (!["write_file", "replace_in_file", "edit_file", "replace_symbol"].includes(call.name)) return false;
+  if (!["write_file", "replace_in_file", "edit_file", ].includes(call.name)) return false;
   const normalized = stripWorkspacePrefix(normalizeArtifactPathForMatch(filePath));
   if (!normalized || isGeneratedOrBuildPath(normalized)) return false;
   if (isLintOrFormattingConfigPath(normalized) || isDependencyManifestPath(normalized)) return false;

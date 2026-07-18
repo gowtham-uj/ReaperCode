@@ -1,21 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { DEFAULT_SUMMARIZE_PROMPT_TEXT } from "../../src/config/project-prompts.js";
 import { tryFullSummarization } from "../../src/context/full-summary.js";
-import { buildMainAgentSystemPrompt } from "../../src/runtime/system-prompt.js";
+import { MAIN_AGENT_SYSTEM_PROMPT_TEXT, buildMainAgentSystemPrompt } from "../../src/runtime/system-prompt.js";
 
-async function freshWorkspace(t: test.TestContext): Promise<string> {
-  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "reaper-project-prompts-"));
-  t.after(async () => rm(workspaceRoot, { recursive: true, force: true }));
-  return workspaceRoot;
+async function freshWorkspace(): Promise<string> {
+  return await mkdtemp(path.join(tmpdir(), "reaper-project-prompts-"));
 }
 
 function summaryConversation() {
   return [
-    { role: "user", content: "Keep project prompt behavior configurable." },
+    { role: "user", content: "Keep the canonical prompt boundary stable." },
     {
       role: "assistant",
       content: "",
@@ -33,69 +32,36 @@ function summaryConversation() {
   ];
 }
 
-const VALID_SUMMARY = "<summary>1. Primary Request and Intent\nKeep prompts configurable.\n7. Pending Tasks\nNone.\n8. Current Work\nVerified.\n9. Optional Next Step\nNone.</summary>";
+const VALID_SUMMARY = "<summary>1. Primary Request and Intent\nKeep policy stable.\n7. Pending Tasks\nNone.\n8. Current Work\nVerified.\n9. Optional Next Step\nNone.</summary>";
 
-function customSummaryTemplate(marker: string): string {
-  return [
-    marker,
-    "{{MODE_INSTRUCTIONS}}",
-    "{{CHECKPOINT_SECTION}}",
-    "{{PRIOR_SUMMARY_SECTION}}",
-    "{{CONVERSATION}}",
-    "{{RETRY_SECTION}}",
-    "{{PREVIOUS_ATTEMPT_SECTION}}",
-  ].join("\n");
-}
-
-test("system prompt files are seeded and reloaded between runs", async (t) => {
-  const workspaceRoot = await freshWorkspace(t);
+test("project system.md cannot replace the canonical main-agent policy", async () => {
+  const workspaceRoot = await freshWorkspace();
   const configDir = path.join(workspaceRoot, ".reaper", ".config");
-  const systemPath = path.join(configDir, "system.md");
-  const summarizePath = path.join(configDir, "summarizePrompt.md");
+  await mkdir(configDir, { recursive: true });
+  await writeFile(path.join(configDir, "system.md"), "MALICIOUS PROJECT SYSTEM\n", "utf8");
 
-  const initial = buildMainAgentSystemPrompt(undefined, { workspaceRoot });
-  assert.match(initial, /You are Reaper's main agent/);
-  assert.match(await readFile(systemPath, "utf8"), /Delivery contract/);
-  assert.match(await readFile(summarizePath, "utf8"), /Primary Request and Intent/);
-
-  await writeFile(systemPath, "CUSTOM SYSTEM PROMPT V1\n", "utf8");
-  const firstReload = buildMainAgentSystemPrompt(undefined, { workspaceRoot });
-  assert.equal(firstReload, "CUSTOM SYSTEM PROMPT V1");
-
-  await writeFile(systemPath, "CUSTOM SYSTEM PROMPT V2\n", "utf8");
-  const secondReload = buildMainAgentSystemPrompt(undefined, { workspaceRoot });
-  assert.equal(secondReload, "CUSTOM SYSTEM PROMPT V2");
+  assert.equal(buildMainAgentSystemPrompt(undefined, { workspaceRoot }), MAIN_AGENT_SYSTEM_PROMPT_TEXT);
+  assert.equal(buildMainAgentSystemPrompt(undefined, { availableTools: [{ name: "bash" }] }), MAIN_AGENT_SYSTEM_PROMPT_TEXT);
 });
 
-test("summarizer prompt is reloaded for every compaction", async (t) => {
-  const workspaceRoot = await freshWorkspace(t);
-  buildMainAgentSystemPrompt(undefined, { workspaceRoot });
-  const summarizePath = path.join(workspaceRoot, ".reaper", ".config", "summarizePrompt.md");
+test("project summarizePrompt.md cannot replace the canonical summary template", async () => {
+  const workspaceRoot = await freshWorkspace();
+  const configDir = path.join(workspaceRoot, ".reaper", ".config");
+  await mkdir(configDir, { recursive: true });
+  await writeFile(path.join(configDir, "summarizePrompt.md"), "MALICIOUS SUMMARY TEMPLATE\n{{CONVERSATION}}", "utf8");
 
-  await writeFile(summarizePath, customSummaryTemplate("CUSTOM SUMMARY V1"), "utf8");
-  let firstPrompt = "";
-  const first = await tryFullSummarization(summaryConversation(), {
+  let renderedPrompt = "";
+  const result = await tryFullSummarization(summaryConversation(), {
     softCap: 2_000,
     workspaceRoot,
     infer: async (prompt) => {
-      firstPrompt = prompt;
+      renderedPrompt = prompt;
       return VALID_SUMMARY;
     },
   });
-  assert.equal(first?.performed, true);
-  assert.match(firstPrompt, /CUSTOM SUMMARY V1/);
 
-  await writeFile(summarizePath, customSummaryTemplate("CUSTOM SUMMARY V2"), "utf8");
-  let secondPrompt = "";
-  const second = await tryFullSummarization(summaryConversation(), {
-    softCap: 2_000,
-    workspaceRoot,
-    infer: async (prompt) => {
-      secondPrompt = prompt;
-      return VALID_SUMMARY;
-    },
-  });
-  assert.equal(second?.performed, true);
-  assert.match(secondPrompt, /CUSTOM SUMMARY V2/);
-  assert.doesNotMatch(secondPrompt, /CUSTOM SUMMARY V1/);
+  assert.equal(result?.performed, true);
+  assert.doesNotMatch(renderedPrompt, /MALICIOUS SUMMARY TEMPLATE/);
+  assert.match(renderedPrompt, /Primary Request and Intent/);
+  assert.match(DEFAULT_SUMMARIZE_PROMPT_TEXT, /Primary Request and Intent/);
 });

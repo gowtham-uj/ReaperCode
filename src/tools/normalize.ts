@@ -183,13 +183,6 @@ export function normalizeToolCall(input: unknown): unknown {
           ...(Array.isArray(record.edits) ? { edits: record.edits } : {}),
         };
         break;
-      case "replace_symbol":
-        args = {
-          ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
-          ...(typeof record.symbolName === "string" ? { symbolName: record.symbolName } : {}),
-          ...(typeof record.newCode === "string" ? { newCode: record.newCode } : {}),
-        };
-        break;
       case "write_file":
         args = {
           ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),

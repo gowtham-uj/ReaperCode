@@ -155,7 +155,7 @@ function isReadOnlyResult(result: ToolResult): boolean {
 
 function isSuccessfulMutation(result: ToolResult): boolean {
   if (!result.ok) return false;
-  if (["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file"].includes(result.name)) return true;
+  if (["write_file", "replace_in_file", "edit_file", "delete_file"].includes(result.name)) return true;
   return result.name === "bash" && /\b(?:mkdir|cp|mv|rm|ln|patch|sed\s+-i|perl\s+-pi|npm\s+install|pip\s+install)\b/i.test(commandOf(result));
 }
 

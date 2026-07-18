@@ -1,7 +1,7 @@
 /**
  * Tests for T1-T4 OMP layers in context-engineering-wiring.
  *
- * - T1 idle compaction: scheduler + global slot
+ * - T1 idle compaction: scheduler + run-state slot
  * - T2 incomplete recovery: stopReason === "length" detection
  * - T3 handoff: smaller-context prompt when enabled
  * - T4 snapcompact: image-cluster collapse hook
@@ -10,6 +10,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { applyConfigToTunables, getContextTunables } from "../../src/config/config-tunables.js";
 import { createContextEngineeringHooks } from "../../src/runtime/context-engineering-wiring.js";
+import { clearRunState, getRunState } from "../../src/runtime/run-state.js";
 
 const capturedEvents: any[] = [];
 function resetEvents() { capturedEvents.length = 0; return capturedEvents; }
@@ -45,8 +46,8 @@ test("T2: incomplete recovery fires when stopReason === 'length' AND shouldCompa
   loadFreshConfig();
   const ctx = createContextEngineeringHooks();
   const runId = "r-t2-test";
-  // Pre-clear the global slot
-  delete (globalThis as any)[`${runId}::incomplete-recovery`];
+  // Pre-clear the typed slot
+  clearRunState(runId);
   // Build messages > threshold
   const messages: any[] = [];
   for (let i = 0; i < 25; i += 1) {
@@ -67,12 +68,12 @@ test("T2: incomplete recovery fires when stopReason === 'length' AND shouldCompa
     softCap: 5000,
     trajectoryLogger: capturingTrajectoryLogger,
   });
-  const slot = (globalThis as any)[`${runId}::incomplete-recovery`];
+  const slot = getRunState(runId).incompleteRecovery;
   assert.ok(slot !== undefined, "incomplete-recovery slot should be set");
-  assert.equal(slot.stopReason, "length");
-  assert.ok(typeof slot.tokensUsed === "number");
+  assert.equal(slot!.stopReason, "length");
+  assert.ok(typeof slot!.tokensUsed === "number");
   // Cleanup
-  delete (globalThis as any)[`${runId}::incomplete-recovery`];
+  clearRunState(runId);
 });
 
 test("T2: incomplete recovery does NOT fire when stopReason !== 'length'", async () => {
@@ -80,7 +81,7 @@ test("T2: incomplete recovery does NOT fire when stopReason !== 'length'", async
   loadFreshConfig();
   const ctx = createContextEngineeringHooks();
   const runId = "r-t2-notlength";
-  delete (globalThis as any)[`${runId}::incomplete-recovery`];
+  clearRunState(runId);
   const messages: any[] = [];
   for (let i = 0; i < 25; i += 1) {
     messages.push({ role: "assistant", content: "x".repeat(2_000), tool_calls: [{ id: `t${i}`, type: "function", function: { name: "bash", arguments: "{}" } }] });
@@ -96,7 +97,7 @@ test("T2: incomplete recovery does NOT fire when stopReason !== 'length'", async
     softCap: 5000,
     trajectoryLogger: capturingTrajectoryLogger,
   });
-  const slot = (globalThis as any)[`${runId}::incomplete-recovery`];
+  const slot = getRunState(runId).incompleteRecovery;
   assert.equal(slot, undefined, "slot must NOT be set when stopReason is not 'length'");
 });
 
@@ -105,9 +106,7 @@ test("T1: idle scheduler creates a setTimeout when tokens exceed threshold", asy
   loadFreshConfig();
   const ctx = createContextEngineeringHooks();
   const runId = "r-t1-schedule";
-  const idleKey = `${runId}::idle-compaction-timer`;
-  delete (globalThis as any)[idleKey];
-  delete (globalThis as any)[`${runId}::idle-compaction`];
+  clearRunState(runId);
   // Build messages that exceed 1000 tokens
   const messages: any[] = [];
   for (let i = 0; i < 5; i += 1) {
@@ -123,11 +122,11 @@ test("T1: idle scheduler creates a setTimeout when tokens exceed threshold", asy
     softCap: 100_000,
     trajectoryLogger: capturingTrajectoryLogger,
   });
-  const timer = (globalThis as any)[idleKey];
-  assert.ok(timer !== undefined, "idle-compaction-timer should be scheduled");
+  const timer = getRunState(runId).idleCompactionTimer;
+  assert.ok(timer !== undefined, "idle-compaction timer should be scheduled");
   // Cleanup: clear the timer
   if (timer && typeof timer.unref === "function") clearTimeout(timer);
-  delete (globalThis as any)[idleKey];
+  clearRunState(runId);
 });
 
 test("T1: idle scheduler does NOT run when idleEnabled is false", async () => {
@@ -143,7 +142,7 @@ test("T1: idle scheduler does NOT run when idleEnabled is false", async () => {
   applyConfigToTunables(cfg as any);
   const ctx = createContextEngineeringHooks();
   const runId = "r-t1-disabled";
-  delete (globalThis as any)[`${runId}::idle-compaction-timer`];
+  clearRunState(runId);
   const messages: any[] = [{ role: "tool", tool_call_id: "t0", content: "x".repeat(2_000) }];
   await ctx.onAfterModelCall({
     workspaceRoot: "/tmp/ws",
@@ -155,7 +154,7 @@ test("T1: idle scheduler does NOT run when idleEnabled is false", async () => {
     softCap: 100_000,
     trajectoryLogger: capturingTrajectoryLogger,
   });
-  const timer = (globalThis as any)[`${runId}::idle-compaction-timer`];
+  const timer = getRunState(runId).idleCompactionTimer;
   assert.equal(timer, undefined, "no timer when idleEnabled is false");
 });
 

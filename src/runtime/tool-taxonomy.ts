@@ -15,7 +15,6 @@ export const CONTROL_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 export const REQUIRED_EXECUTABLE_TOOLS: ReadonlySet<string> = new Set([
-  "inspect_project",
   "git_status",
   "git_diff",
   "read_file",
@@ -42,7 +41,6 @@ export const MUTATING_TOOLS: ReadonlySet<string> = new Set([
   "bash",
 
   // Existing runtime mutation surfaces.
-  "replace_symbol",
   "delete_file",
   "browser_control",
   "computer_control",

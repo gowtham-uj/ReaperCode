@@ -175,9 +175,13 @@ test("unnamed runs do not create session journals", async () => {
     modelGateway: gateway,
   });
   await engine.run();
-  assert.deepEqual(gateway.capturedMessages[0], [
-    { role: "user", content: "No session here." },
-  ]);
+  // The harness sends one mutable cockpit followed by the exact task.
+  const first = gateway.capturedMessages[0] ?? [];
+  assert.equal(first[0]?.role, "user");
+  assert.match(first[0]?.content ?? "", /REAPER_COCKPIT v1/);
+  assert.equal(first[1]?.role, "user");
+  assert.equal(first[1]?.content, "No session here.");
+  assert.equal(first.length, 2);
   assert.doesNotMatch(
     JSON.stringify(gateway.capturedMessages[0]),
     /Main Agent Cockpit|Repo Snapshot|Prepared Context/,

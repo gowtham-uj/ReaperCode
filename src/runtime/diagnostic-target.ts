@@ -117,7 +117,7 @@ export function shouldAllowDependencyManifestRepairDespiteDiagnosticTarget(call:
 }
 
 export function isDependencyManifestMutation(call: ToolCall): boolean {
-  if (!["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file"].includes(call.name)) return false;
+  if (!["write_file", "replace_in_file", "edit_file", "delete_file"].includes(call.name)) return false;
   const args = call.args && typeof call.args === "object" ? (call.args as Record<string, unknown>) : {};
   return typeof args.path === "string" && isDependencyManifestPath(args.path);
 }
@@ -215,7 +215,7 @@ export function hasDiagnosticTargetBeenAddressedSince(targetPath: string, failin
   const normalizedFailingCommand = normalizeDiagnosticCommand(failingCommand);
   const failingCwd = extractLeadingCdDirectory(failingCommand);
   for (const result of laterResults) {
-    if (result.name === "write_file" || result.name === "replace_in_file" || result.name === "edit_file" || result.name === "replace_symbol" || result.name === "delete_file") {
+    if (result.name === "write_file" || result.name === "replace_in_file" || result.name === "edit_file" || result.name === "delete_file") {
       const args = result.args && typeof result.args === "object" ? (result.args as Record<string, unknown>) : {};
       const changedPath = typeof args.path === "string" ? normalizeArtifactPathForMatch(stripWorkspacePrefix(args.path)) : "";
       if (result.ok && changedPath && (changedPath === target || path.basename(changedPath) === basename)) return true;

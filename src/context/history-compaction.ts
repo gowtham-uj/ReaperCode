@@ -45,7 +45,7 @@ export function compactToolHistory(input: HistoryCompactionInput): CompactedHist
 }
 
 function traditionalCompact(input: HistoryCompactionInput): CompactedHistory {
-  const writeTools = new Set(["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file", "bash"]);
+  const writeTools = new Set(["write_file", "replace_in_file", "edit_file", "delete_file", "bash"]);
   const maxEntries = Math.max(0, input.maxEntries);
   const fileOpsSummary = summarizeFileOps(input.toolResults);
   const latestFailureSummary = summarizeLatestFailure(input.toolResults);
@@ -174,7 +174,7 @@ function summarizeFileOps(results: ToolResult[]): string | undefined {
     const path = typeof args.path === "string" ? args.path : undefined;
     if (!path) continue;
     if (["read_file", "view_file", "skim_file"].includes(result.name)) read.add(path);
-    if (["write_file", "replace_in_file", "edit_file", "replace_symbol"].includes(result.name)) modified.add(path);
+    if (["write_file", "replace_in_file", "edit_file", ].includes(result.name)) modified.add(path);
     if (result.name === "delete_file") deleted.add(path);
   }
   const parts = [

@@ -7,7 +7,8 @@ import {
   REAPER_DEFAULT_SOFT_CAP_TOKENS,
 } from "../config/context-hard-cap.js";
 import { parseReaperConfig, type ReaperConfig } from "../config/model-config.js";
-import { RuntimeStateSchema, type RuntimeRepoInspection, type RuntimeState } from "./state.js";
+import { resolveEffectivePermissionMode, permissionModeToSafetyProfile } from "../policy/mode.js";
+import { RuntimeStateSchema, type RuntimeState } from "./state.js";
 
 /** Prefer contextManagement.softCap; fall back to legacy tokenBudget.softCap; then 270K hard cap. */
 const DEFAULT_SOFT_CAP_TOKENS = REAPER_DEFAULT_SOFT_CAP_TOKENS;
@@ -73,7 +74,6 @@ export interface Phase0BootstrapInput {
   /** Named session for cross-run continuity (journaled under .reaper/sessions/). */
   namedSession?: string;
   traceId?: string;
-  repoInspection?: RuntimeRepoInspection;
 }
 
 export interface Phase0BootstrapResult {
@@ -86,12 +86,19 @@ export function bootPhase0Runtime(input: Phase0BootstrapInput): Phase0BootstrapR
   const config = parseReaperConfig(input.config);
   const requestEnvelope = parseAgentRequestEnvelope(input.requestEnvelope);
 
+  // Workflow 3: derive SafetyProfile from PermissionMode in one place.
+  // The state still carries `safetyProfile` because that's what the
+  // RuntimeState contract publishes, but the value is no longer a
+  // hard-coded "allow_all" — it tracks the mode the engine will hand
+  // to the executor (which itself derives from config.runtimeTunables).
+  const effectivePermissionMode = resolveEffectivePermissionMode(config.runtimeTunables.permissionMode);
+
   const state = RuntimeStateSchema.parse({
     sessionId: input.sessionId ?? requestEnvelope.session_id,
     runId: input.runId ?? requestEnvelope.trace_id,
     turnId: requestEnvelope.turn_id,
     logLevel: "info",
-    safetyProfile: "allow_all",
+    safetyProfile: permissionModeToSafetyProfile(effectivePermissionMode),
     noticeVerbosity: "normal",
     sessionProtocolVersion: 1,
     userIntentSummary: input.userIntentSummary ?? "Phase 0 bootstrapped session",
@@ -108,7 +115,6 @@ export function bootPhase0Runtime(input: Phase0BootstrapInput): Phase0BootstrapR
     },
     feedback: [],
     negativeConstraints: [],
-    ...(input.repoInspection ? { repoInspection: input.repoInspection } : {}),
     ...(input.namedSession ? { namedSession: input.namedSession } : {}),
   });
 

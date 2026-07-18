@@ -2,6 +2,7 @@ export interface BudgetedItem<T> {
   item: T;
   tokenCost: number;
   priority: number;
+  rank?: number;
   stableKey: string;
 }
 
@@ -23,6 +24,11 @@ export function applyDeterministicTruncation<T>(items: BudgetedItem<T>[], maxTok
   const ordered = [...items].sort((a, b) => {
     if (a.priority !== b.priority) {
       return a.priority - b.priority;
+    }
+    const rankA = a.rank ?? Number.MAX_SAFE_INTEGER;
+    const rankB = b.rank ?? Number.MAX_SAFE_INTEGER;
+    if (rankA !== rankB) {
+      return rankA - rankB;
     }
     return a.stableKey.localeCompare(b.stableKey);
   });

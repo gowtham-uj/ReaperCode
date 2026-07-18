@@ -6,7 +6,7 @@ Refactor TypeScript code while preserving types and behavior.
 
 1. Read the public API surface (exports, types, classes, Zod schemas).
 2. Plan the refactor in small commits; preserve exports + signatures.
-3. Move / extract / rename with `replace_symbol` or `edit_file` blocks.
+3. Move / extract / rename with `edit_file` (or `replace_in_file`) blocks.
 4. Keep `tsc --noEmit` (or the project's typecheck) green at every step.
 5. Run existing tests; do not delete tests to make the refactor pass.
 6. Document breaking changes in CHANGELOG.

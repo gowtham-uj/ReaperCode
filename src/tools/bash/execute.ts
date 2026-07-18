@@ -33,6 +33,12 @@ export interface BashExecutionContext {
    * exposing the partial-update channel to interested callers.
    */
   onPartialUpdate?: BashPartialUpdateCallback | undefined;
+  /**
+   * Optional allowlist forwarded to the child environment builder. Names
+   * on this list are preserved even when the sensitive-name classifier
+   * would otherwise strip them. Default empty.
+   */
+  childEnvAllowlist?: ReadonlyArray<string>;
 }
 
 export interface BashExecutionResult extends BashOutput {
@@ -115,6 +121,7 @@ export async function executeBashCommand(
     ctx.workingDirectory,
     ctx.ruleContext,
     ctx.runtime,
+    ctx.childEnvAllowlist ? { allowlist: ctx.childEnvAllowlist } : undefined,
   );
 
   if (isBackgroundShellResult(raw)) {

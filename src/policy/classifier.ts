@@ -37,8 +37,15 @@ export class DenialTracker {
 }
 
 // ── Fast-path regex classifier ──
+// Trailing-character class for shell-segment boundaries: whitespace,
+// common shell metacharacters, end-of-string, or start-of-string.
+// Anchoring on these avoids missing `rm -rf /;`, `rm -rf /| ...`,
+// `echo a && rm -rf /` and similar concatenations that the naive
+// `(?:\s|$)` regex silently allowed.
+const SHELL_BOUNDARY = String.raw`(?:^|[;\s&|()<>])`;
+const SHELL_BOUNDARY_END = String.raw`(?:[;\s&|()<>]|$)`;
 const hardDenyPatterns = [
-  { pattern: /rm\s+-rf\s+\/(?:\s|$)/, ruleId: "hard_deny_rm_root", desc: "Recursive root deletion" },
+  { pattern: new RegExp(`${SHELL_BOUNDARY}rm\\s+-rf\\s+\\/${SHELL_BOUNDARY_END}`), ruleId: "hard_deny_rm_root", desc: "Recursive root deletion" },
   { pattern: /dd\s+.*\bof=\/dev\//, ruleId: "hard_deny_disk_dd", desc: "Raw disk write" },
   { pattern: />\s*\/dev\/sda/, ruleId: "hard_deny_disk_overwrite", desc: "Raw disk overwrite" },
   { pattern: /chmod\s+(-R\s+)?777\s+\//, ruleId: "hard_deny_chmod_root", desc: "World-writable root" },
@@ -150,7 +157,7 @@ export class PermissionClassifier {
     }
 
     // Write tools — safe in accept_edits, needs confirmation otherwise
-    if (["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file"].includes(call.name)) {
+    if (["write_file", "replace_in_file", "edit_file", "delete_file"].includes(call.name)) {
       if (this.mode === "accept_edits") {
         return { outcome: "safe", reasoning: "File write — auto-accepted", confidence: 0.85 };
       }

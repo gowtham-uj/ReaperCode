@@ -64,7 +64,7 @@ const MAX_TOTAL_FILES = 8000;
 // `MAX_INDEXED_FILE_BYTES` — skip individual files larger than this.
 // Large files (SQLite WAL logs, mp4s, zips, agent trajectory dumps)
 // don't contain useful source code; reading them just to confirm
-// they exist wastes seconds and trips tree-sitter / regex paths.
+// they exist wastes seconds and trips downstream consumers.
 // 4 MiB is well above any reasonable source file.
 const MAX_INDEXED_FILE_BYTES = 4 * 1024 * 1024;
 
@@ -144,17 +144,22 @@ export async function readIndexedFile(file: IndexedFile): Promise<string> {
   }
 }
 
+// Names that are loaded as INSTRUCTIONS via the context-file loader
+// (see `loadContextFiles`). We deliberately keep these OUT of
+// `alwaysInclude` so the cockpit and context-file renderer do not
+// double-ingest them. Package manifests (README/package.json/etc.)
+// remain here as orientation data — they are not instruction authority.
+// GEMINI.md is intentionally NOT in this set: it is not a
+// ReaperCode-recognized instruction file. ReaperCode trusts
+// AGENTS.md, CLAUDE.md, REAPER.md, and .cursorrules; GEMINI.md is
+// a third-party file that may carry conflicting instructions and
+// must NOT be silently included as project context.
 const alwaysIncludeNames = new Set([
   "README.md",
   "README",
   "package.json",
   "pyproject.toml",
   "go.mod",
-  "AGENTS.md",
-  "REAPER.md",
-  "CLAUDE.md",
-  "GEMINI.md",
-  ".cursorrules",
 ]);
 
 function shouldSkipDirectory(name: string): boolean {
@@ -230,8 +235,8 @@ async function walkFiles(root: string, currentDir: string, currentDepth: number,
         const fileStat = await stat(fullPath).catch(() => null);
         if (!fileStat || !fileStat.isFile()) return null;
         // Skip huge files — see MAX_INDEXED_FILE_BYTES above. These
-        // bloat downstream consumers (the dependency graph reads
-        // every indexed file, then tree-sitter parses each one).
+        // bloat downstream consumers and serve no useful role in
+        // the lightweight workspace fingerprint / mention index.
         if (fileStat.size > MAX_INDEXED_FILE_BYTES) return null;
         return {
           path: fullPath,

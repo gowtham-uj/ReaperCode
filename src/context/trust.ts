@@ -32,6 +32,9 @@
  * than fight the heuristic.
  */
 
+import { realpathSync } from "node:fs";
+import path from "node:path";
+
 import type { ToolResult } from "../tools/types.js";
 
 /**
@@ -127,19 +130,39 @@ export function classifyReadFileTrust(
   result: Pick<ToolResult, "name" | "args">,
   workspaceRoot: string | undefined,
 ): TrustLevel {
-  if (result.name !== "read_file" && result.name !== "view_file" && result.name !== "skim_file") {
+  if (
+    result.name !== "read_file"
+    && result.name !== "view_file"
+    && result.name !== "skim_file"
+    && result.name !== "file_view"
+    && result.name !== "file_scroll"
+    && result.name !== "file_find"
+  ) {
     return classifyToolResultTrust(result);
   }
   const args = (result.args ?? {}) as { path?: unknown };
-  const path = typeof args.path === "string" ? args.path : undefined;
-  if (!path || !workspaceRoot) {
+  const targetPath = typeof args.path === "string" ? args.path : undefined;
+  if (!targetPath || !workspaceRoot) {
     return classifyToolResultTrust(result);
   }
-  if (path.startsWith(workspaceRoot + "/") || path === workspaceRoot) {
-    return "trusted";
+  const canonicalRoot = canonicalizePath(workspaceRoot);
+  const candidate = pathModuleResolve(canonicalRoot, targetPath);
+  const canonicalCandidate = canonicalizePath(candidate);
+  const relative = path.relative(canonicalRoot, canonicalCandidate);
+  const insideWorkspace = relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+  return insideWorkspace ? "trusted" : "untrusted";
+}
+
+function pathModuleResolve(workspaceRoot: string, targetPath: string): string {
+  return path.isAbsolute(targetPath) ? path.resolve(targetPath) : path.resolve(workspaceRoot, targetPath);
+}
+
+function canonicalizePath(targetPath: string): string {
+  try {
+    return realpathSync(targetPath);
+  } catch {
+    return path.resolve(targetPath);
   }
-  // Outside the workspace root — untrusted.
-  return "untrusted";
 }
 
 /**

@@ -154,7 +154,7 @@ interface TunablesCache {
     mainAgentTransportRetryLimit: number;
     modelCallTimeoutMs: number;
     modelRouterLlmDecisions: boolean;
-    permissionMode: string;
+    permissionMode: "yolo" | "accept_edits" | "auto" | "strict";
     printReasoning: boolean;
     progressGuardV2: boolean;
     rescueMaxAttemptsPerDiagnostic: number;

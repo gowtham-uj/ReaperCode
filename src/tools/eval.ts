@@ -9,6 +9,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { z } from "zod";
 
+import { buildChildEnv } from "./child-env.js";
+
 const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
@@ -42,6 +44,17 @@ export interface EvalResult {
   durationMs: number;
 }
 
+export interface ExecuteEvalOptions {
+  workspaceRoot: string;
+  allowlist?: ReadonlyArray<string>;
+  /**
+   * Optional source environment to sanitize. Defaults to `process.env`.
+   * Tests pass a fixture here; production callers should leave it
+   * unset.
+   */
+  sourceEnv?: NodeJS.ProcessEnv;
+}
+
 // ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
@@ -53,21 +66,33 @@ export interface EvalResult {
  * Python: uses `python3 -c` with a timeout.
  *
  * The output is the combined stdout (stderr included as error if non-zero exit).
+ *
+ * The child environment is sanitized via {@link buildChildEnv} so
+ * provider keys, GitHub tokens, AWS creds, and database URLs cannot
+ * leak into JS/Python snippets even if the model or a tool consumer
+ * tries to exfiltrate them.
  */
 export async function executeEval(
   code: string,
   language: string = "javascript",
   timeoutSec: number = 10,
+  options: ExecuteEvalOptions = { workspaceRoot: process.cwd() },
 ): Promise<EvalResult> {
   const start = Date.now();
   const lang = language === "python" ? "python" : "javascript";
+
+  const env = buildChildEnv({
+    workspaceRoot: options.workspaceRoot,
+    ...(options.allowlist ? { allowlist: options.allowlist } : {}),
+    ...(options.sourceEnv ? { sourceEnv: options.sourceEnv } : {}),
+  }).env;
 
   try {
     if (lang === "python") {
       const { stdout, stderr } = await execFileAsync(
         "python3",
         ["-c", code],
-        { timeout: timeoutSec * 1000, maxBuffer: 1024 * 1024 },
+        { timeout: timeoutSec * 1000, maxBuffer: 1024 * 1024, env },
       );
       return {
         output: stdout.trim(),
@@ -80,7 +105,7 @@ export async function executeEval(
       const { stdout, stderr } = await execFileAsync(
         "node",
         ["-e", code],
-        { timeout: timeoutSec * 1000, maxBuffer: 1024 * 1024 },
+        { timeout: timeoutSec * 1000, maxBuffer: 1024 * 1024, env },
       );
       return {
         output: stdout.trim(),

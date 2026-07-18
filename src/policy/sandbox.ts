@@ -80,7 +80,6 @@ const WORKSPACE_WRITE_TOOLS: ReadonlySet<string> = new Set([
   "write_file",
   "replace_in_file",
   "edit_file",
-  "replace_symbol",
   "delete_file",
   "create_checkpoint",
   "restore_checkpoint",

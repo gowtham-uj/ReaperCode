@@ -304,6 +304,23 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     forbidden_in_roles: [],
     allowed_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser", "root"],
   },
+  diagnostics: {
+    name: "diagnostics",
+    // Runs external linters/tsc as a child process; output is
+    // advisory-only and never blocks writes.
+    category: "service",
+    risk_level: "low",
+    is_read_only: true,
+    can_modify_files: false,
+    can_execute_code: true, // executes tsc / eslint via execFile
+    can_control_ui: false,
+    can_affect_host: false,
+    requires_approval: false,
+    preferred_before: ["write_file", "replace_in_file", "edit_file", "file_edit"],
+    preferred_after: [],
+    forbidden_in_roles: [],
+    allowed_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser", "root"],
+  },
 
   // ---- Write ----
   write_file: {
@@ -362,21 +379,6 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     can_affect_host: false,
     requires_approval: false,
     preferred_before: ["file_view", "file_find", "grep_search"],
-    preferred_after: ["bash"],
-    forbidden_in_roles: ["explorer", "architect", "reviewer", "critic", "browser"],
-    allowed_in_roles: ["implementer", "test", "root"],
-  },
-  replace_symbol: {
-    name: "replace_symbol",
-    category: "write",
-    risk_level: "medium",
-    is_read_only: false,
-    can_modify_files: true,
-    can_execute_code: false,
-    can_control_ui: false,
-    can_affect_host: false,
-    requires_approval: false,
-    preferred_before: ["read_file", "view_file"],
     preferred_after: ["bash"],
     forbidden_in_roles: ["explorer", "architect", "reviewer", "critic", "browser"],
     allowed_in_roles: ["implementer", "test", "root"],

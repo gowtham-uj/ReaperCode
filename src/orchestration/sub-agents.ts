@@ -3,7 +3,6 @@ import type { ToolCall } from "../tools/types.js";
 import { selectVerificationCommand, runVerificationCommand } from "../verify/runner.js";
 import { enforceDelegationDepth } from "./depth.js";
 import { assertLeaseAllowsFile, type FileLeaseMap } from "./leases.js";
-import { buildRepoMapSnapshot } from "./return.js";
 import { cleanupSandboxWorkspace, createSandboxWorkspace } from "./sandbox.js";
 import { detectPlanCycle, nextSchedulableTasks, type SubTaskContract } from "./scheduler.js";
 import { runIntegratorMerge } from "./integrator.js";
@@ -17,7 +16,6 @@ export interface OrchestrationResult {
   ok: boolean;
   completedSubtasks: string[];
   failedSubtasks: Array<{ id: string; reason: string }>;
-  repoMapSnapshot?: Awaited<ReturnType<typeof buildRepoMapSnapshot>>;
   conflictSummary?: string;
 }
 
@@ -123,12 +121,10 @@ export async function runDelegatedPlan(input: {
     }
   }
 
-  const repoMapSnapshot = await buildRepoMapSnapshot(input.workspaceRoot, input.prompt);
   return {
     ok: failed.length === 0,
     completedSubtasks: [...completed],
     failedSubtasks: failed,
-    repoMapSnapshot,
   };
 }
 

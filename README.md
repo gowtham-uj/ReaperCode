@@ -13,12 +13,11 @@ Most agents lose the plot on long runs. They forget the original task, re-read t
 You point it at a repo, give it a task, and pick a provider. It builds a picture of the codebase, plans, edits files, runs tests, checks its own work, and keeps going. The interesting part is everything that keeps it coherent across a long session.
 
 - **Context engineering.** This is the core of the project. Before each model call the runtime prunes and compacts the conversation; only when it is genuinely over budget does it pay for an LLM summary. The system prompt is never rewritten, only the surrounding history gets compressed and rehydrated. More on this below.
-- **Provider-agnostic routing.** One gateway (`model/gateway.ts`) talks to Anthropic, OpenAI, a LiteLLM gateway, DeepSeek, Cerebras, OpenRouter, the MiniMax OpenAI-compatible endpoint, and the NeuralWatt gateway (Kimi, GLM, Qwen). Streams get normalized into the same tool-call events, and a per-provider idle timeout kills a stuck stream instead of hanging.
+- **Provider-agnostic routing.** One gateway (`model/gateway.ts`) talks to Anthropic (native SSE streaming), OpenAI, a LiteLLM gateway, DeepSeek, Cerebras, the MiniMax OpenAI-compatible endpoint, and the NeuralWatt gateway (Kimi, GLM, Qwen). Streams get normalized into the same tool-call events, and a per-provider idle timeout kills a stuck stream instead of hanging.
 - **ACI file tools.** `file_view`, `file_scroll`, `file_find`, and `file_edit` give the model bounded, line-numbered views and exact-range edits instead of dumping whole files. Ten tools ship in the model's default surface; everything else is discovered on demand through `search_tools` (BM25 over the tool catalog).
-- **Proactive repo map.** On each turn it builds a codebase index and hands the model a budgeted, ranked map of the files that actually matter, so it does not start every task blind.
 - **Parallel tool islands.** Safe reads and independent shells run at the same time without stepping on each other (`execution/scheduler.ts` plus per-tool resource keys).
 - **Verified recovery.** The `verify/` modules (runner, judge, classifiers, contract coverage, semantic-failure, diff review) push back when the model claims something works without evidence, and `recovery/` keeps a write-ahead log and verified lessons so a failed step does not corrupt the workspace.
-- **Skills, hooks, extensions.** 17 built-in skills plus first-class hook and extension subsystems, so you can change behavior without forking the runtime.
+- **Skills, hooks, extensions.** 15 built-in skills plus first-class hook and extension subsystems, so you can change behavior without forking the runtime.
 - **Its own task list.** A small per-run task API (`createTask` / `updateTask` / `listTasks` in `tools/write/task.ts`) so the model tracks its own work instead of leaning on the conversation.
 
 ## How a turn runs
@@ -27,7 +26,7 @@ The loop lives in `runtime/engine.ts`. Roughly:
 
 ```mermaid
 flowchart TD
-    U(["Your prompt"]) --> P["Prepare content: repo map, skills, tool shortlist (content-prep.ts)"]
+    U(["Your prompt"]) --> P["Prepare content: workspace index, skills, tool shortlist (content-prep.ts)"]
     P --> B["Assemble the cockpit and stable system prompt (engine.ts)"]
     B --> R["Route to a provider (model/gateway.ts)"]
     R --> S["Stream tool calls back"]
@@ -39,7 +38,7 @@ flowchart TD
     D -->|no| E(["Answer"])
 ```
 
-Two things worth calling out. The system prompt (`runtime/system-prompt.ts`) is stable and never gets rewritten, which keeps the provider's prompt cache warm. And `prepareRuntimeContent` only prepares the raw material (the index, the budgeted repo map, skills, context files, the tool shortlist). The engine is what stitches those into the cockpit message the model actually sees.
+Two things worth calling out. The system prompt (`runtime/system-prompt.ts`) is stable and never gets rewritten, which keeps the provider's prompt cache warm. And `prepareRuntimeContent` only prepares the raw material (the workspace index, skill catalog, context files, tool shortlist). The engine is what stitches those into the cockpit message the model actually sees — once per run, never refreshed. The model discovers files itself via `list_directory`, `grep_search`, and `file_view`.
 
 ## The context engineering
 

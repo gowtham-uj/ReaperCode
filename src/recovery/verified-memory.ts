@@ -199,7 +199,7 @@ function inferKnowledgeTags(
   verification: { command?: string; groundedSignal?: VerificationGroundedSignal },
 ): string[] {
   const writePaths = toolResults.flatMap((result) => {
-    if (!["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file"].includes(result.name)) return [];
+    if (!["write_file", "replace_in_file", "edit_file", "delete_file"].includes(result.name)) return [];
     const args = result.args && typeof result.args === "object" ? (result.args as Record<string, unknown>) : {};
     return typeof args.path === "string" ? [args.path] : [];
   });
@@ -214,7 +214,7 @@ function inferKnowledgeTags(
 function inferChangedFileTypes(toolResults: ToolResult[]): string[] {
   return uniqueStrings(
     toolResults.flatMap((result) => {
-      if (!result.ok || !["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file"].includes(result.name)) return [];
+      if (!result.ok || !["write_file", "replace_in_file", "edit_file", "delete_file"].includes(result.name)) return [];
       const args = result.args && typeof result.args === "object" ? (result.args as Record<string, unknown>) : {};
       const targetPath = typeof args.path === "string" ? args.path : "";
       const extension = path.extname(targetPath).toLowerCase();
@@ -224,7 +224,7 @@ function inferChangedFileTypes(toolResults: ToolResult[]): string[] {
 }
 
 function inferImportance(toolResults: ToolResult[], verification: { groundedSignal?: VerificationGroundedSignal }): number {
-  const writeCount = toolResults.filter((result) => result.ok && ["write_file", "replace_in_file", "edit_file", "replace_symbol"].includes(result.name)).length;
+  const writeCount = toolResults.filter((result) => result.ok && ["write_file", "replace_in_file", "edit_file", ].includes(result.name)).length;
   const groundedBoost = verification.groundedSignal?.grounded ? 0.75 : 0;
   return clampImportance(1 + Math.min(2, writeCount * 0.2) + groundedBoost);
 }

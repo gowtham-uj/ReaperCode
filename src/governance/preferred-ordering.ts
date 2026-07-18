@@ -101,16 +101,6 @@ const RULES: Record<string, Predicate[]> = {
     },
   ],
 
-  replace_symbol: [
-    (history) => {
-      const lastRead = findLast(history, (t) => t === "read_file" || t === "view_file" || t === "grep_search");
-      if (lastRead === null) {
-        return { severity: "warn", ruleId: "ordering.replace_symbol_without_read", message: "replace_symbol called without a prior read." };
-      }
-      return null;
-    },
-  ],
-
   delete_file: [
     (history) => {
       const lastRead = findLast(history, (t) => t === "read_file" || t === "view_file" || t === "list_directory");

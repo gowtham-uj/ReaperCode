@@ -35,6 +35,10 @@ export function buildStarterConfig(input: { defaultModel?: string; defaultProvid
       sampleRate: 1.0,
       sessionMetrics: true,
     },
+    // ── Security (Workflow 3) ─────────────────────────────────────
+    security: {
+      childEnvAllowlist: [],
+    },
     // ── Pruner (compaction strategy) ───────────────────────────────
     pruner: {
       enabled: true,

@@ -18,6 +18,7 @@ export class MergedToolRegistry {
   private readonly activeSet = new Map<string, ActiveToolEntry>();
   private readonly mcpClients = new Map<string, McpClient>();
   private currentTurn = 0;
+  private workspaceRoot: string | undefined;
 
   private readonly MAX_ACTIVE_TOOLS = 12;
   private readonly MIN_BUILTIN_SLOTS = 5;
@@ -40,11 +41,24 @@ export class MergedToolRegistry {
     }
   }
 
+  /**
+   * Capture the workspace root so MCP stdio spawns can route their
+   * env through the Workflow 3 buildChildEnv sanitizer. This must be
+   * called once before `addMcpServer` so the client receives the
+   * workspace context it needs.
+   */
+  setWorkspaceRoot(workspaceRoot: string): void {
+    this.workspaceRoot = workspaceRoot;
+  }
+
   async addMcpServer(config: McpServerConfig): Promise<number> {
     const client = new McpClient(config.name);
     try {
       const { name: _name, autoDiscover: _ad, ...connectConfig } = config as McpServerConfig & { autoDiscover?: boolean };
-      await client.connect(connectConfig as { type: "stdio" | "http"; command?: string; args?: string[]; url?: string; env?: Record<string, string> });
+      await client.connect({
+        ...(connectConfig as { type: "stdio" | "http"; command?: string; args?: string[]; url?: string; env?: Record<string, string> }),
+        workspaceRoot: this.workspaceRoot ?? process.cwd(),
+      });
     } catch (err) {
       console.warn(`[mcp] Failed to connect to server '${config.name}': ${err instanceof Error ? err.message : String(err)}`);
       return 0;

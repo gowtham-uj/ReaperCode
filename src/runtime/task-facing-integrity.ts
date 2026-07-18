@@ -327,7 +327,7 @@ function isSuccessfulProducerExecution(result: ToolResult): boolean {
 }
 
 function isSuccessfulSourceMutation(result: ToolResult): boolean {
-  return result.ok && ["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file"].includes(result.name);
+  return result.ok && ["write_file", "replace_in_file", "edit_file", "delete_file"].includes(result.name);
 }
 
 function isVerificationLike(result: ToolResult): boolean {
@@ -337,7 +337,7 @@ function isVerificationLike(result: ToolResult): boolean {
 
 function isSuccessfulMutation(result: ToolResult): boolean {
   if (!result.ok) return false;
-  if (["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file"].includes(result.name)) return true;
+  if (["write_file", "replace_in_file", "edit_file", "delete_file"].includes(result.name)) return true;
   if (result.name !== "bash") return false;
   return /\b(?:rm|mv|cp|touch|mkdir|patch|git\s+apply|sed\s+-i|tee|make|cmake|ninja|npm\s+(?:install|run\s+build)|pip\s+install)\b|(?:^|[^<>])>{1,2}[^&]/i.test(getCommand(result));
 }

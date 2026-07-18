@@ -88,7 +88,7 @@ function evaluateArtifactObligation(
 function isSuccessfulProducerForArtifact(result: ToolResult, artifact: string): boolean {
   if (!result.ok) return false;
   const args = recordArgs(result);
-  if (["write_file", "replace_in_file", "edit_file", "replace_symbol"].includes(result.name)) {
+  if (["write_file", "replace_in_file", "edit_file", ].includes(result.name)) {
     return typeof args.path === "string" && artifactPathMatches(args.path, artifact);
   }
   if (result.name !== "bash") return false;

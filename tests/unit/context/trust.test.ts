@@ -15,6 +15,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 import {
   classifyReadFileTrust,
@@ -80,6 +83,32 @@ test("classifyReadFileTrust treats sibling-directory reads as untrusted", () => 
     args: { path: "/home/user/other-project/foo.ts" },
   });
   assert.equal(classifyReadFileTrust(result, "/home/user/project"), "untrusted");
+});
+
+test("classifyReadFileTrust resolves relative workspace paths", async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "reaper-trust-relative-"));
+  await writeFile(path.join(workspaceRoot, "inside.txt"), "inside", "utf8");
+  const result = makeResult({ name: "file_view", args: { path: "inside.txt" } });
+  assert.equal(classifyReadFileTrust(result, workspaceRoot), "trusted");
+});
+
+test("classifyReadFileTrust rejects symlinks that escape the workspace", async (t) => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "reaper-trust-symlink-"));
+  const outsideRoot = await mkdtemp(path.join(tmpdir(), "reaper-trust-outside-"));
+  const outside = path.join(outsideRoot, "outside.txt");
+  const link = path.join(workspaceRoot, "outside-link.txt");
+  await writeFile(outside, "outside", "utf8");
+  try {
+    await symlink(outside, link);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EPERM") {
+      t.skip("symlink creation requires elevated privileges on this platform");
+      return;
+    }
+    throw error;
+  }
+  const result = makeResult({ name: "file_view", args: { path: "outside-link.txt" } });
+  assert.equal(classifyReadFileTrust(result, workspaceRoot), "untrusted");
 });
 
 test("classifyReadFileTrust falls back to name-only heuristic for non-read tools", () => {

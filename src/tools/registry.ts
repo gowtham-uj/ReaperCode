@@ -17,7 +17,6 @@ import {
   WebSearchArgsSchema,
   ReplaceInFileArgsSchema,
   EditFileArgsSchema,
-  ReplaceSymbolArgsSchema,
   BashArgsSchema,
   BrowserControlArgsSchema,
   ComputerControlArgsSchema,
@@ -48,7 +47,7 @@ import { ApplyPatchArgsSchema } from "./apply-patch.js";
 import { GlobArgsSchema } from "./glob.js";
 import { EvalArgsSchema } from "./eval.js";
 import { JobArgsSchema } from "./job.js";
-import { AstGrepArgsSchema, DiagnosticsArgsSchema } from "./ast-grep.js";
+import { DiagnosticsArgsSchema } from "./diagnostics.js";
 import {
   CreateSkillArgsSchema,
   TestSkillArgsSchema,
@@ -134,10 +133,6 @@ export const toolRegistry = {
   edit_file: {
     description: "Multi-block search and replace. Highly efficient for large files. Each edit must uniquely identify a block of code using 'oldString' and provide 'newString' for replacement. Automatically handles quote and whitespace normalization.",
     argsSchema: EditFileArgsSchema,
-  },
-  replace_symbol: {
-    description: "Replace a parsed symbol in file",
-    argsSchema: ReplaceSymbolArgsSchema,
   },
   delete_file: {
     description: "Delete a file",
@@ -378,11 +373,6 @@ export const toolRegistry = {
     description:
       "Unified facade over background processes. Actions: start (background command), list (all jobs), poll (read output), cancel (send signal), write (to stdin). Unifies read_background_output + signal_process + write_to_process.",
     argsSchema: JobArgsSchema,
-  },
-  ast_grep: {
-    description:
-      "Search for symbol declarations (functions, classes, methods, variables) across the codebase by name. Returns file, line, kind, and snippet. Supports language and kind filters. Faster and more precise than grep for code navigation.",
-    argsSchema: AstGrepArgsSchema,
   },
   diagnostics: {
     description:

@@ -9,6 +9,7 @@ import type { RuleEvaluationContext } from "../../policy/rules.js";
 import { getReaperScratchpadPaths } from "../../workspace/scratchpad.js";
 import { PathPolicyError, normalizeWorkspacePath } from "../../policy/paths.js";
 import { getBashTunables } from "../../config/config-tunables.js";
+import { buildChildEnv, type ChildEnvBuildResult } from "../child-env.js";
 
 function numericRuntimeOverride(name: string, fallback: number): number {
   const value = Number(process.env[name]);
@@ -62,6 +63,10 @@ export async function executeBashTool(
   workingDirectory = workspaceRoot,
   ruleContext?: RuleEvaluationContext,
   runtime?: { runId: string; artifactDir: string; toolCallId: string },
+  childEnvOptions?: {
+    allowlist?: ReadonlyArray<string>;
+    sourceEnv?: NodeJS.ProcessEnv;
+  },
 ): Promise<ShellCommandResult> {
   args = { ...args, cmd: normalizeWorkspaceShellAliases(args.cmd, workspaceRoot) };
   enforceShellWorkspaceBoundary(workspaceRoot, workingDirectory, args.cmd);
@@ -119,7 +124,7 @@ export async function executeBashTool(
     const logPath = runtime ? await createProcessLog(runtime, args.cmd, effectiveWorkingDirectory) : undefined;
     const child = spawn(resolveShellBinary(), ["-c", args.cmd], {
       cwd: effectiveWorkingDirectory,
-      env: buildCommandEnv(workspaceRoot),
+      env: buildCommandEnv(workspaceRoot, childEnvOptions),
       detached: true,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -179,7 +184,7 @@ exit 0
 
       const child = spawn(resolveShellBinary(), ["-c", wrapper], {
         cwd: effectiveWorkingDirectory,
-        env: buildCommandEnv(workspaceRoot),
+        env: buildCommandEnv(workspaceRoot, childEnvOptions),
         detached: true,
       });
 
@@ -1019,36 +1024,19 @@ function toShellPath(value: string): string {
   return process.platform === "win32" ? value.replace(/\\/g, "/") : value;
 }
 
-function buildCommandEnv(workspaceRoot: string): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  delete env.NODE_TEST_CONTEXT;
-  delete env.NODE_PATH;
-  const scratchpad = getReaperScratchpadPaths(workspaceRoot);
-  env.REAPER_SCRATCHPAD = toShellPath(scratchpad.root);
-  env.REAPER_ARTIFACTS_DIR = toShellPath(scratchpad.artifacts);
-  env.REAPER_DEPENDENCIES_DIR = toShellPath(scratchpad.dependencies);
-  env.REAPER_CACHE_DIR = toShellPath(scratchpad.cache);
-  env.WORKSPACE = toShellPath(workspaceRoot);
-  env.NPM_CONFIG_CACHE = toShellPath(path.join(scratchpad.cache, "npm"));
-  env.PNPM_HOME = toShellPath(path.join(scratchpad.dependencies, "pnpm-home"));
-  env.PNPM_STORE_PATH = toShellPath(path.join(scratchpad.cache, "pnpm-store"));
-  env.YARN_CACHE_FOLDER = toShellPath(path.join(scratchpad.cache, "yarn"));
-  env.PIP_CACHE_DIR = toShellPath(path.join(scratchpad.cache, "pip"));
-  env.CARGO_HOME = env.CARGO_HOME ?? toShellPath(path.join(scratchpad.dependencies, "cargo"));
-  env.GOMODCACHE = env.GOMODCACHE ?? toShellPath(path.join(scratchpad.cache, "go-mod"));
-  env.GOCACHE = env.GOCACHE ?? toShellPath(path.join(scratchpad.cache, "go-build"));
-  env.PATH = ensureSystemPath(filterHostDependencyBins(env.PATH, workspaceRoot));
-
-  const venvBin = path.join(workspaceRoot, ".venv", "bin");
-  if (existsSync(venvBin)) {
-    env.PATH = `${venvBin}:${env.PATH ?? ""}`;
-    env.VIRTUAL_ENV = path.join(workspaceRoot, ".venv");
-  }
-  const evalToolchainBin = env.REAPER_EVAL_TOOLCHAIN_BIN;
-  if (evalToolchainBin && existsSync(evalToolchainBin) && !(env.PATH ?? "").split(path.delimiter).includes(evalToolchainBin)) {
-    env.PATH = `${evalToolchainBin}:${env.PATH ?? ""}`;
-  }
-  return env;
+function buildCommandEnv(
+  workspaceRoot: string,
+  childEnvOptions?: {
+    allowlist?: ReadonlyArray<string>;
+    sourceEnv?: NodeJS.ProcessEnv;
+  },
+): NodeJS.ProcessEnv {
+  const result: ChildEnvBuildResult = buildChildEnv({
+    workspaceRoot,
+    ...(childEnvOptions?.allowlist ? { allowlist: childEnvOptions.allowlist } : {}),
+    ...(childEnvOptions?.sourceEnv ? { sourceEnv: childEnvOptions.sourceEnv } : {}),
+  });
+  return result.env;
 }
 
 export function resolveShellBinary(): string {
@@ -1071,29 +1059,6 @@ export function resolveShellBinary(): string {
       ? "Git Bash was not found. Install Git for Windows or set REAPER_BASH_PATH to an absolute bash.exe path."
       : "No supported POSIX shell was found at /bin/bash, /usr/bin/bash, /bin/sh, or /usr/bin/sh.",
   );
-}
-
-function ensureSystemPath(currentPath: string | undefined): string {
-  const required = ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"];
-  const entries = (currentPath ?? "").split(path.delimiter).filter(Boolean);
-  for (const entry of required) {
-    if (existsSync(entry) && !entries.includes(entry)) {
-      entries.push(entry);
-    }
-  }
-  return entries.join(path.delimiter);
-}
-
-function filterHostDependencyBins(currentPath: string | undefined, workspaceRoot: string): string {
-  const entries = (currentPath ?? "").split(path.delimiter).filter(Boolean);
-  const resolvedWorkspace = path.resolve(workspaceRoot);
-  return entries
-    .filter((entry) => {
-      const resolved = path.resolve(entry);
-      if (!resolved.includes(`${path.sep}node_modules${path.sep}.bin`)) return true;
-      return resolved === path.join(resolvedWorkspace, "node_modules", ".bin") || resolved.startsWith(`${resolvedWorkspace}${path.sep}`);
-    })
-    .join(path.delimiter);
 }
 
 async function createProcessLog(runtime: { runId: string; artifactDir: string; toolCallId: string }, cmd: string, cwd: string): Promise<string> {

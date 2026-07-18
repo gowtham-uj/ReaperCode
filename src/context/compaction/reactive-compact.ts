@@ -68,7 +68,7 @@ function scoreImportance(result: ToolResult, index: number, total: number): numb
   if (!result.ok) score += 50;
 
   // Writes are important
-  if (["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file"].includes(result.name)) {
+  if (["write_file", "replace_in_file", "edit_file", "delete_file"].includes(result.name)) {
     score += 40;
   }
 

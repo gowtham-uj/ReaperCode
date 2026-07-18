@@ -31,7 +31,6 @@ const TOOL_FAMILY: Record<string, ToolFamily> = {
   write_file: "edit",
   edit_file: "edit",
   replace_in_file: "edit",
-  replace_symbol: "edit",
   delete_file: "edit",
   read_file: "file",
   view_file: "file",
@@ -131,7 +130,6 @@ const TOOL_CAPABILITY: Record<string, CapabilityTier> = {
   write_file: "write",
   edit_file: "write",
   replace_in_file: "write",
-  replace_symbol: "write",
   delete_file: "write",
 
   // Exec tools
@@ -201,7 +199,6 @@ const TOOL_CONCURRENCY: Record<string, ToolConcurrency> = {
   write_file: "exclusive",
   edit_file: "exclusive",
   replace_in_file: "exclusive",
-  replace_symbol: "exclusive",
   delete_file: "exclusive",
 
   // Exec / shell tools are exclusive
@@ -252,7 +249,6 @@ const TOOL_CONTEXT_COST: Record<string, ContextCost> = {
   write_file: "low",
   delete_file: "low",
   edit_file: "medium",
-  replace_symbol: "medium",
   list_directory: "low",
   grep_search: "low",
   bash: "medium",
@@ -318,7 +314,6 @@ const TOOL_ALIASES: Record<string, readonly string[]> = {
   write_file: ["create_file", "write", "save_file"],
   edit_file: ["edit", "patch"],
   replace_in_file: ["replace", "find_replace"],
-  replace_symbol: ["rename_symbol", "update_symbol"],
   delete_file: ["rm", "remove_file"],
   list_directory: ["ls", "dir", "list_files"],
   grep_search: ["grep", "search_files", "rg", "ripgrep"],

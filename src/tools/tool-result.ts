@@ -130,14 +130,14 @@ function safeToPrune(name: string, ok: boolean): boolean {
     "write_file",
     "file_edit",
     "replace_in_file",
-    "replace_symbol",
+    "replace_in_file",
     "edit_file",
     "bash",
   ].includes(name);
 }
 
 function pruneReplacement(name: string, bytes: number, args: unknown): string {
-  if (name === "write_file" || name === "file_edit" || name === "replace_in_file" || name === "replace_symbol" || name === "edit_file") {
+  if (name === "write_file" || name === "file_edit" || name === "replace_in_file" || name === "edit_file") {
     const path = pathFromArgs(args);
     return path ? `[${name}: ${path}]` : `[${name}: completed]`;
   }

@@ -42,8 +42,20 @@ const TRUST_REQUIRING_PROJECT_PATHS = [
   [".reaper", "prompts"],
   [".reaper", "skills"],
   [".reaper", "themes"],
+  [".reaper", ".config", "system.md"],
+  [".reaper", ".config", "summarizePrompt.md"],
   [".agents", "skills"],
   [".agents", "extensions"],
+  [".opencode", "skills"],
+  [".pi", "skills"],
+  ["skills"],
+  ["AGENTS.md"],
+  ["AGENTS.MD"],
+  ["CLAUDE.md"],
+  ["CLAUDE.MD"],
+  ["REAPER.md"],
+  ["REAPER.MD"],
+  [".cursorrules"],
 ];
 
 /**

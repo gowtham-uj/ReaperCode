@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 
 import { ToolExecutor } from "../../src/tools/executor.js";
@@ -512,6 +514,61 @@ test("standard command rules are logged as would-block in allow-all mode", async
   assert.equal(result.ok, true);
   const auditLog = await readFile(path.join(getReaperScratchpadPaths(workspaceRoot).logs, "reaper-audit.jsonl"), "utf8");
   assert.match(auditLog, /would_block/);
+});
+
+test("replace_in_file edits files that were never read by the executor", async () => {
+  // Regression: the redundant safe-edit guard used to require the
+  // model to pre-read a file before editing it. The guard has been
+  // removed; replace_in_file must succeed against a file that the
+  // executor has never touched. Combined with the source-level test
+  // below, this proves the duplicate read-then-apply path is gone.
+  const workspaceRoot = await createTempWorkspace();
+  const executor = await createExecutor(workspaceRoot);
+
+  const target = path.join(workspaceRoot, "src", "untouched.txt");
+  await mkdir(path.dirname(target), { recursive: true });
+  await writeFile(target, "alpha\nbeta\ngamma\n", "utf8");
+
+  const replaceResult = await executor.execute({
+    id: "1",
+    name: "replace_in_file",
+    args: { path: "src/untouched.txt", oldString: "beta", newString: "BETA" },
+  });
+  assert.equal(replaceResult.ok, true);
+
+  const afterReplace = await readFile(target, "utf8");
+  assert.equal(afterReplace, "alpha\nBETA\ngamma\n");
+});
+
+test("replace_in_file performs no redundant candidate-content read", async () => {
+  const workspaceRoot = await createTempWorkspace();
+  const executor = await createExecutor(workspaceRoot);
+  const target = path.join(workspaceRoot, "src", "single-read.txt");
+  await writeFile(target, "alpha\nbeta\ngamma\n", "utf8");
+
+  const originalReadFile = fs.promises.readFile;
+  let targetReads = 0;
+  fs.promises.readFile = (async (file: unknown, ...args: unknown[]) => {
+    if (path.resolve(String(file)) === target) targetReads += 1;
+    return Reflect.apply(originalReadFile, fs.promises, [file, ...args]);
+  }) as typeof fs.promises.readFile;
+  syncBuiltinESMExports();
+
+  try {
+    const result = await executor.execute({
+      id: "single-read",
+      name: "replace_in_file",
+      args: { path: "src/single-read.txt", oldString: "beta", newString: "BETA" },
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(targetReads, 2, "expected one snapshot read and one authoritative mutation read");
+  } finally {
+    fs.promises.readFile = originalReadFile;
+    syncBuiltinESMExports();
+  }
+
+  assert.equal(await readFile(target, "utf8"), "alpha\nBETA\ngamma\n");
 });
 
 async function listFiles(root: string): Promise<string[]> {

@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 
-import { scoreTask } from "../../reaper_eval/runtime/scorer.js";
-import { parseEvalTask } from "../../reaper_eval/runtime/task-schema.js";
+import { scoreTask } from "../../src/eval/scorer.js";
+import { parseEvalTask } from "../../src/eval/task-schema.js";
 
 const task = parseEvalTask({
   id: "system-prompt-stability",

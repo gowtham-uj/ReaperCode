@@ -31,6 +31,7 @@ export interface ContextFileLoadResult {
 const TRUSTED_PROJECT_CANDIDATES = [
   ".reaper/context.md",
   ".reaper/project.md",
+  ".reaper/.config/system.md",
   ".pi/context.md",
 ];
 
@@ -70,17 +71,22 @@ export async function loadContextFiles(options: ContextFileLoadOptions): Promise
     );
   }
 
-  // Pi parity: walk workspaceRoot → filesystem root (stop at git root),
-  // loading project rule files with content-hash dedup.
-  for (const dir of collectAncestorDirs(workspaceRoot)) {
-    for (const name of PROJECT_RULE_CANDIDATES) {
-      const absolute = path.join(dir, name);
-      const source =
-        path.resolve(dir) === path.resolve(workspaceRoot)
-          ? name
-          : path.relative(workspaceRoot, absolute) || name;
-      await maybeLoad(absolute, source, "project");
+  // Project rule files carry instruction authority, so they are loaded
+  // only after the workspace has been explicitly trusted. Repository
+  // source remains available separately as data through indexed excerpts.
+  if (trusted) {
+    for (const dir of collectAncestorDirs(workspaceRoot)) {
+      for (const name of PROJECT_RULE_CANDIDATES) {
+        const absolute = path.join(dir, name);
+        const source =
+          path.resolve(dir) === path.resolve(workspaceRoot)
+            ? name
+            : path.relative(workspaceRoot, absolute) || name;
+        await maybeLoad(absolute, source, "project");
+      }
     }
+  } else {
+    diagnostics.push("Project rule files were not loaded because the workspace is not trusted.");
   }
 
   if (userHome) {
@@ -90,9 +96,14 @@ export async function loadContextFiles(options: ContextFileLoadOptions): Promise
     }
   }
 
-  // Prefer project rules over user when the total budget is tight:
-  // project files are already first in `files`; renderCombined keeps that order.
-  const combined = renderCombined(files, maxTotalBytes);
+  // User-home instructions have higher authority than project rules, so
+  // reserve their share first when the combined budget is tight. The cockpit
+  // still renders project context before user context so authority increases
+  // toward the exact task at the recency edge.
+  const combined = renderCombined(
+    [...files].sort((a, b) => (a.kind === b.kind ? 0 : a.kind === "user" ? -1 : 1)),
+    maxTotalBytes,
+  );
   if (combined.truncated) {
     diagnostics.push(`Combined context files were truncated to ${maxTotalBytes} bytes.`);
   }

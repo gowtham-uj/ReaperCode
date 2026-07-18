@@ -11,7 +11,7 @@ export function enforcePatcherStatusIntegrity<T extends PatcherIntegrityInput>(r
   const hasMutation =
     result.filesChanged.length > 0 ||
     result.tool_calls.some((call) =>
-      ["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file"].includes(call.name),
+      ["write_file", "replace_in_file", "edit_file", "delete_file"].includes(call.name),
     );
   const hasBehavioralVerification =
     result.testsRun.some((test) => test.result === "passed" && isBehavioralVerificationCommand(test.command)) ||

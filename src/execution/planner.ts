@@ -205,7 +205,6 @@ export function classifyToolCall(call: ToolCall): ExecutionKind {
     call.name === "file_edit" ||
     call.name === "replace_in_file" ||
     call.name === "edit_file" ||
-    call.name === "replace_symbol" ||
     call.name === "delete_file" ||
     call.name === "create_checkpoint" ||
     call.name === "restore_checkpoint"

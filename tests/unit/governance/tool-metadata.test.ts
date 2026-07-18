@@ -69,7 +69,7 @@ test("read-only tools have is_read_only=true and risk in {low, medium}", () => {
 });
 
 test("write tools have can_modify_files=true", () => {
-  for (const name of ["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file"]) {
+  for (const name of ["write_file", "replace_in_file", "edit_file", "delete_file"]) {
     const m = getToolMetadata(name);
     assert.ok(m, `${name} should have metadata`);
     assert.equal(m.can_modify_files, true, `${name} should modify files`);

@@ -1,5 +1,3 @@
-import type { RepoInspection } from "./repo-inspection.js";
-
 export interface TaskContract {
   userGoal: string;
   deliverables: string[];
@@ -70,7 +68,7 @@ export function detectBuildLikeTask(request: unknown): boolean {
   return BUILD_TASK_KEYWORDS.some((keyword) => lower.includes(keyword));
 }
 
-export function extractTaskContract(request: string, repoInspection?: RepoInspection): TaskContract {
+export function extractTaskContract(request: string): TaskContract {
   const intent = extractUserIntentText(request);
   const userGoal = normalizeWhitespace(intent) || "Unspecified user request";
   const taskKind = classifyTask(userGoal);
@@ -82,7 +80,7 @@ export function extractTaskContract(request: string, repoInspection?: RepoInspec
     constraints: unique([...DEFAULT_CONSTRAINTS, ...extractConstraints(userGoal)]),
     acceptanceCriteria: buildAcceptanceCriteria(taskKind, deliverables),
     forbiddenActions: unique([...DEFAULT_FORBIDDEN_ACTIONS, ...extractForbiddenActions(userGoal)]),
-    likelyValidation: suggestValidation(userGoal, taskKind, repoInspection),
+    likelyValidation: suggestValidation(userGoal, taskKind),
   };
 }
 
@@ -206,22 +204,23 @@ function buildAcceptanceCriteria(taskKind: TaskKind, deliverables: string[]): st
   return unique(criteria);
 }
 
-function suggestValidation(request: string, taskKind: TaskKind, repoInspection: RepoInspection | undefined): string[] {
+function suggestValidation(request: string, taskKind: TaskKind): string[] {
   if (taskKind === "readonly") return [];
   if (taskKind === "docs") return ["Review documentation changes for accuracy."];
-  if (!repoInspection) return [];
 
   const lower = request.toLowerCase();
   const commands: string[] = [];
 
   if (taskKind === "bugfix" || taskKind === "refactor" || taskKind === "implementation") {
-    commands.push(...repoInspection.testCommands);
+    // The task contract no longer carries repo inspection; let the model
+    // discover validation commands itself via grep_search / list_package_scripts.
+    commands.push("Run the project's standard test command.");
   }
   if (taskKind === "refactor" || taskKind === "implementation" || /\b(build|compile|typecheck|typescript|full[- ]stack)\b/.test(lower)) {
-    commands.push(...repoInspection.buildCommands);
+    commands.push("Run the project's standard build/typecheck command.");
   }
   if (taskKind === "refactor" || /\b(lint|format|style|cleanup|clean up)\b/.test(lower)) {
-    commands.push(...repoInspection.lintCommands);
+    commands.push("Run the project's standard lint command.");
   }
 
   return unique(commands);

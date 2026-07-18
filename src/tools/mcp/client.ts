@@ -1,6 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 
+import { buildChildEnv } from "../child-env.js";
+
 // ── JSON-RPC types ──
 interface JsonRpcRequest {
   jsonrpc: "2.0";
@@ -22,10 +24,28 @@ interface McpTransport {
   close(): void;
 }
 
-function createStdioTransport(command: string, args: string[], env?: Record<string, string>): McpTransport {
+function createStdioTransport(
+  command: string,
+  args: string[],
+  env: Record<string, string> | undefined,
+  workspaceRoot: string,
+): McpTransport {
+  // MCP servers are third-party tools the model can invoke. They must NOT
+  // inherit the unfiltered Reaper parent env (which holds ANTHROPIC_API_KEY,
+  // GITHUB_TOKEN, AWS_*, DATABASE_URL, etc.). Route the spawn through the
+  // Workflow 3 buildChildEnv sanitizer so only approved variables pass
+  // through. The server-specific env from the workspace config is merged
+  // into the sanitized env (it is itself just `Record<string, string>` and
+  // the caller can hand-pick what each MCP server needs).
+  const { env: sanitizedEnv } = buildChildEnv({
+    workspaceRoot,
+    allowlist: Object.keys(env ?? {}),
+  });
+  const finalEnv: NodeJS.ProcessEnv = { ...sanitizedEnv, ...(env ?? {}) };
+
   const child = spawn(command, args, {
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, ...env },
+    env: finalEnv,
   });
   const handlers: Array<(msg: JsonRpcResponse) => void> = [];
   const rl = createInterface({ input: child.stdout! });
@@ -116,9 +136,16 @@ export class McpClient {
 
   constructor(private readonly serverName: string) {}
 
-  async connect(config: { type: "stdio" | "http"; command?: string; args?: string[]; url?: string; env?: Record<string, string> }): Promise<void> {
+  async connect(config: {
+    type: "stdio" | "http";
+    command?: string;
+    args?: string[];
+    url?: string;
+    env?: Record<string, string>;
+    workspaceRoot: string;
+  }): Promise<void> {
     this.transport = config.type === "stdio"
-      ? createStdioTransport(config.command!, config.args ?? [], config.env)
+      ? createStdioTransport(config.command!, config.args ?? [], config.env, config.workspaceRoot)
       : createHttpTransport(config.url!);
 
     this.transport.onMessage((msg) => {

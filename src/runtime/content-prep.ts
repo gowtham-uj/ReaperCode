@@ -29,6 +29,8 @@ export interface ContentPrepInput {
   prunerConfig?: SwePrunerConfig;
   backgroundProcesses?: Array<{ pid: number; status: "running" | "finished"; exitCode: number | null }>;
   mcpRegistry?: MergedToolRegistry;
+  /** Force a fresh workspace index at a run boundary. */
+  forceIndexRefresh?: boolean;
 }
 
 export interface ContentPrepResult {
@@ -193,7 +195,10 @@ async function computeContentPrep(input: ContentPrepInput): Promise<ContentPrepR
   // tree. Both are independent; running them concurrently shaves
   // hundreds of ms off the cold path.
   const environmentFingerprintPromise = getEnvironmentFingerprint(input.workspaceRoot);
-  const index = await getOrBuildIndex(input.workspaceRoot, hasSuccessfulWorkspaceWrite(input.toolResults ?? []));
+  const index = await getOrBuildIndex(
+    input.workspaceRoot,
+    input.forceIndexRefresh === true || hasSuccessfulWorkspaceWrite(input.toolResults ?? []),
+  );
   const environmentFingerprint = await environmentFingerprintPromise;
   const mentions = resolveMentions(input.prompt);
   const preparedContext = await prepareContext({
@@ -201,7 +206,6 @@ async function computeContentPrep(input: ContentPrepInput): Promise<ContentPrepR
     prompt: input.prompt,
     mentions,
     maxTokens: input.maxContextTokens,
-    ...(input.prunerConfig ? { prunerConfig: input.prunerConfig } : {}),
   });
 
   // Always microcompact to keep tool result outputs bounded
@@ -212,9 +216,6 @@ async function computeContentPrep(input: ContentPrepInput): Promise<ContentPrepR
     toolResults: microcompacted.toolResults,
     ...(input.latestVerificationFailure ? { latestVerificationFailure: input.latestVerificationFailure } : {}),
   });
-
-  const skills = discoverSkills(input.workspaceRoot);
-  const skillsPrompt = formatSkillsForPrompt(skills, input.prompt);
 
   const userHome = input.userHome ?? process.env.HOME ?? process.cwd();
   const resourceTrustBase = await resolveProjectTrusted({
@@ -239,6 +240,8 @@ async function computeContentPrep(input: ContentPrepInput): Promise<ContentPrepR
         }).resolvePackageResourceInputs(),
       })
     : { extensions: [], skills: [], prompts: [], themes: [] };
+  const skills = resourceTrust.trusted ? discoverSkills(input.workspaceRoot) : [];
+  const skillsPrompt = formatSkillsForPrompt(skills, input.prompt);
 
   const contextFiles = await loadContextFiles({
     workspaceRoot: input.workspaceRoot,
@@ -309,10 +312,15 @@ function hasSuccessfulWorkspaceWrite(toolResults: ToolResult[]): boolean {
   return toolResults.some(
     (result) => {
       if (!result.ok) return false;
-      if (["write_file", "replace_in_file", "edit_file", "replace_symbol", "delete_file"].includes(result.name)) return true;
-      if (result.name === "bash" && typeof result.output === "object" && result.output !== null) {
-        const cmd = (result.output as any).cmd?.toLowerCase() || "";
-        return /\b(mkdir|touch|rm|mv|cp|npm|yarn|pnpm|cargo|pip|go|prisma|npx|generate)\b/.test(cmd);
+      if (["write_file", "file_edit", "replace_in_file", "edit_file", "delete_file"].includes(result.name)) return true;
+      if (result.name === "bash") {
+        const args = (result.args ?? {}) as { cmd?: unknown; command?: unknown };
+        const cmd = typeof args.cmd === "string"
+          ? args.cmd
+          : typeof args.command === "string"
+            ? args.command
+            : "";
+        return /\b(?:mkdir|touch|rm|mv|cp|npm|yarn|pnpm|bun|cargo|pip|poetry|go|prisma|npx|generate)\b|\bsed\b[^;&|]*\s-i\b|\bperl\b[^;&|]*\s-[^\s]*i\b|(?:^|[^<>])>{1,2}[^&]|\btee\s+/i.test(cmd);
       }
       return false;
     }

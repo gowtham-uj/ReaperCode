@@ -6,7 +6,7 @@ import path from "node:path";
 import { ToolExecutor } from "../../src/tools/executor.js";
 import { createTempWorkspace } from "../fixtures/workspace.js";
 
-test("rules.local.md deny is advisory only — command still executes", async () => {
+test("rules.local.md deny is enforced — command is blocked and never executes", async () => {
   const workspaceRoot = await createTempWorkspace();
   await writeFile(path.join(workspaceRoot, "rules.local.md"), "- deny: npm\\s+--version\n", "utf8");
   const executor = new ToolExecutor({
@@ -18,9 +18,13 @@ test("rules.local.md deny is advisory only — command still executes", async ()
     safetyProfile: "allow_all",
   });
 
-  // With deny removed, the command should still execute and return real output.
+  // Workflow 3: an explicit local `deny` is a hard denial in every
+  // permission mode. The command must not execute and the tool
+  // result must surface a `permission_denied` code.
   const result = await executor.execute({ id: "1", name: "bash", args: { cmd: "npm --version", timeout: 60} });
-  assert.equal(result.ok, true, "deny rule no longer blocks — command executes with real results");
+  assert.equal(result.ok, false, "local deny must block execution");
+  assert.equal(result.error?.code, "permission_denied");
+  assert.match(result.error?.message ?? "", /rules_local_deny_1|Local rule matched/);
 });
 
 test("rules.local.md loading is audited with hash provenance", async () => {

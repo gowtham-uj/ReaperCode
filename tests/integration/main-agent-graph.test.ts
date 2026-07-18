@@ -77,7 +77,6 @@ test("main-agent graph completes after shell evidence and natural stop", async (
   );
 
   const trajectory = await readFile(result.trajectoryPath, "utf8");
-  assert.match(trajectory, /"to_step":"Inspect Project"/);
   assert.match(trajectory, /"to_step":"Extract Task Contract"/);
   assert.match(trajectory, /"to_step":"Content Prep"/);
   assert.match(trajectory, /"to_step":"Main Agent"/);

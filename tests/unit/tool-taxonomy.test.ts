@@ -17,7 +17,6 @@ const requiredControlTools = [
 ];
 
 const requiredExecutableTools = [
-  "inspect_project",
   "git_status",
   "git_diff",
   "read_file",
@@ -63,7 +62,6 @@ test("detects mutating tools consistently across executable and control tools", 
   const inspectionTools = [
     "update_plan",
     "update_todo",
-    "inspect_project",
     "git_status",
     "git_diff",
     "read_file",

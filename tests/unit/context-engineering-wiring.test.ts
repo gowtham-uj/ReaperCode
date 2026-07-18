@@ -11,6 +11,7 @@ import {
 } from "../../src/config/config-tunables.js";
 import { buildStarterConfig } from "../../src/config/starter-config.js";
 import { createContextEngineeringHooks } from "../../src/runtime/context-engineering-wiring.js";
+import { clearRunState, getRunState } from "../../src/runtime/run-state.js";
 
 function loadFreshConfig() {
   const cfg = buildStarterConfig() as any;
@@ -256,8 +257,8 @@ test("onProviderTokenLimitError: drops the oldest oversized tool result", async 
 test("onProviderTokenLimitError applies an in-flight full summary with system messages intact", async () => {
   loadFreshConfig();
   const runId = "r-ptl-summary";
-  delete (globalThis as any)[`${runId}::full-summary-applied`];
-  (globalThis as any)[`${runId}::full-summary`] = {
+  clearRunState(runId);
+  getRunState(runId).fullSummary = {
     promise: Promise.resolve("<summary>resume from the verified state</summary>"),
   };
   const ctx = createContextEngineeringHooks();
@@ -276,11 +277,11 @@ test("onProviderTokenLimitError applies an in-flight full summary with system me
   assert.ok(result.messages.some((message: any) => String(message.content ?? "").includes("Summary of prior context")));
   assert.equal(result.messages, liveMessages, "PTL recovery should replace the caller's live array");
   assert.equal(
-    (globalThis as any)[`${runId}::full-summary-applied`],
+    getRunState(runId).fullSummaryApplied,
     undefined,
     "immediate PTL recovery must not leave a stale next-call replacement",
   );
-  delete (globalThis as any)[`${runId}::full-summary`];
+  clearRunState(runId);
 });
 
 test("onRunComplete: persists a summary metric event", async () => {
@@ -335,7 +336,7 @@ test("the wiring file imports all 21 layer modules", async () => {
 test("full-summary triggers at the 270k cap and preserves system instructions", async () => {
   loadFreshConfig();
   const runId = "r-270k-summary";
-  delete (globalThis as any)[`${runId}::full-summary-applied`];
+  clearRunState(runId);
   let summaryPrompt = "";
   const ctx = createContextEngineeringHooks({
     infer: async (prompt) => {
@@ -369,7 +370,7 @@ test("full-summary triggers at the 270k cap and preserves system instructions", 
   );
   assert.doesNotMatch(String((compactSummary as any)?.content ?? ""), /private analysis|tool_call/);
   assert.equal(
-    (globalThis as any)[`${runId}::full-summary-applied`],
+    getRunState(runId).fullSummaryApplied,
     undefined,
     "blocking compaction must not leave a stale next-call replacement",
   );
@@ -447,6 +448,7 @@ test("failed full-summary inference arms cooldown instead of retrying every mode
 test("async PTL recovery cannot leave a stale next-call summary replacement", async () => {
   loadFreshConfig();
   const runId = "r-async-ptl-summary";
+  clearRunState(runId);
   let resolveSummary!: (value: string) => void;
   const inferResult = new Promise<string>((resolve) => {
     resolveSummary = resolve;
@@ -476,15 +478,14 @@ test("async PTL recovery cannot leave a stale next-call summary replacement", as
   await new Promise<void>((resolve) => setImmediate(resolve));
 
   assert.ok(recovered.messages.some((message: any) => String(message.content ?? "").includes("Summary of prior context")));
-  assert.equal((globalThis as any)[`${runId}::full-summary-applied`], undefined);
-  delete (globalThis as any)[`${runId}::full-summary`];
-  delete (globalThis as any)[`${runId}::full-summary-ptl-consumed`];
+  assert.equal(getRunState(runId).fullSummaryApplied, undefined);
+  clearRunState(runId);
 });
 
 test("full-summary rejects a replacement larger than its source conversation", async () => {
   loadFreshConfig();
   const runId = "r-non-shrinking-summary";
-  delete (globalThis as any)[`${runId}::full-summary-applied`];
+  clearRunState(runId);
   const originalMessages = [
     { role: "system", content: "stable system prompt" },
     { role: "user", content: "current task" },
@@ -508,20 +509,21 @@ test("full-summary rejects a replacement larger than its source conversation", a
   assert.equal(result.fullSummarized, false);
   assert.deepEqual(result.messages, originalMessages);
   assert.equal(traj.events.some((event: any) => event.kind === "full_summary"), false);
-  assert.equal((globalThis as any)[`${runId}::full-summary-applied`], undefined);
+  assert.equal(getRunState(runId).fullSummaryApplied, undefined);
 });
 
 test("onBeforeModelCall: consumes stashed full-summary on next call (OMP replaceMessages)", async () => {
   loadFreshConfig();
   const ctx = createContextEngineeringHooks();
   const runId = "r-apply";
-  // Pre-stash a post-compact message array on the global slot.
+  // Pre-stash a post-compact message array on the typed slot.
   const stashedMessages = [
     { role: "user", content: "[context boundary 1-10]" },
     { role: "user", content: "SUMMARIZED OLD CONTEXT" },
     { role: "user", content: "Read manifest.json and read each shard." },
   ];
-  (globalThis as any)[`${runId}::full-summary-applied`] = {
+  clearRunState(runId);
+  getRunState(runId).fullSummaryApplied = {
     messages: stashedMessages,
     appliedAt: Date.now(),
   };
@@ -542,8 +544,8 @@ test("onBeforeModelCall: consumes stashed full-summary on next call (OMP replace
   assert.equal(result.messages.length, 3, "messages should be the stashed 3");
   assert.equal((result.messages[0] as any).content, "[context boundary 1-10]");
   assert.equal((result.messages[2] as any).content, "Read manifest.json and read each shard.");
-  // The slot should be consumed (deleted).
-  assert.equal((globalThis as any)[`${runId}::full-summary-applied`], undefined, "slot should be cleared");
+  // The slot should be consumed (cleared).
+  assert.equal(getRunState(runId).fullSummaryApplied, undefined, "slot should be cleared");
   // A state_transition should have been written.
   const st = traj.events.find((e) => e.kind === "state_transition" && e.to_step?.includes("Summary Replaced"));
   assert.ok(st, "Summary Replaced state_transition event expected");
@@ -571,7 +573,7 @@ test("#21 promote: secondary_model sibling is the canonical target role", async 
     },
   });
   const runId = "r-promote-secondary";
-  delete (globalThis as any)[`${runId}::full-summary-applied`];
+  clearRunState(runId);
   const traj = makeTrajectoryLogger();
 
   // Build a conversation that crosses the promote threshold.

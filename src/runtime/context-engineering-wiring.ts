@@ -15,8 +15,17 @@ import { TokenBudgetTracker, tokenUsageFromResponse } from "../context/token-bud
 import { TrajectoryLogger } from "../logging/trajectory.js";
 import {
   buildCompactionCheckpoint,
-  type CompactionCheckpoint,
 } from "../context/compaction-checkpoint.js";
+import {
+  clearRunState,
+  getRunState,
+  type FullSummaryAppliedSlot,
+  type FullSummaryCooldownSlot,
+  type FullSummaryInflightSlot,
+  type IdleCompactionSlot,
+  type IncompleteRecoverySlot,
+  type SessionResumeStash,
+} from "./run-state.js";
 
 export interface ContextEngineeringHooksOptions {
   /** LLM inference callback used by full-summarization. Without this, full-summary is skipped. */
@@ -92,6 +101,7 @@ export interface ContextEngineeringHooks {
     workspaceRoot: string;
     runId: string;
     sessionId: string;
+    traceId?: string;
     namedSession?: string;
     /** The run's user intent (exec preamble stripped) — journaled for named sessions. */
     userPrompt?: string;
@@ -219,13 +229,13 @@ export function createContextEngineeringHooks(
                   content: typeof m.content === "string" ? m.content : "",
                   ...(typeof m.tool_call_id === "string" ? { tool_call_id: m.tool_call_id } : {}),
                   ...(toolCalls ? { tool_calls: toolCalls } : {}),
-                  ...(typeof m.name === "string" ? { name: m.name } : {}),
+                  ...(typeof m.name === "string" && m.name !== "reaper_current_request" ? { name: m.name } : {}),
                   ...(typeof m.is_error === "boolean" ? { is_error: m.is_error } : {}),
                 };
               })
               .filter((m) => m.content.trim().length > 0 || (m as { tool_calls?: unknown[] }).tool_calls);
             if (prior.length > 0) {
-              (globalThis as Record<string, unknown>)[`${runId}::session-resume`] = {
+              const stash: SessionResumeStash = {
                 resume: {
                   reAnchor: "",
                   rehydratedMessages: prior,
@@ -237,6 +247,7 @@ export function createContextEngineeringHooks(
                 sessionId,
                 stashedAt: Date.now(),
               };
+              getRunState(runId).sessionResume = stash;
               return; // journal wins — skip the summary fallback
             }
           }
@@ -249,12 +260,13 @@ export function createContextEngineeringHooks(
           const resume = await buildSessionResumeWithBody(workspaceRoot, {
             ...(sessionId ? { sessionId } : {}),
           });
-          (globalThis as Record<string, unknown>)[`${runId}::session-resume`] = {
+          const stash: SessionResumeStash = {
             resume,
             namedSession: namedSession ?? null,
             sessionId,
             stashedAt: Date.now(),
           };
+          getRunState(runId).sessionResume = stash;
         }
       } catch {
         /* best-effort — boot must not fail the run */
@@ -262,22 +274,23 @@ export function createContextEngineeringHooks(
     },
 
     async onBeforeModelCall({ workspaceRoot, runId, sessionId, traceId, messages, softCap, trajectoryLogger }) {
+      const runState = getRunState(runId);
       const cmTunablesBefore = getContextTunables();
       let working: unknown[] = Array.isArray(messages) ? [...(messages as unknown[])] : [];
 
       // ─── OMP port: apply a stashed full-summary (post-compact messages)
       //   BEFORE running the cheaper layers. Same effect as OMP's
       //   `replaceMessages()` after `runAutoCompaction()`. The
-      //   `runId::full-summary-applied` slot is set by the async
-      //   summary path (line ~244) and consumed here on the next
-      //   model call. Stale summaries (>30s old) are dropped — they
-      //   are out of date by the time we'd consume them.
-      const appliedSlot = (globalThis as any)[`${runId}::full-summary-applied`];
+      //   full-summary-applied slot is set by the async summary path
+      //   (line ~244) and consumed here on the next model call. Stale
+      //   summaries (>30s old) are dropped — they are out of date by
+      //   the time we'd consume them.
+      const appliedSlot = runState.fullSummaryApplied;
       if (appliedSlot && Array.isArray(appliedSlot.messages) && appliedSlot.messages.length > 0) {
         const ageMs = Date.now() - (appliedSlot.appliedAt ?? 0);
         if (ageMs <= 30_000) {
           working = appliedSlot.messages.slice();
-          delete (globalThis as any)[`${runId}::full-summary-applied`];
+          runState.fullSummaryApplied = undefined;
           try {
             await (trajectoryLogger as TrajectoryLogger).write({
               event_id: randomUUID(),
@@ -293,7 +306,7 @@ export function createContextEngineeringHooks(
             } as any);
           } catch { /* best-effort */ }
         } else {
-          delete (globalThis as any)[`${runId}::full-summary-applied`];
+          runState.fullSummaryApplied = undefined;
         }
       }
 
@@ -303,11 +316,11 @@ export function createContextEngineeringHooks(
       // `shouldCompact` returns true. OMP equivalent: the
       // `runAutoCompaction` arm that fires post-event-controller
       // (idle) or post-checkCompaction (incomplete).
-      const idleSlot = (globalThis as any)[`${runId}::idle-compaction`];
-      const incompleteSlot = (globalThis as any)[`${runId}::incomplete-recovery`];
+      const idleSlot = runState.idleCompaction;
+      const incompleteSlot = runState.incompleteRecovery;
       const forceCompactFromIdleOrIncomplete = !!(idleSlot || incompleteSlot);
-      if (idleSlot) delete (globalThis as any)[`${runId}::idle-compaction`];
-      if (incompleteSlot) delete (globalThis as any)[`${runId}::incomplete-recovery`];
+      if (idleSlot) runState.idleCompaction = undefined;
+      if (incompleteSlot) runState.incompleteRecovery = undefined;
 
       // #21: Promote Context Model (OMP port).
       if (cmTunablesBefore.modelPromotionEnabled && config?.models) {
@@ -446,7 +459,7 @@ export function createContextEngineeringHooks(
       // input tokens so compressed wire payloads cannot under-trigger.
       let providerInputTokens = 0;
       try {
-        const stashed = (globalThis as any)[`${runId}::last-input-tokens`];
+        const stashed = runState.lastInputTokens;
         if (typeof stashed === "number" && Number.isFinite(stashed) && stashed > 0) {
           providerInputTokens = stashed;
         }
@@ -494,10 +507,7 @@ export function createContextEngineeringHooks(
       // batches / token growth so post-compact rebuild cannot thrash.
       const fullSummaryEnabledConfig = cmTunablesBefore.fullSummaryEnabled;
       const { shouldCompact } = await import("../context/should-compact.js");
-      const cooldownSlotKey = `${runId}::full-summary-cooldown`;
-      const cooldown = (globalThis as any)[cooldownSlotKey] as
-        | { baselineTokens: number; toolBatchesSince: number; appliedAt: number }
-        | undefined;
+      const cooldown = runState.fullSummaryCooldown as FullSummaryCooldownSlot | undefined;
       const minBatches = Math.max(0, cmTunablesBefore.fullSummaryCooldownMinToolBatches ?? 2);
       const minGrowthConfigured = cmTunablesBefore.fullSummaryCooldownMinTokenGrowth ?? 0;
       const minGrowth =
@@ -528,10 +538,10 @@ export function createContextEngineeringHooks(
         goldenFactsMaxChars: cmTunablesBefore.fullSummaryGoldenFactsMaxChars,
       };
       if (fireFullSummary && infer) {
-        const inflightKey = `${runId}::full-summary`;
-        const ptlConsumedKey = `${runId}::full-summary-ptl-consumed`;
+        const inflightKey = "fullSummary" as const;
+        const ptlConsumedKey = "fullSummaryPtlConsumed" as const;
         const armSummaryCooldown = (): void => {
-          (globalThis as any)[cooldownSlotKey] = {
+          runState.fullSummaryCooldown = {
             baselineTokens: countTokens(working),
             toolBatchesSince: 0,
             appliedAt: Date.now(),
@@ -597,10 +607,10 @@ export function createContextEngineeringHooks(
           // call. Only async compaction needs a one-shot next-call handoff;
           // replaying a blocking result would discard newer tool messages.
           if (!blockingFullSummary) {
-            if ((globalThis as any)[ptlConsumedKey]) {
-              delete (globalThis as any)[ptlConsumedKey];
+            if (runState.fullSummaryPtlConsumed) {
+              runState.fullSummaryPtlConsumed = undefined;
             } else {
-              (globalThis as any)[`${runId}::full-summary-applied`] = {
+              runState.fullSummaryApplied = {
                 messages: newMsgs,
                 summaryText,
                 checkpoint,
@@ -608,7 +618,7 @@ export function createContextEngineeringHooks(
               };
             }
           }
-          (globalThis as any)[cooldownSlotKey] = {
+          runState.fullSummaryCooldown = {
             baselineTokens: postTokens,
             toolBatchesSince: 0,
             appliedAt: Date.now(),
@@ -616,7 +626,7 @@ export function createContextEngineeringHooks(
           // Session write-back: keep the LAST applied summary for this run so
           // onRunComplete can persist it as a journal compaction entry
           // (named sessions rehydrate summary + raw tail, OMP semantics).
-          (globalThis as any)[`${runId}::last-full-summary`] = {
+          runState.lastFullSummary = {
             summaryText,
             preChars,
             postChars,
@@ -659,18 +669,20 @@ export function createContextEngineeringHooks(
 
         if (blockingFullSummary) {
           try {
-            const existing = (globalThis as any)[inflightKey];
+            const existing = runState.fullSummary;
             let summaryText: string;
             if (existing?.promise && typeof existing.promise.then === "function") {
               summaryText = await existing.promise;
             } else {
-              const inflightRef = { promise: summarizeWorkingConversation() };
-              (globalThis as any)[inflightKey] = inflightRef;
+              const inflightRef: FullSummaryInflightSlot = {
+                promise: summarizeWorkingConversation(),
+              };
+              runState.fullSummary = inflightRef;
               try {
                 summaryText = await inflightRef.promise;
               } finally {
-                if ((globalThis as any)[inflightKey] === inflightRef) {
-                  (globalThis as any)[inflightKey] = undefined;
+                if (runState.fullSummary === inflightRef) {
+                  runState.fullSummary = undefined;
                 }
               }
             }
@@ -681,10 +693,11 @@ export function createContextEngineeringHooks(
             armSummaryCooldown();
             /* best-effort — fall through with unshaken working set */
           }
-        } else if (!(globalThis as any)[inflightKey]) {
-          const inflightRef: { promise: Promise<string> } = (globalThis as any)[inflightKey] = {
+        } else if (!runState.fullSummary) {
+          const inflightRef: FullSummaryInflightSlot = {
             promise: summarizeWorkingConversation(),
           };
+          runState.fullSummary = inflightRef;
           inflightRef.promise
             .then(async (summaryText: string) => {
               try {
@@ -696,11 +709,11 @@ export function createContextEngineeringHooks(
             })
             .catch(() => {
               armSummaryCooldown();
-              delete (globalThis as any)[ptlConsumedKey];
+              runState.fullSummaryPtlConsumed = undefined;
             })
             .finally(() => {
-              if ((globalThis as any)[inflightKey] === inflightRef) {
-                (globalThis as any)[inflightKey] = undefined;
+              if (runState.fullSummary === inflightRef) {
+                runState.fullSummary = undefined;
               }
             });
         }
@@ -798,8 +811,8 @@ export function createContextEngineeringHooks(
     }) {
       // Advance full-summary cooldown with every tool result so the
       // model can do real work before another expensive compact.
-      const cooldownKey = `${runId}::full-summary-cooldown`;
-      const cooldownState = (globalThis as any)[cooldownKey];
+      const runState = getRunState(runId);
+      const cooldownState = runState.fullSummaryCooldown;
       if (cooldownState && typeof cooldownState === "object") {
         cooldownState.toolBatchesSince = Number(cooldownState.toolBatchesSince ?? 0) + 1;
       }
@@ -846,6 +859,7 @@ export function createContextEngineeringHooks(
     async onAfterModelCall({ workspaceRoot: _w, runId, sessionId, traceId, modelResponse, messages, softCap, trajectoryLogger }) {
       let timeCompacted = 0;
       const cm = getContextTunables();
+      const runState = getRunState(runId);
 
       // T2: Incomplete (length-stop) recovery. OMP's
       // `#checkCompaction("incomplete", assistantMessage)` arm —
@@ -860,15 +874,16 @@ export function createContextEngineeringHooks(
             const tokensUsed = Math.ceil(estimateLiveConversationChars(messages) / 4);
             const { shouldCompact } = await import("../context/should-compact.js");
             if (shouldCompact(tokensUsed, softCap)) {
-              // Stash a flag on the global slot so the next
+              // Stash a flag in run state so the next
               // `onBeforeModelCall` triggers a full summary before
               // the next model call (same pattern as
-              // `full-summary-applied`).
-              (globalThis as any)[`${runId}::incomplete-recovery`] = {
+              // `fullSummaryApplied`).
+              const slot: IncompleteRecoverySlot = {
                 triggeredAt: Date.now(),
                 stopReason,
                 tokensUsed,
               };
+              runState.incompleteRecovery = slot;
               await (trajectoryLogger as TrajectoryLogger).write({
                 event_id: randomUUID(),
                 run_id: runId,
@@ -900,22 +915,22 @@ export function createContextEngineeringHooks(
         try {
           const totalTokens = Math.ceil(estimateLiveConversationChars(messages) / 4);
           if (totalTokens >= cm.idleThresholdTokens) {
-            const idleKey = `${runId}::idle-compaction-timer`;
-            const existing = (globalThis as any)[idleKey];
+            const existing = runState.idleCompactionTimer;
             if (existing) clearTimeout(existing);
             const timeoutMs = cm.idleTimeoutSeconds * 1000;
             const t = setTimeout(() => {
-              (globalThis as any)[idleKey] = undefined;
+              runState.idleCompactionTimer = undefined;
               // Re-check conditions when the timer fires (per OMP).
               const cm2 = getContextTunables();
               if (!cm2.idleEnabled || cm2.idleThresholdTokens <= 0) return;
               const tokensNow = Math.ceil(estimateLiveConversationChars(messages) / 4);
               if (tokensNow < cm2.idleThresholdTokens) return;
               // Stash a flag for the next onBeforeModelCall.
-              (globalThis as any)[`${runId}::idle-compaction`] = {
+              const slot: IdleCompactionSlot = {
                 triggeredAt: Date.now(),
                 tokensUsed: tokensNow,
               };
+              runState.idleCompaction = slot;
               try {
                 (trajectoryLogger as TrajectoryLogger)
                   .write({
@@ -942,7 +957,7 @@ export function createContextEngineeringHooks(
             if (typeof (t as any).unref === "function") {
               (t as any).unref();
             }
-            (globalThis as any)[idleKey] = t;
+            runState.idleCompactionTimer = t;
           }
         } catch {
           /* swallow */
@@ -1023,11 +1038,10 @@ export function createContextEngineeringHooks(
 
     async onProviderTokenLimitError({ messages, softCap, runId: providedRunId }) {
       const runKey = providedRunId ?? "default";
-      const inflightKey = `${runKey}::full-summary`;
-      const inflight = (globalThis as any)[inflightKey];
+      const runState = getRunState(runKey);
+      const inflight = runState.fullSummary;
       if (inflight && typeof inflight.promise?.then === "function") {
-        const ptlConsumedKey = `${runKey}::full-summary-ptl-consumed`;
-        (globalThis as any)[ptlConsumedKey] = Date.now();
+        runState.fullSummaryPtlConsumed = Date.now();
         let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
         try {
           const summary = await Promise.race([
@@ -1062,7 +1076,7 @@ export function createContextEngineeringHooks(
             // Replace it in place; a next-call stash would replay stale state
             // after the retry's tool results had already been appended.
             messages.splice(0, messages.length, ...postCompactMessages);
-            delete (globalThis as any)[`${runKey}::full-summary-applied`];
+            runState.fullSummaryApplied = undefined;
             return { messages, savedChars };
           }
         } catch {
@@ -1080,6 +1094,7 @@ export function createContextEngineeringHooks(
     },
 
     async onRunComplete({ workspaceRoot, runId, sessionId, namedSession, userPrompt, conversation, assistantMessage, trajectoryLogger, success: _success, softCap: _softCap, usedChars }) {
+      const runState = getRunState(runId);
       try {
         await (trajectoryLogger as TrajectoryLogger).write({
           event_id: randomUUID(),
@@ -1117,15 +1132,7 @@ export function createContextEngineeringHooks(
               // Full-summary write-back FIRST: the compaction entry replaces
               // all prior journaled turns on the next rehydration; this run's
               // own final exchange is then appended raw after it.
-              const summarySlot = (globalThis as any)[`${runId}::last-full-summary`] as
-                | {
-                    summaryText: string;
-                    preChars: number;
-                    postChars: number;
-                    checkpoint: CompactionCheckpoint;
-                    epoch: number;
-                  }
-                | undefined;
+              const summarySlot = runState.lastFullSummary;
               if (summarySlot && typeof summarySlot.summaryText === "string" && summarySlot.summaryText.length > 0) {
                 await appendEntry(workspaceRoot, namedSession, {
                   id: randomUUID(),
@@ -1167,7 +1174,7 @@ export function createContextEngineeringHooks(
                 }
                 slice = cut >= 0 ? wire.slice(cut + 1) : wire;
               } else if (wire.length > 0) {
-                const rawCount = Number((globalThis as any)[`${runId}::rehydrated-count`] ?? 0);
+                const rawCount = Number(runState.rehydratedCount ?? 0);
                 slice = wire.slice(Number.isFinite(rawCount) && rawCount > 0 ? rawCount : 0);
               }
               // Harness-frame messages never enter the session: post-compact
@@ -1187,12 +1194,10 @@ export function createContextEngineeringHooks(
                 let content = typeof m.content === "string" ? m.content : "";
                 if (role === "user") {
                   if (SKIP_PREFIXES.some((p) => content.startsWith(p))) continue;
-                  if (content.startsWith("# Main Agent Cockpit")) {
-                    if (typeof userPrompt === "string" && userPrompt.trim().length > 0) {
-                      content = userPrompt.trim();
-                    } else {
-                      continue;
-                    }
+                  if (content.startsWith("# Main Agent Cockpit") || content.startsWith("<<<REAPER_COCKPIT")) {
+                    // The cockpit is the harness-authored live context frame;
+                    // it must never be journaled as user history.
+                    continue;
                   }
                 }
                 const toolCalls = Array.isArray(m.tool_calls)
@@ -1208,7 +1213,7 @@ export function createContextEngineeringHooks(
                   content,
                   ...(typeof m.tool_call_id === "string" ? { tool_call_id: m.tool_call_id } : {}),
                   ...(toolCalls && toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
-                  ...(typeof m.name === "string" ? { name: m.name } : {}),
+                  ...(typeof m.name === "string" && m.name !== "reaper_current_request" ? { name: m.name } : {}),
                   ...(typeof m.is_error === "boolean" ? { is_error: m.is_error } : {}),
                   ts: Date.now(),
                 });
@@ -1237,8 +1242,11 @@ export function createContextEngineeringHooks(
           /* best-effort — journaling must not fail the run */
         }
       }
-      delete (globalThis as any)[`${runId}::last-full-summary`];
-      delete (globalThis as any)[`${runId}::rehydrated-count`];
+      runState.lastFullSummary = undefined;
+      runState.rehydratedCount = undefined;
+      // Free the per-run state entry. Pending timers and any cached
+      // resume/cool-down/applied slots are dropped with it.
+      clearRunState(runId);
       return { summaryPersisted: typeof assistantMessage === "string" };
     },
   };

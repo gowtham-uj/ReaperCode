@@ -3,6 +3,7 @@ import type { AgentRequestEnvelope } from "../../src/connection/schemas.js";
 
 export function createValidConfig(): ReaperConfig {
   return {
+    security: { childEnvAllowlist: [] },
     connection: {
       auth: {
         allowAnonymous: true,

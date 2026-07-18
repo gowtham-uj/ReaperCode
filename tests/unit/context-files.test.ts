@@ -25,17 +25,17 @@ test("loads project context files in priority order", async () => {
   assert.ok(result.combined.includes("<<<PROJECT_CONTEXT"));
 });
 
-test("loads project AGENTS/CLAUDE context files even when workspace is not trusted", async () => {
+test("omits project AGENTS/CLAUDE context files when workspace is not trusted", async () => {
   const workspaceRoot = await tempDir("reaper-context-");
   await mkdir(path.join(workspaceRoot, ".reaper"), { recursive: true });
   await writeFile(path.join(workspaceRoot, ".reaper/context.md"), "protected");
   await writeFile(path.join(workspaceRoot, "AGENTS.MD"), "agent rules");
   await writeFile(path.join(workspaceRoot, "CLAUDE.md"), "claude rules");
   const result = await loadContextFiles({ workspaceRoot, trusted: false });
-  assert.deepEqual(result.files.map((f) => f.source.toLowerCase()), ["agents.md", "claude.md"]);
-  assert.ok(result.combined.includes("agent rules"));
+  assert.deepEqual(result.files.map((f) => f.source.toLowerCase()), []);
+  assert.ok(!result.combined.includes("agent rules"));
   assert.ok(!result.combined.includes("protected"));
-  assert.ok(result.diagnostics[0]?.includes("not trusted"));
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.includes("not trusted")));
 });
 
 test("loads user context files when provided", async () => {
@@ -103,19 +103,19 @@ test("defaults allow larger project-rule budgets (8KB/32KB)", async () => {
   assert.ok(agents!.content.length >= 5000);
 });
 
-test("prefer project rules over user when total budget is tight", async () => {
+test("preserves user instructions before project rules when total budget is tight", async () => {
   const workspaceRoot = await tempDir("reaper-context-");
   const userHome = await tempDir("reaper-user-");
   await mkdir(path.join(userHome, ".config/reaper"), { recursive: true });
   await writeFile(path.join(workspaceRoot, "AGENTS.md"), "PROJECT_RULES");
-  await writeFile(path.join(userHome, ".config/reaper/context.md"), "USER_RULES_SHOULD_DROP");
+  await writeFile(path.join(userHome, ".config/reaper/context.md"), "USER_RULES_MUST_SURVIVE");
   const result = await loadContextFiles({
     workspaceRoot,
     userHome,
     trusted: true,
     maxTotalBytes: 120,
   });
-  assert.ok(result.combined.includes("PROJECT_RULES"));
-  assert.ok(!result.combined.includes("USER_RULES_SHOULD_DROP"));
+  assert.ok(!result.combined.includes("PROJECT_RULES"));
+  assert.ok(result.combined.includes("USER_RULES_MUST_SURVIVE"));
   assert.ok(result.diagnostics.some((d) => d.includes("truncated")));
 });

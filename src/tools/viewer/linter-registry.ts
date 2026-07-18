@@ -33,6 +33,8 @@ import {
   type LintVerdict,
 } from "./types.js";
 
+import { buildChildEnv } from "../child-env.js";
+
 const CACHE_ROOT = ".reaper";
 const LINTERS_DIR = "linters";
 
@@ -323,7 +325,7 @@ export class LinterRegistry {
     const fileArgIndex = Math.min(entry.fileArgIndex, cmd.length);
     cmd.splice(fileArgIndex, 0, opts.absPath);
 
-    const result = await runProcess(cmd, opts.workspaceRoot, timeoutMs);
+    const result = await runProcess(cmd, opts.workspaceRoot, timeoutMs, opts.workspaceRoot);
 
     if (result.exitCode === 0) {
       return { ok: true, attempts, message: undefined, line: undefined, installLatencyMs: undefined };
@@ -377,7 +379,7 @@ export class LinterRegistry {
           cacheDir,
           `${entry.package}@${entry.version}`,
         ];
-        const exitCode = await runProcess(installCmd, cacheDir, 30_000).then(
+        const exitCode = await runProcess(installCmd, cacheDir, 30_000, workspaceRoot).then(
           (r) => r.exitCode,
         );
         return exitCode === 0;
@@ -467,12 +469,17 @@ interface RunResult {
   error: Error | undefined;
 }
 
-async function runProcess(cmd: string[], cwd: string, ms: number): Promise<RunResult> {
+async function runProcess(cmd: string[], cwd: string, ms: number, workspaceRoot: string): Promise<RunResult> {
   const [requestedBin, ...requestedArgs] = cmd as [string, ...string[]];
   const npmCli = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
   const useBundledNpm = process.platform === "win32" && requestedBin === "npm" && existsSync(npmCli);
   const bin = useBundledNpm ? process.execPath : requestedBin;
   const args = useBundledNpm ? [npmCli, ...requestedArgs] : requestedArgs;
+  // Linters and their plugins are model-invokable third-party code. Pass
+  // them the same sanitized env that bash/eval already use so we never
+  // leak provider keys, GitHub tokens, AWS creds, or DATABASE_URL to a
+  // spawn that would otherwise inherit the unfiltered Reaper parent env.
+  const { env } = buildChildEnv({ workspaceRoot });
   return await new Promise<RunResult>((resolve) => {
     let stdout = "";
     let stderr = "";
@@ -480,6 +487,7 @@ async function runProcess(cmd: string[], cwd: string, ms: number): Promise<RunRe
     const child = spawn(bin, args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
+      env,
     });
     const timer = setTimeout(() => {
       if (done) return;

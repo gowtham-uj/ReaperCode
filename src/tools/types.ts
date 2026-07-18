@@ -4,7 +4,7 @@ import { ApplyPatchArgsSchema } from "./apply-patch.js";
 import { GlobArgsSchema } from "./glob.js";
 import { EvalArgsSchema } from "./eval.js";
 import { JobArgsSchema } from "./job.js";
-import { AstGrepArgsSchema, DiagnosticsArgsSchema } from "./ast-grep.js";
+import { DiagnosticsArgsSchema } from "./diagnostics.js";
 import {
   CreateSkillArgsSchema,
   TestSkillArgsSchema,
@@ -186,14 +186,6 @@ export const EditFileArgsSchema = z
 export const DeleteFileArgsSchema = z
   .object({
     path: z.string().min(1),
-  })
-  .strict();
-
-export const ReplaceSymbolArgsSchema = z
-  .object({
-    path: z.string().min(1),
-    symbolName: z.string().min(1),
-    newCode: z.string(),
   })
   .strict();
 
@@ -449,7 +441,6 @@ export const ToolCallSchema = z.discriminatedUnion("name", [
   z.object({ id: z.string().min(1), name: z.literal("file_edit"), args: FileEditArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("replace_in_file"), args: ReplaceInFileArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("edit_file"), args: EditFileArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("replace_symbol"), args: ReplaceSymbolArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("delete_file"), args: DeleteFileArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("bash"), args: BashArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("browser_control"), args: BrowserControlArgsSchema }).strict(),
@@ -497,7 +488,6 @@ export const ToolCallSchema = z.discriminatedUnion("name", [
   z.object({ id: z.string().min(1), name: z.literal("glob"), args: GlobArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("eval"), args: EvalArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("job"), args: JobArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("ast_grep"), args: AstGrepArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("diagnostics"), args: DiagnosticsArgsSchema }).strict(),
 ]);
 

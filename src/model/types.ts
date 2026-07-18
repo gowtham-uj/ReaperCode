@@ -222,6 +222,7 @@ export interface StreamEvent {
     | "message_end"
     | "error";
   content?: string;
+  reasoning?: string;
   data?: unknown;
 }
 

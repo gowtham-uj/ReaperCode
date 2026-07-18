@@ -40,7 +40,7 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
     level: z.enum(["info", "debug", "trace"]),
     decision_id: z.string().min(1),
     policy_id: z.string().min(1),
-    outcome: z.enum(["allow", "deny", "skip"]),
+    outcome: z.enum(["allow", "deny", "skip", "approval_required"]),
   }),
   CommonLogFieldsSchema.extend({
     kind: z.literal("verification_summary"),
