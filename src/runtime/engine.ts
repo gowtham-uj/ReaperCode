@@ -444,6 +444,32 @@ function hasPassingGroundedVerification(
   return false;
 }
 
+/**
+ * Observation-based verification for natural stops: the model owns the
+ * stop, and the engine never forces a verifier on it. Instead, when the
+ * run ends we look at what the model itself ran. If the most recent
+ * grounded verification-class command (test > build > typecheck, in the
+ * model's own tool history) passed, the run is verified by observation.
+ * No declared request.payload.verification is required.
+ */
+function hasObservedPassingVerification(toolResults: ToolResult[]): boolean {
+  for (let index = toolResults.length - 1; index >= 0; index -= 1) {
+    const result = toolResults[index];
+    if (!result || result.name !== "bash") continue;
+    const args = result.args && typeof result.args === "object" && !Array.isArray(result.args)
+      ? result.args as Record<string, unknown>
+      : {};
+    if (typeof args.cmd !== "string") continue;
+    const signal = classifyGroundedVerificationSignal(args.cmd);
+    if (!signal.grounded) continue;
+    // Only test/build/typecheck runs are authoritative completion
+    // evidence; lint/artifact checks alone are not.
+    if (!["test", "build", "typecheck"].includes(signal.kind)) continue;
+    return result.ok;
+  }
+  return false;
+}
+
 export class RuntimeEngine {
   private readonly config: ReaperConfig;
   private trajectoryLogger: TrajectoryLogger;
@@ -2037,11 +2063,14 @@ export class RuntimeEngine {
 	        taskCompleted,
 	        // A successful executor-backed command of the requested verification
 	        // kind is grounded evidence even when the model ran it directly.
+	        // For natural stops with no declared verification, the model's own
+	        // most recent test/build/typecheck run is the observed evidence.
 	        verifiedCompletion: Boolean(
 	          taskCompleted
 	          && (
 	            state.explicitVerification?.ok === true
 	            || hasPassingGroundedVerification(state.toolResults, getRequest())
+	            || hasObservedPassingVerification(state.toolResults)
 	          )
 	        ),
 	        stuckTripped: false,
@@ -2209,6 +2238,10 @@ export class RuntimeEngine {
       const finalBoot = finalState.boot ?? boot;
       if (!finalBoot) throw new Error("LangGraph runtime ended without boot state");
 
+      // `verification` on the result stays explicit-request-only. Natural
+      // stops are scored observationally in metricsNode (verifiedCompletion
+      // considers the model's own last grounded test/build/typecheck run) —
+      // the engine never runs anything extra and never forces the model to.
       const result: RuntimeEngineResult = {
         state: finalBoot.state,
         toolResults: finalState.toolResults,
@@ -4294,79 +4327,6 @@ function renderRecentToolResultSummary(result: ToolResult): Record<string, unkno
   return renderToolResultForModel(result, { compact: true, maxOutputChars: 600 });
 }
 
-export function renderOptimizationFrame(input: {
-  prompt: string;
-  currentStep?: ExecutionPlanStep | undefined;
-  toolResults: ToolResult[];
-  feedback: string[];
-  negativeConstraints: string[];
-  mode: "planner" | "executor" | "repair" | "patcher" | "simple";
-}): string {
-  const metrics = buildLiveOptimizationSnapshot(input.toolResults);
-  const repeatedFailure = getRepeatedDiagnosticFailure(input.toolResults);
-  const recentTouchedFiles = collectRecentlyTouchedFiles(input.toolResults).slice(0, 12);
-  const latestFailureSummary = input.toolResults
-    .slice()
-    .reverse()
-    .find((result) => !result.ok);
-  const stepText = input.currentStep
-    ? [
-        input.currentStep.id,
-        input.currentStep.title,
-        input.currentStep.instructions,
-        input.currentStep.suggestedImplementation ?? "",
-        input.currentStep.testGuidance ?? "",
-        ...(input.currentStep.successCriteria ?? []),
-      ]
-        .filter(Boolean)
-        .join("\n")
-    : "";
-  return [
-    "# Reaper Optimization Frame",
-    "This frame is persistent task memory. Do not summarize it away or override it with local temptations.",
-    "",
-    "Primary objective:",
-    input.prompt.slice(0, 1200),
-    "",
-    "Current scope anchor:",
-    input.currentStep ? stepText.slice(0, 1400) : "No current step. Stay anchored to the primary objective and visible acceptance criteria.",
-    "",
-    "Non-goals unless directly required by the current objective:",
-    "- Dependency upgrades, formatter/lint cleanup, broad refactors, framework migrations, architecture rewrites, unrelated warnings, unrelated legacy failures.",
-    "- Reinstalling or rebuilding environments without concrete evidence that the environment is the blocker.",
-    "- Expanding edits outside the target dependency radius without explicit evidence.",
-    "",
-    "Execution policy:",
-    "- Prefer the smallest task-facing change that advances the visible success conditions.",
-    "- After a failed build/test/runtime check, classify the failure before acting: task-blocking, preexisting, environmental, non-critical warning, transient, or unrelated legacy noise.",
-    "- If a warning or legacy failure is not blocking the requested task, record it and keep moving.",
-    "- Do not repeat the same command, same edit, or same read-only diagnosis without a materially new hypothesis.",
-    "- For implementation steps, after a small amount of diagnosis, edit or run a targeted check. Repeated searching/reading is drift.",
-    "- Use targeted tests first, then escalate only when local evidence passes.",
-    "- Keep terminal output small: run narrow commands and focus on exit code, error class, failing file/test, stack frame, and key stderr.",
-    "- Before stopping, verify scope, minimality, task alignment, and that any server/process you started has been stopped when no longer needed.",
-    "",
-    "Current trajectory metrics:",
-    JSON.stringify(metrics),
-    "",
-    renderCommandStateLedger(input.toolResults),
-    "",
-    recentTouchedFiles.length ? `Recently touched files:\n${recentTouchedFiles.map((file) => `- ${file}`).join("\n")}` : "Recently touched files: none",
-    "",
-    latestFailureSummary ? `Latest failure summary:\n${renderToolResultForModel(latestFailureSummary, { compact: true, maxOutputChars: 1800 })}` : "Latest failure summary: none",
-    "",
-    repeatedFailure
-      ? `Repeated failure signature detected:\n${JSON.stringify(repeatedFailure)}\nDo not retry the same trajectory. Change strategy or scope the patch.`
-      : "Repeated failure signature detected: none",
-    "",
-    input.feedback.length ? `Active feedback:\n${input.feedback.slice(-6).map((item) => `- ${item}`).join("\n")}` : "Active feedback: none",
-    "",
-    input.negativeConstraints.length
-      ? `Attempt memory / do-not-repeat:\n${input.negativeConstraints.slice(-10).map((item) => `- ${item}`).join("\n")}`
-      : "Attempt memory / do-not-repeat: none",
-  ].join("\n");
-}
-
 export function buildLiveOptimizationSnapshot(results: ToolResult[]): Record<string, unknown> {
   const recent = results.slice(-40);
   const commandResults = recent.filter((result) => result.name === "bash");
@@ -4384,72 +4344,6 @@ export function buildLiveOptimizationSnapshot(results: ToolResult[]): Record<str
     editLocalityScore: computeEditLocalityScore(recent),
     wastedTrajectoryRatio: computeWastedTrajectoryRatio(recent),
   };
-}
-
-function renderCommandStateLedger(results: ToolResult[]): string {
-  const commands = results
-    .filter((result) => result.name === "bash")
-    .slice(-16)
-    .map((result) => {
-      const command = getToolResultCommand(result);
-      const output = result.output && typeof result.output === "object" ? (result.output as Record<string, unknown>) : {};
-      const exitCode = output.exitCode;
-      const status = result.ok ? "ok" : `failed:${result.error?.code ?? "error"}`;
-      const stdout = typeof output.stdout === "string" ? summarizeCommandStream(output.stdout) : "";
-      const stderr = typeof output.stderr === "string" ? summarizeCommandStream(output.stderr) : "";
-      const error = result.error?.message ? summarizeCommandStream(result.error.message) : "";
-      return [
-        `- ${status} exit=${exitCode ?? "n/a"} cmd=${command}`,
-        stdout ? `  stdout: ${stdout}` : "",
-        stderr ? `  stderr: ${stderr}` : "",
-        error ? `  error: ${error}` : "",
-      ].filter(Boolean).join("\n");
-    });
-  const repeated = getRepeatedCommandLedger(results);
-  return [
-    "Recent command ledger:",
-    "Each item below is an EXECUTION RESULT from a command Reaper already ran.",
-    commands.length ? commands.join("\n") : "- none",
-    "",
-    repeated.length ? `Repeated command counts:\n${repeated.map(({ command, count }) => `- ${count}x ${command}`).join("\n")}` : "Repeated command counts: none",
-    "",
-    "Command-state rule: this ledger is authoritative. Do not rerun a command shown here unless a concrete file/config/env change after that command could change its result. If a setup/install command already succeeded but the runtime check still fails, stop reinstalling and inspect/fix path, wrapper, script, import, or test environment instead.",
-  ].join("\n");
-}
-
-export function summarizeCommandStream(value: string): string {
-  return value
-    .trim()
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .slice(-4)
-    .join(" | ")
-    .slice(0, 700);
-}
-
-export function getRepeatedCommandLedger(results: ToolResult[]): Array<{ command: string; count: number }> {
-  const counts = new Map<string, number>();
-  for (const result of results.filter((item) => item.name === "bash")) {
-    const command = normalizeCommandForSignature(getToolResultCommand(result));
-    if (!command) continue;
-    const key = canonicalizeCommandForLoopLedger(command);
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  return [...counts.entries()]
-    .filter(([, count]) => count > 1)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 8)
-    .map(([command, count]) => ({ command, count }));
-}
-
-function canonicalizeCommandForLoopLedger(command: string): string {
-  const normalized = command.replace(/\s+/g, " ").trim();
-  if (/\bpython(?:3)?\s+-m\s+ensurepip\b/i.test(normalized)) return "python -m ensurepip";
-  if (/\bpython(?:3)?\s+-m\s+pip\s+install\b/i.test(normalized)) return normalized.replace(/\bpython3?\b/i, "python");
-  if (/\bpip(?:3)?\s+install\b/i.test(normalized)) return normalized.replace(/\bpip3\b/i, "pip");
-  if (/\bpip(?:3)?\s+--version\b/i.test(normalized)) return "pip --version";
-  return normalized;
 }
 
 export function collectRecentlyTouchedFiles(results: ToolResult[]): string[] {

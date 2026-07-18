@@ -199,7 +199,6 @@ exit 0
       let idleGraceTimer: NodeJS.Timeout | undefined;
       let wrapperExitObserved = false;
       let wrapperExitCleanupTimer: NodeJS.Timeout | undefined;
-      const startTime = Date.now();
       const logPathPromise = runtime ? createProcessLog(runtime, args.cmd, effectiveWorkingDirectory) : Promise.resolve(undefined);
       let totalOutputBytes = 0;
       const maxBufferedOutputChars = Math.max(16_384, Math.min(getSizeWatchdogMaxBytes(), 256 * 1024));
@@ -337,8 +336,6 @@ exit 0
             `Shell command stalled on interactive prompt: ${args.cmd}`,
             `stdout: ${tail(stdout.trim(), 2000) || "<empty>"}`,
             `stderr: ${tail(stderr.trim(), 2000) || "<empty>"}`,
-            "",
-            "[REMEDIATION TIP]: The command appears to be waiting for interactive input. Use non-interactive flags, provide input via file tools, or run with explicit stdin. Do not run interactive commands.",
           ].join("\n")));
           return;
         }
@@ -367,12 +364,10 @@ exit 0
             `Command: ${args.cmd}`,
             `stdout: ${tail(stdout.trim(), 4000) || "<empty>"}`,
             `stderr: ${tail(stderr.trim(), 4000) || "<empty>"}`,
-            "",
-            "[REMEDIATION TIP]: The scaffold tool cancelled because it needed interactive input or refused an existing directory. Do not repeat the same command unchanged. Use documented non-interactive flags, create the files directly with file tools, or inspect the target directory and continue from its current state.",
           ].join("\n")));
           return;
         }
-        resolve({ stdout: appendCommandWarnings(args.cmd, stdout, stderr, Date.now() - startTime, timeoutMs), stderr, exitCode: realExitCode, wouldBlock: decision.outcome === "would_block", nextCwd: realCwd, ...(logPath ? { logPath, persistedOutputSize: totalOutputBytes } : {}) });
+        resolve({ stdout, stderr, exitCode: realExitCode, wouldBlock: decision.outcome === "would_block", nextCwd: realCwd, ...(logPath ? { logPath, persistedOutputSize: totalOutputBytes } : {}) });
       };
       // Replace the implicit `child.on("close")` path. We now drive
       // resolution from `child.on("exit")` directly, with a Pi-style idle
@@ -457,8 +452,6 @@ exit 0
                 `Shell command stalled on interactive prompt: ${args.cmd}`,
                 `stdout: ${tail(stdout.trim(), 2000) || "<empty>"}`,
                 `stderr: ${tail(stderr.trim(), 2000) || "<empty>"}`,
-                "",
-                "[REMEDIATION TIP]: The command appears to be waiting for interactive input. Use non-interactive flags, provide input via file tools, or run with explicit stdin. Do not run interactive commands.",
               ].join("\n"),
             ),
           );
@@ -531,15 +524,13 @@ exit 0
                 `Command: ${args.cmd}`,
                 `stdout: ${tail(stdout.trim(), 4000) || "<empty>"}`,
                 `stderr: ${tail(stderr.trim(), 4000) || "<empty>"}`,
-                "",
-                "[REMEDIATION TIP]: The scaffold tool cancelled because it needed interactive input or refused an existing directory. Do not repeat the same command unchanged. Use documented non-interactive flags, create the files directly with file tools, or inspect the target directory and continue from its current state.",
               ].join("\n"),
             ),
           );
           return;
         }
         resolve({
-          stdout: appendCommandWarnings(args.cmd, stdout, stderr, Date.now() - startTime, timeoutMs),
+          stdout,
           stderr,
           exitCode: realExitCode,
           wouldBlock: decision.outcome === "would_block",
@@ -866,120 +857,21 @@ function formatCommandFailure(input: {
   stderr: string;
   timedOut: boolean;
 }): string {
+  // Raw facts only, per the reference (Pi) coding agent's bash contract:
+  // status, command, stdout, stderr. No injected remediation advice —
+  // the model reads the output and figures out the fix itself.
   const status = input.timedOut
     ? `Command ${input.timedOutKind === "idle" ? "idle " : ""}timed out after ${input.timeoutMs}ms`
     : `Command exited with code ${input.exitCode ?? "unknown"}${input.signal ? ` signal ${input.signal}` : ""}`;
   const stdout = tail(input.stdout.trim(), 4000);
   const stderr = tail(input.stderr.trim(), 4000);
 
-  let remediationTip = "";
-  const lowerOutput = (stdout + " " + stderr).toLowerCase();
-  const cmd = input.cmd.toLowerCase();
-  const missingShellBinary = (stdout + "\n" + stderr).match(/(?:^|\n)\s*(?:sh|bash):(?:\s*line\s*)?\s*\d+:\s*([a-z0-9._-]+):\s*(?:command\s+)?not found\b/i);
-  const relativeImportFailure = stderr.match(/(?:Error: Cannot find module|ModuleNotFoundError: No module named|cannot find module) ['"]?([^'"\n]+)['"]?[\s\S]*(?:Require stack:\s*-\s*([^\n]+))?/i);
-  const missingPackageScript = (stdout + "\n" + stderr).match(/Missing script:\s*["']?([^"'\n]+)["']?/i);
-
-  if (/\btailwindcss\s+init\b/.test(cmd) && lowerOutput.includes("could not determine executable to run")) {
-    remediationTip = "\n\n[REMEDIATION TIP]: Do not use 'npx tailwindcss init -p'. Tailwind v4 does not follow the old init workflow by default. Write the config/CSS directly, use @tailwindcss/vite, or use plain CSS if Tailwind is not required.";
-  } else if (cmd.includes("npm") || cmd.includes("yarn") || cmd.includes("pnpm")) {
-    if (input.timedOut && /\b(?:npm\s+(?:install|i)|pnpm\s+(?:install|i)|yarn\s+install)\b/.test(cmd)) {
-      remediationTip = "\n\n[REMEDIATION TIP]: Dependency installation timed out. Retry the same install command with timeoutMs 300000 before changing packages or researching alternatives.";
-    }
-    if (missingShellBinary) {
-      const binaryName = missingShellBinary[1];
-      remediationTip = `\n\n[REMEDIATION TIP]: The package script invokes missing binary '${binaryName}'. Inspect the package.json that owns this script, add the missing tool as a devDependency in that package, run install in the owning package/workspace, then rerun the same check. Do not repeat the failing test/build command before fixing the missing binary.`;
-    }
-    if (missingPackageScript) {
-      remediationTip = `\n\n[REMEDIATION TIP]: Package script '${missingPackageScript[1]}' is not defined in the package.json for the current command directory. Inspect the repository/package layout, find the package.json that owns this script, and rerun from that directory or use an existing script. Do not repeat the same package-manager command from the same directory unchanged.`;
-    }
-    if (lowerOutput.includes("cannot find module") || lowerOutput.includes("ts2307") || lowerOutput.includes("not found") || lowerOutput.includes("etarget")) {
-      remediationTip ||= "\n\n[REMEDIATION TIP]: The build/install failed because of missing or incorrect dependencies. You likely need to run 'npm install' in the correct directory. If you are unsure of the correct package name or version (e.g. 'etarget'), USE THE 'web_search' TOOL NATIVELY TO FIND THE CORRECT NPM NAMES BEFORE RETRYING.";
-    }
-  }
-  if (relativeImportFailure) {
-    const requestedModule = relativeImportFailure[1];
-    const requiringFile = relativeImportFailure[2]?.trim();
-    remediationTip = `\n\n[REMEDIATION TIP]: Import/module path resolution is runtime-specific and often depends on the executing file plus the command working directory. The module '${requestedModule}' failed${requiringFile ? ` from '${requiringFile}'` : ""}. Inspect the failing file, cwd, and runtime rules before retrying. Do not repeat the same failing import path unchanged.`;
-  }
-  if (/docker(?:-compose|\s+compose)/i.test(input.cmd) && /not a docker command|docker-compose:\s*(?:command\s+)?not found|Cannot connect to the Docker daemon|permission denied/i.test(stdout + "\n" + stderr)) {
-    remediationTip = "\n\n[REMEDIATION TIP]: Docker or Docker Compose is unavailable in this environment. Do not repeatedly install or mutate host-level Docker tooling. Validate generated Docker files with file reads/static inspection, document the limitation, and continue with other runnable checks.";
-  }
-  if (
-    /\b(?:curl|wget|nc|netcat)\b/i.test(input.cmd) &&
-    /Could not resolve host|NameResolutionError|Temporary failure in name resolution|Failed to resolve|Name or service not known/i.test(stdout + "\n" + stderr)
-  ) {
-    remediationTip =
-      "\n\n[REMEDIATION TIP]: A service hostname did not resolve from this execution context. Do not retry the same curl/wget/nc command unchanged and do not replace the service with a mock. Inspect the task's network configuration, service process, and available logs; then run a bounded task-facing probe from the workspace.";
-  }
-  if (/\b(?:conda|mamba|micromamba)\s+env\s+create\b/i.test(input.cmd) && /\s--force(?:\s|$)/i.test(input.cmd)) {
-    remediationTip =
-      "\n\n[REMEDIATION TIP]: conda env create does not support --force. Use a separate explicit recovery sequence: inspect env list/prefix, remove or delete a broken target prefix if necessary, verify it is absent, then run conda env create -f <file> -y or conda env update --prune.";
-  }
-  if (/CondaVerificationError|SafetyError|appears to be corrupted/i.test(stdout + "\n" + stderr)) {
-    remediationTip =
-      "\n\n[REMEDIATION TIP]: Conda reported a corrupted package cache or partially extracted package. Do not retry create/install unchanged. First clean package caches with conda clean --packages --tarballs -y or conda clean -afy, remove any broken target environment prefix in a separate successful command, verify the prefix is gone, then recreate/update the environment.";
-  }
-  if (/prefix already exists|DirectoryNotACondaEnvironmentError|EnvironmentLocationNotFound|Not a conda environment/i.test(stdout + "\n" + stderr)) {
-    remediationTip =
-      "\n\n[REMEDIATION TIP]: The target conda prefix is missing, already exists, or is only a broken directory. Do not run conda env create again until cleanup succeeds. Inspect conda env list and the prefix directory, remove a broken prefix with a non-interactive command, verify absence, then recreate/update the environment.";
-  }
-  if (/\bECONNREFUSED\b|\bconnection refused\b/i.test(stdout + "\n" + stderr) && /\b(?:27017|5432|6379|3306|9200)\b/.test(stdout + "\n" + stderr)) {
-    remediationTip = "\n\n[REMEDIATION TIP]: A local external service/database is unavailable. Do not repeat the same runtime check unchanged or assume Docker can start it. Inspect the app configuration and use a test-safe in-process, file-backed, mocked, or static verification path unless the service is already running in this environment.";
-  }
-  if (/ERR_PACKAGE_PATH_NOT_EXPORTED|Package subpath .* is not defined by "exports"|imported from .*node_modules/i.test(stdout + "\n" + stderr)) {
-    remediationTip = "\n\n[REMEDIATION TIP]: The command resolved incompatible package versions or package internals. Do not rerun unchanged. Inspect the package directory that owns the script, install/update its local dependencies there, and ensure the command uses the package-local toolchain instead of a parent or host dependency tree.";
-  }
-  if (/\bfatal error:\s*[^:\n]+:\s*No such file or directory/i.test(stdout + "\n" + stderr)) {
-    remediationTip = "\n\n[REMEDIATION TIP]: A compiler include/source path is missing. On Linux paths are case-sensitive. If a same-name file exists with different casing, either update the include/source path with a precise line-range edit or create a tiny compatibility wrapper at the exact requested path that includes the existing file. Do not rerun the build unchanged before fixing the cited include/source path.";
-  }
-  if (
-    /does not appear to contain CMakeLists\.txt|does not match the source .*CMakeLists\.txt|CMakeCache\.txt.*different|not a CMake build directory \(missing CMakeCache\.txt\)|Build files have been written to:/i.test(
-      stdout + "\n" + stderr,
-    )
-  ) {
-    remediationTip = "\n\n[REMEDIATION TIP]: CMake is being run from the wrong source/build directory or an existing cache polluted the source root/build dir. Inspect where CMakeCache.txt, CMakeFiles/, Makefile, and cmake_install.cmake were generated. It is safe to remove only those generated task-local CMake artifacts, then reconfigure with explicit flags such as 'cmake -S . -B build' and build with 'cmake --build build'. Do not remove source files or repeat the same cmake command unchanged.";
-  }
-  if (
-    /did you forget to [`']?#include|was not declared in this scope|undefined reference|no member named|has no member|No SOURCES given to target|No rule to make target/i.test(
-      stdout + "\n" + stderr,
-    )
-  ) {
-    remediationTip =
-      "\n\n[REMEDIATION TIP]: Compiler/build diagnostics usually have one root cause followed by cascading errors. Do not rerun unchanged. Inspect the first diagnostic and referenced file, then make the smallest source/import/path/API fix before rebuilding. If the build graph has no sources or a missing target, inspect the project file and actual file tree before editing.";
-  }
-  if (/argument handler must be a function|handler must be a function|callback must be a function|middleware.*function/i.test(stdout + "\n" + stderr)) {
-    remediationTip = "\n\n[REMEDIATION TIP]: The runtime expected a callable handler/callback but received a different value. Do not rerun the same command unchanged. Inspect the stack trace line in application code, then inspect every variable, imported symbol, or exported value passed at that call site. Fix the non-callable value before rerunning the check.";
-  }
-  if (/\b(?:eslint|lint)\b/.test(cmd) && /\bno-undef\b|not defined/i.test(stdout + "\n" + stderr)) {
-    remediationTip = "\n\n[REMEDIATION TIP]: The static analyzer is reporting undefined runtime globals or symbols. Do not repeat the same lint command unchanged. Inspect the analyzer output, then either configure the analyzer for the target runtime/module system or edit the reported code. Rerun lint only after a concrete config/code change.";
-  }
-  if (
-    /Jest did not exit|open handle|TCPSERVERWRAP|app\.listen/i.test(stdout + "\n" + stderr) ||
-    (input.timedOut && /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|\b(jest|vitest|mocha|ava|tap|pytest|node\s+--test)\b/i.test(input.cmd))
-  ) {
-    remediationTip = "\n\n[REMEDIATION TIP]: A test imported code that starts a long-running server or leaves async resources open. Split app creation from process startup: export the app/module without listen/start side effects, guard startup behind the language's main-entry check, and close servers/database connections in test teardown. Do not mask this by only increasing timeouts.";
-  }
-  if (
-    /\b(?:jest|npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+(?:run\s+)?test)\b/i.test(input.cmd) &&
-    /Exceeded timeout|beforeAll|beforeEach|afterAll|afterEach|MongoParseError|MongoServerSelectionError|server selection timed out|buffering timed out|dropDatabase|deleteMany/i.test(stdout + "\n" + stderr)
-  ) {
-    remediationTip =
-      "\n\n[REMEDIATION TIP]: The test failure is in async test setup/teardown or database access. Do not rerun the full suite unchanged. Inspect the referenced test hook and app/database startup code. For Mongo/Mongoose-style tests, remove obsolete driver options, use an isolated in-memory/mocked/file-backed test database or a short server-selection/connection timeout, close/disconnect resources in afterAll/afterEach, and rerun a single failing test file with single-worker/open-handle diagnostics before trying the full suite again.";
-  }
-  if (input.timedOut && /\bnpm\s+(?:test|run\s+\S+)\s+[^-]/i.test(input.cmd) && !/\bnpm\s+(?:test|run\s+\S+)\s+--\s+/i.test(input.cmd)) {
-    remediationTip = "\n\n[REMEDIATION TIP]: This looks like a targeted npm test command without explicit argument forwarding. It may have run the wrong script or unrelated tests. Inspect package.json and run the actual test runner directly, or use 'npm test -- <path>' only if the script supports it.";
-  }
-  if (/\bcd\s+([A-Za-z0-9_.-]+)\s*&&[\s\S]*\btest\s+-[ef]\s+\1\//.test(input.cmd)) {
-    remediationTip = "\n\n[REMEDIATION TIP]: The command changes into a directory and then checks a path still prefixed with that same directory. After 'cd dir', verify artifacts relative to the new working directory (for example 'test -f artifact') or avoid cd and use the full path from the original cwd.";
-  }
-
   return [
     status,
     `Command: ${input.cmd}`,
     stdout ? `stdout:\n${stdout}` : "stdout: <empty>",
     stderr ? `stderr:\n${stderr}` : "stderr: <empty>",
-    remediationTip
-  ].filter(Boolean).join("\n");
+  ].join("\n");
 }
 
 function tail(input: string, maxChars: number): string {
@@ -987,37 +879,6 @@ function tail(input: string, maxChars: number): string {
     return input;
   }
   return input.slice(input.length - maxChars);
-}
-
-function appendCommandWarnings(cmd: string, stdout: string, stderr: string, durationMs: number, timeoutMs: number): string {
-  const warnings: string[] = [];
-  const lowerCmd = cmd.toLowerCase();
-  const combined = `${stdout}\n${stderr}`.toLowerCase();
-  const isInstall = /\b(?:npm|pnpm|yarn|bun)\s+(?:install|i|add)\b|\bnpx\s+create-|pip\s+install|poetry\s+install/.test(lowerCmd);
-
-  if (isInstall && durationMs > 120_000) {
-    warnings.push(
-      `Dependency install took ${Math.round(durationMs / 1000)}s. Treat this as a quality warning: prefer a leaner stack, fewer packages, or already-available runtime features unless the task explicitly requires this dependency set.`,
-    );
-  }
-  if (/\b([1-9]\d*)\s+(?:low|moderate|high|critical)?\s*vulnerabilit(?:y|ies)\b|security vulnerability/.test(combined)) {
-    warnings.push(
-      "Dependency output reported vulnerabilities. Prefer patched/current package versions or a smaller dependency set before continuing feature work.",
-    );
-  }
-  if (/\bdeprecated\b/.test(combined)) {
-    warnings.push(
-      "Dependency output reported deprecated packages. Avoid deprecated scaffolds/packages when a maintained alternative is available.",
-    );
-  }
-  if (isInstall && timeoutMs > 300_000 && durationMs > timeoutMs * 0.75) {
-    warnings.push(
-      "Install nearly consumed its extended timeout. Do not repeat the same stack/install command; simplify or split the dependency plan.",
-    );
-  }
-
-  if (warnings.length === 0) return stdout;
-  return `${stdout.trimEnd()}\n\n[REAPER DEPENDENCY QUALITY WARNINGS]\n${warnings.map((warning) => `- ${warning}`).join("\n")}\n`;
 }
 
 function toShellPath(value: string): string {

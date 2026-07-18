@@ -652,7 +652,9 @@ export class ToolExecutor {
 
       return result;
     } catch (error) {
-      const errorMessage = await this.buildToolErrorMessage(parsedCall, error);
+      // Raw error only — no injected diagnostics or remediation advice.
+      // The model reads the actual failure and figures out the fix itself.
+      const errorMessage = error instanceof Error ? error.message : "Unknown tool error";
 
       // PostToolUseFailure hook envelope (observation only).
       if (this.options.hooks) {
@@ -720,123 +722,6 @@ export class ToolExecutor {
 
       return result;
     }
-  }
-
-  private async buildToolErrorMessage(call: ToolCall, error: unknown): Promise<string> {
-    const baseMessage = error instanceof Error ? error.message : "Unknown tool error";
-    if (
-      call.name === "read_file" &&
-      error &&
-      typeof error === "object" &&
-      "code" in error &&
-      (error as NodeJS.ErrnoException).code === "EISDIR"
-    ) {
-      const targetPath = typeof (call.args as { path?: unknown }).path === "string" ? (call.args as { path: string }).path : "";
-      const diagnostics = targetPath ? await this.buildDirectoryReadDiagnostics(targetPath) : "";
-      return diagnostics ? `${baseMessage}\n\n[REMEDIATION TIP]: ${diagnostics}` : baseMessage;
-    }
-    if (
-      call.name !== "read_file" ||
-      !error ||
-      typeof error !== "object" ||
-      !("code" in error) ||
-      (error as NodeJS.ErrnoException).code !== "ENOENT"
-    ) {
-      return baseMessage;
-    }
-
-    const targetPath = typeof (call.args as { path?: unknown }).path === "string" ? (call.args as { path: string }).path : "";
-    if (!targetPath) return baseMessage;
-
-    const diagnostics = await this.buildMissingPathDiagnostics(targetPath);
-    return diagnostics ? `${baseMessage}\n\n[REMEDIATION TIP]: ${diagnostics}` : baseMessage;
-  }
-
-  private async buildMissingPathDiagnostics(targetPath: string): Promise<string> {
-    const normalizedParent = path.posix.dirname(targetPath.replace(/\\/g, "/"));
-    const parentPath = normalizedParent === "." ? "" : normalizedParent;
-    const targetName = path.posix.basename(targetPath);
-    const parts: string[] = [
-      `The requested file '${targetPath}' does not exist. Do not retry the same read unchanged.`,
-      "Inspect the actual repository layout with list_directory or grep_search, then use the discovered path.",
-    ];
-
-    const parentEntries = await this.safeListRelativeDirectory(parentPath);
-    if (parentEntries.length > 0) {
-      parts.push(`Entries in '${parentPath || "."}': ${parentEntries.slice(0, 20).join(", ")}${parentEntries.length > 20 ? ", ..." : ""}.`);
-    } else {
-      const rootEntries = await this.safeListRelativeDirectory("");
-      if (rootEntries.length > 0) {
-        parts.push(`Top-level entries: ${rootEntries.slice(0, 20).join(", ")}${rootEntries.length > 20 ? ", ..." : ""}.`);
-      }
-    }
-
-    const candidates = await this.findNearbyFileCandidates(targetName);
-    if (candidates.length > 0) {
-      parts.push(`Files with the same name elsewhere: ${candidates.slice(0, 10).join(", ")}${candidates.length > 10 ? ", ..." : ""}.`);
-    }
-
-    return parts.join(" ");
-  }
-
-  private async buildDirectoryReadDiagnostics(targetPath: string): Promise<string> {
-    const entries = await this.safeListRelativeDirectory(targetPath);
-    const parts = [
-      `The requested path '${targetPath}' is a directory, not a file. Do not retry the same read_file call unchanged.`,
-    ];
-    if (entries.length > 0) {
-      parts.push(`Directory entries: ${entries.slice(0, 20).join(", ")}${entries.length > 20 ? ", ..." : ""}.`);
-    } else {
-      parts.push("The directory appears empty or cannot be listed from the current workspace view.");
-    }
-    if (/\.py(?:\/|$)/.test(targetPath.replace(/\\/g, "/"))) {
-      parts.push(
-        "If a service is trying to execute this Python path, inspect the service command and either point it at a real file or create an appropriate package entrypoint such as __main__.py.",
-      );
-    } else {
-      parts.push("Use list_directory on this path, then read a specific contained file or adjust the command to target an actual file.");
-    }
-    return parts.join(" ");
-  }
-
-  private async safeListRelativeDirectory(relativePath: string): Promise<string[]> {
-    try {
-      const absolutePath = normalizeWorkspacePath(this.options.workspaceRoot, relativePath || ".");
-      const entries = await readdir(absolutePath, { withFileTypes: true });
-      return entries
-        .filter((entry) => !entry.name.startsWith("."))
-        .map((entry) => `${entry.name}${entry.isDirectory() ? "/" : ""}`)
-        .sort((a, b) => a.localeCompare(b));
-    } catch {
-      return [];
-    }
-  }
-
-  private async findNearbyFileCandidates(targetName: string): Promise<string[]> {
-    if (!targetName || targetName === "." || targetName === "/") return [];
-    const candidates: string[] = [];
-    const ignored = new Set([".git", "node_modules", ".reaper", "scratchpad", "dist", "build", "coverage", ".next"]);
-
-    const walk = async (relativeDir: string, depth: number): Promise<void> => {
-      if (depth > 4 || candidates.length >= 20) return;
-      let entries: Awaited<ReturnType<typeof readdirWithFileTypes>>;
-      try {
-        entries = await readdirWithFileTypes(normalizeWorkspacePath(this.options.workspaceRoot, relativeDir || "."));
-      } catch {
-        return;
-      }
-
-      for (const entry of entries) {
-        if (candidates.length >= 20) return;
-        if (entry.name.startsWith(".") || ignored.has(entry.name)) continue;
-        const child = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
-        if (entry.isFile() && entry.name === targetName) candidates.push(child);
-        if (entry.isDirectory()) await walk(child, depth + 1);
-      }
-    };
-
-    await walk("", 0);
-    return candidates;
   }
 
   private async resolveExistingPathCase(relativePath: string): Promise<string> {

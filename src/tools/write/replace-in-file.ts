@@ -37,8 +37,6 @@ export function replaceExactString(
     throw new Error(
       [
         `String not found in file '${targetPath}'.`,
-        "This usually means the file changed after the oldString was chosen, indentation/quoting differs, or the block was already edited.",
-        "Do not repeat the same oldString unchanged. Read the current target region with read_file and retry using exact current text, or use replace_in_file with startLine/endLine/content for the smallest safe region.",
         `Missing oldString preview:\n${oldString.slice(0, 1200)}`,
       ].join("\n"),
     );

@@ -334,7 +334,7 @@ test("bash reports immediate background startup failures", async () => {
   assert.match(result.error?.message ?? "", /SyntaxError: Error parsing|ERR_INVALID_PACKAGE_CONFIG/);
 });
 
-test("bash explains module path failures without language-specific repair policy", async () => {
+test("bash reports module path failures with raw runtime output only", async () => {
   const workspaceRoot = await createTempWorkspace();
   await mkdir(path.join(workspaceRoot, "server"), { recursive: true });
   await writeFile(path.join(workspaceRoot, "server", "bad-require.js"), "require('./server/models/Task');\n", "utf8");
@@ -347,8 +347,10 @@ test("bash explains module path failures without language-specific repair policy
   });
 
   assert.equal(result.ok, false);
-  assert.match(result.error?.message ?? "", /Import\/module path resolution is runtime-specific/);
-  assert.match(result.error?.message ?? "", /Do not repeat the same failing import path unchanged/);
+  // The raw Node error reaches the model untouched — no injected
+  // remediation advice. The model diagnoses the path itself.
+  assert.match(result.error?.message ?? "", /Cannot find module '\.\/server\/models\/Task'/);
+  assert.doesNotMatch(result.error?.message ?? "", /REMEDIATION TIP/);
 });
 
 test("background shell processes are logged and cleaned as process groups", async () => {
@@ -455,7 +457,7 @@ test("bash exposes scratchpad dependency cache env vars", async () => {
   assert.match(stdout, new RegExp(escapeRegExp(workspaceRoot.replace(/\\/g, "/"))));
 });
 
-test("bash flags vulnerable dependency output as quality warning", async () => {
+test("bash returns dependency output verbatim without injected quality warnings", async () => {
   const workspaceRoot = await createTempWorkspace();
   const executor = await createExecutor(workspaceRoot);
 
@@ -467,23 +469,10 @@ test("bash flags vulnerable dependency output as quality warning", async () => {
 
   assert.equal(result.ok, true);
   const stdout = String((result.output as { stdout: string }).stdout);
-  assert.match(stdout, /REAPER DEPENDENCY QUALITY WARNINGS/);
-  assert.match(stdout, /vulnerabilities/);
-  assert.match(stdout, /deprecated/);
-});
-
-test("bash does not flag zero vulnerabilities as quality warning", async () => {
-  const workspaceRoot = await createTempWorkspace();
-  const executor = await createExecutor(workspaceRoot);
-
-  const result = await executor.execute({
-    id: "quality-zero",
-    name: "bash",
-    args: { cmd: "printf 'found 0 vulnerabilities\\n'", timeout: 60 },
-  });
-
-  assert.equal(result.ok, true);
-  const stdout = String((result.output as { stdout: string }).stdout);
+  // Raw output only — the model reads the vulnerability/deprecation lines
+  // itself; the tool never appends advisory commentary.
+  assert.match(stdout, /1 critical vulnerability/);
+  assert.match(stdout, /deprecated old-package/);
   assert.doesNotMatch(stdout, /REAPER DEPENDENCY QUALITY WARNINGS/);
 });
 
