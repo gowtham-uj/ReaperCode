@@ -75,15 +75,12 @@ test("keyboard_type without screenshot gets an advisory", () => {
 });
 
 test("empty history returns no advisories for tools that don't have rules", () => {
-  // task_list has no rules
-  assert.deepEqual(getOrderingAdvisories({ currentTool: "task_list", recentTools: [], isSubagentCall: false }), []);
   // search_tools has no rules
   assert.deepEqual(getOrderingAdvisories({ currentTool: "search_tools", recentTools: [], isSubagentCall: false }), []);
 });
 
 test("hasOrderingRules returns false for unordered tools", () => {
   assert.equal(hasOrderingRules("read_file"), false);
-  assert.equal(hasOrderingRules("task_list"), false);
   assert.equal(hasOrderingRules("__nope__"), false);
 });
 

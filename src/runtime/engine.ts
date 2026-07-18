@@ -59,11 +59,11 @@ import {
   stripWorkspacePrefix, 
   uniqueStrings} from "./file-hints.js";
 import {
-  createTask as createSessionTask,
-  listTasks as listSessionTasks,
-  updateTask as updateSessionTask,
-  clearTasks as clearSessionTasks,
-} from "../tools/write/task.js";
+  createEngineTask as createSessionTask,
+  listEngineTasks as listSessionTasks,
+  updateEngineTask as updateSessionTask,
+  clearEngineTasks as clearSessionTasks,
+} from "./task-store.js";
 import { getDiscoveredTools, discoverTools, clearDiscoveredTools } from "../tools/discovery.js";
 import { toolRegistry, CORE_TOOL_NAMES } from "../tools/registry.js";
 import { isKnownToolName, stripUnknownToolArgs } from "./tool-args.js";
@@ -2429,7 +2429,7 @@ export function isReadOnlyToolResult(result: ToolResult): boolean {
 }
 
 function isMutationOrProducerResult(result: ToolResult): boolean {
-  if (["write_file", "replace_in_file", "edit_file", "delete_file", "task_create", "task_update"].includes(result.name)) return true;
+  if (["write_file", "replace_in_file", "edit_file", "delete_file"].includes(result.name)) return true;
   if (result.name !== "bash") return false;
   const command = getToolResultCommand(result);
   return isMutatingShellCommand(command) || isProducerOrVerificationCommand(command);

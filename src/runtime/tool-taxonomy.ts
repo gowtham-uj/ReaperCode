@@ -11,7 +11,6 @@ export const CONTROL_TOOLS: ReadonlySet<string> = new Set([
 
   // Existing runtime control signals.
   "advance_step",
-  "delegate_to_plan",
 ]);
 
 export const REQUIRED_EXECUTABLE_TOOLS: ReadonlySet<string> = new Set([
@@ -53,8 +52,6 @@ export const MUTATING_TOOLS: ReadonlySet<string> = new Set([
   "stop_live_view",
   "signal_process",
   "write_to_process",
-  "task_create",
-  "task_update",
   "create_skill",
   "test_skill",
   "approve_skill",

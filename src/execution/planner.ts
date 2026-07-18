@@ -179,10 +179,6 @@ const READ_ONLY_GIT_SUBCOMMANDS = new Set([
 ]);
 
 export function classifyToolCall(call: ToolCall): ExecutionKind {
-  if ((call.name as string) === "delegate_to_plan") {
-    return "read";
-  }
-
   if (call.name === "get_tool_output") {
     return "read";
   }

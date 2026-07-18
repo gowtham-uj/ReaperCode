@@ -165,7 +165,7 @@ export class PermissionClassifier {
     }
 
     // Control tools
-    if (["delegate_to_plan", "activate_skill"].includes(call.name)) {
+    if (call.name === "activate_skill") {
       return { outcome: "safe", reasoning: "Control tool", confidence: 0.95 };
     }
 

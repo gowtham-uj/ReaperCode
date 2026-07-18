@@ -190,6 +190,6 @@ test("shell risk finding is surfaced on the decision for bash", () => {
 });
 
 test("default to no advisories for a tool that has no rules and no history", () => {
-  const d = evaluateToolCall({ toolName: "task_list", args: {}, callerRole: "root", trustedSandbox: false, recentTools: [] });
+  const d = evaluateToolCall({ toolName: "search_tools", args: {}, callerRole: "root", trustedSandbox: false, recentTools: [] });
   assert.equal(d.advisories.length, 0);
 });

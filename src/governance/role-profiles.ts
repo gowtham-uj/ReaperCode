@@ -63,9 +63,6 @@ const READ_ONLY_TOOLS: readonly string[] = [
   "web_fetch",
   "get_tool_output",
   "search_tools",
-  "task_list",
-  "task_create",
-  "task_update",
   "activate_skill",
 ];
 
@@ -216,9 +213,6 @@ export const ROLE_PROFILES: Record<PolicyRole, RoleProfile> = {
       "stop_live_view",
       "request_human_approval",
       "is_human_intervening",
-      "task_create",
-      "task_update",
-      "task_list",
       "activate_skill",
     ],
     forbidden_tools: ["write_file", "replace_in_file", "edit_file", "delete_file", "bash", "advance_step", "computer_control", "mouse_move", "mouse_click", "mouse_scroll", "keyboard_type", "keyboard_press", "read_background_output", "signal_process", "write_to_process"],

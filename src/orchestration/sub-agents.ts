@@ -1,7 +1,6 @@
 import { RuntimeEngine, type RuntimeEngineResult } from "../runtime/engine.js";
 import type { ToolCall } from "../tools/types.js";
 import { selectVerificationCommand, runVerificationCommand } from "../verify/runner.js";
-import { enforceDelegationDepth } from "./depth.js";
 import { assertLeaseAllowsFile, type FileLeaseMap } from "./leases.js";
 import { cleanupSandboxWorkspace, createSandboxWorkspace } from "./sandbox.js";
 import { detectPlanCycle, nextSchedulableTasks, type SubTaskContract } from "./scheduler.js";
@@ -40,7 +39,6 @@ export async function runDelegatedPlan(input: {
   depth?: number;
   runner?: SubAgentRunner;
 }): Promise<OrchestrationResult> {
-  enforceDelegationDepth(input.depth ?? 0, 2);
   detectPlanCycle(input.plan);
 
   const completed = new Set<string>();

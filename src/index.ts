@@ -32,7 +32,6 @@ export * from "./model/providers/provider-client.js";
 export * from "./model/providers/provider-registry.js";
 export * from "./model/response-adapter.js";
 export * from "./model/types.js";
-export * from "./orchestration/depth.js";
 export * from "./orchestration/integrator.js";
 export * from "./orchestration/leases.js";
 export * from "./orchestration/sandbox.js";

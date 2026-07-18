@@ -59,7 +59,7 @@ test("every metadata entry has a complete shape", () => {
 });
 
 test("read-only tools have is_read_only=true and risk in {low, medium}", () => {
-  for (const name of ["read_file", "view_file", "list_directory", "grep_search", "skim_file", "inspect_environment", "get_tool_output", "task_list", "search_tools"]) {
+  for (const name of ["read_file", "view_file", "list_directory", "grep_search", "skim_file", "inspect_environment", "get_tool_output", "search_tools"]) {
     const m = getToolMetadata(name);
     assert.ok(m, `${name} should have metadata`);
     assert.equal(m.is_read_only, true, `${name} should be is_read_only`);
