@@ -63,6 +63,12 @@ interface CockpitTurnSnapshot {
   bytes: number;
 }
 
+interface TracedToolCall {
+  turn: number;
+  name: string;
+  args: Record<string, unknown>;
+}
+
 interface TracedToolResult {
   turn: number;
   name: string;
@@ -76,8 +82,12 @@ interface TraceData {
   tool_calls_by_name: Record<string, number>;
   system_prompts: string[];
   cockpit_per_turn: CockpitTurnSnapshot[];
+  tool_calls: TracedToolCall[];
   tool_results: TracedToolResult[];
-  verification_ok: boolean;
+  // Pi-parity: verification is no longer computed by the harness. The
+  // model decides when (and whether) to verify. The trace below
+  // captures only the model's own tool-call graph so downstream tools
+  // can check whether the model ran `npm test`, wrote README.md, etc.
   summary_assistant_message: string;
   duration_ms: number;
   final_files: string[];
@@ -130,9 +140,25 @@ class TraceCapturingGateway implements ModelGateway {
       if (event.type === "tool_call") {
         this.trace.tool_calls_total += 1;
         toolCallsThisTurn += 1;
-        const data = event.data as { name?: string } | undefined;
+        const data = event.data as { name?: string; arguments?: string } | undefined;
         const name = typeof data?.name === "string" ? data.name : "unknown";
         this.trace.tool_calls_by_name[name] = (this.trace.tool_calls_by_name[name] ?? 0) + 1;
+        let parsedArgs: Record<string, unknown> = {};
+        if (typeof data?.arguments === "string" && data.arguments.length > 0) {
+          try {
+            const parsed = JSON.parse(data.arguments);
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              parsedArgs = parsed as Record<string, unknown>;
+            }
+          } catch {
+            /* arguments may be partial / malformed mid-stream; ignore */
+          }
+        }
+        this.trace.tool_calls.push({
+          turn: turnNumber,
+          name,
+          args: parsedArgs,
+        });
       }
       yield event;
     }
@@ -260,8 +286,8 @@ test(
       tool_calls_by_name: {},
       system_prompts: [],
       cockpit_per_turn: [],
+      tool_calls: [],
       tool_results: [],
-      verification_ok: false,
       summary_assistant_message: "",
       duration_ms: 0,
       final_files: [],
@@ -288,7 +314,6 @@ test(
     trace.duration_ms = Date.now() - startedAt;
 
     trace.tool_results = attributeToolResultsToTurns(result?.toolResults ?? [], trace.tool_calls_per_turn);
-    trace.verification_ok = result?.verification?.ok === true;
     trace.summary_assistant_message = result?.assistantMessage ?? (runError ? `[error] ${String(runError)}` : "");
 
     const filesAfter = await listFilesRecursive(workspaceRoot);
@@ -302,7 +327,45 @@ test(
 
     if (runError) throw runError;
 
-    assert.ok(trace.model_turns > 0, "expected at least one model turn");
+    // ── Pi-parity assertions: the model owns verification. The harness
+    // only checks the model's own tool-call graph and final summary. ──
     assert.ok(result, "engine run should produce a result");
+    assert.ok(trace.model_turns > 0, "expected at least one model turn");
+
+    // 1) The model ran its own tests at least once — either via
+    //    `npm test`, `node --test`, or `node -e ...test...`.
+    const ranTests = trace.tool_calls.some(
+      (c) =>
+        c.name === "bash" &&
+        typeof c.args.cmd === "string" &&
+        (/(^|\s)(npm\s+test|node\s+--test)\b/.test(c.args.cmd) ||
+          /node\s+-e\s+.*test/i.test(c.args.cmd)),
+    );
+    assert.ok(ranTests, "model should have run its own tests (npm test / node --test)");
+
+    // 2) The model wrote README.md to document its deliverable.
+    //    The model may emit an absolute workspace path or a relative
+    //    one depending on its working directory; match either shape.
+    const wroteReadme = trace.tool_calls.some(
+      (c) =>
+        c.name === "write_file" &&
+        typeof c.args.path === "string" &&
+        (c.args.path === "README.md" ||
+          c.args.path.endsWith("/README.md") ||
+          c.args.path.endsWith("/README.md/")),
+    );
+    assert.ok(wroteReadme, "model should have written README.md");
+
+    // 3) The model's final assistant message is a real summary, not
+    //    a one-line truncation. Pi lets the model pick when to stop;
+    //    we just verify the message that survives is substantive.
+    assert.ok(
+      trace.summary_assistant_message.length >= 200,
+      `final assistant summary should be substantive (>=200 chars); got ${trace.summary_assistant_message.length}`,
+    );
+    assert.ok(
+      !trace.summary_assistant_message.startsWith("[error]"),
+      "engine run produced an error rather than a real summary",
+    );
   },
 );

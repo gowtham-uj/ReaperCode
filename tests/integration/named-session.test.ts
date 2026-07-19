@@ -175,16 +175,15 @@ test("unnamed runs do not create session journals", async () => {
     modelGateway: gateway,
   });
   await engine.run();
-  // The harness sends one mutable cockpit followed by the exact task.
+  // Pi-parity: the harness no longer prepends a curated cockpit
+  // bundle. The first user message is the raw prompt itself.
   const first = gateway.capturedMessages[0] ?? [];
+  assert.equal(first.length, 1, "expected exactly one user message at start (the raw prompt)");
   assert.equal(first[0]?.role, "user");
-  assert.match(first[0]?.content ?? "", /REAPER_COCKPIT v1/);
-  assert.equal(first[1]?.role, "user");
-  assert.equal(first[1]?.content, "No session here.");
-  assert.equal(first.length, 2);
+  assert.equal(first[0]?.content, "No session here.");
   assert.doesNotMatch(
     JSON.stringify(gateway.capturedMessages[0]),
-    /Main Agent Cockpit|Repo Snapshot|Prepared Context/,
+    /REAPER_COCKPIT v1|Main Agent Cockpit|Repo Snapshot|Prepared Context/,
   );
   assert.equal(
     existsSync(path.join(workspaceRoot, ".reaper", "sessions")),

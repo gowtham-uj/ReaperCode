@@ -334,37 +334,30 @@ test("mega dev task: add stats module with full test coverage", async () => {
   for (const req of mainRequests) {
     const all = req.messages.map((m) => m.content).filter((c) => typeof c === "string").join("\n");
     const counts = countCockpitMarkers(all);
-    assert.deepEqual(counts, { opens: 1, closes: 1 }, "exactly one cockpit pair per request, every turn");
+    assert.deepEqual(counts, { opens: 0, closes: 0 }, "no cockpit markers in any request under Pi-parity");
   }
 
   const first = mainRequests[0]!;
   const last = mainRequests[mainRequests.length - 1]!;
 
+  // Pi-parity: NO cockpit bundle is injected on any turn. The model's
+  // first user message is always the raw prompt; subsequent turns see
+  // accumulated assistant + tool messages, nothing else.
   const cockpitFirst = first.messages.find(
     (m) => m.role === "user" && typeof m.content === "string" && m.content.startsWith(COCKPIT_OPEN),
   ) as { content: string } | undefined;
-  assert.ok(cockpitFirst, "cockpit present on first request");
+  assert.equal(cockpitFirst, undefined, "no cockpit on first request under Pi-parity");
 
   const cockpitLast = last.messages.find(
     (m) => m.role === "user" && typeof m.content === "string" && m.content.startsWith(COCKPIT_OPEN),
   ) as { content: string } | undefined;
-  assert.ok(cockpitLast, "cockpit present on last request");
-  assert.equal(cockpitLast.content, cockpitFirst.content, "cockpit bytes identical on first vs last turn (no refresh across 6 tool batches)");
+  assert.equal(cockpitLast, undefined, "no cockpit on last request under Pi-parity");
 
-  // Slimmed-cockpit envelope assertions (mirrors e2e-live-validation.test.ts).
-  assert.match(cockpitFirst.content, /OS=/);
-  assert.match(cockpitFirst.content, /Node=/);
-  assert.doesNotMatch(cockpitFirst.content, /npm=/, "slimmed cockpit omits npm probe");
-  assert.doesNotMatch(cockpitFirst.content, /docker=/, "slimmed cockpit omits docker probe");
-  assert.doesNotMatch(cockpitFirst.content, /tools=/, "slimmed cockpit omits tools probe");
-  assert.doesNotMatch(cockpitFirst.content, /# Ranked workspace map/, "no ranked workspace map in cockpit");
-  assert.doesNotMatch(cockpitFirst.content, /# Ranked bounded file excerpts/, "no ranked bounded excerpts in cockpit");
-
-  const cockpitIdx = first.messages.findIndex(
-    (m) => m.role === "user" && typeof m.content === "string" && m.content.startsWith(COCKPIT_OPEN),
+  const firstUserMessage = first.messages.find(
+    (m) => m.role === "user" && (m as { name?: string }).name === CURRENT_REQUEST_MESSAGE_NAME,
   );
-  assert.equal(first.messages[cockpitIdx + 1]?.name, CURRENT_REQUEST_MESSAGE_NAME, "exact task follows cockpit immediately");
-  assert.equal(first.messages[cockpitIdx + 1]?.content, userPrompt);
+  assert.ok(firstUserMessage, "raw prompt is the first user message under Pi-parity");
+  assert.equal((firstUserMessage as { content: string }).content, userPrompt);
 
   // ── Context growth: message count grows turn over turn, tools land ───
   assert.ok(

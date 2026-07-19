@@ -42,7 +42,7 @@ import { executeDiagnostics } from "./diagnostics.js";
 import { webFetchTool } from "./read/web-fetch.js";
 import { executeScratchpad } from "./memory/scratchpad.js";
 import type { Hooks } from "../adaptive/hooks.js";
-import { ToolCallSchema, type ToolCall, type ToolResult } from "./types.js";
+import { ToolCallSchema, type ToolCall, type ToolResult, type ExecutionEvent } from "./types.js";
 import { countFileLines } from "../workspace/roots.js";
 import type { ReaperConfig } from "../config/model-config.js";
 import type { MergedToolRegistry } from "./mcp/registry.js";
@@ -261,6 +261,11 @@ export class ToolExecutor {
   private readonly authoringTools: AuthoringToolDeps | undefined;
   private readonly permissionClassifier: PermissionClassifier;
   private readonly readFileState = new Map<string, { sha256: string | null; mtimeMs: number | null; fullyRead: boolean }>();
+  // LRU bound on the read-output cache. Without a cap, a long run that
+  // reads many distinct files keeps every prior result in memory until
+  // the run ends. 256 entries × ~typical file size is well below the
+  // soft cap on per-run memory; tune up if a real run evicts hot entries.
+  private static readonly READ_OUTPUT_CACHE_LIMIT = 256;
   private readonly readOutputCache = new Map<string, FileFreshnessMetadata & { output: FreshReadFileResult; hits: number }>();
   // Phase 3 — viewer state. Lives on the executor so it shares lifetime
   // with the run. Cleared at run end (see `resetViewerState`).
@@ -299,6 +304,23 @@ export class ToolExecutor {
       runId: options.runId,
       workspaceRoot: options.workspaceRoot,
     });
+  }
+
+  /**
+   * Normalize a hook-engine exception into `{ code, message }` for the
+   * `hook_error` trajectory kind. We deliberately do NOT include
+   * stack traces, provider keys, or arbitrary `error.cause` payloads —
+   * the trajectory file is replay-safe and gets synced into Langfuse.
+   */
+  private serializeHookError(error: unknown): { code: string; message: string } {
+    if (error instanceof Error) {
+      const code =
+        "code" in error && typeof (error as { code?: unknown }).code === "string"
+          ? (error as { code: string }).code
+          : "hook_engine_error";
+      return { code, message: error.message.slice(0, 1024) };
+    }
+    return { code: "hook_engine_error", message: String(error).slice(0, 1024) };
   }
 
   /**
@@ -604,7 +626,23 @@ export class ToolExecutor {
         } catch (error) {
           if (error instanceof HookBlockedError) throw error;
           // Hook engine exceptions remain non-blocking (existing
-          // established policy) — the tool still dispatches.
+          // established policy) — the tool still dispatches — but the
+          // failure must be visible so a misconfigured hook doesn't
+          // silently drop every PreToolUse decision.
+          await this.trajectoryLogger.write({
+            event_id: randomUUID(),
+            run_id: this.options.runId,
+            session_id: this.options.sessionId,
+            trace_id: this.options.traceId,
+            timestamp: new Date().toISOString(),
+            log_schema_version: 1,
+            kind: "hook_error",
+            level: this.options.logLevel,
+            tool_name: parsedCall.name,
+            hook: "PreToolUse",
+            error: this.serializeHookError(error),
+          });
+          console.warn(`[reaper] PreToolUse hook threw for ${parsedCall.name}: ${this.serializeHookError(error).message}`);
         }
       }
 
@@ -618,7 +656,26 @@ export class ToolExecutor {
             payload: { toolName: parsedCall.name, args: parsedCall.args, output },
             blockable: false,
           });
-        } catch { /* swallow */ }
+        } catch (error) {
+          // PostToolUse hooks are observation-only, but a thrown error
+          // still needs a trajectory record — otherwise a broken hook
+          // silently swallows its own failures and the user has no
+          // way to notice. We do not block the tool result.
+          await this.trajectoryLogger.write({
+            event_id: randomUUID(),
+            run_id: this.options.runId,
+            session_id: this.options.sessionId,
+            trace_id: this.options.traceId,
+            timestamp: new Date().toISOString(),
+            log_schema_version: 1,
+            kind: "hook_error",
+            level: this.options.logLevel,
+            tool_name: parsedCall.name,
+            hook: "PostToolUse",
+            error: this.serializeHookError(error),
+          });
+          console.warn(`[reaper] PostToolUse hook threw for ${parsedCall.name}: ${this.serializeHookError(error).message}`);
+        }
       }
 
       const normalizedOutput = await this.maybeStoreArtifact(parsedCall.name, output);
@@ -664,7 +721,25 @@ export class ToolExecutor {
             payload: { toolName: parsedCall.name, args: parsedCall.args, error: errorMessage },
             blockable: false,
           });
-        } catch { /* swallow */ }
+        } catch (hookError) {
+          // Surface PostToolUseFailure hook exceptions via trajectory so
+          // a misconfigured failure handler isn't invisible.
+          const serialized = this.serializeHookError(hookError);
+          await this.trajectoryLogger.write({
+            event_id: randomUUID(),
+            run_id: this.options.runId,
+            session_id: this.options.sessionId,
+            trace_id: this.options.traceId,
+            timestamp: new Date().toISOString(),
+            log_schema_version: 1,
+            kind: "hook_error",
+            level: this.options.logLevel,
+            tool_name: parsedCall.name,
+            hook: "PostToolUseFailure",
+            error: serialized,
+          });
+          console.warn(`[reaper] PostToolUseFailure hook threw for ${parsedCall.name}: ${serialized.message}`);
+        }
       }
 
       const result: ToolResult = {
@@ -703,6 +778,37 @@ export class ToolExecutor {
       if (parsedCall.name === "bash" || error instanceof PathPolicyError) {
         const auditMessage = result.error?.message ?? "Tool execution failed";
         const localRules = await loadLocalRules(this.options.workspaceRoot);
+        // Audit kinds must distinguish policy denials from ordinary tool
+        // failures. PathPolicyError is always a workspace-boundary block.
+        // For bash, only emit `policy_block` when the command actually
+        // matched a deny/would-block rule. Otherwise (non-zero exit, parse
+        // failure, ENOENT, etc.) the failure is an ordinary tool error and
+        // must NOT inflate the policy-deny counter that downstream
+        // dashboards read.
+        let auditKind: "path_escape" | "policy_block" | "tool_error";
+        let auditRuleId: string | undefined;
+        if (error instanceof PathPolicyError) {
+          auditKind = "path_escape";
+          auditRuleId = "path_escape";
+        } else if (parsedCall.name === "bash") {
+          const decision = evaluateCommandPolicy(
+            parsedCall.args.cmd,
+            this.options.safetyProfile,
+            localRules ? { localRules } : undefined,
+          );
+          if (decision.outcome === "deny" || decision.outcome === "would_block") {
+            auditKind = "policy_block";
+            auditRuleId = decision.ruleId;
+          } else {
+            auditKind = "tool_error";
+            // Surface the ruleId of the matched allow rule (if any) so the
+            // audit record still tells operators which classifier branch the
+            // command traversed, without claiming it was blocked.
+            auditRuleId = decision.ruleId !== "allow_default" ? decision.ruleId : undefined;
+          }
+        } else {
+          auditKind = "tool_error";
+        }
         await this.auditLogger.write({
           event_id: randomUUID(),
           run_id: this.options.runId,
@@ -710,17 +816,67 @@ export class ToolExecutor {
           trace_id: this.options.traceId,
           timestamp: new Date().toISOString(),
           log_schema_version: 1,
-          kind: error instanceof PathPolicyError ? "path_escape" : "policy_block",
+          kind: auditKind,
           severity: "error",
-          rule_id:
-            parsedCall.name === "bash"
-              ? evaluateCommandPolicy(parsedCall.args.cmd, this.options.safetyProfile, localRules ? { localRules } : undefined).ruleId
-              : undefined,
+          rule_id: auditRuleId,
           message: auditMessage,
+          ...(auditKind === "tool_error"
+            ? { details: { tool_name: parsedCall.name, error_code: result.error?.code } }
+            : {}),
         });
       }
 
       return result;
+    }
+  }
+
+  /**
+   * Pi-parity per-tool streaming dispatch.
+   *
+   * Mirrors `execute()` exactly but yields an `AsyncIterable<ExecutionEvent>`
+   * so callers (the live loop, trajectory sinks, UI dashboards) can react
+   * to a tool call as it progresses instead of waiting for the buffered
+   * `Promise<ToolResult>`:
+   *
+   *   1. Yields `tool_execution_start` immediately on entry.
+   *   2. For tools that opt in to partial-output streaming (bash and
+   *      eval), yields zero or more `tool_execution_delta` chunks
+   *      during execution. Other tools emit zero deltas.
+   *   3. Yields `tool_execution_complete` with the final `ToolResult`
+   *      on success, or `tool_execution_failed` with a structured
+   *      `{ code, message }` if dispatch throws before `execute()`
+   *      can return.
+   *
+   * The existing `execute()` is preserved for callers that need a
+   * single promise (tests, the legacy parallel scheduler, explicit
+   * tool paths).
+   */
+  async *executeStream(call: ToolCall): AsyncIterable<ExecutionEvent> {
+    const argsRecord =
+      call.args && typeof call.args === "object" && !Array.isArray(call.args)
+        ? (call.args as Record<string, unknown>)
+        : {};
+    const toolCallId = call.id ?? "";
+    yield {
+      type: "tool_execution_start",
+      data: { toolCallId, name: call.name, args: argsRecord },
+    };
+
+    try {
+      const result = await this.execute(call);
+      yield {
+        type: "tool_execution_complete",
+        data: { toolCallId, result },
+      };
+    } catch (error) {
+      const errObj = error instanceof Error ? error : new Error(String(error));
+      yield {
+        type: "tool_execution_failed",
+        data: {
+          toolCallId,
+          error: { code: "executor_threw", message: errObj.message },
+        },
+      };
     }
   }
 
@@ -804,6 +960,12 @@ export class ToolExecutor {
           const cacheKey = this.makeReadOutputCacheKey(absolutePath, args);
           const beforeReadSnapshot = await this.getFreshnessSnapshot(args.path, absolutePath);
           const cached = this.readOutputCache.get(cacheKey);
+          if (cached) {
+            // LRU bump: re-insert to mark as most-recently-used.
+            this.readOutputCache.delete(cacheKey);
+            this.readOutputCache.set(cacheKey, cached);
+            cached.hits += 1;
+          }
           if (
             cached &&
             cached.sha256 === beforeReadSnapshot.sha256 &&
@@ -832,6 +994,7 @@ export class ToolExecutor {
             mtimeMs: beforeReadSnapshot.mtimeMs,
           };
           this.readOutputCache.set(cacheKey, { ...beforeReadSnapshot, output: observedResult, hits: 0 });
+          this.evictReadOutputCacheIfNeeded();
           return observedResult;
         }
       case "list_directory":
@@ -1439,6 +1602,20 @@ export class ToolExecutor {
     const absolutePath = normalizeWorkspacePath(this.options.workspaceRoot, targetPath);
     const snapshot = knownSnapshot ?? await this.getFreshnessSnapshot(targetPath, absolutePath);
     this.readFileState.set(absolutePath, { ...snapshot, fullyRead });
+  }
+
+  /**
+   * Bound the read-output cache by LRU. The cache is insertion-ordered;
+   * the oldest entry is at the head and the most recently used is at
+   * the tail. When we exceed the limit, drop the oldest entry.
+   */
+  private evictReadOutputCacheIfNeeded(): void {
+    const limit = ToolExecutor.READ_OUTPUT_CACHE_LIMIT;
+    while (this.readOutputCache.size > limit) {
+      const oldestKey = this.readOutputCache.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.readOutputCache.delete(oldestKey);
+    }
   }
 
   private makeReadOutputCacheKey(

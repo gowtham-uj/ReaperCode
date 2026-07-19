@@ -421,6 +421,29 @@ function hasUnexecutedActionPromise(value: string): boolean {
   ) && !/\b(?:complete|completed|done|fixed|passed|verified|created|wrote|ran)\b/i.test(lastSentence);
 }
 
+/**
+ * Strip model reasoning envelopes from a final assistant message.
+ *
+ * Matches the same `<think>...</think>`, `<analysis>...</analysis>`,
+ * `<reasoning>...</reasoning>` blocks that `hasUnexecutedActionPromise`
+ * strips internally, plus unclosed leading `<think>` tails (some
+ * providers omit the closing tag when reasoning runs to the end of the
+ * turn). Used at the final-result boundary so the persisted
+ * `assistantMessage`, the trajectory `assistant_message` field, and the
+ * `finalAssistantTextLength` metric all reflect only user-visible
+ * content — internal reasoning stays in trajectory as its own
+ * `model_response` events rather than leaking into the summary.
+ */
+export function stripThinkingBlocks(value: string): string {
+  if (!value) return value;
+  return value
+    .replace(/<(think|analysis|reasoning)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
+    // Unclosed leading reasoning envelope (no closing tag).
+    .replace(/<(think|analysis|reasoning)\b[^>]*>[\s\S]*$/i, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function hasPassingGroundedVerification(
   toolResults: ToolResult[],
   request: AgentRequestEnvelope,
@@ -476,7 +499,15 @@ export class RuntimeEngine {
   private ctxHooks?: ContextEngineeringHooks;
 
   constructor(private readonly input: RuntimeEngineInput) {
-    this.config = parseReaperConfig(mergeWorkspaceConfigSync(input.config, input.workspaceRoot));
+    // mergeWorkspaceConfigSync may return `undefined` for an empty
+    // workspace with no on-disk config and an unset `input.config`.
+    // Hand parseReaperConfig a `{}` rather than `undefined` so the
+    // schema error is explicit ("which field is missing?") and the
+    // constructor never throws a bare `Cannot read properties of
+    // undefined` for callers that want to probe the engine with a
+    // partial input (e.g. tests, REPL).
+    const mergedConfig = mergeWorkspaceConfigSync(input.config, input.workspaceRoot) ?? {};
+    this.config = parseReaperConfig(mergedConfig);
     // Apply the config to the runtime-tunables cache so every module
     // reads from a single source of truth (the config file). No env
     // fallbacks — the engine rejects if the config is incomplete.
@@ -492,6 +523,27 @@ export class RuntimeEngine {
 
   async run(): Promise<RuntimeEngineResult> {
     const startedAt = Date.now();
+    // Provider-readiness preflight: fail fast on a missing API key
+    // instead of letting the first provider call throw on turn 1 and
+    // leave an orphan .reaper/runs/<id>/ on disk. This is a no-op when
+    // no model gateway is configured.
+    if (this.input.modelGateway) {
+      try {
+        const profile = await Promise.resolve(this.input.modelGateway.resolveRole("default_model"));
+        const { checkProviderProfileReadiness } = await import("../model/preflight.js");
+        const readiness = checkProviderProfileReadiness(profile, process.env);
+        if (!readiness.ok) {
+          const error = new Error(readiness.reason ?? "provider not ready");
+          Object.assign(error, { code: "ProviderNotReady", status: 401, provider: readiness.provider, model: readiness.model });
+          throw error;
+        }
+      } catch (error) {
+        if ((error as { code?: string }).code === "ProviderNotReady") throw error;
+        // Other errors during preflight (gateway unreachable, schema
+        // mismatch) are not the user's missing-API-key case — fall through
+        // and let the provider's own first call surface the problem.
+      }
+    }
     const initialRequest = parseAgentRequestEnvelope(this.input.requestEnvelope);
     const runContext = createReaperRunContext(this.input.workspaceRoot, initialRequest);
     await ensureReaperRunContext(runContext, initialRequest);
@@ -797,12 +849,28 @@ export class RuntimeEngine {
           config: this.config as { models?: unknown } as any,
           // Prefer last provider-reported input tokens as a floor so
           // shake/full-summary gates track real usage, not only chars/4.
+          // Avoids the previous JSON.stringify(msgs).length per-call cost
+          // by summing message-content lengths in a single pass — the
+          // chat-4o rule of thumb (chars/4) is just an estimate; the
+          // provider-reported number is more accurate.
           countTokens: (msgs: unknown[]) => {
-            const charsEst = Math.ceil(
-              (typeof msgs === "object" && msgs !== null
-                ? JSON.stringify(msgs).length
-                : 0) / 4,
-            );
+            let chars = 0;
+            if (Array.isArray(msgs)) {
+              for (const m of msgs) {
+                if (m === null || typeof m !== "object") continue;
+                const content = (m as { content?: unknown }).content;
+                if (typeof content === "string") {
+                  chars += content.length;
+                } else if (Array.isArray(content)) {
+                  for (const block of content) {
+                    if (block && typeof block === "object" && typeof (block as { text?: unknown }).text === "string") {
+                      chars += (block as { text: string }).text.length;
+                    }
+                  }
+                }
+              }
+            }
+            const charsEst = Math.ceil(chars / 4);
             const last = runState.lastInputTokens;
             if (typeof last === "number" && Number.isFinite(last) && last > 0) {
               return Math.max(charsEst, Math.floor(last));
@@ -867,13 +935,11 @@ export class RuntimeEngine {
         const resumedConversation = await loadLiveConversationSnapshot(runContext.runDir);
         const liveConversation: GenerateRequest["messages"] = resumedConversation ?? [];
         if (resumedConversation) {
-          // The persisted cockpit from the prior run reflects the END of that
-          // run (potentially stale content_fingerprint / workspace map /
-          // excerpts / runtime facts). Strip it so the first iteration of
-          // the cockpit insert branch below fires a FRESH cockpit against
-          // THIS run's ContentPrepResult. Without this, the first model
-          // call after resume would see stale workspace context until the
-          // next mutation batch triggered an in-place refresh.
+          // Strip any cockpit text that older runs may have persisted
+          // into the snapshot. The runtime no longer inserts cockpits,
+          // so a stale one in the snapshot would confuse the model with
+          // outdated workspace context. We do not re-insert anything;
+          // the new code path (above) appends the raw prompt directly.
           replaceConversationMessages(
             liveConversation,
             stripCockpitFromMessages(liveConversation),
@@ -1108,23 +1174,20 @@ export class RuntimeEngine {
           // API `tools` field. Keeping the cockpit stable across turns
           // also keeps its byte representation stable, which lets
           // provider prompt caches reuse the prefix.
-          const rawPromptValue = getRequest().payload.prompt;
-          const rawUserPrompt = typeof rawPromptValue === "string" ? rawUserPromptValueSafe(rawPromptValue) : "";
-          const liveCockpit = liveConversation.find(
-            (m) => m.role === "user" && typeof m.content === "string" && containsCockpitMarker(m.content),
-          );
-          if (!liveCockpit) {
-            // First iteration OR compaction/replace stripped the
-            // cockpit — reinsert exactly one. The system bytes are
-            // untouched either way.
-            insertCockpitIntoConversation({
-              messages: liveConversation,
-              contentPrep: state.contentPrep as ContentPrepResult,
-              currentUserRequest: rawUserPrompt,
-              activeWorkspaceRoot: this.input.workspaceRoot,
-            });
-            await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
-          }
+        // Pi-parity: the runtime no longer injects a curated cockpit
+        // context bundle. The model explores the workspace itself with
+        // its own tool calls. We still need to surface the raw user
+        // prompt as a user message on the first iteration of every
+        // run (including after named-session resume); before, that was
+        // carried inside the cockpit block. On subsequent iterations
+        // the prompt is already in `liveConversation`, so we skip.
+        const hasUserPromptAlready = liveConversation.some(
+          (m) => m.role === "user" && (m as { name?: string }).name === CURRENT_REQUEST_MESSAGE_NAME,
+        );
+        if (!hasUserPromptAlready && rawUserPrompt) {
+          liveConversation.push({ role: "user", name: CURRENT_REQUEST_MESSAGE_NAME, content: rawUserPrompt });
+          await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
+        }
 
           const turnRequest: GenerateRequest = {
             role: effectiveMainAgentRole,
@@ -2242,10 +2305,15 @@ export class RuntimeEngine {
       // stops are scored observationally in metricsNode (verifiedCompletion
       // considers the model's own last grounded test/build/typecheck run) —
       // the engine never runs anything extra and never forces the model to.
+      // Strip model-reasoning envelopes (<think>…</think> etc.) from the
+      // visible final assistant message. The reasoning stays in trajectory
+      // as its own model_response events but must not bleed into the
+      // user-facing summary.
+      const visibleAssistantMessage = stripThinkingBlocks(finalState.assistantMessage ?? "");
       const result: RuntimeEngineResult = {
         state: finalBoot.state,
         toolResults: finalState.toolResults,
-        assistantMessage: finalState.assistantMessage,
+        assistantMessage: visibleAssistantMessage,
         events: finalState.events,
         trajectoryPath: this.trajectoryLogger.path,
         ...(finalState.contentFingerprint ? { contentFingerprint: finalState.contentFingerprint } : {}),
@@ -4155,6 +4223,14 @@ function buildCockpitInput(input: {
  *   - the current task intent is preserved verbatim at the recency
  *     edge (last section of the cockpit).
  */
+/**
+ * @deprecated The runtime no longer inserts a curated cockpit
+ * context bundle. The Pi-parity refactor removed this so the model
+ * explores the workspace itself with its own tool calls. This
+ * function is preserved as a guarded no-op for any external code
+ * that imports its symbol. Set `REAPER_LEGACY_COCKPIT=1` to opt back
+ * into the previous behavior.
+ */
 export function insertCockpitIntoConversation(input: {
   messages: GenerateRequest["messages"];
   contentPrep: ContentPrepResult;
@@ -4162,6 +4238,28 @@ export function insertCockpitIntoConversation(input: {
   activeWorkspaceRoot: string;
   latestVerificationFailure?: string;
 }): void {
+  if (process.env.REAPER_LEGACY_COCKPIT !== "1") {
+    // Drop any stale cockpit text from resumed snapshots before
+    // appending the raw prompt — keeps the conversation clean
+    // across named-session boundaries.
+    const cleaned = stripCockpitFromMessages(input.messages as GenerateRequest["messages"]);
+    const withoutCurrentRequest = cleaned.filter(
+      (message) => !(message.role === "user" && message.name === CURRENT_REQUEST_MESSAGE_NAME),
+    );
+    const exists = withoutCurrentRequest.some(
+      (message) => message.role === "user" && message.name === CURRENT_REQUEST_MESSAGE_NAME,
+    );
+    if (!exists && input.currentUserRequest) {
+      withoutCurrentRequest.push({
+        role: "user",
+        name: CURRENT_REQUEST_MESSAGE_NAME,
+        content: input.currentUserRequest,
+      });
+    }
+    input.messages.length = 0;
+    input.messages.push(...withoutCurrentRequest);
+    return;
+  }
   const cockpit = renderContextCockpit(buildCockpitInput({
     contentPrep: input.contentPrep,
     runtimeFacts: {

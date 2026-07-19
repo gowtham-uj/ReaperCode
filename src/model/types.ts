@@ -219,6 +219,24 @@ export interface StreamEvent {
     | "message_delta"
     | "reasoning_delta"
     | "tool_call"
+    /**
+     * Pi-parity tool-execution streaming vocabulary. Emitted by the
+     * runtime / executor (not the model gateway), so `tool_call` from
+     * the gateway stays the source of truth for what the model asked
+     * for. The runtime emits:
+     *   - `tool_execution_start`  as soon as the executor begins
+     *     dispatch (name + args + toolCallId)
+     *   - `tool_execution_delta`  partial-output chunks for tools
+     *     that opt in to streaming (currently bash and eval). Other
+     *     tools emit zero of these.
+     *   - `tool_execution_complete` with the final `ToolResult` once
+     *     the dispatch resolves (success or failure).
+     * Callers that do not consume these (existing mock gateways, the
+     * legacy parity `tool_call`-only path) are unaffected.
+     */
+    | "tool_execution_start"
+    | "tool_execution_delta"
+    | "tool_execution_complete"
     | "message_end"
     | "error";
   content?: string;

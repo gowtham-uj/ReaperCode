@@ -513,6 +513,26 @@ export type ToolCall = z.infer<typeof ToolCallSchema>;
 export type ToolResult = z.infer<typeof ToolResultSchema>;
 
 /**
+ * Pi-parity: per-tool streaming vocabulary. The runtime emits these as
+ * an `AsyncIterable` so callers (live loops, trajectory sinks, UI
+ * dashboards) can react to a tool call in real time instead of waiting
+ * for the full buffered result.
+ *
+ *   - `tool_execution_start`   — dispatch has begun
+ *   - `tool_execution_delta`   — partial output chunk (bash/eval only;
+ *                                other tools do not emit these)
+ *   - `tool_execution_complete` — the final buffered `ToolResult`
+ *   - `tool_execution_failed`  — a non-recoverable error surfaced from
+ *                                the executor; the loop should stop
+ *                                dispatching further tools for this batch.
+ */
+export type ExecutionEvent =
+  | { type: "tool_execution_start"; data: { toolCallId: string; name: string; args: Record<string, unknown> } }
+  | { type: "tool_execution_delta"; data: { toolCallId: string; delta: string } }
+  | { type: "tool_execution_complete"; data: { toolCallId: string; result: ToolResult } }
+  | { type: "tool_execution_failed"; data: { toolCallId: string; error: { code: string; message: string } } };
+
+/**
  * Per-tool resource keys used by the parallel scheduler's island partitioner.
  *
  * Shape expected by the partitioner:

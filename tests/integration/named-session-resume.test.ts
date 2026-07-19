@@ -11,7 +11,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 
 import { RuntimeEngine } from "../../src/runtime/engine.js";
-import { COCKPIT_OPEN, countCockpitMarkers } from "../../src/runtime/context-cockpit.js";
+import { countCockpitMarkers } from "../../src/runtime/context-cockpit.js";
 import type {
   EmbeddingRequest,
   EmbeddingResult,
@@ -138,13 +138,14 @@ test("named-session resume reinserts a fresh cockpit after stripping the prior r
   const mainRequestsB = gatewayB.requests.filter((item) => item.source === "main_agent");
   assert.ok(mainRequestsB.length >= 1, "expected at least one main_agent request in run B");
 
-  // Cockpit present, exactly one pair, slim envelope.
+  // Pi-parity: NO cockpit bundle is injected, neither on a fresh run
+  // nor on a resumed session. The raw user prompt is always the first
+  // user message that the model sees, regardless of session history.
   const first = mainRequestsB[0]!;
   const all = first.messages.map((m) => m.content).filter((c) => typeof c === "string").join("\n");
-  assert.deepEqual(countCockpitMarkers(all), { opens: 1, closes: 1 });
+  assert.deepEqual(countCockpitMarkers(all), { opens: 0, closes: 0 });
   const cockpit = first.messages.find(
-    (m) => m.role === "user" && typeof m.content === "string" && m.content.startsWith(COCKPIT_OPEN),
+    (m) => m.role === "user" && typeof m.content === "string" && m.content.startsWith("<<<REAPER_COCKPIT v1>>>"),
   );
-  assert.ok(cockpit, "fresh cockpit present in resumed run");
-  assert.doesNotMatch((cockpit as { content: string }).content, /npm=|docker=|tools=/, "resumed cockpit is the slim envelope");
+  assert.equal(cockpit, undefined, "no cockpit bundle is injected under Pi-parity");
 });

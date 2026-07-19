@@ -1,8 +1,8 @@
 /**
  * Live end-to-end validation: a real complex multi-file dev task exercising
- * cockpit, named-session resume, tool execution, child-env sanitization,
- * permission enforcement, and the new slimmed cockpit envelope. Uses a
- * scripted mock provider that walks the model through:
+ * named-session resume, tool execution, child-env sanitization,
+ * permission enforcement. Uses a scripted mock provider that walks the
+ * model through:
  *   - file_view tool call to inspect
  *   - write_file to refactor
  *   - bash test run that verifies behavior
@@ -116,7 +116,7 @@ class StepwiseGateway implements ModelGateway {
   }
 }
 
-test("end-to-end live validation: multi-file dev task with cockpit + sessions", async () => {
+test("end-to-end live validation: multi-file dev task with Pi-parity sessions", async () => {
   const workspaceRoot = await createTempWorkspace();
   const userHome = await mkdtemp(path.join(tmpdir(), "reaper-e2e-home-"));
   await mkdir(path.join(userHome, ".config", "reaper"), { recursive: true });
@@ -211,38 +211,22 @@ test("end-to-end live validation: multi-file dev task with cockpit + sessions", 
   for (const req of mainRequests) {
     const all = req.messages.map((m) => m.content).filter((c) => typeof c === "string").join("\n");
     const counts = countCockpitMarkers(all);
-    assert.deepEqual(counts, { opens: 1, closes: 1 }, "exactly one cockpit pair per request");
+    assert.deepEqual(counts, { opens: 0, closes: 0 }, "no cockpit markers in any request under Pi-parity");
   }
 
   const first = mainRequests[0]!;
+  // Pi-parity: no cockpit bundle is injected. The first request's
+  // user message must still carry the raw task prompt so the model
+  // has something to act on.
   const cockpit = first.messages.find(
     (m) => m.role === "user" && typeof m.content === "string" && m.content.startsWith(COCKPIT_OPEN),
   );
-  assert.ok(cockpit, "cockpit present in first request");
-  const cockpitContent = (cockpit as { content: string }).content;
-  assert.match(cockpitContent, /OS=/);
-  assert.match(cockpitContent, /Node=/);
-  assert.doesNotMatch(cockpitContent, /npm=/, "slimmed cockpit omits npm");
-  assert.doesNotMatch(cockpitContent, /docker=/, "slimmed cockpit omits docker");
-  assert.doesNotMatch(cockpitContent, /tools=/, "slimmed cockpit omits tools probe");
-  assert.doesNotMatch(cockpitContent, /soft_cap_tokens=/, "slimmed cockpit omits soft_cap_tokens");
-  assert.doesNotMatch(cockpitContent, /background_processes=/, "slimmed cockpit omits background_processes");
-  assert.doesNotMatch(cockpitContent, /# Ranked workspace map/, "no ranked workspace map");
-  assert.doesNotMatch(cockpitContent, /# Ranked bounded file excerpts/, "no ranked bounded excerpts");
-  assert.match(cockpitContent, /# Compact environment/);
-  assert.match(cockpitContent, /# Runtime facts/);
-
-  const cockpit1 = mainRequests[1]!.messages.find(
-    (m) => m.role === "user" && typeof m.content === "string" && m.content.startsWith(COCKPIT_OPEN),
-  ) as { content: string } | undefined;
-  assert.ok(cockpit1);
-  assert.equal(cockpit1.content, cockpitContent, "cockpit bytes are stable across mutations (no refresh)");
-
-  const cockpitIdx = first.messages.findIndex(
-    (m) => m.role === "user" && typeof m.content === "string" && m.content.startsWith(COCKPIT_OPEN),
+  assert.equal(cockpit, undefined, "no cockpit bundle is injected under Pi-parity");
+  const firstUserMessage = first.messages.find(
+    (m) => m.role === "user" && (m as { name?: string }).name === CURRENT_REQUEST_MESSAGE_NAME,
   );
-  assert.equal(first.messages[cockpitIdx + 1]?.name, CURRENT_REQUEST_MESSAGE_NAME, "exact task follows cockpit");
-  assert.equal(first.messages[cockpitIdx + 1]?.content, userPrompt);
+  assert.ok(firstUserMessage, "the raw user prompt is the first user message");
+  assert.equal((firstUserMessage as { content: string }).content, userPrompt);
 
   assert.ok(result.toolResults.length >= 3);
   const toolNames = new Set(result.toolResults.map((r) => r.name));
