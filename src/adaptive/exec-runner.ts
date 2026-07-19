@@ -387,7 +387,7 @@ export async function runExec(opts: ExecRunnerOptions): Promise<ExecRunnerResult
       events: result.events,
     });
     runEndEmitter = {
-      logger: new TrajectoryLogger(opts.workspaceRoot),
+      logger: new TrajectoryLogger(opts.workspaceRoot, { runId: deriveRunIdFromTrajectoryPath(result.trajectoryPath) }),
       runId: deriveRunIdFromTrajectoryPath(result.trajectoryPath),
     };
     await emitRunEnd({
@@ -424,14 +424,21 @@ export async function runExec(opts: ExecRunnerOptions): Promise<ExecRunnerResult
     };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    if (runEndEmitter) {
-      await emitRunEnd({
-        emitter: runEndEmitter,
-        status: "failed",
-        finalAssistantMessage: message,
-        durationMs: Date.now() - startedAt,
-      });
+    // If the engine threw before producing a trajectory path, fall
+    // back to a run-agnostic TrajectoryLogger so the failed-run_end
+    // envelope still lands somewhere a harness can find it.
+    if (!runEndEmitter) {
+      runEndEmitter = {
+        logger: new TrajectoryLogger(opts.workspaceRoot),
+        runId: "exec",
+      };
     }
+    await emitRunEnd({
+      emitter: runEndEmitter,
+      status: "failed",
+      finalAssistantMessage: message,
+      durationMs: Date.now() - startedAt,
+    });
     return {
       status: "failed",
       assistantMessage: "",
