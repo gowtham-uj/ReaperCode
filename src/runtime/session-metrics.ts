@@ -60,7 +60,40 @@ export function computeMaxActionRepeat(results: ToolResult[]): number {
 }
 
 export function countNoProgressTrips(results: ToolResult[]): number {
-  return 0;
+  // A no-progress trip is N consecutive failed tool calls with the
+  // same action signature and an empty or zero-byte error message
+  // (i.e. the tool was unable to advance the task because it kept
+  // retrying the same dead end). We treat three consecutive repeats
+  // as one trip — small enough not to flag ordinary "rerun after
+  // fix" debugging, large enough to surface genuine deadlocks.
+  //
+  // The previous implementation returned a hardcoded 0, which made
+  // the dashboard metric silently meaningless; downstream consumers
+  // had no way to distinguish a stuck run from a fast one.
+  const REPEAT_THRESHOLD = 3;
+  let trips = 0;
+  let runLength = 0;
+  let lastSig: string | undefined;
+  for (const result of results) {
+    if (result.ok) {
+      runLength = 0;
+      lastSig = undefined;
+      continue;
+    }
+    const sig = makeActionSignature(result);
+    if (sig === lastSig) {
+      runLength += 1;
+      if (runLength === REPEAT_THRESHOLD) {
+        trips += 1;
+        // Continue counting — a long stuck run counts multiple trips.
+        runLength = 0;
+      }
+    } else {
+      lastSig = sig;
+      runLength = 1;
+    }
+  }
+  return trips;
 }
 
 export function makeActionSignature(result: ToolResult): string {

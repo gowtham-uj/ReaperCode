@@ -82,6 +82,8 @@ export async function createCheckpoint(input: CreateCheckpointInput): Promise<Ch
 export async function restoreCheckpoint(workspaceRoot: string, checkpointId: string): Promise<RestoreCheckpointResult> {
   const checkpoint = await readCheckpoint(workspaceRoot, checkpointId);
   if (!checkpoint.restoreAvailable || checkpoint.baseRevision === "unavailable") {
+    // Defense-in-depth: even if a corrupted metadata.json claims restoreAvailable,
+    // refuse to attempt a restore without a real base revision.
     throw new Error(`Checkpoint '${checkpointId}' is not restorable`);
   }
 
@@ -101,7 +103,33 @@ export async function restoreCheckpoint(workspaceRoot: string, checkpointId: str
 
 export async function readCheckpoint(workspaceRoot: string, checkpointId: string): Promise<Checkpoint> {
   const raw = await readFile(path.join(getCheckpointDir(workspaceRoot, checkpointId), "metadata.json"), "utf8");
-  return JSON.parse(raw) as Checkpoint;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Checkpoint '${checkpointId}' metadata.json is malformed: ${message}`);
+  }
+  if (!isCheckpointShape(parsed)) {
+    throw new Error(`Checkpoint '${checkpointId}' metadata.json failed shape validation`);
+  }
+  return parsed;
+}
+
+function isCheckpointShape(value: unknown): value is Checkpoint {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<Checkpoint>;
+  return (
+    typeof candidate.id === "string" &&
+    typeof candidate.createdAt === "string" &&
+    typeof candidate.baseRevision === "string" &&
+    Array.isArray(candidate.dirtyFilesBefore) &&
+    candidate.dirtyFilesBefore.every((entry) => typeof entry === "string") &&
+    typeof candidate.reason === "string" &&
+    Array.isArray(candidate.toolCallIds) &&
+    candidate.toolCallIds.every((entry) => typeof entry === "string") &&
+    typeof candidate.restoreAvailable === "boolean"
+  );
 }
 
 export function getCheckpointDir(workspaceRoot: string, checkpointId: string): string {

@@ -58,12 +58,12 @@ export class ExtensionLifecycle {
     };
     const cmds = extManifest.validation?.commands ?? [];
     if (cmds.length === 0) {
-      return {
-        ok: true,
-        id,
-        results: [],
-        ...(loaded.error ? { error: loaded.error } : {}),
-      };
+      // No validation commands declared — be explicit that there is no
+      // validation evidence rather than reporting success.
+      const message = loaded.error
+        ? `extension "${id}" failed to load: ${loaded.error}`
+        : `extension "${id}" declares no validation commands (manifest schema does not yet expose validation.commands); validation is a no-op`;
+      return { ok: false, id, results: [], error: message };
     }
     const results: Array<{ id: string; exitCode: number; stderr: string }> = [];
     for (const c of cmds) {

@@ -24,6 +24,7 @@ export function inferTransport(value: unknown): TransportKind {
 
 export async function persistRunResult(runContext: ReaperRunContext, result: RuntimeEngineResult, status: "completed" | "failed"): Promise<void> {
   await mkdir(runContext.runDir, { recursive: true });
+  const completedAt = new Date().toISOString();
   await writeFile(
     path.join(runContext.runDir, "result.json"),
     JSON.stringify(
@@ -32,7 +33,7 @@ export async function persistRunResult(runContext: ReaperRunContext, result: Run
         sessionId: runContext.sessionId,
         traceId: runContext.traceId,
         status,
-        completedAt: new Date().toISOString(),
+        completedAt,
         assistantMessage: result.assistantMessage,
         toolResultCount: result.toolResults.length,
         failedToolResultCount: result.toolResults.filter((item) => !item.ok).length,
@@ -45,6 +46,42 @@ export async function persistRunResult(runContext: ReaperRunContext, result: Run
     ),
     "utf8",
   );
+  // Refresh the run manifest so any operator-side check that compares
+  // manifest.json's mtime/contents against trajectory/audit/result.json
+  // sees a consistent end-of-run snapshot. Without this, manifest.json
+  // is only written once on run creation and may diverge from the
+  // final result, causing stale-flag heuristics to false-positive a
+  // successful run as broken.
+  await refreshRunManifest(runContext, { status, completedAt });
+}
+
+/**
+ * Merge a status/completedAt stamp onto the existing `manifest.json`
+ * so downstream staleness checks see the canonical end-of-run state.
+ * Reads the existing manifest first (created on run start); if it is
+ * missing or unparseable, writes a fresh one from the runContext.
+ */
+export async function refreshRunManifest(
+  runContext: ReaperRunContext,
+  stamp: { status: "completed" | "failed"; completedAt: string },
+): Promise<void> {
+  const manifestPath = path.join(runContext.runDir, "manifest.json");
+  let base: Record<string, unknown> = {};
+  try {
+    const { readFile } = await import("node:fs/promises");
+    const text = await readFile(manifestPath, "utf8");
+    base = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    base = {
+      runId: runContext.runId,
+      sessionId: runContext.sessionId,
+      traceId: runContext.traceId,
+      threadId: runContext.threadId,
+      startedAt: runContext.startedAt,
+    };
+  }
+  const merged = { ...base, ...stamp };
+  await writeFile(manifestPath, JSON.stringify(merged, null, 2), "utf8");
 }
 
 export function extractIntentSummary(request: AgentRequestEnvelope): string {

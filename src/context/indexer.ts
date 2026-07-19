@@ -111,10 +111,13 @@ export interface CodebaseIndex {
   fileTree: string[];
   alwaysInclude: IndexedFile[];
   truncated: boolean;
+  /** Per-path readdir/stat failures encountered while walking. */
+  errors?: { path: string; code: string; message: string }[];
 }
 
 export async function buildCodebaseIndex(workspaceRoot: string): Promise<CodebaseIndex> {
-  const collected = await walkFiles(workspaceRoot, workspaceRoot, 0, 10);
+  const errors: { path: string; code: string; message: string }[] = [];
+  const collected = await walkFiles(workspaceRoot, workspaceRoot, 0, 10, errors);
   const truncated = collected.length >= MAX_TOTAL_FILES;
   const sorted = collected
     .sort((a, b) => a.relativePath.localeCompare(b.relativePath))
@@ -125,7 +128,7 @@ export async function buildCodebaseIndex(workspaceRoot: string): Promise<Codebas
     .update(JSON.stringify(sorted.map((file) => [file.relativePath, file.sizeBytes, file.modifiedMs])))
     .digest("hex");
 
-  return {
+  const result: CodebaseIndex = {
     workspaceRoot,
     fingerprint,
     files: sorted,
@@ -133,6 +136,8 @@ export async function buildCodebaseIndex(workspaceRoot: string): Promise<Codebas
     alwaysInclude: sorted.filter((file) => alwaysIncludeNames.has(path.basename(file.relativePath))),
     truncated,
   };
+  if (errors.length > 0) result.errors = errors;
+  return result;
 }
 
 export async function readIndexedFile(file: IndexedFile): Promise<string> {
@@ -173,12 +178,23 @@ function shouldSkipDirectory(name: string): boolean {
   return false;
 }
 
-async function walkFiles(root: string, currentDir: string, currentDepth: number, maxDepth: number): Promise<IndexedFile[]> {
+async function walkFiles(root: string, currentDir: string, currentDepth: number, maxDepth: number, errors: { path: string; code: string; message: string }[] = []): Promise<IndexedFile[]> {
   if (currentDepth > maxDepth) {
     return [];
   }
 
-  const entries = await readdir(currentDir, { withFileTypes: true }).catch(() => []);
+  let entries: import("node:fs").Dirent[];
+  try {
+    entries = await readdir(currentDir, { withFileTypes: true });
+  } catch (error) {
+    const errno = error as NodeJS.ErrnoException;
+    errors.push({
+      path: currentDir,
+      code: errno?.code ?? "UNKNOWN",
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return [];
+  }
   if (entries.length === 0) return [];
 
   // Phase 1: classify and skip-in-place for directories that we know
@@ -232,7 +248,18 @@ async function walkFiles(root: string, currentDir: string, currentDepth: number,
     const batch = fileCandidates.slice(i, i + MAX_CONCURRENCY);
     const batchStats = await Promise.all(
       batch.map(async ({ name, fullPath }) => {
-        const fileStat = await stat(fullPath).catch(() => null);
+        let fileStat;
+        try {
+          fileStat = await stat(fullPath);
+        } catch (error) {
+          const errno = error as NodeJS.ErrnoException;
+          errors.push({
+            path: fullPath,
+            code: errno?.code ?? "UNKNOWN",
+            message: error instanceof Error ? error.message : String(error),
+          });
+          return null;
+        }
         if (!fileStat || !fileStat.isFile()) return null;
         // Skip huge files — see MAX_INDEXED_FILE_BYTES above. These
         // bloat downstream consumers and serve no useful role in

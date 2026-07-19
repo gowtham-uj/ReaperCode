@@ -4,6 +4,12 @@ export interface IntegratorResult {
   ok: boolean;
   mergedBranches: string[];
   conflictSummary?: string;
+  /**
+   * Set when the merge could not be diagnosed because git itself was
+   * unreachable or returned an error. Consumers should treat this as a
+   * transient infrastructure failure, not a code conflict.
+   */
+  diagnosticError?: string;
 }
 
 export async function runIntegratorMerge(workspaceRoot: string, branches: string[]): Promise<IntegratorResult> {
@@ -16,12 +22,25 @@ export async function runIntegratorMerge(workspaceRoot: string, branches: string
     }
     return { ok: true, mergedBranches: [baseBranch, ...mergedBranches] };
   } catch (error) {
-    const conflictSummary = await git(["status", "--short"], workspaceRoot).catch(() => "merge failed");
-    await git(["merge", "--abort"], workspaceRoot).catch(() => undefined);
-    return {
+    let conflictSummary: string | undefined;
+    let diagnosticError: string | undefined;
+    try {
+      conflictSummary = (await git(["status", "--short"], workspaceRoot)).trim();
+    } catch (statusError) {
+      diagnosticError = statusError instanceof Error ? statusError.message : String(statusError);
+    }
+    try {
+      await git(["merge", "--abort"], workspaceRoot);
+    } catch {
+      // Best effort — merge --abort fails when no merge is in progress.
+    }
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const result: IntegratorResult = {
       ok: false,
       mergedBranches,
-      conflictSummary: error instanceof Error ? `${error.message}\n${conflictSummary}` : conflictSummary,
+      ...(diagnosticError ? { diagnosticError } : {}),
+      ...(!diagnosticError && conflictSummary ? { conflictSummary: `${errorMessage}\n${conflictSummary}`.trim() } : {}),
     };
+    return result;
   }
 }

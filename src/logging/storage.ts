@@ -34,7 +34,25 @@ export class JsonlStorage {
   private lastEntryHash: string | undefined;
   private currentOffset = 0;
   private currentMtimeMs = 0;
+  // `chainHealthy` — false when initializeStateIfNeeded observed a
+  // malformed tail but chose to fall back to "root" anyway so writes
+  // don't stall. A subsequent audit entry ("chain_unhealthy") is
+  // emitted once so the operator knows the in-memory chain forked and
+  // the next batch's `prev_hash` will no longer match what an
+  // independent reader sees. This trades guaranteed chain integrity
+  // (which we already lacked: see comment on `append`) for at least a
+  // visible-to-trajectory signal.
+  private chainHealthy = true;
   private initializingPromise: Promise<void> | undefined;
+  // Per-instance write chain. Every append/appendBatch is queued onto
+  // this promise so concurrent callers serialise on the same chain and
+  // the in-memory `lastEntryHash` / `currentOffset` updates land in
+  // arrival order. Without this, two near-simultaneous appends read the
+  // same prev_hash, both write the same chain link, and the audit log
+  // forks into two branches that never reconcile (the bug that
+  // produced two same-prev_hash audit entries ~0.8 ms apart in
+  // production).
+  private writeChain: Promise<void> = Promise.resolve();
 
   constructor(options: JsonlStorageOptions) {
     const scratchpad = getReaperScratchpadPaths(options.workspaceRoot);
@@ -70,7 +88,21 @@ export class JsonlStorage {
         } catch {
           this.currentMtimeMs = Date.now();
         }
-      } catch {
+      } catch (error) {
+        const errno = error as NodeJS.ErrnoException;
+        if (errno?.code === "ENOENT") {
+          // Fresh log file — chainHealthy stays true.
+          this.currentOffset = 0;
+          this.lastEntryHash = "root";
+          this.currentMtimeMs = Date.now();
+          return;
+        }
+        // Other read errors (EACCES, EIO): chain is unsynced. Emit a
+        // trajectory-shaped warning via stderr so it's visible. The
+        // append path will start a "root" chain as a recovery fallback
+        // — see `chainUnhealthyDetectedOnce`.
+        this.chainHealthy = false;
+        console.warn(`[reaper][storage] failed to read existing trajectory file '${this.filePath}': ${errno?.code ?? "UNKNOWN"} ${error instanceof Error ? error.message : String(error)} — starting a new root chain`);
         this.currentOffset = 0;
         this.lastEntryHash = "root";
         this.currentMtimeMs = Date.now();
@@ -95,6 +127,15 @@ export class JsonlStorage {
   }
 
   async append(entry: unknown): Promise<{ offset: number; serialized: string } | null> {
+    const next = this.writeChain.then(() => this.appendInternal(entry));
+    this.writeChain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+
+  private async appendInternal(entry: unknown): Promise<{ offset: number; serialized: string } | null> {
     await mkdir(path.dirname(this.filePath), { recursive: true });
 
     const payloadRaw = entry as Record<string, unknown>;
@@ -135,6 +176,15 @@ export class JsonlStorage {
    * event during bursty phases (tool dispatch produces 3-4 envelopes).
    */
   async appendBatch(entries: unknown[]): Promise<Array<{ offset: number; serialized: string } | null>> {
+    const next = this.writeChain.then(() => this.appendBatchInternal(entries));
+    this.writeChain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+
+  private async appendBatchInternal(entries: unknown[]): Promise<Array<{ offset: number; serialized: string } | null>> {
     if (entries.length === 0) return [];
     await mkdir(path.dirname(this.filePath), { recursive: true });
     await this.initializeStateIfNeeded();
@@ -177,6 +227,21 @@ export class JsonlStorage {
   get path() {
     return this.filePath;
   }
+
+  /**
+   * Has this storage observed a chain-healthy state since the last
+   * `initializeStateIfNeeded`? Returns `true` on fresh files and on
+   * a clean reload from a valid tail. Returns `false` when the
+   * reloaded tail was missing `entry_hash`, had unparseable JSON, or
+   * could not be read for filesystem reasons — the in-memory chain
+   * forked from the on-disk one. Callers should emit a `chain_unhealthy`
+   * trajectory event on the next append so the operator can
+   * review-repair the file.
+   */
+  isChainHealthy(): boolean {
+    return this.chainHealthy;
+  }
+
 
   /**
    * Phase T3.13: structured rotation policy. Replaces the legacy
@@ -253,10 +318,25 @@ export class JsonlStorage {
 
     try {
       const lastEntry = JSON.parse(lines.at(-1) ?? "{}") as { entry_hash?: unknown };
-      return typeof lastEntry.entry_hash === "string" && lastEntry.entry_hash.length > 0 ? lastEntry.entry_hash : "root";
-    } catch {
+      if (typeof lastEntry.entry_hash === "string" && lastEntry.entry_hash.length > 0) {
+        return lastEntry.entry_hash;
+      }
+    } catch (error) {
+      // The last line is unparseable. Returning "root" here would
+      // silently fork the chain — the corrupted tail would be followed
+      // by a brand-new root-anchored chain that never reconciles with
+      // the valid prefix. We still proceed (so the agent isn't blocked)
+      // but flip `chainHealthy=false` so a `chain_unhealthy` audit
+      // event can be emitted on the next append.
+      const message = error instanceof Error ? error.message : String(error);
+      this.chainHealthy = false;
+      console.warn(`[reaper][storage] trajectory tail is malformed: ${message}; restarting chain at root and will emit chain_unhealthy on next append`);
       return "root";
     }
+    // Last line had no `entry_hash`. Same fork risk — mark unhealthy.
+    this.chainHealthy = false;
+    console.warn(`[reaper][storage] trajectory tail lacks entry_hash field; restarting chain at root and will emit chain_unhealthy on next append`);
+    return "root";
   }
 }
 

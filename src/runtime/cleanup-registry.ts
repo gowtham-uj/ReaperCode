@@ -54,7 +54,7 @@ export function installCrashHandlers(): void {
 
   process.on("uncaughtException", async (error) => {
     console.error("[reaper] uncaughtException:", error);
-    await writeCrashResult(error);
+    await writeCrashResult(error, "uncaughtException");
     await runCleanupFunctions();
     process.exit(1);
   });
@@ -62,13 +62,40 @@ export function installCrashHandlers(): void {
   process.on("unhandledRejection", async (reason) => {
     console.error("[reaper] unhandledRejection:", reason);
     const error = reason instanceof Error ? reason : new Error(String(reason));
-    await writeCrashResult(error);
+    await writeCrashResult(error, "unhandledRejection");
     await runCleanupFunctions();
     process.exit(1);
   });
+
+  // Signal handlers: SIGTERM/SIGINT/SIGHUP leave orphan run dirs with
+  // no result.json unless we synthesize one. Without these, the next
+  // orphan-reap scan picks up a half-written run dir and the user has
+  // no record of why their run died.
+  const onSignal = (signal: NodeJS.Signals): void => {
+    void handleSignal(signal);
+  };
+  process.on("SIGTERM", onSignal);
+  process.on("SIGINT", onSignal);
+  process.on("SIGHUP", onSignal);
 }
 
-async function writeCrashResult(error: Error): Promise<void> {
+async function handleSignal(signal: NodeJS.Signals): Promise<void> {
+  // Avoid recursion if a signal fires during shutdown.
+  try {
+    process.removeAllListeners(signal);
+  } catch {
+    // ignore
+  }
+  const error = new Error(`received ${signal}`);
+  error.name = "SignalInterruption";
+  await writeCrashResult(error, signal);
+  await runCleanupFunctions();
+  // 128 + conventional signal number so shell sees the right code.
+  const code = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 129;
+  process.exit(code);
+}
+
+async function writeCrashResult(error: Error, cause: string): Promise<void> {
   if (!activeRunDir) return;
   try {
     await mkdir(activeRunDir, { recursive: true });
@@ -78,6 +105,7 @@ async function writeCrashResult(error: Error): Promise<void> {
         {
           status: "crashed",
           crashedAt: new Date().toISOString(),
+          cause,
           error: {
             name: error.name,
             message: error.message,

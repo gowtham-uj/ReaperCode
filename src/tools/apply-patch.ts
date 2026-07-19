@@ -213,6 +213,14 @@ async function applyFilePatch(
   let additions = 0;
   let removals = 0;
 
+  // Tolerate at most this many context-line mismatches before treating the
+  // hunk as not applied. Without a ceiling, a single stray space in the
+  // patch silently corrupts the file because the runner silently keeps
+  // the expected line instead of the supplied context.
+  const CONTEXT_MISMATCH_LIMIT = 4;
+  let contextMismatches = 0;
+  const mismatchedLines: number[] = [];
+
   for (const hunk of filePatch.hunks) {
     // Copy unchanged lines before this hunk
     const oldStartIndex = hunk.oldStart > 0 ? hunk.oldStart - 1 : 0;
@@ -224,9 +232,13 @@ async function applyFilePatch(
     // Apply hunk
     for (const hunkLine of hunk.lines) {
       if (hunkLine.type === "context") {
-        // Verify context matches (advisory, don't throw on mismatch)
         const expected = oldLines[currentOldLine] ?? "";
-        // Context mismatch is a warning but doesn't block
+        if (hunkLine.content !== expected) {
+          contextMismatches += 1;
+          if (mismatchedLines.length < CONTEXT_MISMATCH_LIMIT) {
+            mismatchedLines.push(currentOldLine + 1);
+          }
+        }
         resultLines.push(expected);
         currentOldLine++;
       } else if (hunkLine.type === "add") {
@@ -249,12 +261,36 @@ async function applyFilePatch(
   const newContent = resultLines.join("\n");
   const action = filePatch.isNew ? "created" : (newContent === oldContent ? "unchanged" : "modified");
 
+  if (contextMismatches > CONTEXT_MISMATCH_LIMIT) {
+    // The patch does not actually match the source. Refuse to write —
+    // otherwise we silently drop the model's intended content into the
+    // file and the only signal is "the file changed but doesn't compile".
+    throw new Error(
+      `apply_patch: ${contextMismatches} context-line mismatches in ${filePatch.newPath} (lines ${mismatchedLines.join(", ")}…) — patch does not match the source file. Re-read the file and regenerate the patch.`,
+    );
+  }
+
   if (!dryRun && action !== "unchanged") {
     await mkdir(dirname(fullPath), { recursive: true });
     await writeFile(fullPath, newContent, "utf8");
   }
 
-  return { path: filePatch.newPath, action, additions, removals, newContent };
+  return {
+    path: filePatch.newPath,
+    action,
+    additions,
+    removals,
+    newContent,
+    ...(contextMismatches > 0
+      ? {
+          diagnostics: {
+            contextMismatches,
+            mismatchedLines,
+            warning: `${contextMismatches} context-line mismatch(es) in ${filePatch.newPath}; the surrounding file content was preserved.`,
+          },
+        }
+      : {}),
+  };
 }
 
 function resolvePath(toolPath: string, workspaceRoot: string): string {

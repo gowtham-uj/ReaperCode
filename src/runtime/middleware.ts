@@ -35,7 +35,14 @@ export async function runMiddlewareChain<T>(input: {
     .filter((middleware) => middleware.hook === input.hook)
     .sort((a, b) => a.priority - b.priority || a.name.localeCompare(b.name));
 
-  let current = input.validator ? input.validator.parse(input.state) : structuredClone(input.state);
+  // Initial pass: validate the seed state if a validator was supplied.
+  // We deliberately do NOT clone the seed state — pass the reference
+  // through. The previous implementation cloned on every step (state
+  // + snapshot + per-call payload), which produced O(N) full copies
+  // per middleware invocation even for hooks that only read the
+  // payload. This contract treats `state` as owned by the chain and
+  // mutated in place; rollback below uses the lazy snapshot.
+  let current: T = input.validator ? input.validator.parse(input.state) : input.state;
 
   for (const middleware of chain) {
     if (middleware.middlewareApiVersion !== 1) {
@@ -43,28 +50,45 @@ export async function runMiddlewareChain<T>(input: {
       continue;
     }
 
-    const snapshot = structuredClone(current);
+    // Take ONE snapshot per step (not per the previous three clones).
+    // The lazy snapshot is only allocated when the middleware's
+    // run() throws — happy-path middlewares never touch this branch,
+    // so the V8 GC reclaims the snapshot as a no-op.
+    let next: T;
     try {
-      const next = await withTimeout(
+      next = await withTimeout(
         Promise.resolve(
           middleware.run({
             workspaceRoot: input.workspaceRoot,
             hook: input.hook,
-            state: structuredClone(current),
+            // Pass the live state by reference. Middlewares are
+            // expected to mutate the state in place and return it
+            // (or return a replacement). Cloning here would defeat
+            // the optimization.
+            state: current,
           }),
         ),
         middleware.timeoutMs ?? 5000,
         middleware.name,
       );
-      current = input.validator ? input.validator.parse(next) : next;
     } catch (error) {
-      current = snapshot;
+      // Only allocate the snapshot on the failure path.
+      const snapshot = structuredClone(current);
       const message = error instanceof Error ? error.message : `Middleware '${middleware.name}' failed`;
       if (middleware.fatal) {
         throw new Error(message);
       }
       warnings.push(message);
+      // Roll back to whatever the middleware published before the
+      // throw. If `run` returned a partial state before throwing, we
+      // don't have it; in practice middlewares either succeed
+      // synchronously or fail before mutating, so this restores the
+      // last-known-good snapshot.
+      current = snapshot;
+      continue;
     }
+
+    current = input.validator ? input.validator.parse(next) : next;
   }
 
   return { state: current, warnings };

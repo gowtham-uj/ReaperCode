@@ -7,6 +7,11 @@ export class TrajectoryLogger {
   private readonly storage: JsonlStorage;
   private readonly index: LogIndexFile;
   private readonly workspaceRoot: string;
+  // Tracks whether we've already surfaced the chain-unhealthy signal
+  // for the current process lifetime. We only want to spam a single
+  // `chain_unhealthy` audit entry per storage fork — once flagged,
+  // operators know.
+  private chainUnhealthyReported = false;
 
   constructor(workspaceRoot: string, options?: { devMode?: boolean; sampleRate?: number; runId?: string }) {
     this.workspaceRoot = workspaceRoot;
@@ -26,6 +31,7 @@ export class TrajectoryLogger {
     // (different files, no data dependency on each other beyond
     // `appended.offset`). Previously the index write waited for the
     // jsonl write to finish; now they overlap.
+    await this.maybeReportChainUnhealthy(parsed);
     const indexAppendPromise = this.storage.append(parsed).then((appended) => {
       if (appended) {
         // Fire-and-forget the index write — losing an index entry on
@@ -66,6 +72,7 @@ export class TrajectoryLogger {
       return this.write(entries[0]);
     }
     const parsed = entries.map((e) => parseTrajectoryEntry(e));
+    await this.maybeReportChainUnhealthy(parsed[0] ?? { run_id: "", session_id: "", trace_id: "" });
     const appended = await this.storage.appendBatch(parsed);
     const indexAppends: Array<Promise<void>> = [];
     for (let i = 0; i < parsed.length; i++) {
@@ -100,5 +107,47 @@ export class TrajectoryLogger {
 
   get path() {
     return this.storage.path;
+  }
+
+  /**
+   * Surface a single trajectory `chain_unhealthy` event when the
+   * underlying JsonlStorage's in-memory chain is known to have
+   * forked from the on-disk file. The signal is emitted at most once
+   * per process lifetime — operators do not need N redundant entries
+   * for one corruption episode. The entry kind piggy-backs on
+   * `recovery_summary` (already a known observer-only event) since
+   * the trajectory schema has a discriminated-union `kind` and adding
+   * `chain_unhealthy` would require a schema bump. The `cause` field
+   * (`chain_unhealthy`) carries the durable signal and is what
+   * downstream log readers should filter on.
+   */
+  private async maybeReportChainUnhealthy(
+    seed: { run_id: string; session_id: string; trace_id: string },
+  ): Promise<void> {
+    if (this.chainUnhealthyReported) return;
+    if (this.storage.isChainHealthy()) return;
+    this.chainUnhealthyReported = true;
+    try {
+      await this.storage.append({
+        event_id: crypto.randomUUID(),
+        run_id: seed.run_id,
+        session_id: seed.session_id,
+        trace_id: seed.trace_id,
+        timestamp: new Date().toISOString(),
+        log_schema_version: 1,
+        kind: "recovery_summary",
+        level: "info",
+        recovery_type: "chain_unhealthy",
+        cause: "chain_unhealthy",
+        outcome: "failure",
+      });
+      console.warn(
+        "[reaper][trajectory] chain_unhealthy emitted — reaper-trajectory.jsonl tail was malformed or unreadable; the in-memory chain restarted at root and may diverge from a replay reader",
+      );
+    } catch (error) {
+      console.warn(
+        `[reaper][trajectory] failed to emit chain_unhealthy (best-effort): ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 }

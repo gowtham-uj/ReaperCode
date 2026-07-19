@@ -35,8 +35,17 @@ function verifierKind(result: ToolResult): VerifierKind | undefined {
   const args = asRecord(result.args);
   const cmd = typeof args?.cmd === "string" ? args.cmd : undefined;
   if (!cmd) return undefined;
-  if (/\b(pnpm|npm|yarn)\b[^\n;|&]*\b(test|vitest|jest)\b/.test(cmd)) return "test";
-  if (/\b(pnpm|npm|yarn)\b[^\n;|&]*\b(build|tsc)\b/.test(cmd)) return "build";
+  // Tests — npm/yarn/pnpm vitest/jest + standalone test runners.
+  if (/\b(?:pnpm|npm|yarn)\b[^\n;|&]*\b(?:test|vitest|jest)\b/.test(cmd)) return "test";
+  if (/\b(?:pytest|py\.test|unittest)\b/.test(cmd)) return "test";
+  if (/\b(?:cargo\s+test|rustc\b[^\n]*--test\b)/.test(cmd)) return "test";
+  if (/\b(?:go\s+test)\b/.test(cmd)) return "test";
+  if (/\b(?:mvn\s+test|gradle\s+test|bazel\s+test)\b/.test(cmd)) return "test";
+  if (/\b(?:rspec|bundle\s+exec\s+rspec|mocha|jest|vitest)\b/.test(cmd)) return "test";
+  // Builds — package managers, compilers, generic build scripts.
+  if (/\b(?:pnpm|npm|yarn)\b[^\n;|&]*\b(?:build|tsc)\b/.test(cmd)) return "build";
+  if (/\b(?:tsc|cargo\s+build|go\s+build|rustc)\b/.test(cmd)) return "build";
+  if (/\b(?:mvn\s+package|gradle\s+build|make|cmake)\b/.test(cmd)) return "build";
   return undefined;
 }
 
@@ -60,6 +69,14 @@ export function classifyRunFinalStatus(state: {
 }): "completed" | "failed" {
   if (state.completionGateExhausted) return "failed";
   if (state.explicitVerification?.ok === false) return "failed";
+  // Verification MUST be checked before any completion-signal shortcut.
+  // The previous ordering accepted `state.split?.completionSignal` as a
+  // stand-alone green light, which let a confident status string from
+  // the model override an unrecovered verifier failure. Now: any
+  // outstanding verifier failure flips the run to "failed" regardless
+  // of the autonomous-mode completion signal.
+  const toolResults = state.toolResults ?? [];
+  if (hasUnrecoveredVerifierFailure(toolResults)) return "failed";
   if (state.explicitVerification?.ok === true) return "completed";
   if (state.mode === "autonomous" && state.split?.completionSignal) return "completed";
   // autonomous run with an empty assistant message is not a real completion
@@ -70,8 +87,6 @@ export function classifyRunFinalStatus(state: {
     // !ok results during autonomous recovery (e.g. test fail → fix → test
     // pass) are part of normal model-driven debugging and must not flip the
     // run to "failed" when the model ultimately succeeded.
-    const toolResults = state.toolResults ?? [];
-    if (hasUnrecoveredVerifierFailure(toolResults)) return "failed";
     if (toolResults.length > 0 && toolResults[toolResults.length - 1]?.ok !== false) {
       return "completed";
     }

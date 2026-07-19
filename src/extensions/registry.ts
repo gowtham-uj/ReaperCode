@@ -80,6 +80,8 @@ export class ExtensionRegistry {
   private readonly toolRegistry: ExtensionToolRegistry;
   private readonly permissions: ExtensionPermissionManager;
   private readonly hookRunner: HookRunner | null;
+  /** Manifest load errors collected by discover(), exposed via getLoadErrors(). */
+  private readonly loadErrors: { path: string; error: string }[] = [];
 
   constructor(opts: ExtensionRegistryOptions) {
     this.opts = opts;
@@ -95,6 +97,7 @@ export class ExtensionRegistry {
 
   /** Walk the 3 install locations and parse manifests. */
   discover(_input?: DiscoverInput): LoadedExtension[] {
+    this.loadErrors.length = 0;
     const out: LoadedExtension[] = [];
     for (const folder of [this.opts.builtinRoot, join(this.opts.userHome, ".reaper", "extensions"), join(this.opts.workspaceRoot, ".reaper", "extensions")]) {
       for (const ent of enumerateFolders(folder)) {
@@ -160,13 +163,26 @@ export class ExtensionRegistry {
     return { ok: true, id: manifest.id };
   }
 
-  uninstall(id: string): { ok: boolean; error?: string } {
+  uninstall(id: string): { ok: boolean; error?: string; partial?: boolean } {
     const r = this.loaded.get(id);
     if (!r) return { ok: false, error: `extension "${id}" not loaded` };
     this.loaded.delete(id);
     this.toolRegistry.unregisterAllForExtension(id);
     if (existsSync(r.installPath)) {
-      try { rmSync(r.installPath, { recursive: true, force: true }); } catch { /* ignore */ }
+      try {
+        rmSync(r.installPath, { recursive: true, force: true });
+      } catch (error) {
+        // In-memory state is already cleared. Surface the on-disk failure
+        // rather than pretending the uninstall succeeded — the caller
+        // needs to know files remain on disk so they can retry or clean
+        // up by hand.
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          ok: false,
+          partial: true,
+          error: `in-memory extension removed but on-disk cleanup of ${r.installPath} failed: ${message}`,
+        };
+      }
     }
     return { ok: true };
   }
@@ -310,15 +326,26 @@ export class ExtensionRegistry {
     return this.permissions;
   }
 
+  /** Manifest parse errors from the most recent discover() call. */
+  getLoadErrors(): { path: string; error: string }[] {
+    return [...this.loadErrors];
+  }
+
   /** Deactivate every enabled extension (reverse order). */
-  async deactivateAll(): Promise<void> {
+  async deactivateAll(): Promise<{ deactivated: number; failed: number }> {
     const ordered = [...this.loaded.values()].reverse();
+    let deactivated = 0;
+    let failed = 0;
     for (const r of ordered) {
       if (r.status !== "enabled") continue;
       const loadResult = await loadExtensionMain(r.installPath, r.manifest);
       if (!loadResult.ok || !loadResult.module) continue;
       const activated = loadResult.module.default;
-      if (typeof activated.deactivate !== "function") continue;
+      if (typeof activated.deactivate !== "function") {
+        r.status = "disabled";
+        deactivated++;
+        continue;
+      }
       try {
         await activated.deactivate(createExtensionContext({
           extensionId: r.id,
@@ -328,9 +355,18 @@ export class ExtensionRegistry {
           extensionInstallPath: r.installPath,
           ...(this.opts.logSink ? { logSink: this.opts.logSink } : {}),
         }));
-      } catch { /* swallow */ }
+        deactivated++;
+      } catch (error) {
+        failed++;
+        const message = error instanceof Error ? error.message : String(error);
+        r.error = `deactivate threw: ${message}`;
+        if (this.opts.logSink) {
+          this.opts.logSink.error(`[extension:${r.id}] deactivate threw: ${message}`);
+        }
+      }
       r.status = "disabled";
     }
+    return { deactivated, failed };
   }
 
   /* ----- registration sinks (called by the host context) ----- */
@@ -407,7 +443,15 @@ export class ExtensionRegistry {
     let manifest: ExtensionManifest;
     try {
       manifest = parseExtensionManifest(readFileSync(manifestPath, "utf8"));
-    } catch {
+    } catch (error) {
+      // Capture the parse failure rather than silently dropping the
+      // extension — the user wants to know that a manifest at <dir>
+      // is unreadable so they can fix it.
+      const message = error instanceof Error ? error.message : String(error);
+      this.loadErrors.push({ path: manifestPath, error: message });
+      if (this.opts.logSink) {
+        this.opts.logSink.warn(`[extension] failed to parse ${manifestPath}: ${message}`);
+      }
       return null;
     }
     const decision = this.trust.resolve({ extensionId: manifest.id, installPath: dir });

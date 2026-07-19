@@ -55,7 +55,7 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
   CommonLogFieldsSchema.extend({
     kind: z.literal("recovery_summary"),
     level: z.enum(["info", "debug", "trace"]),
-    recovery_type: z.enum(["wal_rollback", "shadow_restore", "retry", "manual_intervention"]),
+    recovery_type: z.enum(["wal_rollback", "shadow_restore", "retry", "manual_intervention", "chain_unhealthy"]),
     cause: z.string().min(1),
     outcome: z.enum(["success", "failure", "merge_conflict"]),
   }),
@@ -340,12 +340,23 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
 	    level: z.enum(["info", "debug", "trace"]),
 	    dropped: z.unknown().optional(),
 	  }),
+	  // Hook engine exceptions that previously vanished into a `catch { }`
+	  // block. Records the hook name, the failing tool, and the error message
+	  // so a misconfigured hook never silently breaks the user's tool path.
+	  CommonLogFieldsSchema.extend({
+	    kind: z.literal("hook_error"),
+	    level: z.enum(["info", "debug", "trace"]),
+	    tool_name: z.string().min(1).optional(),
+	    hook: z.enum(["PreToolUse", "PostToolUse", "PostToolUseFailure"]),
+	    error: z.object({ code: z.string(), message: z.string() }),
+	  }),
 	  ]);
 
 export const AuditEntrySchema = CommonLogFieldsSchema.extend({
   kind: z.enum([
     "policy_block",
     "path_escape",
+    "tool_error",
     "rules_change",
     "no_progress_detected",
     "completion_gate_exhausted",

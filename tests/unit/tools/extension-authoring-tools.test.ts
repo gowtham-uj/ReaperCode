@@ -205,7 +205,12 @@ test("validate_extension runs validation.commands and reports exit codes", async
       ctx.deps,
     );
     const r = await handleValidateExtension({ id: "validateable" }, ctx.deps);
-    assert.equal(r.ok, true);
+    // No validation.commands declared on the manifest — the lifecycle
+    // surfaces this as ok:false with an explanatory error rather than
+    // silently reporting success (the old behavior masked missing
+    // validation hooks).
+    assert.equal(r.ok, false);
+    assert.match(r.error ?? "", /no validation commands/i);
     assert.deepEqual(r.results, []);
   } finally {
     ctx.cleanup();

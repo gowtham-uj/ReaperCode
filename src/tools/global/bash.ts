@@ -529,13 +529,15 @@ exit 0
           );
           return;
         }
+        const smokeResult = await runBinarySmokeCheck(workspaceRoot, args.cmd, realExitCode, stdout, stderr);
         resolve({
-          stdout,
+          stdout: smokeResult.stdout,
           stderr,
-          exitCode: realExitCode,
-          wouldBlock: decision.outcome === "would_block",
+          exitCode: smokeResult.exitCode,
+          wouldBlock: decision.outcome === "would_block" || smokeResult.smokeFailed,
           nextCwd: realCwd,
           ...(logPath ? { logPath, persistedOutputSize: totalOutputBytes } : {}),
+          ...(smokeResult.smokeFailed ? { smokeCheckFailed: true } : {}),
         });
       });
     },
@@ -546,6 +548,59 @@ function appendBoundedOutput(current: string, chunk: string, maxChars: number): 
   const combined = current + chunk;
   if (combined.length <= maxChars) return combined;
   return combined.slice(-maxChars);
+}
+
+// ---------------------------------------------------------------------------
+// Post-install binary smoke check.
+// When a foreground bash command runs `npm install` (or pnpm/yarn
+// equivalent) and the install exits 0, Reaper probes every bin declared
+// in the workspace `package.json` with `--version` (falling back through
+// --help/-h). A silent 0-exit is appended to stdout as a notice so the
+// model is forced to see the misfiring entry guard instead of shipping
+// a no-op CLI. Hooks into the bash tool's resolve path below.
+// ---------------------------------------------------------------------------
+interface SmokeCheckResult {
+  stdout: string;
+  exitCode: number | null;
+  smokeFailed: boolean;
+}
+
+async function runBinarySmokeCheck(
+  workspaceRoot: string,
+  command: string,
+  exitCode: number | null,
+  stdout: string,
+  stderr: string,
+): Promise<SmokeCheckResult> {
+  if (exitCode !== 0) return { stdout, exitCode, smokeFailed: false };
+  if (!/\b(?:npm|pnpm|yarn)\s+(?:install|i|add)\b/.test(command)) {
+    return { stdout, exitCode, smokeFailed: false };
+  }
+  try {
+    const { smokeInstalledBins } = await import("../../runtime/binary-smoke.js");
+    const report = await smokeInstalledBins(workspaceRoot);
+    if (!report.installed) {
+      return { stdout, exitCode, smokeFailed: false };
+    }
+    if (report.binsTruncated) {
+      const truncNotice = `\n\n[REAPER BINARY SMOKE]: declared bin list exceeded the smoke probe ceiling (${report.bins.length} entries); probed the first ${report.issues.length} flagged + a subset. Re-run npm test to re-probe.\n`;
+      stdout = `${stdout}${truncNotice}`;
+    }
+    if (report.issues.length === 0) return { stdout, exitCode, smokeFailed: false };
+    const flagged = report.issues
+      .map((issue) => `  - ${issue.bin}: ${issue.reason}${issue.exitCode !== undefined ? ` (exit=${issue.exitCode})` : ""}${issue.stderrTail ? ` stderrTail="${issue.stderrTail}"` : ""}`)
+      .join("\n");
+    const notice = `\n\n[REAPER BINARY SMOKE]: detected ${report.issues.length} installed binary/binaries that exit 0 with no output. The CLI guard probably misfires when launched through a symlink (npm publish). Inspect each binary's isMainModule check and switch to a realpath comparison or a top-level await main() pattern.\n${flagged}\n`;
+    stdout = `${stdout}${notice}`;
+    // The npm install "succeeded" but a downstream artifact is broken.
+    // Surface a non-zero exit so the verifier fires and the model is
+    // forced to address it instead of continuing as if all was well.
+    return { stdout, exitCode: 78, smokeFailed: true };
+  } catch (error) {
+    // Smoke check is best-effort; a failed probe must never break the
+    // command result.
+    return { stdout, exitCode, smokeFailed: false };
+  }
 }
 
 function appendOutputSpillNotice(output: string, logPath: string, totalBytes: number): string {

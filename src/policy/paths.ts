@@ -142,10 +142,21 @@ function rewriteWorkspaceAliasPath(root: string, targetPath: string): string {
 function rewriteShellWorkspacePath(root: string, targetPath: string): string | undefined {
   const parts = targetPath.replace(/\\/g, "/").split("/").filter(Boolean);
   const workspaceName = path.basename(root).toLocaleLowerCase();
+  // Only honor the heuristic when the matched segment is the FIRST one
+  // in `parts` (i.e. the path begins with the workspace basename).
+  // Matching anywhere in the path is dangerous: `/etc/foo/x` would
+  // otherwise be silently rewritten as `<root>/x` even when the
+  // caller is talking about an unrelated `/foo/` directory elsewhere
+  // on the filesystem. Anchoring at index 0 keeps the heuristic useful
+  // for shell prompts printed by Docker/CI that always prefix
+  // `/<workspace>/...` while rejecting paths that just happen to
+  // share a basename.
   let workspaceIndex = -1;
   for (let index = parts.length - 1; index >= 0; index -= 1) {
     if (parts[index]?.toLocaleLowerCase() === workspaceName) {
-      workspaceIndex = index;
+      if (index === 0) {
+        workspaceIndex = index;
+      }
       break;
     }
   }

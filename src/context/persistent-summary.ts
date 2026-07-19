@@ -85,6 +85,59 @@ function safeTimestamp(): string {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
+// Cap the index file size so long-running workspaces don't accumulate
+// thousands of summary rows. When the index exceeds the cap, the
+// oldest rows are moved into <summaryDir>/archive/index.jsonl and the
+// associated .md bodies are deleted. The archiver keeps the most
+// recent N entries searchable by default.
+const INDEX_MAX_BYTES = 10 * 1024 * 1024; // 10 MiB
+const INDEX_KEEP_ROWS = 500;
+const ARCHIVE_INDEX_NAME = "archive-index.jsonl";
+
+async function rotateSummaryIndexIfNeeded(workspaceRoot: string): Promise<void> {
+  const idx = indexPath(workspaceRoot);
+  let stat: Awaited<ReturnType<typeof statAsync>>;
+  try {
+    stat = await statAsync(idx);
+  } catch {
+    return;
+  }
+  if (stat.size <= INDEX_MAX_BYTES) return;
+  const { readFile, writeFile, mkdir, unlink } = await import("node:fs/promises");
+  const raw = await readFile(idx, "utf8");
+  const lines = raw.split("\n").filter((l) => l.trim().length > 0);
+  if (lines.length <= INDEX_KEEP_ROWS) return;
+  const dropCount = lines.length - INDEX_KEEP_ROWS;
+  const dropped = lines.slice(0, dropCount);
+  const kept = lines.slice(dropCount);
+  const archivePath = path.join(summaryDir(workspaceRoot), ARCHIVE_INDEX_NAME);
+  await mkdir(summaryDir(workspaceRoot), { recursive: true });
+  // Append dropped rows to the archive, then drop their .md bodies.
+  let existingArchive = "";
+  try {
+    existingArchive = await readFile(archivePath, "utf8");
+  } catch {
+    // no archive yet
+  }
+  await writeFile(archivePath, `${existingArchive}${dropped.join("\n")}\n`, "utf8");
+  await writeFile(idx, `${kept.join("\n")}\n`, "utf8");
+  for (const line of dropped) {
+    try {
+      const row = JSON.parse(line) as { file?: string };
+      if (row.file && row.file.startsWith(summaryDir(workspaceRoot))) {
+        await unlink(row.file).catch(() => undefined);
+      }
+    } catch {
+      // skip malformed row
+    }
+  }
+}
+
+async function statAsync(path: string): Promise<{ size: number }> {
+  const { stat } = await import("node:fs/promises");
+  return stat(path);
+}
+
 function redactTextForPersistence(value: string): string {
   return redactPersistedSecrets(value).redacted;
 }
@@ -159,6 +212,7 @@ export async function persistSummary(
     bodyPreview: summary.body.slice(0, 500),
   };
   await appendFile(indexPath(workspaceRoot), `${JSON.stringify(indexRow)}\n`, "utf8");
+  await rotateSummaryIndexIfNeeded(workspaceRoot);
   return summary;
 }
 

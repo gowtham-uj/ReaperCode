@@ -29,6 +29,7 @@ export class PersistentMemoryStore {
   private readonly projectDir: string;
   private readonly userDir: string;
   private readonly machineDir: string;
+  private loadErrors: { scope: string; error: string }[] = [];
   private cache: { project: MemoryRecord[]; user: MemoryRecord[]; machine: MemoryRecord[]; transient: Map<string, MemoryRecord> } = {
     project: [],
     user: [],
@@ -57,18 +58,33 @@ export class PersistentMemoryStore {
   private loadScope(scope: Exclude<MemoryScope, "transient" | "secret">): void {
     const path = this.pathFor(scope);
     if (!existsSync(path)) return;
+    let raw: string;
     try {
-      const lines = readFileSync(path, "utf8").split("\n").filter((l) => l.trim().length > 0);
-      for (const line of lines) {
-        try {
-          const r = JSON.parse(line) as MemoryRecord;
-          if (r.sensitive && r.scope !== "secret") {
-            r.content = this.redactIfSensitive(r.content);
-          }
-          this.cache[scope].push(r);
-        } catch { /* skip malformed lines */ }
-      }
-    } catch { /* ignore */ }
+      raw = readFileSync(path, "utf8");
+    } catch (error) {
+      // File exists but is unreadable (permissions, EIO, etc.). Surface
+      // the load failure rather than silently returning an empty cache —
+      // the caller needs to know that persisted records are unavailable.
+      const message = error instanceof Error ? error.message : String(error);
+      this.loadErrors.push({ scope, error: message });
+      console.warn(`[memory] cannot read ${path}: ${message}`);
+      return;
+    }
+    const lines = raw.split("\n").filter((l) => l.trim().length > 0);
+    for (const line of lines) {
+      try {
+        const r = JSON.parse(line) as MemoryRecord;
+        if (r.sensitive && r.scope !== "secret") {
+          r.content = this.redactIfSensitive(r.content);
+        }
+        this.cache[scope].push(r);
+      } catch { /* skip malformed lines */ }
+    }
+  }
+
+  /** Surfaces any errors encountered while reading memory files at startup. */
+  getLoadErrors(): { scope: string; error: string }[] {
+    return [...this.loadErrors];
   }
 
   private redactIfSensitive(s: string): string {
