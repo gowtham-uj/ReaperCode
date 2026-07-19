@@ -2,6 +2,7 @@ import { parseTrajectoryEntry, type TrajectoryEntry } from "./schema.js";
 import { LogIndexFile } from "./index-file.js";
 import { JsonlStorage } from "./storage.js";
 import { logLangfuseEvent } from "./langfuse.js";
+import { emitStreamEvent } from "./stream-events.js";
 
 export class TrajectoryLogger {
   private readonly storage: JsonlStorage;
@@ -27,6 +28,10 @@ export class TrajectoryLogger {
 
   async write(entry: TrajectoryEntry): Promise<void> {
     const parsed = parseTrajectoryEntry(entry);
+    // Live event stream: mirror every entry to stdout as JSONL when
+    // REAPER_STREAM_EVENTS is enabled. Emitted before the disk write
+    // so downstream consumers see the event with minimal latency.
+    emitStreamEvent(parsed);
     // Latency optimization: parallelize storage.append + index.append
     // (different files, no data dependency on each other beyond
     // `appended.offset`). Previously the index write waited for the
@@ -72,6 +77,7 @@ export class TrajectoryLogger {
       return this.write(entries[0]);
     }
     const parsed = entries.map((e) => parseTrajectoryEntry(e));
+    for (const p of parsed) emitStreamEvent(p);
     await this.maybeReportChainUnhealthy(parsed[0] ?? { run_id: "", session_id: "", trace_id: "" });
     const appended = await this.storage.appendBatch(parsed);
     const indexAppends: Array<Promise<void>> = [];

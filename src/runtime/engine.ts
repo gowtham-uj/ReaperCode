@@ -444,6 +444,28 @@ export function stripThinkingBlocks(value: string): string {
     .trim();
 }
 
+/**
+ * Extract the reasoning text from a model output that embeds it
+ * inline as `<think>…</think>`, `<analysis>…</analysis>`, or
+ * `<reasoning>…</reasoning>` blocks. Mirror of `stripThinkingBlocks`
+ * — used to populate the structured `thinking` trajectory event when
+ * a provider returned reasoning inside the visible content instead of
+ * via a separate reasoning channel.
+ */
+export function extractThinkingBlocks(value: string): string {
+  if (!value) return "";
+  const blocks: string[] = [];
+  const re = /<(think|analysis|reasoning)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(value)) !== null) {
+    blocks.push(m[0]);
+  }
+  // Unclosed leading envelope — some providers omit the closing tag.
+  const unclosed = value.match(/<(think|analysis|reasoning)\b[^>]*>[\s\S]*$/i);
+  if (unclosed) blocks.push(unclosed[0]);
+  return blocks.join("\n").trim();
+}
+
 function hasPassingGroundedVerification(
   toolResults: ToolResult[],
   request: AgentRequestEnvelope,
@@ -684,6 +706,10 @@ export class RuntimeEngine {
         ...(mcpRegistry ? { mcpRegistry } : {}),
       });
 
+      // Run-boundary metadata: resolve which provider + model the
+      // mainAgent route lands on so external harnesses reading the
+      // event stream know what actually ran without joining configs.
+      const mainProfile = this.config.models[modelRoute(this.config, "mainAgent")] ?? this.config.models.default_model;
       await this.trajectoryLogger.write({
         event_id: randomUUID(),
         run_id: boot.state.runId,
@@ -694,6 +720,21 @@ export class RuntimeEngine {
         kind: "session_start",
         level: boot.state.logLevel,
         user_intent_summary: boot.state.userIntentSummary,
+        ...(mainProfile?.provider ? { provider: mainProfile.provider } : {}),
+        ...(mainProfile?.model ? { model: mainProfile.model } : {}),
+        run_params: {
+          workspace_root: this.input.workspaceRoot,
+          safety_profile: boot.state.safetyProfile,
+          log_level: boot.state.logLevel,
+          ...(boot.state.namedSession ? { named_session: boot.state.namedSession } : {}),
+          ...(typeof mainProfile?.defaultParams?.maxTokens === "number"
+            ? { max_tokens: mainProfile.defaultParams.maxTokens }
+            : {}),
+          ...(typeof mainProfile?.defaultParams?.temperature === "number"
+            ? { temperature: mainProfile.defaultParams.temperature }
+            : {}),
+          ...(boot.state.tokenBudget?.softCap ? { token_soft_cap: boot.state.tokenBudget.softCap } : {}),
+        },
       });
 
       await this.trajectoryLogger.write({
@@ -924,6 +965,7 @@ export class RuntimeEngine {
         const liveToolResults: ToolResult[] = [];
         const liveEvents: AgentEventEnvelope[] = [];
         let lastAssistantMessage = "";
+        let liveModelTurnIndex = 0;
         let incompleteRecoveryAttempts = 0;
         let emptyStopRetries = 0;
         let prematureStopNudges = 0;
@@ -1267,6 +1309,40 @@ export class RuntimeEngine {
               runState.lastInputTokens = inputTokens;
             }
           } catch { /* best-effort */ }
+
+          // Structured `thinking` trajectory event: one entry per model
+          // turn carrying the full accumulated reasoning text. The
+          // streaming path already collects `reasoningContent` from
+          // reasoning deltas; previously it was only echoed dimmed to
+          // the terminal and stripped from the final summary. Writing
+          // it through the TrajectoryLogger gives it the standard
+          // envelope + hash chain and mirrors it onto the live event
+          // stream when --stream-events is on.
+          // Universal across providers: prefer the dedicated reasoning
+          // channel (Anthropic thinking blocks, OpenAI-compatible
+          // reasoning deltas); fall back to inline <think>…</think>
+          // envelopes for models that embed reasoning in content.
+          const channelReasoning = typeof (turn as any).reasoningContent === "string"
+            ? ((turn as any).reasoningContent as string).trim()
+            : "";
+          const turnReasoning = channelReasoning || extractThinkingBlocks(turn.content ?? "");
+          if (turnReasoning) {
+            await this.trajectoryLogger
+              .write({
+                event_id: randomUUID(),
+                run_id: getBoot().state.runId,
+                session_id: getBoot().state.sessionId,
+                trace_id: getBoot().state.runId,
+                timestamp: new Date().toISOString(),
+                log_schema_version: 1,
+                kind: "thinking",
+                level: getBoot().state.logLevel,
+                content: turnReasoning,
+                turn_index: liveModelTurnIndex,
+              })
+              .catch(() => undefined);
+          }
+          liveModelTurnIndex += 1;
 
           const tc = (turn.toolCalls ?? []) as ToolCall[];
           if (turn.content) {

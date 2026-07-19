@@ -26,6 +26,9 @@ import { ConfiguredModelGateway } from "../model/gateway.js";
 import { ProviderMultiplexerClient } from "../model/providers/provider-client.js";
 import type { ModelCapabilities } from "../model/types.js";
 import { isValidSessionName } from "../context/session-journal.js";
+import { TrajectoryLogger } from "../logging/trajectory.js";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
 
 type ExecProvider = "anthropic" | "openai" | "openai-codex" | "minimax" | "deepseek" | "nuralwatt" | "nuralwatt2";
 
@@ -371,15 +374,30 @@ export async function runExec(opts: ExecRunnerOptions): Promise<ExecRunnerResult
   // can pass --timeout-ms N. N=0 is the canonical "no Reaper timer".
   const timeoutMs = opts.timeoutMs ?? 0;
   const timer = timeoutMs > 0 ? setTimeout(() => abort.abort(), timeoutMs) : undefined;
+  // Terminal `run_end` envelope appended to the same trajectory file
+  // the engine is writing — keeps the live stream readable for
+  // harnesses that `tail -f` the JSONL or pipe stdout (--stream-events).
+  let runEndEmitter: { logger: TrajectoryLogger; runId: string } | undefined;
   try {
     const result = await engine.run();
     const v = result.verification;
+    const status = deriveExecFinalStatus({
+      aborted: abort.signal.aborted,
+      verification: v,
+      events: result.events,
+    });
+    runEndEmitter = {
+      logger: new TrajectoryLogger(opts.workspaceRoot),
+      runId: deriveRunIdFromTrajectoryPath(result.trajectoryPath),
+    };
+    await emitRunEnd({
+      emitter: runEndEmitter,
+      status,
+      finalAssistantMessage: result.assistantMessage ?? "",
+      durationMs: Date.now() - startedAt,
+    });
     return {
-      status: deriveExecFinalStatus({
-        aborted: abort.signal.aborted,
-        verification: v,
-        events: result.events,
-      }),
+      status,
       assistantMessage: result.assistantMessage ?? "",
       toolResults: (result.toolResults ?? []).map((tr) => ({
         id: String((tr as { call_id?: string }).call_id ?? ""),
@@ -405,6 +423,15 @@ export async function runExec(opts: ExecRunnerOptions): Promise<ExecRunnerResult
       })),
     };
   } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (runEndEmitter) {
+      await emitRunEnd({
+        emitter: runEndEmitter,
+        status: "failed",
+        finalAssistantMessage: message,
+        durationMs: Date.now() - startedAt,
+      });
+    }
     return {
       status: "failed",
       assistantMessage: "",
@@ -412,7 +439,7 @@ export async function runExec(opts: ExecRunnerOptions): Promise<ExecRunnerResult
       trajectoryPath: "",
       events: 0,
       durationMs: Date.now() - startedAt,
-      notices: [{ kind: "error", message: e instanceof Error ? e.message : String(e) }],
+      notices: [{ kind: "error", message }],
     };
   } finally {
     clearTimeout(timer);
@@ -423,3 +450,44 @@ export async function runExec(opts: ExecRunnerOptions): Promise<ExecRunnerResult
     }
   }
 }
+
+/**
+ * Pull the run's UUID off the engine's trajectory path
+ * (`.../runs/<runId>/logs/reaper-trajectory.jsonl`). Lets the run_end
+ * envelope stamp the same run_id used on every prior session_start /
+ * tool_call / thinking entry written by the engine.
+ */
+function deriveRunIdFromTrajectoryPath(p: string): string {
+  if (!p) return "exec";
+  const parts = p.split(path.sep);
+  const idx = parts.lastIndexOf("runs");
+  if (idx >= 0 && idx + 1 < parts.length) return parts[idx + 1] ?? "exec";
+  return path.basename(path.dirname(p)) || "exec";
+}
+
+async function emitRunEnd(input: {
+  emitter: { logger: TrajectoryLogger; runId: string };
+  status: "completed" | "failed" | "aborted";
+  finalAssistantMessage: string;
+  durationMs: number;
+}): Promise<void> {
+  try {
+    await input.emitter.logger.write({
+      event_id: randomUUID(),
+      run_id: input.emitter.runId,
+      session_id: "exec",
+      trace_id: input.emitter.runId,
+      timestamp: new Date().toISOString(),
+      log_schema_version: 1,
+      kind: "run_end",
+      level: "info",
+      status: input.status,
+      final_assistant_message: input.finalAssistantMessage,
+      duration_ms: input.durationMs,
+    });
+  } catch {
+    /* run_end is best-effort metadata; never break the run */
+  }
+}
+
+

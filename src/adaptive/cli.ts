@@ -357,6 +357,8 @@ export class ReaperCLI {
     const maxTokens = flags["max-tokens"] ? Number(flags["max-tokens"]) : undefined;
     const timeoutMs = flags["timeout-ms"] ? Number(flags["timeout-ms"]) : undefined;
     const session = flags["session"];
+    const wantStreamEvents = flags["stream-events"] === "true" || flags["stream-events"] === "1";
+    if (wantStreamEvents) process.env.REAPER_STREAM_EVENTS = "1";
     const providerRaw = flags["provider"];
     const isExecProvider = (value: string | undefined): value is NonNullable<ExecRunnerOptions["provider"]> =>
       value === "openai" || value === "openai-codex" || value === "anthropic" || value === "minimax" || value === "deepseek" || value === "nuralwatt" || value === "nuralwatt2";
@@ -420,7 +422,15 @@ export class ReaperCLI {
         }
       }
       // In prod mode, model output was already streamed live — nothing extra to print.
-      return { exitCode: result.status === "completed" ? 0 : 1, stdout: lines.length ? lines.join("\n") + "\n" : "", stderr: "" };
+      const summary = lines.length ? lines.join("\n") + "\n" : "";
+      // When stream-events is enabled, stdout is the pure JSONL event
+      // stream; route the human summary to stderr so consumers can
+      // pipe it without parsing noise.
+      return {
+        exitCode: result.status === "completed" ? 0 : 1,
+        stdout: wantStreamEvents ? "" : summary,
+        stderr: wantStreamEvents ? summary : "",
+      };
     } catch (e) {
       return { exitCode: 1, stdout: "", stderr: e instanceof Error ? e.message : String(e) };
     }
@@ -438,7 +448,7 @@ export class ReaperCLI {
       "  visual      list | analyze | bridge",
       "  capability  show | probe",
       "  redact      <file|->",
-      "  exec        run --prompt <text> [--session <name>] [--workspace <dir>] [--model <id>] [--provider anthropic|openai|openai-codex|minimax|deepseek|nuralwatt|nuralwatt2] [--reasoning-effort low|medium|high] [--max-tokens N] [--timeout-ms N] [--json]",
+      "  exec        run --prompt <text> [--session <name>] [--workspace <dir>] [--model <id>] [--provider anthropic|openai|openai-codex|minimax|deepseek|nuralwatt|nuralwatt2] [--reasoning-effort low|medium|high] [--max-tokens N] [--timeout-ms N] [--json] [--stream-events]",
     ].join("\n");
     return { exitCode: 0, stdout: usage + "\n", stderr: "" };
   }

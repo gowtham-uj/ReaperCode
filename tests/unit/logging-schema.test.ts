@@ -187,3 +187,64 @@ test("premature_stop_nudge and tool_call_parse_error are accepted", () => {
   assert.equal(parseErr.kind, "tool_call_parse_error");
 });
 
+test("thinking trajectory entry accepts reasoning text + turn_index", () => {
+  const thinking = parseTrajectoryEntry({
+    ...baseLogFields(),
+    kind: "thinking",
+    level: "info",
+    content: "Considering the workspace state before opening my next file",
+    turn_index: 3,
+  });
+  assert.equal(thinking.kind, "thinking");
+  if (thinking.kind === "thinking") {
+    assert.equal(thinking.turn_index, 3);
+  }
+});
+
+test("run_end trajectory entry accepts completed status and final message", () => {
+  const runEnd = parseTrajectoryEntry({
+    ...baseLogFields(),
+    kind: "run_end",
+    level: "info",
+    status: "completed",
+    final_assistant_message: "All goals met.",
+    duration_ms: 4242,
+  });
+  assert.equal(runEnd.kind, "run_end");
+});
+
+test("session_start accepts provider/model/run_params metadata", () => {
+  const enriched = parseTrajectoryEntry({
+    ...baseLogFields(),
+    kind: "session_start",
+    level: "info",
+    user_intent_summary: "Build it",
+    provider: "anthropic",
+    model: "claude-sonnet-4-6",
+    run_params: { workspace_root: "/tmp/ws", max_tokens: 4096 },
+  });
+  assert.equal(enriched.kind, "session_start");
+});
+
+test("token_budget accepts optional reasoning-tokens + cost fields", () => {
+  const enriched = parseTrajectoryEntry({
+    ...baseLogFields(),
+    kind: "token_budget",
+    level: "info",
+    turn_input_tokens: 100,
+    turn_output_tokens: 50,
+    turn_cache_read_tokens: 0,
+    turn_cache_write_tokens: 0,
+    turn_call_count: 1,
+    cumulative_input_tokens: 100,
+    cumulative_output_tokens: 50,
+    cumulative_cache_read_tokens: 0,
+    cumulative_cache_write_tokens: 0,
+    cumulative_call_count: 1,
+    turn_reasoning_tokens: 17,
+    cumulative_reasoning_tokens: 17,
+    cost_usd: 0.0042,
+  });
+  assert.equal(enriched.kind, "token_budget");
+});
+

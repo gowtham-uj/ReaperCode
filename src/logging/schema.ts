@@ -18,6 +18,37 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
     kind: z.literal("session_start"),
     level: z.enum(["info", "debug", "trace"]),
     user_intent_summary: z.string().min(1),
+    // Run-boundary metadata for external harnesses: which provider +
+    // model the run resolved to and the effective run parameters.
+    // Optional so historical entries (and minimal test runs without a
+    // model gateway) still parse.
+    provider: z.string().min(1).optional(),
+    model: z.string().min(1).optional(),
+    run_params: z.record(z.string(), z.unknown()).optional(),
+  }),
+  // Structured model reasoning ("thinking") for the just-finished model
+  // turn. One entry per turn carrying the full accumulated reasoning
+  // text; `streaming: true` marks optional incremental delta entries.
+  // The reasoning was previously only streamed dimmed to the terminal
+  // and stripped from the final assistant message — this makes it a
+  // first-class trajectory event external harnesses can consume.
+  CommonLogFieldsSchema.extend({
+    kind: z.literal("thinking"),
+    level: z.enum(["info", "debug", "trace"]),
+    content: z.string().min(1),
+    turn_index: z.number().int().min(0).optional(),
+    streaming: z.boolean().optional(),
+  }),
+  // Terminal run boundary. Emitted exactly once at the end of every
+  // engine run (success, failure, or abort) with the final status and
+  // the user-visible final assistant message, so a live event stream
+  // has an unambiguous end-of-run marker.
+  CommonLogFieldsSchema.extend({
+    kind: z.literal("run_end"),
+    level: z.enum(["info", "debug", "trace"]),
+    status: z.enum(["completed", "failed", "aborted"]),
+    final_assistant_message: z.string(),
+    duration_ms: z.number().int().min(0).optional(),
   }),
   CommonLogFieldsSchema.extend({
     kind: z.literal("tool_call"),
@@ -153,6 +184,11 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
 	    cumulative_cache_write_tokens: z.number().int().min(0),
 	    cumulative_call_count: z.number().int().min(0),
 	    source: z.string().min(1).optional(),
+	    // Optional reasoning-token + cost accounting for providers that
+	    // report them. Harnesses that price runs themselves can ignore.
+	    turn_reasoning_tokens: z.number().int().min(0).optional(),
+	    cumulative_reasoning_tokens: z.number().int().min(0).optional(),
+	    cost_usd: z.number().min(0).optional(),
 	  }),
 	  CommonLogFieldsSchema.extend({
 	    kind: z.literal("context_shake"),
