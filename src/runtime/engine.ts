@@ -74,8 +74,6 @@ import {
   isInternalGuardBlockedResult, 
   normalizeDiagnosticCommand} from "./diagnostic-target.js";
 import { classifyShellCommandSemantics } from "../tools/command-semantics.js";
-import { loadMcpServersFromFile } from "../tools/mcp/config.js";
-import { MergedToolRegistry } from "../tools/mcp/registry.js";
 import { ToolCallSchema, type ToolCall, type ToolResult } from "../tools/types.js";
 import { normalizeToolCall } from "../tools/normalize.js";
 import { streamMainAgentResponse } from "./main-agent-node.js";
@@ -626,7 +624,6 @@ export class RuntimeEngine {
     let recoverySession: RecoverySession | undefined;
     let executor: ToolExecutor | undefined;
     let auditLogger: AuditLogger | undefined;
-    let mcpRegistry: MergedToolRegistry | undefined;
 
     const getRequest = () => {
       if (!request) throw new Error("LangGraph runtime request was not bootstrapped");
@@ -677,16 +674,6 @@ export class RuntimeEngine {
       });
       auditLogger = new AuditLogger(this.input.workspaceRoot, { runId: boot.state.runId });
 
-      if (this.config.mcp?.enabled) {
-        mcpRegistry = new MergedToolRegistry();
-        mcpRegistry.setWorkspaceRoot(this.input.workspaceRoot);
-        const serverConfigs = [...(this.config.mcp.servers ?? []), ...loadMcpServersFromFile(this.input.workspaceRoot)];
-        for (const serverConfig of serverConfigs) {
-          await mcpRegistry.addMcpServer(serverConfig).catch((error) => {
-            console.warn(`[runtime-engine] MCP server '${serverConfig.name}' failed to load:`, error);
-          });
-        }
-      }
       executor = new ToolExecutor({
         workspaceRoot: this.input.workspaceRoot,
         runId: boot.state.runId,
@@ -703,7 +690,6 @@ export class RuntimeEngine {
         runDir: runContext.runDir,
         artifactsDir: runContext.artifactsDir,
         ...(this.input.shellRunner ? { shellRunner: this.input.shellRunner } : {}),
-        ...(mcpRegistry ? { mcpRegistry } : {}),
       });
 
       // Run-boundary metadata: resolve which provider + model the
@@ -829,7 +815,6 @@ export class RuntimeEngine {
         prunerConfig: this.config.pruner,
         toolResults: state.toolResults,
         backgroundProcesses: getExecutor().getBackgroundProcesses(),
-        ...(mcpRegistry ? { mcpRegistry } : {}),
         ...(this.input.middlewares ? { middlewares: this.input.middlewares as any } : {}),
       });
       if (prepared?.toolShortlist?.length) {
@@ -1773,7 +1758,6 @@ export class RuntimeEngine {
         prunerConfig: this.config.pruner,
         toolResults: state.toolResults,
         backgroundProcesses: getExecutor().getBackgroundProcesses(),
-        ...(mcpRegistry ? { mcpRegistry } : {}),
         ...(this.input.middlewares ? { middlewares: this.input.middlewares as any } : {}),
       });
       await this.trajectoryLogger.write({
@@ -2163,7 +2147,6 @@ export class RuntimeEngine {
         prunerConfig: this.config.pruner,
         toolResults: state.toolResults,
         backgroundProcesses: getExecutor().getBackgroundProcesses(),
-        ...(mcpRegistry ? { mcpRegistry } : {}),
         ...(this.input.middlewares ? { middlewares: this.input.middlewares as any } : {}),
       });
       // The model owns the stop. We never synthesize a fresh LLM
@@ -2336,15 +2319,9 @@ export class RuntimeEngine {
 
     // Register scoped cleanup for this run
     const executorInstance = executor;
-    const mcpRegistryInstance = mcpRegistry;
     const unregisterExecutorCleanup = executorInstance
       ? registerCleanup(async () => {
           await executorInstance.cleanupBackgroundProcesses("runtime_finished");
-        })
-      : undefined;
-    const unregisterMcpCleanup = mcpRegistryInstance
-      ? registerCleanup(async () => {
-          await (mcpRegistryInstance as any).closeAll?.().catch(() => undefined);
         })
       : undefined;
 
@@ -2440,12 +2417,10 @@ export class RuntimeEngine {
       await persistRunFailure(runContext, error);
       // Drop any cached typed slots + the idle-compaction timer even
       // on failure; the wiring's onRunComplete path is the happy-path
-      // cleanup but exceptions bypass it.
       clearRunState(runContext.runId);
       throw error;
     } finally {
       unregisterExecutorCleanup?.();
-      unregisterMcpCleanup?.();
       await runCleanupFunctions();
       await writeLatestRunPointer(this.input.workspaceRoot, runContext);
     }

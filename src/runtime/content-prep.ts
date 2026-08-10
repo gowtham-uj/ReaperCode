@@ -11,7 +11,6 @@ import { getEnvironmentFingerprint, type EnvironmentFingerprint } from "./finger
 import type { ToolResult } from "../tools/types.js";
 import { z } from "zod";
 import type { SwePrunerConfig } from "../context/swe-pruner.js";
-import type { MergedToolRegistry } from "../tools/mcp/registry.js";
 import { ProjectTrustStore, resolveProjectTrusted, type ProjectTrustResolution } from "../resources/project-trust.js";
 import { resolveResources, type ResolvedResources } from "../resources/resource-loader.js";
 import { DefaultResourcePackageManager } from "../resources/package-manager.js";
@@ -28,7 +27,6 @@ export interface ContentPrepInput {
   middlewares?: Array<MiddlewareDefinition<ContentPrepResult>>;
   prunerConfig?: SwePrunerConfig;
   backgroundProcesses?: Array<{ pid: number; status: "running" | "finished"; exitCode: number | null }>;
-  mcpRegistry?: MergedToolRegistry;
   /** Force a fresh workspace index at a run boundary. */
   forceIndexRefresh?: boolean;
 }
@@ -176,7 +174,7 @@ export async function prepareRuntimeContent(
   // filesystem / fingerprint state pass `memoize: false`. The engine
   // passes `memoize: true` because retry / replay loops re-drive
   // this function with identical inputs.
-  const useCache = options.memoize === true && !input.mcpRegistry && !input.middlewares;
+  const useCache = options.memoize === true && !input.middlewares;
   if (useCache) {
     const key = buildCacheKey(input);
     const hit = getCached(key);
@@ -254,7 +252,6 @@ async function computeContentPrep(input: ContentPrepInput): Promise<ContentPrepR
     preparedContext,
     compactedHistory,
     toolShortlist: searchTools(input.prompt, {
-      ...(input.mcpRegistry ? { mcpRegistry: input.mcpRegistry } : {}),
       remainingTokenBudget: input.maxContextTokens,
     }),
     mentions,

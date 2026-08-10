@@ -1,12 +1,10 @@
 import { toolRegistry } from "../tools/registry.js";
-import type { MergedToolRegistry } from "../tools/mcp/registry.js";
 
 const coreToolOrder = ["read_file", "list_directory", "grep_search", "write_file", "replace_in_file", "bash"] as const;
 
 export interface ToolSearchOptions {
   catalog?: Record<string, { description: string }>;
   pinnedTools?: Record<string, number>;
-  mcpRegistry?: MergedToolRegistry;
   remainingTokenBudget?: number;
 }
 
@@ -18,11 +16,6 @@ export interface PinnedToolState {
 export function searchTools(query: string, options?: ToolSearchOptions): Array<{ name: string; description: string }> {
   const normalized = query.toLowerCase();
 
-  // If MCP registry is available, use it for active set selection
-  if (options?.mcpRegistry) {
-    const activeTools = options.mcpRegistry.advanceTurn(query, options.remainingTokenBudget ?? 50000);
-    return activeTools.map((t) => ({ name: t.name, description: t.description }));
-  }
 
   // Fallback: static registry
   const fullCatalog = { ...toolRegistry, ...(options?.catalog ?? {}) };
@@ -103,7 +96,6 @@ export function scoreTool(name: string, description: string, query: string): num
 
 export function normalizeToolName(name: string): string {
   return name
-    .replace(/^mcp__/, "")
     .replace(/__/g, " ")
     .replace(/_/g, " ")
     .replace(/([a-z])([A-Z])/g, "$1 $2")

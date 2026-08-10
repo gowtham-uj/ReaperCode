@@ -102,13 +102,6 @@ export function buildStarterConfig(input: { defaultModel?: string; defaultProvid
         },
       },
     },
-    // ── MCP (Model Context Protocol servers) ───────────────────────
-    mcp: {
-      enabled: true,
-      maxActiveMCPTools: 6,
-      refreshIntervalTurns: 10,
-      servers: [],
-    },
     // ── Context management (shake, time-MC, full summary, etc.) ───
     contextManagement: {
       softCap: 270_000,

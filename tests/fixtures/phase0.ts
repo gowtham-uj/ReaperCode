@@ -58,12 +58,6 @@ export function createValidConfig(): ReaperConfig {
       summarizer: "fast_reasoner",
       judge: "judge",
     },
-    mcp: {
-      enabled: false,
-      maxActiveMCPTools: 6,
-      refreshIntervalTurns: 10,
-      servers: [],
-    },
     models: {
       default_model: {
         provider: "nuralwatt",

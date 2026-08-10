@@ -19,7 +19,6 @@ test("buildStarterConfig: every required field is set, no implicit defaults", ()
   assert.ok(cfg["verification"], "verification block required");
   assert.ok(cfg["modelRouting"], "modelRouting block required");
   assert.ok(cfg["models"], "models block required");
-  assert.ok(cfg["mcp"], "mcp block required");
   assert.ok(cfg["contextManagement"], "contextManagement block required");
   assert.ok(cfg["runtimeTunables"], "runtimeTunables block required");
   // API keys are NOT in the config file. They stay in environment

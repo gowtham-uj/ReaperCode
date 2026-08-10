@@ -45,7 +45,6 @@ import type { Hooks } from "../adaptive/hooks.js";
 import { ToolCallSchema, type ToolCall, type ToolResult, type ExecutionEvent } from "./types.js";
 import { countFileLines } from "../workspace/roots.js";
 import type { ReaperConfig } from "../config/model-config.js";
-import type { MergedToolRegistry } from "./mcp/registry.js";
 import { ensureReaperScratchpad, getReaperScratchpadPaths } from "../workspace/scratchpad.js";
 import { normalizeWorkspacePath, relativeWorkspacePath } from "../policy/paths.js";
 import { BackgroundProcessManager } from "./background-process-manager.js";
@@ -94,7 +93,6 @@ export interface ToolExecutorOptions {
   trajectoryLogger?: TrajectoryLogger;
   auditLogger?: AuditLogger;
   recoverySession?: RecoverySession;
-  mcpRegistry?: MergedToolRegistry;
   config?: ReaperConfig;
   runDir?: string;
   artifactsDir?: string;
@@ -257,7 +255,6 @@ export class ToolExecutor {
   private readonly fullReadPaths = new Set<string>();
   private readonly artifactStore: ArtifactStore;
   private readonly config: ReaperConfig | undefined;
-  private readonly mcpRegistry: MergedToolRegistry | undefined;
   private readonly authoringTools: AuthoringToolDeps | undefined;
   private readonly permissionClassifier: PermissionClassifier;
   private readonly readFileState = new Map<string, { sha256: string | null; mtimeMs: number | null; fullyRead: boolean }>();
@@ -293,7 +290,6 @@ export class ToolExecutor {
     this.recoverySession = options.recoverySession;
     this.artifactStore = new ArtifactStore(options.workspaceRoot);
     this.config = options.config;
-    this.mcpRegistry = options.mcpRegistry;
     this.authoringTools = options.authoringTools;
     const resolvedMode = resolveEffectivePermissionMode(options.permissionMode ?? "yolo");
     this.permissionMode = resolvedMode;
@@ -376,7 +372,7 @@ export class ToolExecutor {
     const decisionId = normalizedCall.id || call.id || randomUUID();
 
     // Unknown-tool loop guard
-    const isKnownTool = normalizedCall.name in toolRegistry || (this.mcpRegistry?.isMcpTool(normalizedCall.name) ?? false);
+    const isKnownTool = normalizedCall.name in toolRegistry;
     if (!isKnownTool) {
       this.consecutiveUnknownTools++;
       this.lastUnknownToolName = normalizedCall.name;
@@ -1558,16 +1554,8 @@ export class ToolExecutor {
         if (!h) throw new Error("reload_hooks is not wired for this run");
         return h(call.args);
       }
-      default: {
-        // MCP tool dispatch fallback
-        if (this.mcpRegistry && this.mcpRegistry.isMcpTool(call.name)) {
-          const argsRecord = (call.args ?? {}) as Record<string, unknown>;
-          const output = await this.mcpRegistry.executeMcpTool(call.name, argsRecord);
-          this.mcpRegistry.markUsed(call.name);
-          return output;
-        }
+      default:
         throw new Error(`Unknown tool: ${call.name}`);
-      }
     }
   }
 

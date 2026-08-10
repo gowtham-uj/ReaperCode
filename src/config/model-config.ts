@@ -16,7 +16,6 @@ import {
   type ModelRole,
   type ResolvedModelProfile,
 } from "../model/types.js";
-import { McpConfigSchema } from "../tools/mcp/config.js";
 
 const optionalRoleEntries = Object.fromEntries(
   modelRoleValues
@@ -451,7 +450,6 @@ export const ReaperConfigSchema = z
     verification: VerificationGateConfigSchema,
     modelRouting: ModelRoutingConfigSchema,
     models: ModelsConfigSchema,
-    mcp: McpConfigSchema.optional().default({ enabled: true, maxActiveMCPTools: 6, refreshIntervalTurns: 10, servers: [] }),
     contextManagement: ContextManagementConfigSchema,
     runtimeTunables: RuntimeTunablesConfigSchema,
   })
