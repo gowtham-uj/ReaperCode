@@ -61,7 +61,6 @@ node bin/reaper exec run \
 | `openai-codex` | `OPENAI_CODEX_ACCESS_TOKEN` | `gpt-5.4` |
 | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-chat` |
 | `nuralwatt` | `NURALWATT_API_KEY` | `kimi-k2.7-code` |
-| `nuralwatt2` | `NURALWATT_API_KEY2` | `kimi-k2.7-code` |
 
 `ANTHROPIC_AUTH_TOKEN` also works for Anthropic-compatible proxies.
 
