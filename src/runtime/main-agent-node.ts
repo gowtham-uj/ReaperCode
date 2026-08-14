@@ -4,6 +4,7 @@ import { ToolCallSchema, type ToolCall } from "../tools/types.js";
 import { dim } from "./session-printer.js";
 import { validateToolCallBatch, type ToolValidationBlocker } from "./tool-validation.js";
 import { getEngineTunables } from "../config/config-tunables.js";
+import { writeHumanOutput } from "../logging/stream-events.js";
 
 
 export interface MainAgentCallInput {
@@ -120,15 +121,15 @@ export async function streamMainAgentResponse(
     if (event.type === "message_delta") {
       if (typeof event.content === "string") {
         content += event.content;
-        // Live stream actual model output to stdout immediately — no buffering
-        process.stdout.write(event.content);
+        // Live stream actual model output — stderr in stream-events mode
+        writeHumanOutput(event.content);
         await callbacks.onMessageDelta?.(event.content);
       }
       const data = asRecord(event.data);
       if (typeof data?.reasoningContent === "string") {
         reasoningContent += data.reasoningContent;
-        // Live stream reasoning as dimmed "thinking" text
-        process.stdout.write(dim(data.reasoningContent, process.stdout as NodeJS.WriteStream));
+        // Live stream reasoning as dimmed "thinking" text (stderr in stream mode)
+        writeHumanOutput(dim(data.reasoningContent, process.stdout as NodeJS.WriteStream));
         await callbacks.onReasoningDelta?.(data.reasoningContent);
       }
       continue;
@@ -136,7 +137,7 @@ export async function streamMainAgentResponse(
     if (event.type === "reasoning_delta") {
       if (typeof event.content === "string") {
         reasoningContent += event.content;
-        process.stdout.write(dim(event.content, process.stdout as NodeJS.WriteStream));
+        writeHumanOutput(dim(event.content, process.stdout as NodeJS.WriteStream));
         await callbacks.onReasoningDelta?.(event.content);
       }
       continue;

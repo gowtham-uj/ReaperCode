@@ -1308,22 +1308,22 @@ export class RuntimeEngine {
             }
           } catch { /* best-effort */ }
 
-          // Structured `thinking` trajectory event: one entry per model
-          // turn carrying the full accumulated reasoning text. The
-          // streaming path already collects `reasoningContent` from
-          // reasoning deltas; previously it was only echoed dimmed to
-          // the terminal and stripped from the final summary. Writing
-          // it through the TrajectoryLogger gives it the standard
-          // envelope + hash chain and mirrors it onto the live event
-          // stream when --stream-events is on.
+          // ─── Thinking wrap ───────────────────────────────────────────────
           // Universal across providers: prefer the dedicated reasoning
-          // channel (Anthropic thinking blocks, OpenAI-compatible
-          // reasoning deltas); fall back to inline <think>…</think>
-          // envelopes for models that embed reasoning in content.
+          // channel (Anthropic thinking blocks, OpenAI-compatible reasoning
+          // deltas). When a model embeds reasoning inside content
+          // (<think>…</think> and friends), extract it and strip it from
+          // the visible assistant text so reasoning lands in a thinking
+          // record (session.jsonl message + conversation.md), never inside
+          // the assistant message.
           const channelReasoning = typeof (turn as any).reasoningContent === "string"
             ? ((turn as any).reasoningContent as string).trim()
             : "";
-          const turnReasoning = channelReasoning || extractThinkingBlocks(turn.content ?? "");
+          const rawTurnContent = typeof (turn as any).content === "string" ? ((turn as any).content as string) : "";
+          const inlineReasoning = extractThinkingBlocks(rawTurnContent).trim();
+          const visibleContent = inlineReasoning ? stripThinkingBlocks(rawTurnContent).trim() : rawTurnContent;
+          (turn as { content?: string }).content = visibleContent;
+          const turnReasoning = channelReasoning || inlineReasoning;
           if (turnReasoning) {
             await this.trajectoryLogger
               .write({

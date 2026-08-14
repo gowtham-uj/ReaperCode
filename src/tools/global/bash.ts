@@ -11,7 +11,7 @@ import { PathPolicyError, normalizeWorkspacePath } from "../../policy/paths.js";
 import { getBashTunables } from "../../config/config-tunables.js";
 import { buildChildEnv, type ChildEnvBuildResult } from "../child-env.js";
 import { isReaperDevMode } from "../../runtime/dev-mode.js";
-
+import { writeHumanOutput } from "../../logging/stream-events.js";
 function numericRuntimeOverride(name: string, fallback: number): number {
   const value = Number(process.env[name]);
   return Number.isFinite(value) && value >= 0 ? value : fallback;
@@ -257,7 +257,7 @@ exit 0
         }
         // Heartbeat
         if (stdout.length % 1024 === 0) {
-          console.log(`[shell] ${args.cmd.slice(0, 50)}... (${stdout.length} buffered bytes, ${totalOutputBytes} total bytes)`);
+          writeHumanOutput(`[shell] ${args.cmd.slice(0, 50)}... (${stdout.length} buffered bytes, ${totalOutputBytes} total bytes)\n`);
         }
       });
       child.stderr.on("data", (chunk) => {
@@ -981,6 +981,7 @@ export function resolveShellBinary(): string {
 async function createProcessLog(runtime: { runId: string; artifactDir: string; toolCallId: string }, cmd: string, cwd: string): Promise<string> {
   if (!isReaperDevMode()) return "";
   const processDir = path.join(runtime.artifactDir, "processes");
+  await mkdir(processDir, { recursive: true });
   const logPath = path.join(processDir, `${runtime.toolCallId.replace(/[^a-zA-Z0-9_.-]/g, "_")}.log`);
   await writeFile(
     logPath,
@@ -989,6 +990,7 @@ async function createProcessLog(runtime: { runId: string; artifactDir: string; t
   );
   return toShellPath(logPath);
 }
+
 
 async function appendProcessLog(logPath: string | undefined, stream: "stdout" | "stderr" | "system", data: string): Promise<void> {
   if (!logPath) return;

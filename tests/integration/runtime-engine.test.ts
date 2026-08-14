@@ -78,33 +78,40 @@ test("runtime engine executes real tool calls and writes trajectory logs", async
 
 test("runtime engine creates isolated run-local artifacts for placeholder trace ids", async () => {
   const workspaceRoot = await createTempWorkspace();
-  const request = createValidRequestEnvelope();
-  request.payload = {
-    prompt: "Inspect workspace",
-    tool_calls: [{ id: "1", name: "bash", args: { cmd: "printf isolated-run" } }],
-  };
+  const prevDev = process.env.REAPER_DEV;
+  process.env.REAPER_DEV = "1";
+  try {
+    const request = createValidRequestEnvelope();
+    request.payload = {
+      prompt: "Inspect workspace",
+      tool_calls: [{ id: "1", name: "bash", args: { cmd: "printf isolated-run" } }],
+    };
 
-  const engine = new RuntimeEngine({
-    config: createValidConfig(),
-    workspaceRoot,
-    requestEnvelope: request,
-  });
+    const engine = new RuntimeEngine({
+      config: createValidConfig(),
+      workspaceRoot,
+      requestEnvelope: request,
+    });
 
-  const result = await engine.run();
+    const result = await engine.run();
 
-  assert.match(result.state.runId, /^run-\d{14}-[a-f0-9]{8}$/);
-  assert.notEqual(result.state.runId, "trace-1");
-  assert.equal(path.normalize(result.trajectoryPath), path.join(workspaceRoot, ".reaper", "logs", result.state.runId, "session.jsonl"));
+    assert.match(result.state.runId, /^run-\d{14}-[a-f0-9]{8}$/);
+    assert.notEqual(result.state.runId, "trace-1");
+    assert.equal(path.normalize(result.trajectoryPath), path.join(workspaceRoot, ".reaper", "logs", result.state.runId, "session.jsonl"));
 
-  const runResult = JSON.parse(await readFile(path.join(workspaceRoot, ".reaper", "logs", result.state.runId, "result.json"), "utf8")) as {
-    status: string;
-    toolResultCount: number;
-  };
-  assert.equal(runResult.status, "completed");
-  assert.equal(requestedToolResults(result.toolResults).length, 1);
+    const runResult = JSON.parse(await readFile(path.join(workspaceRoot, ".reaper", "logs", result.state.runId, "result.json"), "utf8")) as {
+      status: string;
+      toolResultCount: number;
+    };
+    assert.equal(runResult.status, "completed");
+    assert.equal(requestedToolResults(result.toolResults).length, 1);
 
-  const latest = JSON.parse(await readFile(path.join(workspaceRoot, ".reaper", "latest-run.json"), "utf8")) as { runId: string };
-  assert.equal(latest.runId, result.state.runId);
+    const latest = JSON.parse(await readFile(path.join(workspaceRoot, ".reaper", "latest-run.json"), "utf8")) as { runId: string };
+    assert.equal(latest.runId, result.state.runId);
+  } finally {
+    if (prevDev === undefined) delete process.env.REAPER_DEV;
+    else process.env.REAPER_DEV = prevDev;
+  }
 });
 
 test("runtime engine surfaces failed tools cleanly", async () => {

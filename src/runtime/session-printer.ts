@@ -12,6 +12,7 @@
 
 import { WriteStream } from "node:tty";
 import { getEngineTunables } from "../config/config-tunables.js";
+import { streamEventsEnabled } from "../logging/stream-events.js";
 
 
 export interface SessionPrinterOptions {
@@ -28,6 +29,10 @@ export interface ToolCallPrintOptions {
 let globalReasoningEnabled = false;
 let globalOut: NodeJS.WriteStream = process.stdout;
 
+/** Resolve the stream for human text: stderr when stream-events owns stdout. */
+function humanOut(): NodeJS.WriteStream {
+  return streamEventsEnabled() ? process.stderr : globalOut;
+}
 export function enableSessionPrinter(enabled: boolean, out?: NodeJS.WriteStream): void {
   globalReasoningEnabled = enabled;
   if (out) globalOut = out;
@@ -67,13 +72,13 @@ function sectionHeader(kind: "reasoning" | "content", charCount: number): string
 
 export function printTurnHeader(turn: number, opts?: ToolCallPrintOptions): void {
   if (!isSessionPrinterEnabled()) return;
-  const out = opts?.out ?? globalOut;
+  const out = opts?.out ?? humanOut();
   out.write(`\n${dim(`● Turn ${turn}`, out)}\n`);
 }
 
 export function printToolCalls(toolCalls: Array<{ name: string; args?: Record<string, unknown> }>, opts?: ToolCallPrintOptions): void {
   if (!isSessionPrinterEnabled() || toolCalls.length === 0) return;
-  const out = opts?.out ?? globalOut;
+  const out = opts?.out ?? humanOut();
   for (const call of toolCalls) {
     const summary = summarizeToolCall(call.name, call.args ?? {});
     out.write(`  ${dim("→", out)} ${call.name}${summary ? ` ${dim("—", out)} ${summary}` : ""}\n`);
@@ -105,7 +110,7 @@ function summarizeToolCall(name: string, args: Record<string, unknown>): string 
 export function printAgentReasoning(reasoning?: string, content?: string, opts?: SessionPrinterOptions): void {
   if (!isSessionPrinterEnabled()) return;
 
-  const out = opts?.out ?? globalOut;
+  const out = opts?.out ?? humanOut();
   const format = opts?.format ?? defaultFormat;
   const parts: string[] = [];
 

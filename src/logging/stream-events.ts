@@ -45,6 +45,20 @@ function ensureStdoutErrorHook(): void {
 }
 
 /**
+ * Write human-readable text. When stream-events mode is on, stdout is
+ * reserved for the pure JSONL event stream, so human text goes to
+ * stderr; otherwise it goes to stdout like normal.
+ */
+export function writeHumanOutput(text: string): void {
+  try {
+    if (streamEventsEnabled()) process.stderr.write(text);
+    else process.stdout.write(text);
+  } catch {
+    /* never break the run for a console write */
+  }
+}
+
+/**
  * Mirror one trajectory entry to stdout as a single JSONL line.
  * No-op unless stream events are enabled. Swallows all write errors
  * (EPIPE when a downstream pipe is closed, etc.) so a consumer
