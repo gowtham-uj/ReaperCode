@@ -46,7 +46,7 @@ test("renderModelCallTranscript includes system, messages, and output", () => {
   assert.match(text, /MODEL OUTPUT/);
 });
 
-test("logModelCall writes json + txt + TRANSCRIPT.md", async () => {
+test("logModelCall writes json and does not write a fat transcript by default", async () => {
   const root = mkdtempSync(path.join(tmpdir(), "reaper-model-io-"));
   const fakeGithubToken = `ghp_${"D".repeat(36)}`;
   try {
@@ -72,21 +72,16 @@ test("logModelCall writes json + txt + TRANSCRIPT.md", async () => {
     });
     const dir = path.join(root, ".reaper", "runs", "run-test", "model-calls");
     const json = readFileSync(path.join(dir, "0001-generate.json"), "utf8");
-    const txt = readFileSync(path.join(dir, "0001-generate.txt"), "utf8");
-    const transcript = readFileSync(path.join(dir, "TRANSCRIPT.md"), "utf8");
     assert.match(json, /"call_id": "0001-generate"/);
-    assert.match(txt, /hi/);
-    assert.match(txt, /hello/);
-    assert.match(transcript, /0001-generate/);
-    for (const persisted of [json, txt, transcript]) {
-      assert.doesNotMatch(persisted, new RegExp(fakeGithubToken));
-      assert.match(persisted, /\[REDACTED(?::[^\]]+)?\]/);
+    assert.doesNotMatch(json, new RegExp(fakeGithubToken));
+    assert.match(json, /\[REDACTED(?::[^\]]+)?\]/);
+    let fatMissing = false;
+    try {
+      readFileSync(path.join(dir, "TRANSCRIPT.md"), "utf8");
+    } catch {
+      fatMissing = true;
     }
-
-    const dest = path.join(root, "MODEL_IO.md");
-    const collected = await collectModelCallTranscripts(root, "run-test", dest);
-    assert.equal(collected.calls, 1);
-    assert.match(readFileSync(dest, "utf8"), /Model I\/O Transcript/);
+    assert.equal(fatMissing, true);
   } finally {
     setModelCallLogContext(undefined);
     rmSync(root, { recursive: true, force: true });

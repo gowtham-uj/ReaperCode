@@ -10,6 +10,7 @@ const CommonLogFieldsSchema = z
     trace_id: z.string().min(1),
     timestamp: IsoDateTimeSchema,
     log_schema_version: z.literal(1),
+    turn_index: z.number().int().min(0).optional(),
   })
   .strict();
 
@@ -59,6 +60,8 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
     args: z.unknown().optional(),
     output: z.unknown().optional(),
     error: z.object({ code: z.string(), message: z.string() }).optional(),
+    duration_ms: z.number().int().min(0).optional(),
+    is_error: z.boolean().optional(),
   }),
   CommonLogFieldsSchema.extend({
     kind: z.literal("state_transition"),
@@ -100,7 +103,8 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
   CommonLogFieldsSchema.extend({
     kind: z.literal("assistant_message"),
     level: z.enum(["info", "debug", "trace"]),
-    content: z.string().min(1),
+    content: z.string(),
+    tool_names: z.array(z.string().min(1)).optional(),
   }),
   CommonLogFieldsSchema.extend({
     kind: z.literal("model_response"),
@@ -136,6 +140,7 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
 	    completion_gate_attempts: z.number().int().min(0).optional(),
 	    verified_completion: z.boolean().optional(),
 	    stop_reason: z.enum(["solved", "no_progress_stop", "gate_exhausted", "harness_timeout", "infra_failed", "error"]).optional(),
+	    engine_stop_reason: z.enum(["solved", "no_progress_stop", "gate_exhausted", "harness_timeout", "infra_failed", "error"]).optional(),
 	  }),
 	  CommonLogFieldsSchema.extend({
 	    kind: z.literal("subagent_prompt"),

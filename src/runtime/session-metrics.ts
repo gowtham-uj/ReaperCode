@@ -12,6 +12,37 @@ export interface SessionMetricsSummary {
   stop_reason: SessionStopReason;
 }
 
+const VERIFY_CMD = /\b(npm\s+test|pnpm\s+test|yarn\s+test|pytest|go\s+test|cargo\s+test|make\s+test|run-tests|tsc\s+--noEmit|npm\s+run\s+typecheck|npm\s+run\s+build|pnpm\s+build)\b/i;
+const MUTATING_TOOLS = new Set(["file_edit", "write_file", "replace_in_file", "delete_file", "apply_patch", "edit_file"]);
+
+export function countVerificationAttempts(results: ToolResult[]): number {
+  let count = 0;
+  for (const result of results) {
+    if (result.name !== "bash") continue;
+    const args = result.args && typeof result.args === "object" && !Array.isArray(result.args) ? result.args : {};
+    const cmd = "cmd" in args && typeof args.cmd === "string" ? args.cmd : "";
+    if (VERIFY_CMD.test(cmd)) count += 1;
+  }
+  return count;
+}
+
+export function hasPassingVerifyAfterLastEdit(results: ToolResult[]): boolean {
+  let lastEdit = -1;
+  for (let i = 0; i < results.length; i += 1) {
+    if (MUTATING_TOOLS.has(results[i]!.name)) lastEdit = i;
+  }
+  if (lastEdit < 0) return false;
+  for (let i = lastEdit + 1; i < results.length; i += 1) {
+    const result = results[i]!;
+    if (result.name !== "bash" || !result.ok) continue;
+    const args = result.args && typeof result.args === "object" && !Array.isArray(result.args) ? result.args : {};
+    const cmd = "cmd" in args && typeof args.cmd === "string" ? args.cmd : "";
+    if (VERIFY_CMD.test(cmd)) return true;
+  }
+  return false;
+}
+
+
 export interface BuildSessionMetricsSummaryInput {
   toolResults: ToolResult[];
   completionGateAttempts: number;

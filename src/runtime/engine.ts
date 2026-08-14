@@ -113,7 +113,7 @@ import { createReaperRunContext, ensureReaperRunContext, writeLatestRunPointer, 
 import { renderFingerprintForPrompt } from "./fingerprint.js";
 import { registerCleanup, runCleanupFunctions, setActiveRunDir, installCrashHandlers } from "./cleanup-registry.js";
 import { buildDerivedSecretEncodingFeedback } from "./derived-secret-encoding.js";
-import { buildSessionMetricsSummary } from "./session-metrics.js";
+import { buildSessionMetricsSummary, countVerificationAttempts, hasPassingVerifyAfterLastEdit } from "./session-metrics.js";
 import { collectWorkspaceDiff, runFreshContextDiffReview } from "../verify/diff-review.js";
 import { buildRescueHypothesisLedger, renderRescueHypothesisLedger } from "./hypothesis-ledger.js";
 import { printToolCalls, printTurnHeader } from "./session-printer.js";
@@ -706,8 +706,9 @@ export class RuntimeEngine {
         kind: "session_start",
         level: boot.state.logLevel,
         user_intent_summary: boot.state.userIntentSummary,
-        ...(mainProfile?.provider ? { provider: mainProfile.provider } : {}),
-        ...(mainProfile?.model ? { model: mainProfile.model } : {}),
+        provider: mainProfile?.provider ?? "unknown",
+        model: mainProfile?.model ?? "unknown",
+
         run_params: {
           workspace_root: this.input.workspaceRoot,
           safety_profile: boot.state.safetyProfile,
@@ -1327,6 +1328,23 @@ export class RuntimeEngine {
               })
               .catch(() => undefined);
           }
+          await this.trajectoryLogger
+            .write({
+              event_id: randomUUID(),
+              run_id: getBoot().state.runId,
+              session_id: getBoot().state.sessionId,
+              trace_id: getBoot().state.runId,
+              timestamp: new Date().toISOString(),
+              log_schema_version: 1,
+              kind: "assistant_message",
+              level: getBoot().state.logLevel,
+              content: typeof turn.content === "string" ? turn.content : "",
+              turn_index: liveModelTurnIndex,
+              tool_names: ((turn.toolCalls ?? []) as ToolCall[]).map((call) => call.name),
+            })
+            .catch(() => undefined);
+          this.trajectoryLogger.setTurnIndex(liveModelTurnIndex);
+
           liveModelTurnIndex += 1;
 
           const tc = (turn.toolCalls ?? []) as ToolCall[];
@@ -1634,25 +1652,6 @@ export class RuntimeEngine {
           } catch { /* best-effort */ }
           continue;
         }
-        await logModelResponseTrace({
-          trajectoryLogger: this.trajectoryLogger,
-          runId: getBoot().state.runId,
-          sessionId: getBoot().state.sessionId,
-          traceId: getBoot().state.runId,
-          level: getBoot().state.logLevel,
-          source: "main_agent_live",
-          assistantMessage: lastAssistantMessage,
-          toolCalls: [],
-        });
-        await logAssistantMessageTrace({
-          trajectoryLogger: this.trajectoryLogger,
-          runId: getBoot().state.runId,
-          sessionId: getBoot().state.sessionId,
-          traceId: getBoot().state.runId,
-          level: getBoot().state.logLevel,
-          source: "main_agent_live",
-          content: lastAssistantMessage,
-        });
         // We have already executed everything; the engine's downstream
         // nodes should not re-execute. Pass empty plannedToolCalls.
         return {
@@ -2189,10 +2188,10 @@ export class RuntimeEngine {
 	        // most recent test/build/typecheck run is the observed evidence.
 	        verifiedCompletion: Boolean(
 	          taskCompleted
+	          && hasPassingVerifyAfterLastEdit(state.toolResults)
 	          && (
 	            state.explicitVerification?.ok === true
 	            || hasPassingGroundedVerification(state.toolResults, getRequest())
-	            || hasObservedPassingVerification(state.toolResults)
 	          )
 	        ),
 	        stuckTripped: false,
@@ -2203,15 +2202,19 @@ export class RuntimeEngine {
 	      const metrics = buildTrajectoryEfficiencyMetrics({
 	        startedAt,
 	        prompt: state.prompt,
-        toolResults: state.toolResults,
-        feedback: state.feedback,
-        negativeConstraints: state.negativeConstraints,
-        completedStepIds: state.completedStepIds,
+	        toolResults: state.toolResults,
+	        feedback: state.feedback,
+	        negativeConstraints: state.negativeConstraints,
+	        completedStepIds: state.completedStepIds,
 	        currentStepIndex: state.currentStepIndex,
 	        ...(state.executionPlan ? { executionPlan: state.executionPlan } : {}),
 	        ...(state.explicitVerification ? { explicitVerification: state.explicitVerification } : {}),
 	      });
-	      const mergedMetrics = { ...metrics, ...sessionMetrics };
+	      const verificationAttempts = Math.max(
+	        countVerificationAttempts(state.toolResults),
+	        metrics.verification_attempts,
+	      );
+	      const mergedMetrics = { ...metrics, ...sessionMetrics, verification_attempts: verificationAttempts };
 	      if (this.config.logging.sessionMetrics) {
 	        await this.trajectoryLogger.write({
 	          event_id: randomUUID(),
@@ -2224,9 +2227,10 @@ export class RuntimeEngine {
 	          level: activeBoot.state.logLevel,
 	          tool_count: metrics.tool_count,
 	          failure_count: metrics.failure_count,
-	          verification_attempts: metrics.verification_attempts,
+	          verification_attempts: verificationAttempts,
 	          total_runtime_ms: metrics.total_runtime_ms,
 	          ...sessionMetrics,
+	          engine_stop_reason: sessionMetrics.stop_reason,
 	        });
 	        await writeTrajectoryMetricsFile(this.input.workspaceRoot, activeBoot.state.runId, mergedMetrics);
 	      }

@@ -9,7 +9,7 @@ import { createTempWorkspace } from "../fixtures/workspace.js";
 import { ToolExecutor } from "../../src/tools/executor.js";
 import { logLangfuseEvent } from "../../src/logging/langfuse.js";
 
-test("trajectory logger writes indexed entries with integrity hashes", async () => {
+test("trajectory logger writes a session header and sequenced mutations", async () => {
   const workspaceRoot = await createTempWorkspace();
   const logger = new TrajectoryLogger(workspaceRoot);
 
@@ -26,9 +26,12 @@ test("trajectory logger writes indexed entries with integrity hashes", async () 
   });
 
   const log = await readFile(logger.path, "utf8");
+  const lines = log.trim().split("\n").map((line) => JSON.parse(line) as { kind: string; type?: string; seq?: number });
+  assert.equal(lines[0]?.kind, "header");
+  assert.equal(lines[1]?.kind, "record");
+  assert.equal(lines[1]?.type, "operation_started");
+  assert.equal(lines[1]?.seq, 1);
   const index = await readFile(path.join(workspaceRoot, ".reaper", "logs", "reaper-trajectory.index.json"), "utf8");
-  assert.match(log, /entry_hash/);
-  assert.match(log, /prev_hash/);
   assert.match(index, /event-1/);
 });
 

@@ -480,6 +480,8 @@ export class ToolExecutor {
         status: r.ok ? "completed" : "failed",
         args: callAnyBypass.args,
         output: r.output,
+        duration_ms: Date.now() - start,
+        is_error: !r.ok,
         ...(r.error ? { error: r.error } : {}),
       });
       return result;
@@ -506,6 +508,8 @@ export class ToolExecutor {
         status: "failed",
         args,
         error: { message, code: "INVALID_TOOL_PARAMS" },
+        duration_ms: Date.now() - start,
+        is_error: true,
       });
       return {
         toolCallId: call.id,
@@ -701,6 +705,8 @@ export class ToolExecutor {
         status: "completed",
         args: parsedCall.args,
         output: finalOutput,
+        duration_ms: Date.now() - start,
+        is_error: false,
       });
 
       return result;
@@ -769,6 +775,8 @@ export class ToolExecutor {
         status: "failed",
         args: parsedCall.args,
         error: result.error,
+        duration_ms: Date.now() - start,
+        is_error: true,
       });
 
       if (parsedCall.name === "bash" || error instanceof PathPolicyError) {

@@ -29,6 +29,7 @@ type ModelCallLogPayload = {
 
 let context: ModelCallLogContext | undefined;
 const counters = new Map<string, number>();
+const systemPrintedForRun = new Set<string>();
 
 export function setModelCallLogContext(next: ModelCallLogContext | undefined): void {
   context = next;
@@ -54,86 +55,86 @@ export async function logModelCall(payload: ModelCallLogPayload): Promise<void> 
   }));
   await writeFile(path.join(dir, `${callId}.json`), JSON.stringify(safe, null, 2), "utf8");
 
-  // Human-readable transcript: exactly what the model sees (system + messages)
-  // plus the model response. Secrets are redacted.
   try {
-    const text = renderModelCallTranscript(callId, payload);
-    await writeFile(path.join(dir, `${callId}.txt`), text, "utf8");
-    // Append to a single chronological transcript for the whole run.
-    const indexPath = path.join(dir, "TRANSCRIPT.md");
-    await appendFile(indexPath, text + "\n\n", "utf8");
+    if (process.env.REAPER_DEBUG_TRANSCRIPT === "1" || process.env.REAPER_DEBUG_TRANSCRIPT === "true") {
+      const includeSystem = !systemPrintedForRun.has(active.runId);
+      const text = renderModelCallTranscript(callId, payload, { includeSystem });
+      if (includeSystem) systemPrintedForRun.add(active.runId);
+      await appendFile(path.join(dir, "TRANSCRIPT.md"), `${text}\n`, "utf8");
+    }
   } catch {
-    /* best-effort — never break the model loop for logging */
+    /* best-effort. never break the model loop for logging */
   }
 }
 
 /**
- * Render a readable transcript of one model call — the context window
- * as the model receives it, then the model output.
+ * One slice of the append-only human session log.
+ * System prompt and tool schemas are written only on the first call.
  */
-export function renderModelCallTranscript(callId: string, payload: ModelCallLogPayload): string {
+export function renderModelCallTranscript(
+  callId: string,
+  payload: ModelCallLogPayload,
+  options?: { includeSystem?: boolean },
+): string {
+  const includeSystem = options?.includeSystem !== false;
   const lines: string[] = [];
   const divider = "=".repeat(72);
   const thin = "-".repeat(72);
   lines.push(divider);
-  lines.push(`MODEL CALL  ${callId}`);
+  lines.push(`TURN  ${callId}`);
   lines.push(`kind=${payload.kind}  role=${payload.role ?? "?"}  durationMs=${payload.durationMs ?? "?"}`);
   if (payload.profile) {
+    const profileName =
+      payload.profile && typeof payload.profile === "object" && "profileName" in payload.profile
+        ? String(payload.profile.profileName ?? "?")
+        : "?";
     lines.push(
-      `provider=${payload.profile.provider ?? "?"}  model=${payload.profile.model ?? "?"}  profile=${(payload.profile as any).profileName ?? "?"}`,
+      `provider=${payload.profile.provider ?? "?"}  model=${payload.profile.model ?? "?"}  profile=${profileName}`,
     );
   }
   if (payload.startedAt) lines.push(`started=${payload.startedAt}`);
   if (payload.completedAt) lines.push(`completed=${payload.completedAt}`);
   lines.push(divider);
 
-  const req = payload.request as GenerateRequest | undefined;
-  if (req && typeof req === "object") {
-    lines.push("");
-    lines.push("### SYSTEM (what the model sees as system)");
-    lines.push(thin);
-    lines.push(redactText(typeof req.system === "string" ? req.system : "(none)"));
-    lines.push("");
-
-    if (Array.isArray(req.tools) && req.tools.length > 0) {
-      lines.push("### TOOLS (schemas offered this call)");
-      lines.push(thin);
-      for (const tool of req.tools as Array<Record<string, unknown>>) {
-        const name =
-          (typeof tool.name === "string" && tool.name) ||
-          (tool.function && typeof (tool.function as any).name === "string"
-            ? (tool.function as any).name
-            : "(unnamed)");
-        const desc =
-          (typeof tool.description === "string" && tool.description) ||
-          (tool.function && typeof (tool.function as any).description === "string"
-            ? (tool.function as any).description
-            : "");
-        lines.push(`- ${name}${desc ? `: ${String(desc).slice(0, 160)}` : ""}`);
-      }
+  const req = payload.request;
+  if (req && typeof req === "object" && "system" in req) {
+    if (includeSystem) {
       lines.push("");
+      lines.push("### SYSTEM (once for this session)");
+      lines.push(thin);
+      lines.push(redactText(typeof req.system === "string" ? req.system : "(none)"));
+      lines.push("");
+      if (Array.isArray(req.tools) && req.tools.length > 0) {
+        lines.push("### TOOLS (once for this session)");
+        lines.push(thin);
+        for (const tool of req.tools) {
+          if (!tool || typeof tool !== "object") continue;
+          const name = "name" in tool && typeof tool.name === "string" ? tool.name : "(unnamed)";
+          const desc = "description" in tool && typeof tool.description === "string" ? tool.description : "";
+          lines.push(`- ${name}${desc ? `: ${desc.slice(0, 160)}` : ""}`);
+        }
+        lines.push("");
+      }
     }
 
-    lines.push("### MESSAGES (conversation context sent to the model)");
-    lines.push(thin);
     const messages = Array.isArray(req.messages) ? req.messages : [];
-    for (let i = 0; i < messages.length; i += 1) {
-      const msg = messages[i] as Record<string, unknown>;
-      const role = String(msg.role ?? "unknown");
+    const slice = includeSystem ? messages : messages.slice(-2);
+    if (slice.length > 0) {
       lines.push("");
-      lines.push(`---- message[${i}] role=${role}${msg.tool_call_id ? ` tool_call_id=${msg.tool_call_id}` : ""} ----`);
-      if (typeof msg.content === "string") {
-        lines.push(redactText(msg.content));
-      } else if (msg.content != null) {
-        lines.push(redactText(JSON.stringify(msg.content, null, 2)));
-      } else {
-        lines.push("(empty content)");
-      }
-      if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
-        lines.push("[tool_calls emitted in this assistant message:]");
-        for (const tc of msg.tool_calls as Array<Record<string, unknown>>) {
-          const fn = (tc.function as Record<string, unknown> | undefined) ?? {};
-          lines.push(`  • id=${tc.id ?? "?"} name=${fn.name ?? "?"} args=${redactText(String(fn.arguments ?? ""))}`);
+      lines.push(includeSystem ? "### MESSAGES" : "### NEW CONTEXT");
+      lines.push(thin);
+      for (const msg of slice) {
+        if (!msg || typeof msg !== "object") continue;
+        const role = "role" in msg ? String(msg.role ?? "unknown") : "unknown";
+        const toolCallId = "tool_call_id" in msg && typeof msg.tool_call_id === "string" ? msg.tool_call_id : "";
+        lines.push("");
+        lines.push(`---- role=${role}${toolCallId ? ` tool_call_id=${toolCallId}` : ""} ----`);
+        if ("content" in msg && typeof msg.content === "string") {
+          lines.push(redactText(msg.content));
+        } else if ("content" in msg && msg.content != null) {
+          lines.push(redactText(JSON.stringify(msg.content, null, 2)));
+        } else {
+          lines.push("(empty content)");
         }
       }
     }
