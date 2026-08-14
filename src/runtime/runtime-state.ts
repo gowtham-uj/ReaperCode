@@ -16,13 +16,14 @@ import type { ToolCall } from "../tools/types.js";
 import { TrajectoryLogger } from "../logging/trajectory.js";
 import type { ReaperRunContext } from "./run-manager.js";
 import type { RuntimeEngineResult, SplitToolCalls } from "./engine.js";
-
+import { isReaperDevMode } from "./dev-mode.js";
 export function inferTransport(value: unknown): TransportKind {
   const allowed = new Set<TransportKind>(["stdio", "http_json", "http_sse", "websocket", "webhook"]);
   return typeof value === "string" && allowed.has(value as TransportKind) ? (value as TransportKind) : "stdio";
 }
 
 export async function persistRunResult(runContext: ReaperRunContext, result: RuntimeEngineResult, status: "completed" | "failed"): Promise<void> {
+  if (!isReaperDevMode()) return;
   await mkdir(runContext.runDir, { recursive: true });
   const completedAt = new Date().toISOString();
   await writeFile(

@@ -70,7 +70,7 @@ test("logModelCall writes json and does not write a fat transcript by default", 
       } as any,
       durationMs: 1,
     });
-    const dir = path.join(root, ".reaper", "runs", "run-test", "model-calls");
+    const dir = path.join(root, ".reaper", "logs", "run-test", "model-calls");
     const json = readFileSync(path.join(dir, "0001-generate.json"), "utf8");
     assert.match(json, /"call_id": "0001-generate"/);
     assert.doesNotMatch(json, new RegExp(fakeGithubToken));

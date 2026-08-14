@@ -379,6 +379,13 @@ export class ReaperCLI {
     const reasoningEffort = reasoningEffortRaw === "low" || reasoningEffortRaw === "medium" || reasoningEffortRaw === "high"
       ? reasoningEffortRaw
       : undefined;
+    const thinkingRaw = flags["thinking"];
+    const thinking: ExecRunnerOptions["thinking"] | undefined =
+      thinkingRaw === "on" || thinkingRaw === "enabled" || thinkingRaw === "1"
+        ? "enabled"
+        : thinkingRaw === "off" || thinkingRaw === "disabled" || thinkingRaw === "0"
+          ? "disabled"
+          : undefined;
     try {
       const result = await runExec({
         workspaceRoot,
@@ -388,6 +395,7 @@ export class ReaperCLI {
         ...(timeoutMs !== undefined && Number.isFinite(timeoutMs) ? { timeoutMs } : {}),
         ...(provider !== undefined ? { provider } : {}),
         ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+        ...(thinking !== undefined ? { thinking } : {}),
         ...(session !== undefined ? { session } : {}),
       });
       if (wantJson) {
@@ -448,7 +456,7 @@ export class ReaperCLI {
       "  visual      list | analyze | bridge",
       "  capability  show | probe",
       "  redact      <file|->",
-      "  exec        run --prompt <text> [--session <name>] [--workspace <dir>] [--model <id>] [--provider anthropic|openai|openai-codex|minimax|deepseek|nuralwatt|nuralwatt2] [--reasoning-effort low|medium|high] [--max-tokens N] [--timeout-ms N] [--json] [--stream-events]",
+      "  exec        run --prompt <text> [--session <name>] [--workspace <dir>] [--model <id>] [--provider anthropic|openai|openai-codex|minimax|deepseek|nuralwatt|nuralwatt2] [--reasoning-effort low|medium|high] [--thinking on|off] [--max-tokens N] [--timeout-ms N] [--json] [--stream-events]",
     ].join("\n");
     return { exitCode: 0, stdout: usage + "\n", stderr: "" };
   }

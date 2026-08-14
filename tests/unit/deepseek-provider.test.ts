@@ -45,7 +45,7 @@ test("DeepSeek generate preserves stable system prefix and exposes cache usage",
     assert.equal(typeof capturedBody.messages[0].content, "string");
     assert.equal(capturedBody.messages[1].role, "user");
     assert.equal(capturedBody.stream_options.include_usage, true);
-    assert.deepEqual(capturedBody.thinking, { type: "disabled" });
+    assert.deepEqual(capturedBody.thinking, { type: "enabled" });
     assert.equal(result.content, "ok");
     const raw = result.raw as any;
     assert.equal(raw.promptCache.enabled, true);

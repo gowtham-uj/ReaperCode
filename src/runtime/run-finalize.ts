@@ -12,7 +12,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { ReaperRunContext } from "./run-manager.js";
-
+import { isReaperDevMode } from "./dev-mode.js";
 type GraphMode = "explicit_tools" | "needs_model" | "autonomous";
 type SplitToolCalls = { completionSignal?: unknown };
 type ToolResult = {
@@ -96,7 +96,7 @@ export function classifyRunFinalStatus(state: {
 }
 
 export async function persistRunFailure(runContext: ReaperRunContext, error: unknown): Promise<void> {
-  await mkdir(runContext.runDir, { recursive: true });
+  if (!isReaperDevMode()) return;
   await writeFile(
     path.join(runContext.runDir, "result.json"),
     JSON.stringify(

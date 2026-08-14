@@ -1,5 +1,4 @@
 import { parseTrajectoryEntry, type TrajectoryEntry } from "./schema.js";
-import { LogIndexFile } from "./index-file.js";
 import { logLangfuseEvent } from "./langfuse.js";
 import { emitStreamEvent } from "./stream-events.js";
 import { SessionLogWriter } from "./session-writer.js";
@@ -9,7 +8,6 @@ import type { SessionMutation } from "./session-format.js";
 export class TrajectoryLogger {
   private readonly session: SessionLogWriter;
   private readonly conversation: ConversationLog;
-  private readonly index: LogIndexFile;
   private readonly workspaceRoot: string;
   private turnIndex: number | undefined;
 
@@ -20,7 +18,6 @@ export class TrajectoryLogger {
       ...(options?.runId ? { runId: options.runId } : {}),
     });
     this.conversation = new ConversationLog(workspaceRoot, options?.runId);
-    this.index = new LogIndexFile(workspaceRoot, "session.index.json", options?.runId);
   }
 
   setTurnIndex(turnIndex: number): void {
@@ -37,8 +34,6 @@ export class TrajectoryLogger {
     await this.conversation.append(parsed);
     for (const mutation of mutations) {
       emitStreamEvent(mutation);
-      const seq = "seq" in mutation ? mutation.seq : 0;
-      await this.index.append({ event_id: parsed.event_id, offset: seq });
     }
     const statusMessage = "error" in parsed ? parsed.error?.message : undefined;
     setImmediate(() => {

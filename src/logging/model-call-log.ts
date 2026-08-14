@@ -4,6 +4,7 @@ import path from "node:path";
 import type { GenerateRequest, GenerateResult, EmbeddingRequest, EmbeddingResult, ResolvedModelProfile, StreamEvent } from "../model/types.js";
 import { getActiveModelCallContext } from "../model/observability.js";
 import { getReaperScratchpadPaths } from "../workspace/scratchpad.js";
+import { isReaperDevMode } from "../runtime/dev-mode.js";
 import { redactSecrets } from "./redaction.js";
 
 export interface ModelCallLogContext {
@@ -39,12 +40,12 @@ export function currentModelCallLogContext(): ModelCallLogContext | undefined {
 }
 
 export async function logModelCall(payload: ModelCallLogPayload): Promise<void> {
+  if (!isReaperDevMode()) return;
   const observed = getActiveModelCallContext();
   const active = context ?? (observed ? { workspaceRoot: observed.workspaceRoot, runId: observed.runId } : undefined);
   if (!active) return;
   const callId = payload.callId ?? nextCallId(active.runId, payload.kind);
-  const paths = getReaperScratchpadPaths(active.workspaceRoot);
-  const dir = path.join(paths.runs, active.runId, "model-calls");
+  const dir = path.join(getReaperScratchpadPaths(active.workspaceRoot).logs, active.runId, "model-calls");
   await mkdir(dir, { recursive: true });
   const safe = redactSecrets(toJsonSafe({
     schema_version: 1,
@@ -189,7 +190,7 @@ export async function collectModelCallTranscripts(
   destPath: string,
 ): Promise<{ calls: number; destPath: string }> {
   const paths = getReaperScratchpadPaths(workspaceRoot);
-  const dir = path.join(paths.runs, runId, "model-calls");
+  const dir = path.join(paths.logs, runId, "model-calls");
   let files: string[] = [];
   try {
     files = (await readdir(dir)).filter((f) => f.endsWith(".txt") && f !== "TRANSCRIPT.md").sort();

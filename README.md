@@ -90,10 +90,11 @@ node bin/reaper exec run --prompt "..." \
 | `--max-tokens` | Cap on the model's output tokens |
 | `--timeout-ms` | Cap on the whole run |
 | `--reasoning-effort` | `low`, `medium`, or `high` on OpenAI-compatible providers |
+| `--thinking` | `on` or `off` for any provider (default `on`) |
 | `--json` | Print the result object instead of live text |
 | `--stream-events` | JSONL events on stdout, extra notes on stderr |
 
-`--session name` writes turns to `.reaper/sessions/name.jsonl` and reloads them the next time you use the same name.
+`--session name` writes turns to `.reaper/logs/name/session.jsonl` and reloads them the next time you use the same name.
 
 ## What it can do
 

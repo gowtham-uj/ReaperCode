@@ -43,10 +43,14 @@ test("MiniMax M3 prefers buffered provider JSON structured output", () => {
   assert.equal(getDefaultStructuredModePreference({ provider: "minimax", model: "MiniMax-M3" }), "provider_json");
 });
 
-test("DeepSeek quirks request streaming usage and optional v4 thinking", () => {
+test("DeepSeek quirks request streaming usage and thinking default enabled", () => {
   assert.equal(shouldRequestStreamUsage({ provider: "deepseek", model: "deepseek-chat" }), true);
   assert.deepEqual(buildDeepSeekThinkingParam({ provider: "deepseek", model: "deepseek-v3" }), undefined);
-  assert.deepEqual(buildDeepSeekThinkingParam({ provider: "deepseek", model: "deepseek-v4" }), { thinking: { type: "disabled" } });
+  assert.deepEqual(buildDeepSeekThinkingParam({ provider: "deepseek", model: "deepseek-v4" }), { thinking: { type: "enabled" } });
+  assert.deepEqual(
+    buildDeepSeekThinkingParam({ provider: "deepseek", model: "deepseek-v4", defaultParams: { thinking: "disabled" } } as never),
+    { thinking: { type: "disabled" } },
+  );
 });
 
 test("provider max-token helper applies provider caps", () => {

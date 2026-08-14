@@ -655,6 +655,7 @@ export function createContextEngineeringHooks(
             log_schema_version: 1,
             kind: useHandoff ? "handoff_summary" : "full_summary",
             level: "info",
+            summary: summaryText,
             summary_chars: summaryText.length,
             kept_messages: newMsgs.length,
             ptl_drops: 0,
@@ -663,7 +664,6 @@ export function createContextEngineeringHooks(
             checkpoint_chars: JSON.stringify(checkpoint).length,
             golden_fact_count: checkpoint.goldenFacts.length,
             blocking: blockingFullSummary,
-            ...(useHandoff ? { handoff_kind: "omp-4-section" } : {}),
           } as any).catch(() => undefined);
         };
 
@@ -1115,138 +1115,12 @@ export function createContextEngineeringHooks(
       } catch {
         /* best-effort */
       }
-
-      // Named-session continuity (OMP parity): journal the run's NEW turns —
-      // the POST-TRANSFORM conversation delta, including assistant tool_calls
-      // and (already shaken/pruned) tool results — so the next run with the
-      // same --session name rehydrates the real multi-turn conversation.
-      if (namedSession) {
-        try {
-          const { isValidSessionName, journalExists, initJournal, appendEntry, lastEntryId } =
-            await import("../context/session-journal.js");
-          if (isValidSessionName(namedSession)) {
-            if (!journalExists(workspaceRoot, namedSession)) {
-              await initJournal({ name: namedSession, workspaceRoot, cwd: workspaceRoot }).catch(() => undefined);
-            }
-            if (journalExists(workspaceRoot, namedSession)) {
-              // Full-summary write-back FIRST: the compaction entry replaces
-              // all prior journaled turns on the next rehydration; this run's
-              // own final exchange is then appended raw after it.
-              const summarySlot = runState.lastFullSummary;
-              if (summarySlot && typeof summarySlot.summaryText === "string" && summarySlot.summaryText.length > 0) {
-                await appendEntry(workspaceRoot, namedSession, {
-                  id: randomUUID(),
-                  parentId: lastEntryId(workspaceRoot, namedSession),
-                  type: "compaction",
-                  ts: new Date().toISOString(),
-                  note: "full_summary write-back",
-                  payload: {
-                    preChars: summarySlot.preChars,
-                    postChars: summarySlot.postChars,
-                    savedChars: Math.max(0, summarySlot.preChars - summarySlot.postChars),
-                    resultsShaken: 0,
-                    summary: summarySlot.summaryText,
-                    checkpoint: summarySlot.checkpoint,
-                  },
-                });
-              }
-              // Live mid-run journaling already persisted the conversation
-              // parent chain. Only write the compaction entry above; do not
-              // re-append the same messages (would fork a second branch).
-              if (!runState.liveJournalWrites) {
-                const wire = Array.isArray(conversation)
-                  ? (conversation as Array<Record<string, unknown>>)
-                  : [];
-                let slice: Array<Record<string, unknown>> = [];
-                if (summarySlot && wire.length > 0) {
-                  // Post-compact state: everything before the summary block is
-                  // already represented by the compaction entry above.
-                  let cut = -1;
-                  for (let i = wire.length - 1; i >= 0; i -= 1) {
-                    const m = wire[i]!;
-                    if (
-                      m.role === "user" &&
-                      (
-                        m.name === "reaper_compaction_summary" ||
-                        (typeof m.content === "string" &&
-                          m.content.startsWith("Summary of prior context:"))
-                      )
-                    ) {
-                      cut = i;
-                      break;
-                    }
-                  }
-                  slice = cut >= 0 ? wire.slice(cut + 1) : wire;
-                } else if (wire.length > 0) {
-                  const rawCount = Number(runState.rehydratedCount ?? 0);
-                  slice = wire.slice(Number.isFinite(rawCount) && rawCount > 0 ? rawCount : 0);
-                }
-                // Harness-frame messages never enter the session: post-compact
-                // re-anchors are derivable, and the cockpit is replaced by the
-                // clean user intent.
-                const SKIP_PREFIXES = [
-                  "[Reaper context boundary]",
-                  "Summary of prior context:",
-                  "[Reaper session checkpoint v1]",
-                  "[Post-compact progress]",
-                  "[Post-compact re-anchor]",
-                ];
-                const payloads: Array<Record<string, unknown>> = [];
-                for (const m of slice) {
-                  const role = m.role;
-                  if (role !== "user" && role !== "assistant" && role !== "tool") continue;
-                  let content = typeof m.content === "string" ? m.content : "";
-                  if (role === "user") {
-                    if (SKIP_PREFIXES.some((p) => content.startsWith(p))) continue;
-                    if (content.startsWith("# Main Agent Cockpit") || content.startsWith("<<<REAPER_COCKPIT")) {
-                      // The cockpit is the harness-authored live context frame;
-                      // it must never be journaled as user history.
-                      continue;
-                    }
-                  }
-                  const toolCalls = Array.isArray(m.tool_calls)
-                    ? (m.tool_calls as Array<{ id?: string; function?: { name?: string; arguments?: string } }>).map((c) => ({
-                        id: String(c.id ?? ""),
-                        name: String(c.function?.name ?? ""),
-                        args: c.function?.arguments ?? "",
-                      }))
-                    : undefined;
-                  if (content.trim().length === 0 && (!toolCalls || toolCalls.length === 0)) continue;
-                  payloads.push({
-                    role,
-                    content,
-                    ...(typeof m.tool_call_id === "string" ? { tool_call_id: m.tool_call_id } : {}),
-                    ...(toolCalls && toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
-                    ...(typeof m.name === "string" && m.name !== "reaper_current_request" ? { name: m.name } : {}),
-                    ...(typeof m.is_error === "boolean" ? { is_error: m.is_error } : {}),
-                    ts: Date.now(),
-                  });
-                }
-                if (payloads.length === 0) {
-                  // Fallback (no snapshot available): minimal final exchange.
-                  if (typeof userPrompt === "string" && userPrompt.trim().length > 0) {
-                    payloads.push({ role: "user", content: userPrompt.trim(), ts: Date.now() });
-                  }
-                  if (typeof assistantMessage === "string" && assistantMessage.trim().length > 0) {
-                    payloads.push({ role: "assistant", content: assistantMessage.trim(), ts: Date.now() });
-                  }
-                }
-                for (const payload of payloads) {
-                  await appendEntry(workspaceRoot, namedSession, {
-                    id: randomUUID(),
-                    parentId: lastEntryId(workspaceRoot, namedSession),
-                    type: "message",
-                    ts: new Date().toISOString(),
-                    payload: payload as any,
-                  });
-                }
-              }
-            }
-          }
-        } catch {
-          /* best-effort — journaling must not fail the run */
-        }
-      }
+      // Pi-style: the message tree is already in session.jsonl from mid-run
+      // writes (user_message / assistant_message / tool_call → message entries).
+      // No separate journal append and no live-conversation snapshot replay.
+      void namedSession;
+      void userPrompt;
+      void conversation;
       runState.lastFullSummary = undefined;
       runState.rehydratedCount = undefined;
       // Free the per-run state entry. Pending timers and any cached

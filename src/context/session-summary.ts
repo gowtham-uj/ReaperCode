@@ -129,7 +129,7 @@ export interface SessionSummaryPath {
 function summaryPath(input: SessionSummaryPath): string {
   const paths = getReaperScratchpadPaths(input.workspaceRoot);
   const runId = input.runId ?? "default";
-  return path.join(paths.runs, runId, "session-summary.json");
+  return path.join(paths.logs, runId, "session-summary.json");
 }
 
 export async function saveSessionSummary(

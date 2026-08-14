@@ -62,6 +62,11 @@ export interface ExecRunnerOptions {
    */
   reasoningEffort?: "low" | "medium" | "high";
   /**
+   * Thinking channel for all providers. Default: enabled.
+   * Pass "disabled" for latency-sensitive runs.
+   */
+  thinking?: "enabled" | "disabled";
+  /**
    * Named session for cross-run continuity. Runs sharing a --session
    * name journal their user/assistant turns under
    * `.reaper/sessions/<name>.jsonl` and rehydrate the prior
@@ -229,6 +234,7 @@ export function buildConfig(opts: ExecRunnerOptions): unknown {
             maxTokens,
             temperature: 0,
             reasoningEffort,
+            ...(opts.thinking ? { thinking: opts.thinking } : {}),
           },
         },
       },
@@ -262,6 +268,7 @@ export function buildConfig(opts: ExecRunnerOptions): unknown {
         defaultParams: {
           maxTokens,
           temperature: 0,
+          ...(opts.thinking ? { thinking: opts.thinking } : {}),
         },
       },
     },
@@ -320,6 +327,7 @@ export function buildRequestEnvelope(opts: ExecRunnerOptions): unknown {
     metadata: {
       transport: opts.transport ?? "http_json",
       yolo: true,
+      ...(opts.session ? { namedSession: opts.session, session: opts.session } : {}),
     },
     payload: {
       prompt: opts.prompt,
@@ -459,17 +467,16 @@ export async function runExec(opts: ExecRunnerOptions): Promise<ExecRunnerResult
 }
 
 /**
- * Pull the run's UUID off the engine's session path
- * (`.../runs/<runId>/logs/session.jsonl`).
+ * Pull the run/session id off the engine's session path
+ * (`.../logs/<id>/session.jsonl`).
  */
 function deriveRunIdFromTrajectoryPath(p: string): string {
   if (!p) return "exec";
   const parts = p.split(path.sep);
-  const idx = parts.lastIndexOf("runs");
+  const idx = parts.lastIndexOf("logs");
   if (idx >= 0 && idx + 1 < parts.length) return parts[idx + 1] ?? "exec";
   return path.basename(path.dirname(p)) || "exec";
 }
-
 async function emitRunEnd(input: {
   emitter: { logger: TrajectoryLogger; runId: string };
   status: "completed" | "failed" | "aborted";

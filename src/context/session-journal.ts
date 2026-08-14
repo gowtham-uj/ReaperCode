@@ -209,11 +209,11 @@ export const TITLE_SLOT_TYPE = "title_slot";
 // ─────────────────────────────────────────────────────────────────────────
 
 function sessionsDir(workspaceRoot: string): string {
-  return path.join(workspaceRoot, ".reaper", "sessions");
+  return path.join(workspaceRoot, ".reaper", "logs");
 }
 
 function journalPath(workspaceRoot: string, name: string): string {
-  return path.join(sessionsDir(workspaceRoot), `${name}.jsonl`);
+  return path.join(sessionsDir(workspaceRoot), name, "session.jsonl");
 }
 
 function titleSlotLine(title: string, source: "auto" | "user" | undefined, updatedAt: string): string {
@@ -276,11 +276,10 @@ export async function initJournal(input: JournalInit): Promise<{ header: Session
   if (!isValidSessionName(input.name)) {
     throw new Error(`Invalid session name: ${input.name}`);
   }
-  await mkdir(sessionsDir(input.workspaceRoot), { recursive: true });
   const jp = journalPath(input.workspaceRoot, input.name);
-  if (existsSync(jp)) {
-    throw new Error(`Session "${input.name}" already exists.`);
-  }
+  await mkdir(path.dirname(jp), { recursive: true });
+  // Pi-style: session.jsonl header is written on the first real event by
+  // SessionLogWriter. init only reserves the directory.
   const header: SessionHeader = {
     type: "session",
     id: randomUUID(),
@@ -295,33 +294,23 @@ export async function initJournal(input: JournalInit): Promise<{ header: Session
       : {}),
     formatVersion: CURRENT_FORMAT_VERSION,
   };
-  const now = new Date().toISOString();
-  const initial = input.title
-    ? padToBytes(titleSlotLine(input.title, input.source ?? "auto", now).trimEnd(), TITLE_SLOT_BYTES)
-    : "";
-  const lines = [
-    initial,
-    `${JSON.stringify(header)}\n`,
-  ];
-  await writeFile(jp, lines.filter(Boolean).join("") + "\n", "utf8");
   return { header, journalPath: jp };
 }
 
 export function journalExists(workspaceRoot: string, name: string): boolean {
-  return existsSync(journalPath(workspaceRoot, name));
+  // Directory reserved by initJournal, or an existing session.jsonl.
+  const dir = path.join(sessionsDir(workspaceRoot), name);
+  return existsSync(dir) || existsSync(journalPath(workspaceRoot, name));
 }
 
-/** Append a single entry to the journal. The parent must already exist
- *  (or be null for a root entry, which is reserved for the header). */
+/** Append a legacy typed entry row into session.jsonl (tests / compaction write-back). */
 export async function appendEntry(
   workspaceRoot: string,
   name: string,
   entry: SessionEntry,
 ): Promise<void> {
   const jp = journalPath(workspaceRoot, name);
-  if (!existsSync(jp)) {
-    throw new Error(`Session "${name}" does not exist.`);
-  }
+  await mkdir(path.dirname(jp), { recursive: true });
   const safeEntry = redactSecrets(entry) as SessionEntry;
   await appendFile(jp, `${JSON.stringify(safeEntry)}\n`, "utf8");
 }
@@ -333,32 +322,9 @@ export async function setTitle(
   source: "auto" | "user" = "user",
 ): Promise<void> {
   const jp = journalPath(workspaceRoot, name);
-  if (!existsSync(jp)) {
-    throw new Error(`Session "${name}" does not exist.`);
-  }
+  await mkdir(path.dirname(jp), { recursive: true });
   const truncated = truncateForSlot(title, source, new Date().toISOString());
-  const slot = padToBytes(titleSlotLine(truncated, source, new Date().toISOString()).trimEnd(), TITLE_SLOT_BYTES);
-  const raw = await readFile(jp, "utf8");
-  const firstNewline = raw.indexOf("\n");
-  const rest = firstNewline >= 0 ? raw.slice(firstNewline + 1) : raw;
-  // Atomic temp-write + rename. On EPERM (windows / locked file) we
-  // leave a `.bak` for recovery. Mirrors OMP's recoverOrphanedBackups
-  // pattern.
-  const tmp = `${jp}.tmp`;
-  const bak = `${jp}.${Date.now()}.bak`;
-  await writeFile(tmp, slot + rest, "utf8");
-  try {
-    await rename(tmp, jp);
-  } catch (err) {
-    // Save as .bak so a future `recoverOrphanedBackups` can pick it up.
-    try {
-      await rename(tmp, bak);
-    } catch {
-      /* give up */
-    }
-    throw err;
-  }
-  // Also append a title_change entry for audit.
+  // Title-change is an audit entry in the session tree. No separate title slot.
   await appendEntry(workspaceRoot, name, {
     id: randomUUID(),
     parentId: lastEntryId(workspaceRoot, name),
@@ -379,31 +345,26 @@ export async function setTitle(
 export function recoverOrphanedBackups(workspaceRoot: string): number {
   const dir = sessionsDir(workspaceRoot);
   if (!existsSync(dir)) return 0;
-  const files = readdirSync(dir);
   let recovered = 0;
-  // Group: base name -> .bak files
-  const byBase = new Map<string, string[]>();
-  for (const f of files) {
-    const m = f.match(/^(.+?)\.(\d+)\.bak$/);
-    if (!m) continue;
-    const base = m[1]!;
-    if (!byBase.has(base)) byBase.set(base, []);
-    byBase.get(base)!.push(f);
-  }
-  for (const [base, baks] of byBase) {
-    const primaryPath = path.join(dir, base);
-    if (existsSync(primaryPath)) continue;
-    // Sort by mtime descending, take the newest.
-    baks.sort((a, b) => statSync(path.join(dir, b)).mtimeMs - statSync(path.join(dir, a)).mtimeMs);
-    const newest = baks[0]!;
-    const from = path.join(dir, newest);
-    const to = path.join(dir, base);
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const sessionDir = path.join(dir, entry.name);
+    let files: string[] = [];
     try {
-      // Use copy + unlink because we can't rename across the same path
-      // if the target is a hardlink/symlink. On most systems rename
-      // works; on some filesystems it doesn't.
+      files = readdirSync(sessionDir);
+    } catch {
+      continue;
+    }
+    const baks = files.filter((f) => /^session\.jsonl\.\d+\.bak$/.test(f) || /^journal\.jsonl\.\d+\.bak$/.test(f));
+    if (baks.length === 0) continue;
+    const primaryPath = path.join(sessionDir, "session.jsonl");
+    if (existsSync(primaryPath)) continue;
+    baks.sort((a, b) => statSync(path.join(sessionDir, b)).mtimeMs - statSync(path.join(sessionDir, a)).mtimeMs);
+    const newest = baks[0]!;
+    const from = path.join(sessionDir, newest);
+    try {
       const data = readFileSync(from);
-      writeFileSync(to, data);
+      writeFileSync(primaryPath, data);
       unlinkSync(from);
       recovered += 1;
     } catch {
@@ -434,9 +395,6 @@ export function readHeader(workspaceRoot: string, name: string): JournalHeader |
 export function parseHeader(raw: string): JournalHeader | null {
   if (!raw) return null;
   const lines = raw.split("\n");
-  // Find the header line. It might be line 0 (no title slot) or line 1
-  // (after a title slot). The header is the first line whose JSON.parse
-  // yields `{type: "session"}`.
   let title: string | undefined;
   let titleSource: "auto" | "user" | undefined;
   let titleUpdatedAt: string | undefined;
@@ -444,31 +402,58 @@ export function parseHeader(raw: string): JournalHeader | null {
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    let obj: { type?: string; title?: string; source?: "auto" | "user"; updatedAt?: string };
+    let obj: Record<string, unknown>;
     try {
-      obj = JSON.parse(trimmed) as typeof obj;
+      obj = JSON.parse(trimmed) as Record<string, unknown>;
     } catch {
       continue;
     }
-    if (obj.type === TITLE_SLOT_TYPE && obj.title) {
+    if (obj.type === TITLE_SLOT_TYPE && typeof obj.title === "string") {
       title = obj.title;
-      titleSource = obj.source;
-      titleUpdatedAt = obj.updatedAt;
+      titleSource = obj.source === "user" || obj.source === "auto" ? obj.source : undefined;
+      titleUpdatedAt = typeof obj.updatedAt === "string" ? obj.updatedAt : undefined;
       continue;
     }
     if (obj.type === "session") {
-      header = obj as SessionHeader;
-      break;
+      header = obj as unknown as SessionHeader;
+      continue;
+    }
+    if (obj.kind === "header") {
+      const metadata = obj.metadata && typeof obj.metadata === "object" ? (obj.metadata as Record<string, unknown>) : undefined;
+      header = {
+        type: "session",
+        id: String(obj.id ?? randomUUID()),
+        v: CURRENT_FORMAT_VERSION,
+        name: nameFromMetadata(metadata) ?? "session",
+        cwd: String(obj.cwd ?? ""),
+        createdAt: typeof obj.createdAt === "number" ? new Date(obj.createdAt).toISOString() : new Date().toISOString(),
+        formatVersion: CURRENT_FORMAT_VERSION,
+      };
+      continue;
+    }
+    if (obj.type === "title_change" && obj.payload && typeof obj.payload === "object") {
+      const payload = obj.payload as { title?: string; source?: "auto" | "user" };
+      if (typeof payload.title === "string") {
+        title = payload.title;
+        titleSource = payload.source;
+        titleUpdatedAt = typeof obj.ts === "string" ? obj.ts : undefined;
+      }
     }
   }
-  if (!header) return null;
-  // Override title with the slot's title if present.
-  if (title) {
-    header.title = title;
+  if (!header && !title) return null;
+  if (!header) {
+    header = {
+      type: "session",
+      id: randomUUID(),
+      v: CURRENT_FORMAT_VERSION,
+      name: "session",
+      cwd: "",
+      createdAt: new Date().toISOString(),
+      formatVersion: CURRENT_FORMAT_VERSION,
+    };
   }
-  if (titleSource) {
-    header.titleSource = titleSource;
-  }
+  if (title) header.title = title;
+  if (titleSource) header.titleSource = titleSource;
   return {
     header,
     ...(title ? { title } : {}),
@@ -477,94 +462,102 @@ export function parseHeader(raw: string): JournalHeader | null {
   };
 }
 
+function nameFromMetadata(metadata: Record<string, unknown> | undefined): string | undefined {
+  if (!metadata) return undefined;
+  const sessionId = metadata.sessionId;
+  return typeof sessionId === "string" ? sessionId : undefined;
+}
+
 export function readEntries(workspaceRoot: string, name: string, options: { maxRows?: number; fromTail?: boolean } = {}): SessionEntry[] {
   const jp = journalPath(workspaceRoot, name);
   if (!existsSync(jp)) return [];
   const raw = readFileSync(jp, "utf8");
-  const lines = raw.split("\n");
-  // Skip the slot (line 0) and header (line 1).
-  const dataLines: string[] = [];
-  let seenHeader = false;
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i]!;
-    if (i === 0) continue; // slot
-    if (!seenHeader) {
-      // The header line may have padding if slot is empty; detect by JSON parse.
-      try {
-        const obj = JSON.parse(line.trim()) as { type?: string };
-        if (obj.type === "session") {
-          seenHeader = true;
-          continue;
-        }
-      } catch {
-        // skip
-      }
-    }
-    if (line.trim()) dataLines.push(line);
-  }
-  let entries: SessionEntry[] = [];
-  for (const line of dataLines) {
+  const entries: SessionEntry[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let obj: Record<string, unknown>;
     try {
-      entries.push(JSON.parse(line) as SessionEntry);
+      obj = JSON.parse(line) as Record<string, unknown>;
     } catch {
-      // skip malformed
+      continue;
+    }
+    if (obj.kind === "entry" && obj.type === "message" && obj.message && typeof obj.message === "object") {
+      const message = obj.message as SessionMessage;
+      entries.push({
+        id: String(obj.id ?? randomUUID()),
+        parentId: typeof obj.parentId === "string" ? obj.parentId : null,
+        type: "message",
+        ts: typeof obj.timestamp === "number" ? new Date(obj.timestamp).toISOString() : new Date().toISOString(),
+        payload: message,
+      });
+      continue;
+    }
+    if (obj.kind === "entry" && obj.type === "compaction") {
+      const details = obj.details && typeof obj.details === "object" ? (obj.details as Record<string, unknown>) : {};
+      const summary =
+        typeof obj.summary === "string"
+          ? obj.summary
+          : typeof details.summary === "string"
+            ? details.summary
+            : undefined;
+      const payload: CompactionEntry["payload"] = {
+        preChars: Number(details.preChars ?? details.summary_chars ?? 0) || 0,
+        postChars: Number(details.postChars ?? 0) || 0,
+        savedChars: Number(details.savedChars ?? details.saved_chars ?? 0) || 0,
+        resultsShaken: Number(details.resultsShaken ?? 0) || 0,
+      };
+      if (summary) payload.summary = summary;
+      if (details.checkpoint) {
+        payload.checkpoint = details.checkpoint as NonNullable<CompactionEntry["payload"]["checkpoint"]>;
+      }
+      entries.push({
+        id: String(obj.id ?? randomUUID()),
+        parentId: typeof obj.parentId === "string" ? obj.parentId : null,
+        type: "compaction",
+        ts: typeof obj.timestamp === "number" ? new Date(obj.timestamp).toISOString() : new Date().toISOString(),
+        payload,
+      });
+      continue;
+    }
+    if (typeof obj.type === "string" && obj.id && !obj.kind) {
+      try {
+        entries.push(obj as unknown as SessionEntry);
+      } catch {
+        /* skip */
+      }
     }
   }
   if (options.fromTail) entries.reverse();
-  if (options.maxRows) entries = entries.slice(0, options.maxRows);
+  if (options.maxRows) return entries.slice(0, options.maxRows);
   return entries;
 }
 
-/** The id of the last entry in the journal (the leaf of the main branch). */
+/** The id of the last message/compaction entry in the session tree. */
 export function lastEntryId(workspaceRoot: string, name: string): string | null {
   const entries = readEntries(workspaceRoot, name, { fromTail: true, maxRows: 1 });
   return entries[0]?.id ?? null;
 }
 
 /**
- * Append a live conversation message mid-run and return the new leaf id.
- * Parent chain is Pi-style: each append points at the previous leaf so a
- * crash still leaves a rehydratable active branch.
+ * @deprecated Message tree is written via TrajectoryLogger → session.jsonl.
+ * Kept as a no-op-compatible helper for older call sites during migration.
  */
 export async function appendLiveMessage(
-  workspaceRoot: string,
-  name: string,
-  message: SessionMessage,
+  _workspaceRoot: string,
+  _name: string,
+  _message: SessionMessage,
   parentId?: string | null,
 ): Promise<string> {
-  if (!journalExists(workspaceRoot, name)) {
-    throw new Error(`Session "${name}" does not exist.`);
-  }
-  const id = randomUUID();
-  const resolvedParent = parentId === undefined ? lastEntryId(workspaceRoot, name) : parentId;
-  await appendEntry(workspaceRoot, name, {
-    id,
-    parentId: resolvedParent,
-    type: "message",
-    ts: new Date().toISOString(),
-    payload: message,
-  });
-  return id;
+  return parentId ?? randomUUID();
 }
 
-/**
- * Best-effort live write used by the engine. Never throws into the run loop.
- * Returns the new leaf id when the write lands; otherwise the prior parent.
- */
 export async function tryAppendLiveMessage(
-  workspaceRoot: string,
-  name: string | undefined,
-  message: SessionMessage,
+  _workspaceRoot: string,
+  _name: string | undefined,
+  _message: SessionMessage,
   parentId?: string | null,
 ): Promise<string | null | undefined> {
-  if (!name || !isValidSessionName(name) || !journalExists(workspaceRoot, name)) {
-    return parentId;
-  }
-  try {
-    return await appendLiveMessage(workspaceRoot, name, message, parentId);
-  } catch {
-    return parentId;
-  }
+  return parentId;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -575,33 +568,36 @@ export async function tryAppendLiveMessage(
 export function buildActiveBranchMessages(workspaceRoot: string, name: string): SessionMessage[] {
   const entries = readEntries(workspaceRoot, name);
   if (entries.length === 0) return [];
-  // Find leaf: the last entry whose type is "message" and isn't followed by a child.
-  // Simpler: the last entry with parentId pointing into the chain. For now, take
-  // the entry with the highest ts as the leaf, then walk parents.
   const byId = new Map<string, SessionEntry>();
   for (const e of entries) byId.set(e.id, e);
-  // Leaf = entry with no children.
   const hasChild = new Set<string>();
   for (const e of entries) {
     if (e.parentId) hasChild.add(e.parentId);
   }
+  // Prefer a message leaf so internal custom rows don't become the tip.
   let leaf: SessionEntry | undefined;
   for (let i = entries.length - 1; i >= 0; i -= 1) {
-    if (!hasChild.has(entries[i]!.id)) {
-      leaf = entries[i]!;
+    const candidate = entries[i]!;
+    if (candidate.type === "message" && !hasChild.has(candidate.id)) {
+      leaf = candidate;
       break;
     }
   }
+  if (!leaf) {
+    for (let i = entries.length - 1; i >= 0; i -= 1) {
+      if (!hasChild.has(entries[i]!.id)) {
+        leaf = entries[i]!;
+        break;
+      }
+    }
+  }
   if (!leaf) return [];
-  // Walk parents.
   const chain: SessionEntry[] = [];
   let cur: SessionEntry | undefined = leaf;
   while (cur) {
     chain.unshift(cur);
     cur = cur.parentId ? byId.get(cur.parentId) : undefined;
   }
-  // A compaction entry with an inline summary replaces everything before
-  // it (OMP semantics: summary + raw tail). Use the LAST such entry.
   let cutIdx = -1;
   for (let i = chain.length - 1; i >= 0; i -= 1) {
     const e = chain[i]!;
@@ -610,9 +606,14 @@ export function buildActiveBranchMessages(workspaceRoot: string, name: string): 
       break;
     }
   }
+  const isInternalNotice = (message: SessionMessage): boolean => {
+    const content = typeof message.content === "string" ? message.content : "";
+    return content.startsWith("[session-resume]") || content.startsWith("[resume]") || content.startsWith("[summary-applied]");
+  };
   const tail = (cutIdx >= 0 ? chain.slice(cutIdx + 1) : chain)
     .filter((e): e is MessageEntry => e.type === "message")
-    .map((e) => e.payload);
+    .map((e) => e.payload)
+    .filter((message) => !isInternalNotice(message));
   if (cutIdx < 0) return tail;
   const compaction = chain[cutIdx] as CompactionEntry;
   const summary = compaction.payload.summary!;
@@ -704,21 +705,33 @@ export interface SessionSummary {
 export function listJournals(workspaceRoot: string): SessionSummary[] {
   const dir = sessionsDir(workspaceRoot);
   if (!existsSync(dir)) return [];
-  const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+  const names = readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .filter((name) => isValidSessionName(name) && (existsSync(journalPath(workspaceRoot, name)) || existsSync(path.join(dir, name))));
   const out: SessionSummary[] = [];
-  for (const f of files) {
-    const name = f.slice(0, -".jsonl".length);
+  for (const name of names) {
     try {
-      const stat = statSync(path.join(dir, f));
+      const jp = journalPath(workspaceRoot, name);
+      const statPath = existsSync(jp) ? jp : path.join(dir, name);
+      const stat = statSync(statPath);
       const headerRaw = readHeader(workspaceRoot, name);
-      if (!headerRaw) continue;
+      const header: SessionHeader = headerRaw?.header ?? {
+        type: "session",
+        id: name,
+        v: CURRENT_FORMAT_VERSION,
+        name,
+        cwd: workspaceRoot,
+        createdAt: stat.mtime.toISOString(),
+        formatVersion: CURRENT_FORMAT_VERSION,
+      };
       out.push({
         name,
-        header: headerRaw.header,
-        ...(headerRaw.title ? { title: headerRaw.title } : {}),
-        ...(headerRaw.titleSource ? { titleSource: headerRaw.titleSource } : {}),
+        header,
+        ...(headerRaw?.title ? { title: headerRaw.title } : header.title ? { title: header.title } : {}),
+        ...(headerRaw?.titleSource ? { titleSource: headerRaw.titleSource } : {}),
         status: deriveStatus(workspaceRoot, name),
-        sizeBytes: stat.size,
+        sizeBytes: stat.isFile() ? stat.size : 0,
         modified: stat.mtime.toISOString(),
         entryCount: readEntries(workspaceRoot, name).length,
       });
@@ -741,33 +754,28 @@ export interface ForkInput {
   reason?: string;
 }
 
-/** Copy entries [0..fromEntryId] from `fromName` into a new session `name`. */
 export async function forkSession(input: ForkInput): Promise<{ header: SessionHeader; journalPath: string }> {
   const fromEntries = readEntries(input.workspaceRoot, input.fromName);
-  const fromHeader = readHeader(input.workspaceRoot, input.fromName);
-  if (!fromHeader) {
+  if (!journalExists(input.workspaceRoot, input.fromName) && fromEntries.length === 0) {
     throw new Error(`Source session "${input.fromName}" not found.`);
   }
-  // Find the cut point.
+  const fromHeader = readHeader(input.workspaceRoot, input.fromName);
   const idx = fromEntries.findIndex((e) => e.id === input.fromEntryId);
   if (idx < 0) {
     throw new Error(`Entry ${input.fromEntryId} not found in ${input.fromName}.`);
   }
   const slice = fromEntries.slice(0, idx + 1);
-  // Create new journal with the same header minus the id, plus a branch entry.
   const { header, journalPath } = await initJournal({
     name: input.name,
     workspaceRoot: input.workspaceRoot,
-    cwd: fromHeader.header.cwd,
-    ...(fromHeader.header.model ? { model: fromHeader.header.model } : {}),
-    ...(fromHeader.header.provider ? { provider: fromHeader.header.provider } : {}),
-    ...(fromHeader.title ? { title: fromHeader.title, source: fromHeader.titleSource ?? "user" } : {}),
+    cwd: fromHeader?.header.cwd ?? input.workspaceRoot,
+    ...(fromHeader?.header.model ? { model: fromHeader.header.model } : {}),
+    ...(fromHeader?.header.provider ? { provider: fromHeader.header.provider } : {}),
+    ...(fromHeader?.title ? { title: fromHeader.title, source: fromHeader.titleSource ?? "user" } : {}),
   });
-  // Append the copied entries.
   for (const e of slice) {
     await appendEntry(input.workspaceRoot, input.name, e);
   }
-  // Mark the fork point.
   await appendEntry(input.workspaceRoot, input.name, {
     id: randomUUID(),
     parentId: slice[slice.length - 1]!.id,

@@ -105,6 +105,21 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
     level: z.enum(["info", "debug", "trace"]),
     content: z.string(),
     tool_names: z.array(z.string().min(1)).optional(),
+    tool_calls: z
+      .array(
+        z.object({
+          id: z.string().min(1),
+          name: z.string().min(1),
+          args: z.unknown().optional(),
+        }),
+      )
+      .optional(),
+  }),
+  CommonLogFieldsSchema.extend({
+    kind: z.literal("user_message"),
+    level: z.enum(["info", "debug", "trace"]),
+    content: z.string(),
+    name: z.string().min(1).optional(),
   }),
   CommonLogFieldsSchema.extend({
     kind: z.literal("model_response"),
@@ -245,6 +260,8 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
 	    CommonLogFieldsSchema.extend({
 	      kind: z.literal("full_summary"),
 	      level: z.enum(["info", "debug", "trace"]),
+	      /** Canonical summary text stored in the session tree compaction entry. */
+	      summary: z.string().min(1).optional(),
 	      summary_chars: z.number().int().min(0).optional(),
 	      kept_messages: z.number().int().min(0).optional(),
 	      ptl_drops: z.number().int().min(0).optional(),
@@ -263,6 +280,7 @@ export const TrajectoryEntrySchema = z.discriminatedUnion("kind", [
 	      CommonLogFieldsSchema.extend({
 	        kind: z.literal("handoff_summary"),
 	        level: z.enum(["info", "debug", "trace"]),
+	        summary: z.string().min(1).optional(),
 	        summary_chars: z.number().int().min(0).optional(),
 	        kept_messages: z.number().int().min(0).optional(),
 	        ptl_drops: z.number().int().min(0).optional(),

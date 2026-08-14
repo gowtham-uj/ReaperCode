@@ -19,6 +19,7 @@ import path from "node:path";
 import type { ToolCall, ToolResult } from "../tools/types.js";
 import type { ExecutionPlanStep } from "./engine.js";
 import { classifyShellCommandSemantics } from "../tools/command-semantics.js";import { getReaperScratchpadPaths } from "../workspace/scratchpad.js";
+import { isReaperDevMode } from "./dev-mode.js";
 import { getShellCommandArg, isMutatingToolCall } from "./tool-call-utils.js";
 import { renderToolResultForModel } from "../context/history-compaction.js";
 import {
@@ -555,7 +556,8 @@ export async function persistExecutionPlanProgress(
   runId: string,
   progress: { currentStepIndex: number; completedStepIds: string[]; failed: boolean },
 ): Promise<void> {
-  const runDir = path.join(getReaperScratchpadPaths(workspaceRoot).runs, runId);
+  if (!isReaperDevMode()) return;
+  const runDir = path.join(getReaperScratchpadPaths(workspaceRoot).logs, runId);
   await mkdir(runDir, { recursive: true });
   await writeFile(
     path.join(runDir, "progress.json"),

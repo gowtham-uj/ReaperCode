@@ -48,7 +48,7 @@ test("recordModelCall writes a generation event with prompt and response to the 
   } finally {
     release();
   }
-  const logPath = path.join(root, ".reaper", "runs", "test-run", "logs", "langfuse-events.jsonl");
+  const logPath = path.join(root, ".reaper", "logs", "test-run", "langfuse-events.jsonl");
   const contents = await readFile(logPath, "utf8");
   assert.ok(contents.includes('"reaper.model_request"'), "log should include a model_request event");
   assert.ok(contents.includes("planner_subagent"), "log should include the source label");

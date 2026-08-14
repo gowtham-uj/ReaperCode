@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 
 import { redactSecrets } from "./redaction.js";
 import { defaultRotationPolicy, planRotation, type RotationPolicy } from "./rotation.js";
-import { getReaperScratchpadPaths } from "../workspace/scratchpad.js";
+import { resolveLogRoot } from "./paths.js";
 
 export interface JsonlStorageOptions {
   workspaceRoot: string;
@@ -55,8 +55,7 @@ export class JsonlStorage {
   private writeChain: Promise<void> = Promise.resolve();
 
   constructor(options: JsonlStorageOptions) {
-    const scratchpad = getReaperScratchpadPaths(options.workspaceRoot);
-    const logsRoot = options.runId ? path.join(scratchpad.runs, options.runId, "logs") : scratchpad.logs;
+    const logsRoot = resolveLogRoot(options.workspaceRoot, options.runId);
     this.filePath = path.join(logsRoot, options.filename);
     this.rawFilePath = path.join(logsRoot, `raw_${options.filename}`);
     this.maxBytes = options.maxBytes ?? 100 * 1024 * 1024;

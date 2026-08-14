@@ -276,7 +276,9 @@ export function mapTrajectoryToMutations(
             role: "tool",
             tool_call_id: entry.decision_id,
             name: entry.tool_name,
-            content: entry.error ?? entry.output ?? "",
+            content:
+              entry.error ??
+              (typeof entry.output === "string" ? entry.output : entry.output ? JSON.stringify(entry.output) : ""),
             is_error: entry.is_error ?? entry.status === "failed",
             duration_ms: entry.duration_ms,
             turn_index: entry.turn_index,
@@ -328,7 +330,10 @@ export function mapTrajectoryToMutations(
           parentId,
           timestamp: ts(),
           lane,
-          summary: `${entry.kind} chars=${entry.summary_chars ?? 0} saved=${entry.saved_chars ?? 0}`,
+          summary:
+            entry.summary && entry.summary.trim().length > 0
+              ? entry.summary
+              : `${entry.kind} chars=${entry.summary_chars ?? 0} saved=${entry.saved_chars ?? 0}`,
           retainedTail: [],
           tokensBefore: entry.kept_messages ?? 0,
           details: data,
@@ -393,6 +398,33 @@ export function mapTrajectoryToMutations(
             content: entry.content,
             turn_index: entry.turn_index,
             ...(entry.tool_names?.length ? { tool_names: entry.tool_names } : {}),
+            ...(entry.tool_calls?.length
+              ? {
+                  tool_calls: entry.tool_calls.map((call) => ({
+                    id: call.id,
+                    name: call.name,
+                    args: call.args ?? {},
+                  })),
+                }
+              : {}),
+          },
+        },
+      ];
+    case "user_message":
+      return [
+        {
+          kind: "entry",
+          type: "message",
+          id: id(),
+          seq: seq(),
+          parentId,
+          timestamp: ts(),
+          lane,
+          message: {
+            role: "user",
+            content: entry.content,
+            ...(entry.name ? { name: entry.name } : {}),
+            turn_index: entry.turn_index,
           },
         },
       ];

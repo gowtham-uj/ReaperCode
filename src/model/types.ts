@@ -119,6 +119,9 @@ export const ModelProfileSchema = z
         maxTokens: z.number().int().positive().optional(),
         topP: z.number().min(0).max(1).optional(),
         stop: z.array(z.string().min(1)).optional(),
+        // DeepSeek v4 thinking channel. Default enabled; set "disabled"
+        // to suppress reasoning_content for latency-sensitive runs.
+        thinking: z.enum(["enabled", "disabled"]).optional(),
         // OpenAI reasoning-model knob. Accept either the new
         // string-literal form ("low" | "medium" | "high") or the
         // legacy numeric form. Per-request override also exists on

@@ -108,7 +108,7 @@ export async function reapOrphansFromPreviousRun(
       return { status: "no-previous-run", durationMs: Date.now() - startedAt };
     }
     parseError = error instanceof Error ? error.message : String(error);
-    log(`latest-run.json at ${pointerPath} is unreadable: ${parseError}; falling back to mtime scan of .reaper/runs/*/processes.json`);
+    log(`latest-run.json at ${pointerPath} is unreadable: ${parseError}; falling back to mtime scan of .reaper/logs/*/processes.json`);
   }
   if (parseError) {
     return await fallbackReapFromRunsDir(scratchpadRoot, currentRunId, log, startedAt, parseError);
@@ -126,7 +126,7 @@ export async function reapOrphansFromPreviousRun(
   }
 
   const manifestPath = path.join(previousRunDir, "processes.json");
-  const currentRunDir = path.join(scratchpadRoot, "runs", currentRunId);
+  const currentRunDir = path.join(scratchpadRoot, "logs", currentRunId);
   const result = await BackgroundProcessManager.reapOrphansFromManifest(manifestPath, {
     logDir: currentRunDir,
   });
@@ -155,7 +155,7 @@ export async function reapOrphansFromPreviousRun(
 
 /**
  * Fallback when latest-run.json is missing or unreadable: scan the
- * .reaper/runs directory for processes.json manifests by mtime and
+ * .reaper/logs directory for processes.json manifests by mtime and
  * reap the most recent previous run. This keeps orphan-reap working
  * when the pointer file is corrupt or was hand-edited.
  */
@@ -167,7 +167,7 @@ async function fallbackReapFromRunsDir(
   pointerError: string,
 ): Promise<OrphanReapOutcome> {
   const { readdirSync, statSync } = await import("node:fs");
-  const runsRoot = path.join(scratchpadRoot, "runs");
+  const runsRoot = path.join(scratchpadRoot, "logs");
   let entries: { runId: string; runDir: string; mtimeMs: number }[] = [];
   try {
     const names = readdirSync(runsRoot);

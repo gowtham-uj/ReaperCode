@@ -81,7 +81,9 @@ function summarize(input) {
   const toolCounts = Object.create(null);
   const bashCommands = [];
   const replaceFailures = [];
-  const sessionPath = path.join(runDir, 'logs', 'session.jsonl');
+  const sessionPath = existsSync(path.join(runDir, 'session.jsonl'))
+    ? path.join(runDir, 'session.jsonl')
+    : path.join(runDir, 'logs', 'session.jsonl');
   const legacyPath = path.join(runDir, 'logs', 'reaper-trajectory.jsonl');
   const trajectoryPath = existsSync(sessionPath) ? sessionPath : legacyPath;
   const trajectoryUnique = new Map();

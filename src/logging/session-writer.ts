@@ -1,6 +1,7 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
+import { resolveLogRoot } from "./paths.js";
 import { redactSecrets } from "./redaction.js";
 import {
   buildSessionHeader,
@@ -12,7 +13,6 @@ import {
   type SessionMutation,
 } from "./session-format.js";
 import type { TrajectoryEntry } from "./schema.js";
-import { getReaperScratchpadPaths } from "../workspace/scratchpad.js";
 
 export class SessionLogWriter {
   private readonly filePath: string;
@@ -25,9 +25,7 @@ export class SessionLogWriter {
   private resumeChecked = false;
 
   constructor(workspaceRoot: string, options?: { runId?: string; filename?: string }) {
-    const scratchpad = getReaperScratchpadPaths(workspaceRoot);
-    const logsRoot = options?.runId ? path.join(scratchpad.runs, options.runId, "logs") : scratchpad.logs;
-    this.filePath = path.join(logsRoot, options?.filename ?? "session.jsonl");
+    this.filePath = path.join(resolveLogRoot(workspaceRoot, options?.runId), options?.filename ?? "session.jsonl");
     this.cwd = workspaceRoot;
     this.clock = createSessionClock();
   }
@@ -70,7 +68,11 @@ export class SessionLogWriter {
         if (typeof parsed.seq === "number" && Number.isFinite(parsed.seq)) {
           maxSeq = Math.max(maxSeq, parsed.seq);
         }
-        if (parsed.kind === "entry" && typeof parsed.id === "string") {
+        if (
+          parsed.kind === "entry" &&
+          (parsed.type === "message" || parsed.type === "compaction") &&
+          typeof parsed.id === "string"
+        ) {
           lastEntryId = parsed.id;
         }
       } catch {
@@ -110,7 +112,10 @@ export class SessionLogWriter {
     for (const mutation of mutations) {
       parseSessionLine(mutation);
       await appendFile(this.filePath, `${JSON.stringify(redactSecrets(mutation))}\n`, "utf8");
-      if (mutation.kind === "entry") {
+      if (
+        mutation.kind === "entry" &&
+        (mutation.type === "message" || mutation.type === "compaction")
+      ) {
         this.leafId = mutation.id;
       }
     }

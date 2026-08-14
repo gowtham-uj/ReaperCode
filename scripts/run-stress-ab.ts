@@ -221,8 +221,10 @@ if (!runDir) {
 
 console.log(`\nRun dir: ${runDir}`);
 
-// Analyze the session log (legacy trajectory filename still accepted).
-const trajPath = existsSync(path.join(runDir, "logs", "session.jsonl"))
+// Analyze the session log (unified layout puts it at runDir root).
+const trajPath = existsSync(path.join(runDir, "session.jsonl"))
+  ? path.join(runDir, "session.jsonl")
+  : existsSync(path.join(runDir, "logs", "session.jsonl"))
   ? path.join(runDir, "logs", "session.jsonl")
   : path.join(runDir, "logs", "reaper-trajectory.jsonl");
 const traj = existsSync(trajPath)

@@ -1,4 +1,5 @@
 import type { GenerateRequest, ResolvedModelProfile } from "../types.js";
+import { isProvider, resolveThinkingMode } from "../provider-quirks.js";
 import { resolveProviderDefaults, resolveProviderModelName, usesAzureOpenAiV1 } from "./provider-registry.js";
 
 export function mapGenerateRequestToLiteLLM(request: GenerateRequest, profile: ResolvedModelProfile) {
@@ -18,6 +19,11 @@ export function mapGenerateRequestToLiteLLM(request: GenerateRequest, profile: R
     tools: normalizeOpenAiTools(request.tools),
     stream: false,
     response_format: request.responseFormat === "json" && !request.tools?.length ? { type: "json_object" } : undefined,
+    // Thinking-capable OpenAI-compatible vendors (MiniMax) accept an
+    // explicit thinking toggle. Default enabled; only wire "disabled".
+    ...(isThinkingTogglableOpenAiVendor(profile) && resolveThinkingMode(profile) === "disabled"
+      ? { thinking: { type: "disabled" } }
+      : {}),
   };
 
   if (resolveProviderDefaults(profile).pathStyle === "azure-openai" && !usesAzureOpenAiV1(profile)) {
@@ -26,6 +32,10 @@ export function mapGenerateRequestToLiteLLM(request: GenerateRequest, profile: R
   }
 
   return payload;
+}
+
+function isThinkingTogglableOpenAiVendor(profile: ResolvedModelProfile): boolean {
+  return isProvider(profile, "minimax") || isProvider(profile, "minimax-oauth") || isProvider(profile, "deepseek");
 }
 
 /**

@@ -9,8 +9,6 @@ import {
   initJournal,
   journalExists,
   appendEntry,
-  appendLiveMessage,
-  tryAppendLiveMessage,
   readHeader,
   readEntries,
   buildActiveBranchMessages,
@@ -27,6 +25,7 @@ import {
   type ToolResultEntry,
   type CompactionEntry,
 } from "../../src/context/session-journal.js";
+import { TrajectoryLogger } from "../../src/logging/trajectory.js";
 
 async function freshWorkspace() {
   return await mkdtemp(path.join(tmpdir(), "reaper-journal-"));
@@ -49,58 +48,60 @@ test("isValidSessionName accepts safe names", () => {
   assert.ok(!isValidSessionName(""));
 });
 
-test("live mid-run appends keep a crash-resumable parent chain", async () => {
+test("session.jsonl message tree is crash-resumable via buildActiveBranchMessages", async () => {
   const ws = await freshWorkspace();
   await initJournal({ name: "live-resume", workspaceRoot: ws, cwd: ws });
-
-  const userLeaf = await appendLiveMessage(ws, "live-resume", {
-    role: "user",
+  const logger = new TrajectoryLogger(ws, { runId: "live-resume" });
+  const base = {
+    run_id: "live-resume",
+    session_id: "live-resume",
+    trace_id: "live-resume",
+    timestamp: new Date().toISOString(),
+    log_schema_version: 1 as const,
+    level: "info" as const,
+  };
+  await logger.write({
+    ...base,
+    event_id: "u1",
+    kind: "user_message",
     content: "fix the sum bug",
   });
-  const assistantLeaf = await appendLiveMessage(
-    ws,
-    "live-resume",
-    {
-      role: "assistant",
-      content: "I'll edit the file",
-      tool_calls: [{ id: "c1", name: "replace_in_file", args: { path: "src/sum.js" } }],
-    },
-    userLeaf,
-  );
-  // Simulate crash after assistant tool-call write, before tool result / run_end.
+  await logger.write({
+    ...base,
+    event_id: "a1",
+    kind: "assistant_message",
+    content: "I'll edit the file",
+    tool_names: ["replace_in_file"],
+    tool_calls: [{ id: "c1", name: "replace_in_file", args: { path: "src/sum.js" } }],
+  });
   const interrupted = buildActiveBranchMessages(ws, "live-resume");
   assert.equal(interrupted.length, 2);
   assert.equal(interrupted[0]?.role, "user");
   assert.equal(interrupted[1]?.role, "assistant");
   assert.equal(interrupted[1]?.tool_calls?.[0]?.name, "replace_in_file");
 
-  // Resume continues from prior leaf.
-  const toolLeaf = await tryAppendLiveMessage(
-    ws,
-    "live-resume",
-    {
-      role: "tool",
-      tool_call_id: "c1",
-      content: "ok",
-      is_error: false,
-    },
-    assistantLeaf,
-  );
-  assert.equal(typeof toolLeaf, "string");
-  const finalLeaf = await appendLiveMessage(
-    ws,
-    "live-resume",
-    { role: "assistant", content: "Fixed and verified." },
-    toolLeaf ?? null,
-  );
-  assert.ok(finalLeaf);
+  await logger.write({
+    ...base,
+    event_id: "t1",
+    kind: "tool_call",
+    tool_name: "replace_in_file",
+    decision_id: "c1",
+    status: "completed",
+    output: "ok",
+  });
+  await logger.write({
+    ...base,
+    event_id: "a2",
+    kind: "assistant_message",
+    content: "Fixed and verified.",
+  });
   const resumed = buildActiveBranchMessages(ws, "live-resume");
   assert.equal(resumed.length, 4);
   assert.equal(resumed[2]?.role, "tool");
   assert.equal(resumed[3]?.content, "Fixed and verified.");
 });
 
-test("initJournal creates a session with header and title slot", async () => {
+test("initJournal reserves the session log directory", async () => {
   const ws = await freshWorkspace();
   const { header, journalPath } = await initJournal({
     name: "build-repo-mind",
@@ -115,17 +116,14 @@ test("initJournal creates a session with header and title slot", async () => {
   assert.equal(header.name, "build-repo-mind");
   assert.equal(header.cwd, ws);
   assert.equal(header.title, "Build RepoMind");
-  assert.equal(header.titleSource, "user");
-  // Read the file: should start with the title slot, then header.
-  const raw = (await import("node:fs")).readFileSync(journalPath, "utf8");
-  const firstLine = raw.split("\n")[0]!;
-  assert.match(firstLine, /"type":"title_slot"/);
+  assert.match(journalPath.replace(/\\/g, "/"), /logs\/build-repo-mind\/session\.jsonl$/);
 });
 
-test("initJournal refuses duplicates", async () => {
+test("initJournal is idempotent for an existing session name", async () => {
   const ws = await freshWorkspace();
   await initJournal({ name: "s", workspaceRoot: ws, cwd: ws });
-  await assert.rejects(() => initJournal({ name: "s", workspaceRoot: ws, cwd: ws }), /already exists/);
+  await initJournal({ name: "s", workspaceRoot: ws, cwd: ws });
+  assert.ok(journalExists(ws, "s"));
 });
 
 test("appendEntry + readEntries roundtrip", async () => {

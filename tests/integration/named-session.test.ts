@@ -2,7 +2,7 @@
  * Named-session continuity — the `exec run --session <name>` contract.
  *
  * 1. A run with `namedSession` journals its user/assistant turns under
- *    `.reaper/sessions/<name>.jsonl`.
+ *    `.reaper/logs/<name>/session.jsonl`.
  * 2. The next run with the same name rehydrates the prior conversation:
  *    the model's first call sees the earlier turns before the new prompt.
  * 3. runExec rejects invalid session names before touching the engine.
@@ -115,7 +115,7 @@ test("named session journals turns and rehydrates them on the next run", async (
   });
   await engine1.run();
 
-  const journalPath = path.join(workspaceRoot, ".reaper", "sessions", `${sessionName}.jsonl`);
+  const journalPath = path.join(workspaceRoot, ".reaper", "logs", sessionName, "session.jsonl");
   assert.ok(existsSync(journalPath), "named run must create the session journal");
   const afterRun1 = buildActiveBranchMessages(workspaceRoot, sessionName);
   assert.equal(afterRun1.length, 2, "run 1 must journal exactly user + assistant turns");
@@ -280,15 +280,16 @@ test("grown session context triggers full summary and writes compaction back to 
     await engine1.run();
 
     // Journal must now hold a compaction entry with the stub summary.
-    const journalPath = path.join(workspaceRoot, ".reaper", "sessions", `${sessionName}.jsonl`);
+    const journalPath = path.join(workspaceRoot, ".reaper", "logs", sessionName, "session.jsonl");
     const entries = readFileSync(journalPath, "utf8")
       .split("\n")
       .filter(Boolean)
       .map((l) => { try { return JSON.parse(l); } catch { return null; } })
-      .filter((e): e is { type: string; payload?: { summary?: string } } => Boolean(e));
+      .filter((e): e is { kind?: string; type?: string; summary?: string; payload?: { summary?: string } } => Boolean(e));
     const compactions = entries.filter((e) => e.type === "compaction");
     assert.equal(compactions.length, 1, "run must write exactly one compaction entry back to the journal");
-    assert.match(compactions[0]?.payload?.summary ?? "", /ZEBRA-PLUM-77/);
+    const compactionSummary = compactions[0]?.summary ?? compactions[0]?.payload?.summary ?? "";
+    assert.match(compactionSummary, /ZEBRA-PLUM-77/);
 
     // Rehydration = boundary + checkpoint + canonical summary + this run's raw exchange.
     const rehydrated = buildActiveBranchMessages(workspaceRoot, sessionName);

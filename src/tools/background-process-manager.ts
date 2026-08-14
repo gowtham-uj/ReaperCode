@@ -94,7 +94,7 @@ export class BackgroundProcessManager {
 
   constructor(private readonly options: { runId: string; workspaceRoot: string }) {
     this.runDir = path.join(
-      getReaperScratchpadPaths(options.workspaceRoot).runs,
+      getReaperScratchpadPaths(options.workspaceRoot).logs,
       options.runId,
     );
   }

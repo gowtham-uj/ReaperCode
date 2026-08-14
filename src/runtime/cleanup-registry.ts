@@ -6,6 +6,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { isReaperDevMode } from "./dev-mode.js";
 export type CleanupFn = () => Promise<void>;
 
 const registry = new Set<CleanupFn>();
@@ -96,7 +97,7 @@ async function handleSignal(signal: NodeJS.Signals): Promise<void> {
 }
 
 async function writeCrashResult(error: Error, cause: string): Promise<void> {
-  if (!activeRunDir) return;
+  if (!activeRunDir || !isReaperDevMode()) return;
   try {
     await mkdir(activeRunDir, { recursive: true });
     await writeFile(

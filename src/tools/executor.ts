@@ -1290,7 +1290,7 @@ export class ToolExecutor {
           ruleContext: localRules ? { localRules } : undefined,
           runtime: {
             runId: this.options.runId,
-            artifactDir: this.options.artifactsDir ?? path.join(getReaperScratchpadPaths(this.options.workspaceRoot).runs, this.options.runId, "artifacts"),
+            artifactDir: this.options.artifactsDir ?? path.join(getReaperScratchpadPaths(this.options.workspaceRoot).logs, this.options.runId, "artifacts"),
             toolCallId: call.id,
           },
           ...(this.childEnvAllowlist.length > 0 ? { childEnvAllowlist: this.childEnvAllowlist } : {}),
@@ -1585,7 +1585,7 @@ export class ToolExecutor {
   private toolRuntimeMetadata(toolCallId: string) {
     return {
       runId: this.options.runId,
-      artifactDir: this.options.artifactsDir ?? path.join(getReaperScratchpadPaths(this.options.workspaceRoot).runs, this.options.runId, "artifacts"),
+      artifactDir: this.options.artifactsDir ?? path.join(getReaperScratchpadPaths(this.options.workspaceRoot).logs, this.options.runId, "artifacts"),
       toolCallId,
     };
   }

@@ -11,7 +11,7 @@ test("scoreRunSet summarizes pass rate, timeouts, tool calls, repeats, and stop 
   try {
     const suiteDir = path.join(root, "suite");
     const taskDir = path.join(suiteDir, "task-a", "task-a.1-of-1");
-    const logsDir = path.join(taskDir, "agent-logs", ".reaper", "runs", "run-1", "logs");
+    const logsDir = path.join(taskDir, "agent-logs", ".reaper", "logs", "run-1");
     await mkdir(logsDir, { recursive: true });
     await writeFile(
       path.join(suiteDir, "results.json"),
@@ -34,7 +34,7 @@ test("scoreRunSet summarizes pass rate, timeouts, tool calls, repeats, and stop 
       "utf8",
     );
     await writeFile(
-      path.join(logsDir, "reaper-trajectory.jsonl"),
+      path.join(logsDir, "session.jsonl"),
       `${JSON.stringify({
         kind: "session_metrics",
         total_tool_calls: 10,

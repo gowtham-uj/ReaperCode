@@ -53,23 +53,24 @@ test("runtime engine executes real tool calls and writes trajectory logs", async
   const app = await readFile(path.join(workspaceRoot, "src", "app.ts"), "utf8");
   assert.match(app, /42/);
   const trajectory = await readFile(result.trajectoryPath, "utf8");
-  assert.match(trajectory, /session_start/);
-  assert.match(trajectory, /tool_call/);
-  assert.match(trajectory, /session_metrics/);
+  assert.match(trajectory, /operation_started/);
+  assert.match(trajectory, /tool_started/);
+  assert.match(trajectory, /"customType":"session_metrics"/);
   const trajectoryEvents = trajectory
     .split(/\r?\n/)
     .filter(Boolean)
     .map((line) => JSON.parse(line) as {
       kind?: string;
-      decision_id?: string;
-      status?: string;
+      type?: string;
+      toolCallId?: string;
+      message?: { tool_call_id?: string; status?: string };
     });
   for (const toolCallId of ["1", "2", "3"]) {
     const terminalEvents = trajectoryEvents.filter((event) =>
-      event.kind === "tool_call"
-      && event.decision_id === toolCallId
-      && (event.status === "completed" || event.status === "failed"));
-    assert.equal(terminalEvents.length, 1, `tool call ${toolCallId} must have one terminal trajectory event`);
+      event.kind === "entry"
+      && event.type === "message"
+      && event.message?.tool_call_id === toolCallId);
+    assert.equal(terminalEvents.length, 1, `tool call ${toolCallId} must have one terminal message entry`);
   }
   assert.ok(typeof result.assistantMessage === "string" && result.assistantMessage.length > 0);
   assert.equal(result.events.some((event) => event.message_type === "tool_call_completed"), true);
@@ -93,9 +94,9 @@ test("runtime engine creates isolated run-local artifacts for placeholder trace 
 
   assert.match(result.state.runId, /^run-\d{14}-[a-f0-9]{8}$/);
   assert.notEqual(result.state.runId, "trace-1");
-  assert.equal(path.normalize(result.trajectoryPath), path.join(workspaceRoot, ".reaper", "runs", result.state.runId, "logs", "session.jsonl"));
+  assert.equal(path.normalize(result.trajectoryPath), path.join(workspaceRoot, ".reaper", "logs", result.state.runId, "session.jsonl"));
 
-  const runResult = JSON.parse(await readFile(path.join(workspaceRoot, ".reaper", "runs", result.state.runId, "result.json"), "utf8")) as {
+  const runResult = JSON.parse(await readFile(path.join(workspaceRoot, ".reaper", "logs", result.state.runId, "result.json"), "utf8")) as {
     status: string;
     toolResultCount: number;
   };
@@ -614,13 +615,10 @@ test("autonomous runtime retries a promised action that omitted its tool call", 
   assert.equal(gateway.generateCount, 3);
   assert.equal(await readFile(path.join(workspaceRoot, "promised.txt"), "utf8"), "done\n");
   const trajectory = await readFile(result.trajectoryPath, "utf8");
-  assert.match(trajectory, /"kind":"premature_stop_nudge"/);
-  const snapshot = await readFile(
-    path.join(workspaceRoot, ".reaper", "runs", result.state.runId, "live-conversation.json"),
-    "utf8",
-  );
-  assert.doesNotMatch(snapshot, new RegExp(fakeGithubToken));
-  assert.match(snapshot, /\[REDACTED:github-token\]/);
+  assert.match(trajectory, /"customType":"premature_stop_nudge"/);
+  const sessionLog = await readFile(result.trajectoryPath, "utf8");
+  assert.doesNotMatch(sessionLog, new RegExp(fakeGithubToken));
+  assert.match(sessionLog, /\[REDACTED:github-token\]/);
 });
 
 test("autonomous runtime ignores future-action language inside hidden reasoning", async () => {
@@ -639,7 +637,7 @@ test("autonomous runtime ignores future-action language inside hidden reasoning"
   });
   const result = await engine.run();
   assert.equal(gateway.generateCount, 1);
-  assert.doesNotMatch(await readFile(result.trajectoryPath, "utf8"), /"kind":"premature_stop_nudge"/);
+  assert.doesNotMatch(await readFile(result.trajectoryPath, "utf8"), /"customType":"premature_stop_nudge"/);
 });
 
 test("autonomous runtime records a passing requested verifier as solved", async () => {

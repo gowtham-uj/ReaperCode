@@ -17,6 +17,7 @@ import {
   persistRunResult, logAssistantMessageTrace, logModelResponseTrace,
 } from "./runtime-state.js";
 import { clearRunState, getRunState } from "./run-state.js";
+import { isReaperDevMode, promoteDevModeFromConfig } from "./dev-mode.js";
 import type { ContextEngineeringHooks } from "./context-engineering-wiring.js";
 import { renderToolResultForModel, summarizeToolResult } from "../context/history-compaction.js";
 import { executeToolCalls } from "../execution/scheduler.js";
@@ -31,7 +32,7 @@ import { resolveEffectivePermissionMode } from "../policy/mode.js";
 import { AuditLogger } from "../logging/audit.js";
 import { logLangfuseEvent } from "../logging/langfuse.js";
 import { TrajectoryLogger } from "../logging/trajectory.js";
-import { lastEntryId, tryAppendLiveMessage } from "../context/session-journal.js";
+import { lastEntryId } from "../context/session-journal.js";
 import { generateFinalSummary, summarizeExplicitToolRun } from "./final-summary.js";
 import { classifyRunFinalStatus, persistRunFailure } from "./run-finalize.js";
 import { buildGeneralAgentTools, buildAgentToolDescriptor, userPromptRequestsScratchpad, type AgentToolDescriptor } from "./agent-tools.js";
@@ -358,91 +359,71 @@ export function inferPlanStepTypeFromText(text: string): PlannerStepType {
   return "command";
 }
 
-const LIVE_CONVERSATION_SNAPSHOT = "live-conversation.json";
-
-async function loadLiveConversationSnapshot(runDir: string): Promise<GenerateRequest["messages"] | undefined> {
-  if (!process.env.REAPER_RESUME_RUN_ID) return undefined;
-  try {
-    const raw = await readFile(path.join(runDir, LIVE_CONVERSATION_SNAPSHOT), "utf8");
-    const parsed = JSON.parse(raw) as { messages?: unknown };
-    if (!Array.isArray(parsed.messages)) return undefined;
-    const messages = parsed.messages.filter(
-      (message): message is GenerateRequest["messages"][number] =>
-        Boolean(message) &&
-        typeof message === "object" &&
-        typeof (message as { role?: unknown }).role === "string" &&
-        typeof (message as { content?: unknown }).content === "string",
-    );
-    return messages.length > 0 ? messages : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/** Ungated snapshot reader for run-end journaling (the loader above is
- *  crash-resume only). Returns the POST-TRANSFORM conversation exactly
- *  as the context-engineering layers left it. */
-async function readFinalConversationSnapshot(runDir: string): Promise<GenerateRequest["messages"] | undefined> {
-  try {
-    const raw = await readFile(path.join(runDir, LIVE_CONVERSATION_SNAPSHOT), "utf8");
-    const parsed = JSON.parse(raw) as { messages?: unknown };
-    return Array.isArray(parsed.messages) ? (parsed.messages as GenerateRequest["messages"]) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-async function persistLiveConversationSnapshot(runDir: string, messages: GenerateRequest["messages"]): Promise<void> {
-  await mkdir(runDir, { recursive: true });
-  await writeFile(
-    path.join(runDir, LIVE_CONVERSATION_SNAPSHOT),
-    JSON.stringify({
-      updatedAt: new Date().toISOString(),
-      messages: redactSecrets(messages),
-    }, null, 2),
-    "utf8",
-  );
-}
-
-async function appendNamedSessionLiveMessage(
+async function appendSessionTreeMessage(
+  logger: TrajectoryLogger,
   input: {
-    workspaceRoot: string;
-    namedSession?: string | undefined;
     runId: string;
+    sessionId: string;
     message: {
-      role: "user" | "assistant" | "tool" | "system";
+      role: "user" | "assistant" | "tool";
       content: string;
       tool_call_id?: string;
       tool_calls?: Array<{ id: string; name: string; args: unknown }>;
       name?: string;
       is_error?: boolean;
+      tool_name?: string;
     };
   },
 ): Promise<void> {
-  const namedSession = input.namedSession;
-  if (!namedSession) return;
-  const runState = getRunState(input.runId);
+  const base = {
+    event_id: randomUUID(),
+    run_id: input.runId,
+    session_id: input.sessionId,
+    trace_id: input.runId,
+    timestamp: new Date().toISOString(),
+    log_schema_version: 1 as const,
+    level: "info" as const,
+  };
   try {
-    const nextLeaf = await tryAppendLiveMessage(
-      input.workspaceRoot,
-      namedSession,
-      {
-        role: input.message.role,
+    if (input.message.role === "user") {
+      await logger.write({
+        ...base,
+        kind: "user_message",
         content: input.message.content,
-        ...(input.message.tool_call_id ? { tool_call_id: input.message.tool_call_id } : {}),
-        ...(input.message.tool_calls ? { tool_calls: input.message.tool_calls } : {}),
         ...(input.message.name ? { name: input.message.name } : {}),
-        ...(typeof input.message.is_error === "boolean" ? { is_error: input.message.is_error } : {}),
-        ts: Date.now(),
-      },
-      runState.journalLeafId,
-    );
-    if (typeof nextLeaf === "string") {
-      runState.journalLeafId = nextLeaf;
-      runState.liveJournalWrites = true;
+      });
+      return;
     }
+    if (input.message.role === "assistant") {
+      await logger.write({
+        ...base,
+        kind: "assistant_message",
+        content: input.message.content,
+        ...(input.message.tool_calls?.length
+          ? {
+              tool_names: input.message.tool_calls.map((c) => c.name),
+              tool_calls: input.message.tool_calls.map((c) => ({
+                id: c.id,
+                name: c.name,
+                args: c.args ?? {},
+              })),
+            }
+          : {}),
+      });
+      return;
+    }
+    // tool result — lands as message role=tool in session.jsonl
+    await logger.write({
+      ...base,
+      kind: "tool_call",
+      tool_name: input.message.tool_name ?? input.message.name ?? "tool",
+      decision_id: input.message.tool_call_id ?? randomUUID(),
+      status: input.message.is_error ? "failed" : "completed",
+      is_error: Boolean(input.message.is_error),
+      output: input.message.content,
+    });
   } catch {
-    /* best-effort — never break the run for journaling */
+    /* best-effort — never break the run for logging */
   }
 }
 
@@ -608,11 +589,14 @@ export class RuntimeEngine {
       }
     }
     const initialRequest = parseAgentRequestEnvelope(this.input.requestEnvelope);
-    const runContext = createReaperRunContext(this.input.workspaceRoot, initialRequest);
+    const runContext = createReaperRunContext(this.input.workspaceRoot, initialRequest, {
+      ...(this.input.namedSession ? { namedSession: this.input.namedSession } : {}),
+    });
     await ensureReaperRunContext(runContext, initialRequest);
     await writeLatestRunPointer(this.input.workspaceRoot, runContext);
     clearSessionTasks(runContext.runId);
     clearDiscoveredTools(runContext.runId);
+    promoteDevModeFromConfig(this.config.logging?.devMode);
     this.trajectoryLogger = new TrajectoryLogger(this.input.workspaceRoot, { ...this.config.logging, runId: runContext.runId });
     setActiveRunDir(runContext.runDir);
     installCrashHandlers();
@@ -1003,34 +987,11 @@ export class RuntimeEngine {
         let terminalRuntimeBlocker: RuntimeBlocker | undefined;
         const rawPromptValue = getRequest().payload.prompt;
         const rawUserPrompt = typeof rawPromptValue === "string" ? rawPromptValue : "";
-        const resumedConversation = await loadLiveConversationSnapshot(runContext.runDir);
-        const liveConversation: GenerateRequest["messages"] = resumedConversation ?? [];
-        if (resumedConversation) {
-          // Strip any cockpit text that older runs may have persisted
-          // into the snapshot. The runtime no longer inserts cockpits,
-          // so a stale one in the snapshot would confuse the model with
-          // outdated workspace context. We do not re-insert anything;
-          // the new code path (above) appends the raw prompt directly.
-          replaceConversationMessages(
-            liveConversation,
-            stripCockpitFromMessages(liveConversation),
-          );
-          await this.trajectoryLogger.write({
-            event_id: randomUUID(),
-            run_id: getBoot().state.runId,
-            session_id: getBoot().state.sessionId,
-            trace_id: getBoot().state.runId,
-            timestamp: new Date().toISOString(),
-            log_schema_version: 1,
-            kind: "assistant_message",
-            level: getBoot().state.logLevel,
-            content: `[resume] restored ${resumedConversation.length} live conversation message(s) from prior run snapshot`,
-          });
-        }
-
-        // Soft-context continuity: prepend session-resume re-anchor when
-        // onBoot stashed one and this is a fresh (non-snapshot) conversation.
-        if (!resumedConversation) {
+        let currentRequestLogged = false;
+        // Pi-style: conversation continuity comes from session.jsonl message
+        // tree via onBoot → buildActiveBranchMessages. No live-conversation.json.
+        const liveConversation: GenerateRequest["messages"] = [];
+        {
           const resumeSlot = runState.sessionResume;
           const resume = resumeSlot?.resume;
           const reAnchor =
@@ -1045,16 +1006,12 @@ export class RuntimeEngine {
                 )
               : [];
           if (resume && (reAnchor.length > 0 || rehydratedMessages.length > 0)) {
-            // Prior-session turns must PRECEDE this run's request so the
-            // conversation stays chronological and the new prompt keeps
-            // recency position.
             const resumeMessages: unknown[] = [];
             if (reAnchor.length > 0) {
               resumeMessages.push({ role: "user", content: reAnchor });
             }
             resumeMessages.push(...(rehydratedMessages as unknown[]));
-            liveConversation.unshift(...(resumeMessages as any[]));
-            // Session journaling slices the run's NEW turns off this prefix.
+            liveConversation.push(...(resumeMessages as any[]));
             runState.rehydratedCount = resumeMessages.length;
             runState.sessionResume = undefined;
             try {
@@ -1134,7 +1091,6 @@ export class RuntimeEngine {
             liveConversation.push({ role: "user", content: feedbackMessage });
           }
         }
-        await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
 
         const softCap = getBoot().state.tokenBudget?.softCap ?? 270_000;
 
@@ -1258,18 +1214,13 @@ export class RuntimeEngine {
         // its own tool calls. We still need to surface the raw user
         // prompt as a user message on the first iteration of every
         // run (including after named-session resume); before, that was
-        // carried inside the cockpit block. On subsequent iterations
-        // the prompt is already in `liveConversation`, so we skip.
-        const hasUserPromptAlready = liveConversation.some(
-          (m) => m.role === "user" && (m as { name?: string }).name === CURRENT_REQUEST_MESSAGE_NAME,
-        );
-        if (!hasUserPromptAlready && rawUserPrompt) {
+        // On subsequent iterations the prompt is already in liveConversation.
+        if (!currentRequestLogged && rawUserPrompt) {
+          currentRequestLogged = true;
           liveConversation.push({ role: "user", name: CURRENT_REQUEST_MESSAGE_NAME, content: rawUserPrompt });
-          await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
-          await appendNamedSessionLiveMessage({
-            workspaceRoot: this.input.workspaceRoot,
+          await appendSessionTreeMessage(this.trajectoryLogger, {
             runId: getBoot().state.runId,
-            ...(getBoot().state.namedSession ? { namedSession: getBoot().state.namedSession } : {}),
+            sessionId: getBoot().state.sessionId,
             message: {
               role: "user",
               name: CURRENT_REQUEST_MESSAGE_NAME,
@@ -1402,6 +1353,15 @@ export class RuntimeEngine {
               content: typeof turn.content === "string" ? turn.content : "",
               turn_index: liveModelTurnIndex,
               tool_names: ((turn.toolCalls ?? []) as ToolCall[]).map((call) => call.name),
+              ...(((turn.toolCalls ?? []) as ToolCall[]).length
+                ? {
+                    tool_calls: ((turn.toolCalls ?? []) as ToolCall[]).map((call) => ({
+                      id: call.id,
+                      name: call.name,
+                      args: (call.args ?? {}) as Record<string, unknown>,
+                    })),
+                  }
+                : {}),
             })
             .catch(() => undefined);
           this.trajectoryLogger.setTurnIndex(liveModelTurnIndex);
@@ -1435,7 +1395,6 @@ export class RuntimeEngine {
               content: turn.content ?? "",
             });
             liveConversation.push({ role: "user", content: feedback });
-            await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
             await this.trajectoryLogger
               .write({
                 event_id: randomUUID(),
@@ -1476,7 +1435,6 @@ export class RuntimeEngine {
                   "or, if every requested artifact and check already exists, return a final evidence summary with " +
                   "no future-action language.",
               });
-              await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
               await this.trajectoryLogger
                 .write({
                   event_id: randomUUID(),
@@ -1512,7 +1470,6 @@ export class RuntimeEngine {
                   "Either take the next concrete action with structured tool_calls, or emit a " +
                   "short final summary and stop. Do not return empty again.",
               });
-              await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
               await this.trajectoryLogger
                 .write({
                   event_id: randomUUID(),
@@ -1531,16 +1488,6 @@ export class RuntimeEngine {
             }
             if (turn.content) {
               liveConversation.push({ role: "assistant", content: turn.content });
-              await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
-              await appendNamedSessionLiveMessage({
-                workspaceRoot: this.input.workspaceRoot,
-                runId: getBoot().state.runId,
-                ...(getBoot().state.namedSession ? { namedSession: getBoot().state.namedSession } : {}),
-                message: {
-                  role: "assistant",
-                  content: turn.content,
-                },
-              });
             }
             // Incomplete recovery (OMP): finishReason === "length" means the
             // model hit the output/context ceiling mid-turn. Shrink context
@@ -1556,7 +1503,6 @@ export class RuntimeEngine {
                 });
                 if (Array.isArray(recovered?.messages) && recovered.messages.length > 0) {
                   replaceConversationMessages(liveConversation, recovered.messages as any[]);
-                  await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
                   await this.trajectoryLogger.write({
                     event_id: randomUUID(),
                     run_id: getBoot().state.runId,
@@ -1598,21 +1544,6 @@ export class RuntimeEngine {
                 arguments: JSON.stringify((c.args ?? {}) as Record<string, unknown>),
               },
             })),
-          });
-          await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
-          await appendNamedSessionLiveMessage({
-            workspaceRoot: this.input.workspaceRoot,
-            runId: getBoot().state.runId,
-            ...(getBoot().state.namedSession ? { namedSession: getBoot().state.namedSession } : {}),
-            message: {
-              role: "assistant",
-              content: turn.content ?? "",
-              tool_calls: tc.map((c) => ({
-                id: c.id,
-                name: c.name,
-                args: (c.args ?? {}) as Record<string, unknown>,
-              })),
-            },
           });
           // 2. Execute tools in parallel via the scheduler (island
           // partitioner). The scheduler returns one result per original
@@ -1719,18 +1650,6 @@ export class RuntimeEngine {
               content: toolContent,
               timestamp: Date.now(),
             } as any);
-            await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
-            await appendNamedSessionLiveMessage({
-              workspaceRoot: this.input.workspaceRoot,
-              runId: getBoot().state.runId,
-              ...(getBoot().state.namedSession ? { namedSession: getBoot().state.namedSession } : {}),
-              message: {
-                role: "tool",
-                tool_call_id: id,
-                is_error: !result.ok,
-                content: toolContent,
-              },
-            });
           }
           if (scheduled.aborted) {
             break;
@@ -1743,7 +1662,6 @@ export class RuntimeEngine {
             const { pruneSupersededToolResults } = await import("../context/supersede-prune.js");
             const mid = pruneSupersededToolResults(liveConversation as any[], { warmPrefixCount: 1 });
             if (mid.performed) {
-              await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
             }
           } catch { /* best-effort */ }
           continue;
@@ -2278,18 +2196,18 @@ export class RuntimeEngine {
 	        toolResults: state.toolResults,
 	        completionGateAttempts: state.completionGateAttempts,
 	        taskCompleted,
-	        // A successful executor-backed command of the requested verification
-	        // kind is grounded evidence even when the model ran it directly.
-	        // For natural stops with no declared verification, the model's own
-	        // most recent test/build/typecheck run is the observed evidence.
-	        verifiedCompletion: Boolean(
-	          taskCompleted
-	          && hasPassingVerifyAfterLastEdit(state.toolResults)
-	          && (
-	            state.explicitVerification?.ok === true
-	            || hasPassingGroundedVerification(state.toolResults, getRequest())
-	          )
-	        ),
+        // A successful executor-backed command of the requested verification
+        // kind is grounded evidence even when the model ran it directly.
+        // For natural stops with no declared verification, the model's own
+        // most recent test/build/typecheck run is the observed evidence.
+        verifiedCompletion: Boolean(
+          taskCompleted
+          && (
+            state.explicitVerification?.ok === true
+            || (hasPassingVerifyAfterLastEdit(state.toolResults)
+              && hasPassingGroundedVerification(state.toolResults, getRequest()))
+          )
+        ),
 	        stuckTripped: false,
 	        gateExhausted: state.completionGateExhausted,
 	        ...(transportRetryExhausted ? { stopReasonOverride: "infra_failed" as const } : {}),
@@ -2328,7 +2246,7 @@ export class RuntimeEngine {
 	          ...sessionMetrics,
 	          engine_stop_reason: sessionMetrics.stop_reason,
 	        });
-	        await writeTrajectoryMetricsFile(this.input.workspaceRoot, activeBoot.state.runId, mergedMetrics);
+        if (isReaperDevMode()) await writeTrajectoryMetricsFile(this.input.workspaceRoot, activeBoot.state.runId, mergedMetrics);
 	      }
 	      return {};
 	    };
@@ -2480,23 +2398,12 @@ export class RuntimeEngine {
         if (ctxHooks) {
           const usedChars = JSON.stringify(finalState.toolResults ?? []).length
             + (finalState.assistantMessage ?? "").length;
-          const finalConversation = finalBoot.state.namedSession
-            ? await readFinalConversationSnapshot(runContext.runDir)
-            : undefined;
           await ctxHooks.onRunComplete({
             workspaceRoot: this.input.workspaceRoot,
             runId: finalBoot.state.runId,
             sessionId: finalBoot.state.sessionId,
             traceId: finalBoot.state.runId,
             ...(finalBoot.state.namedSession ? { namedSession: finalBoot.state.namedSession } : {}),
-            ...(finalBoot.state.namedSession
-              ? {
-                  userPrompt: extractUserIntentText(
-                    typeof getRequest().payload.prompt === "string" ? (getRequest().payload.prompt as string) : "",
-                  ),
-                }
-              : {}),
-            ...(finalConversation ? { conversation: finalConversation } : {}),
             assistantMessage: finalState.assistantMessage ?? "",
             trajectoryLogger: this.trajectoryLogger,
             success: finalStatus === "completed",
@@ -4725,7 +4632,7 @@ function countRetryLikeActions(results: ToolResult[]): number {
 }
 
 async function writeTrajectoryMetricsFile(workspaceRoot: string, runId: string, metrics: Record<string, unknown>): Promise<void> {
-  const runDir = path.join(getReaperScratchpadPaths(workspaceRoot).runs, runId);
+  const runDir = path.join(getReaperScratchpadPaths(workspaceRoot).logs, runId);
   await mkdir(runDir, { recursive: true });
   await writeFile(path.join(runDir, "trajectory-metrics.json"), JSON.stringify({ runId, ...metrics, updatedAt: new Date().toISOString() }, null, 2), "utf8");
 }

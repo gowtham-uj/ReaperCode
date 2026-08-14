@@ -4,6 +4,7 @@ import path from "node:path";
 
 import type { AgentRequestEnvelope } from "../connection/schemas.js";
 import { getReaperScratchpadPaths } from "../workspace/scratchpad.js";
+import { isReaperDevMode } from "./dev-mode.js";
 
 export interface ReaperRunContext {
   runId: string;
@@ -15,14 +16,29 @@ export interface ReaperRunContext {
   startedAt: string;
 }
 
-export function createReaperRunContext(workspaceRoot: string, request: AgentRequestEnvelope): ReaperRunContext {
+export function createReaperRunContext(
+  workspaceRoot: string,
+  request: AgentRequestEnvelope,
+  options?: { namedSession?: string },
+): ReaperRunContext {
   const resumeRunId = readMetadataString(request.metadata, "resumeRunId") ?? process.env.REAPER_RESUME_RUN_ID;
   const explicitRunId = readMetadataString(request.metadata, "runId") ?? readMetadataString(request.metadata, "run_id");
+  const namedSession =
+    options?.namedSession ??
+    readMetadataString(request.metadata, "namedSession") ??
+    readMetadataString(request.metadata, "session");
   const requestTraceId = typeof request.trace_id === "string" ? request.trace_id : undefined;
-  const runId = resumeRunId ?? explicitRunId ?? (isPlaceholderRunId(requestTraceId) ? createRunId() : requestTraceId ?? createRunId());
+  // Named sessions and anonymous exec runs share one layout:
+  //   .reaper/logs/<id>/...
+  // Named session id = user-provided name; exec id = generated run id.
+  const runId =
+    resumeRunId ??
+    explicitRunId ??
+    (namedSession && /^[a-zA-Z0-9_.-]{1,128}$/.test(namedSession) ? namedSession : undefined) ??
+    (isPlaceholderRunId(requestTraceId) ? createRunId() : requestTraceId ?? createRunId());
   const sessionId = isPlaceholderSessionId(request.session_id) ? `session-${runId}` : request.session_id;
   const scratchpad = getReaperScratchpadPaths(workspaceRoot);
-  const runDir = path.join(scratchpad.runs, runId);
+  const runDir = path.join(scratchpad.logs, runId);
   return {
     runId,
     sessionId,
@@ -36,6 +52,11 @@ export function createReaperRunContext(workspaceRoot: string, request: AgentRequ
 
 export async function ensureReaperRunContext(context: ReaperRunContext, request: AgentRequestEnvelope): Promise<void> {
   try {
+    if (!isReaperDevMode()) {
+      // Keep the directory reserved for session.jsonl; skip dev metadata.
+      await mkdir(context.runDir, { recursive: true });
+      return;
+    }
     await mkdir(context.artifactsDir, { recursive: true });
     await writeFile(
       path.join(context.runDir, "manifest.json"),
@@ -69,7 +90,7 @@ export async function ensureReaperRunContext(context: ReaperRunContext, request:
  * Convert low-level fs errors at run-context setup into actionable
  * human messages. The engine bubbles these up as `BootConfigError`s so
  * the user sees "workspace is read-only" instead of `EROFS: operation
- * not permitted, mkdir '.../runs/<id>'`.
+ * not permitted, mkdir '.../logs/<id>'`.
  */
 export function translateRunContextFsError(error: unknown, context: ReaperRunContext): Error {
   const errno = error as NodeJS.ErrnoException;

@@ -76,9 +76,26 @@ export function supportsDeepSeekThinking(profile: ProviderModelIdentity): boolea
   return isProvider(profile, "deepseek") && normalizeModelId(profile.model).startsWith("deepseek-v4");
 }
 
+/**
+ * Resolve the thinking mode for a provider profile.
+ * Default: enabled for every model. Disable via profile
+ * `defaultParams.thinking: "disabled"` (config / CLI) or
+ * env REAPER_THINKING=0|off|false (DEEPSEEK_THINKING works as an alias).
+ */
+export function resolveThinkingMode(profile: ProviderModelIdentity): "enabled" | "disabled" {
+  const profileThinking =
+    "defaultParams" in profile && typeof profile.defaultParams === "object" && profile.defaultParams !== null
+      ? (profile.defaultParams as { thinking?: "enabled" | "disabled" }).thinking
+      : undefined;
+  if (profileThinking === "enabled" || profileThinking === "disabled") return profileThinking;
+  const env = process.env.REAPER_THINKING ?? process.env.DEEPSEEK_THINKING;
+  const disabled = env === "0" || env === "false" || env === "off" || env === "disabled";
+  return disabled ? "disabled" : "enabled";
+}
+
 export function buildDeepSeekThinkingParam(profile: ProviderModelIdentity): { thinking: { type: "enabled" | "disabled" } } | undefined {
   if (!supportsDeepSeekThinking(profile)) return undefined;
-  return { thinking: { type: process.env.DEEPSEEK_THINKING === "1" ? "enabled" : "disabled" } };
+  return { thinking: { type: resolveThinkingMode(profile) } };
 }
 
 export function shouldRequestStreamUsage(profile: ProviderModelIdentity): boolean {

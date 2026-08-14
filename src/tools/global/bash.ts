@@ -10,6 +10,7 @@ import { getReaperScratchpadPaths } from "../../workspace/scratchpad.js";
 import { PathPolicyError, normalizeWorkspacePath } from "../../policy/paths.js";
 import { getBashTunables } from "../../config/config-tunables.js";
 import { buildChildEnv, type ChildEnvBuildResult } from "../child-env.js";
+import { isReaperDevMode } from "../../runtime/dev-mode.js";
 
 function numericRuntimeOverride(name: string, fallback: number): number {
   const value = Number(process.env[name]);
@@ -978,8 +979,8 @@ export function resolveShellBinary(): string {
 }
 
 async function createProcessLog(runtime: { runId: string; artifactDir: string; toolCallId: string }, cmd: string, cwd: string): Promise<string> {
+  if (!isReaperDevMode()) return "";
   const processDir = path.join(runtime.artifactDir, "processes");
-  await mkdir(processDir, { recursive: true });
   const logPath = path.join(processDir, `${runtime.toolCallId.replace(/[^a-zA-Z0-9_.-]/g, "_")}.log`);
   await writeFile(
     logPath,

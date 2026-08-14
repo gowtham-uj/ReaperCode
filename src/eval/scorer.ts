@@ -116,7 +116,7 @@ async function evaluateGate(gate: EvalGateSpec, task: EvalTask, ctx: ScoreContex
       };
     }
     case "model_calls_min": {
-      const dir = path.join(ctx.workspaceRoot, ".reaper", "runs", ctx.runId, "model-calls");
+      const dir = path.join(ctx.workspaceRoot, ".reaper", "logs", ctx.runId, "model-calls");
       let count = 0;
       try {
         const files = await readdir(dir);
@@ -180,7 +180,7 @@ async function evaluateSystemPromptStability(ctx: ScoreContext): Promise<GateRes
     return { type, passed: false, details: { error: "no timestamped full_summary event" } };
   }
 
-  const modelCallDir = path.join(ctx.workspaceRoot, ".reaper", "runs", ctx.runId, "model-calls");
+  const modelCallDir = path.join(ctx.workspaceRoot, ".reaper", "logs", ctx.runId, "model-calls");
   let files: string[] = [];
   try {
     files = (await readdir(modelCallDir)).filter((file) => /^\d+-(?:stream|generate)\.json$/.test(file)).sort();

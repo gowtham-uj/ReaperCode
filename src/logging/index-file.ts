@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { getReaperScratchpadPaths } from "../workspace/scratchpad.js";
+import { resolveLogRoot } from "./paths.js";
 
 export interface LogIndexEntry {
   event_id: string;
@@ -27,8 +27,7 @@ export class LogIndexFile {
   private writeChain: Promise<void> = Promise.resolve();
 
   constructor(workspaceRoot: string, filename: string, runId?: string) {
-    const scratchpad = getReaperScratchpadPaths(workspaceRoot);
-    this.filePath = path.join(runId ? path.join(scratchpad.runs, runId, "logs") : scratchpad.logs, filename);
+    this.filePath = path.join(resolveLogRoot(workspaceRoot, runId), filename);
   }
 
   /**

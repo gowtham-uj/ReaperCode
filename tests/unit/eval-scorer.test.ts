@@ -22,11 +22,11 @@ async function scoreSystems(t: TestContext, systems: string[], extraRecords: unk
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "reaper-eval-scorer-"));
   t.after(() => rm(workspaceRoot, { recursive: true, force: true }));
   const runId = "run-system-prompt-test";
-  const runDir = path.join(workspaceRoot, ".reaper", "runs", runId);
+  const runDir = path.join(workspaceRoot, ".reaper", "logs", runId);
   const modelCallDir = path.join(runDir, "model-calls");
   await mkdir(modelCallDir, { recursive: true });
   const summaryAt = "2026-07-13T10:00:02.000Z";
-  const trajectoryPath = path.join(runDir, "logs", "reaper-trajectory.jsonl");
+  const trajectoryPath = path.join(runDir, "session.jsonl");
   await mkdir(path.dirname(trajectoryPath), { recursive: true });
   await writeFile(trajectoryPath, `${JSON.stringify({ kind: "full_summary", timestamp: summaryAt })}\n`, "utf8");
   for (const [index, system] of systems.entries()) {

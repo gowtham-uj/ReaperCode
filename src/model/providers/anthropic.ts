@@ -8,7 +8,7 @@ import type {
   TokenUsage,
 } from "../types.js";
 import type { ProviderModelClient } from "../gateway.js";
-import { anthropicAuthHeaderForProvider } from "../provider-quirks.js";
+import { anthropicAuthHeaderForProvider, resolveThinkingMode } from "../provider-quirks.js";
 import { AnthropicMessagesResponseSchema } from "./response.js";
 
 export interface AnthropicClientOptions {
@@ -127,6 +127,7 @@ export class AnthropicClient implements ProviderModelClient {
         : {}),
       ...(profile.defaultParams?.topP !== undefined ? { top_p: profile.defaultParams.topP } : {}),
       ...(profile.defaultParams?.stop ? { stop_sequences: profile.defaultParams.stop } : {}),
+      ...(resolveThinkingMode(profile) === "disabled" ? { thinking: { type: "disabled" as const } } : {}),
       ...(request.tools?.length ? { tools: mapTools(request.tools) } : {}),
       stream,
     };

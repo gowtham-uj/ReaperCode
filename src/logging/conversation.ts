@@ -1,21 +1,17 @@
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
-import { getReaperScratchpadPaths } from "../workspace/scratchpad.js";
+import { resolveLogRoot } from "./paths.js";
 import { redactSecrets } from "./redaction.js";
 import type { TrajectoryEntry } from "./schema.js";
 
 export class ConversationLog {
   private readonly filePath: string;
-  private readonly manifestPath: string;
   private headerWritten = false;
   private writeChain: Promise<void> = Promise.resolve();
 
   constructor(workspaceRoot: string, runId?: string) {
-    const scratchpad = getReaperScratchpadPaths(workspaceRoot);
-    const logsRoot = runId ? path.join(scratchpad.runs, runId, "logs") : scratchpad.logs;
-    this.filePath = path.join(logsRoot, "conversation.md");
-    this.manifestPath = path.join(logsRoot, "evidence-manifest.json");
+    this.filePath = path.join(resolveLogRoot(workspaceRoot, runId), "conversation.md");
   }
 
   get path(): string {
@@ -47,18 +43,6 @@ export class ConversationLog {
       } else {
         const header = `# Conversation\n\nrun=${entry.run_id}  session=${entry.session_id}\n\nSystem prompt is not repeated here. See the first model-call JSON if you need the raw system text.\n\n`;
         await appendFile(this.filePath, header, "utf8");
-        await writeFile(
-          this.manifestPath,
-          `${JSON.stringify(
-            {
-              trace: { file: "session.jsonl", role: "trace" },
-              transcript: { file: "conversation.md", role: "transcript" },
-            },
-            null,
-            2,
-          )}\n`,
-          "utf8",
-        );
         this.headerWritten = true;
       }
     }
@@ -70,6 +54,9 @@ export function renderConversationSlice(entry: TrajectoryEntry): string | undefi
   const turn = "turn_index" in entry && typeof entry.turn_index === "number" ? ` t${entry.turn_index}` : "";
   if (entry.kind === "thinking") {
     return String(redactSecrets(`## thinking${turn}\n\n${entry.content}\n\n`));
+  }
+  if (entry.kind === "user_message") {
+    return String(redactSecrets(`## user${turn}\n\n${entry.content || "(no text)"}\n\n`));
   }
   if (entry.kind === "assistant_message") {
     const tools = entry.tool_names?.length ? `\ntools: ${entry.tool_names.join(", ")}` : "";
