@@ -521,6 +521,52 @@ export function lastEntryId(workspaceRoot: string, name: string): string | null 
   return entries[0]?.id ?? null;
 }
 
+/**
+ * Append a live conversation message mid-run and return the new leaf id.
+ * Parent chain is Pi-style: each append points at the previous leaf so a
+ * crash still leaves a rehydratable active branch.
+ */
+export async function appendLiveMessage(
+  workspaceRoot: string,
+  name: string,
+  message: SessionMessage,
+  parentId?: string | null,
+): Promise<string> {
+  if (!journalExists(workspaceRoot, name)) {
+    throw new Error(`Session "${name}" does not exist.`);
+  }
+  const id = randomUUID();
+  const resolvedParent = parentId === undefined ? lastEntryId(workspaceRoot, name) : parentId;
+  await appendEntry(workspaceRoot, name, {
+    id,
+    parentId: resolvedParent,
+    type: "message",
+    ts: new Date().toISOString(),
+    payload: message,
+  });
+  return id;
+}
+
+/**
+ * Best-effort live write used by the engine. Never throws into the run loop.
+ * Returns the new leaf id when the write lands; otherwise the prior parent.
+ */
+export async function tryAppendLiveMessage(
+  workspaceRoot: string,
+  name: string | undefined,
+  message: SessionMessage,
+  parentId?: string | null,
+): Promise<string | null | undefined> {
+  if (!name || !isValidSessionName(name) || !journalExists(workspaceRoot, name)) {
+    return parentId;
+  }
+  try {
+    return await appendLiveMessage(workspaceRoot, name, message, parentId);
+  } catch {
+    return parentId;
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Active-branch rehydration
 // ─────────────────────────────────────────────────────────────────────────

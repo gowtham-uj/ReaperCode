@@ -31,7 +31,7 @@ interface MetricsRecord {
   stopReason?: string | undefined;
 }
 
-const TARGET_FILENAMES = new Set(["results.json", "trajectory-metrics.json", "reaper-trajectory.jsonl", "reaper-terminal-bench-result.json"]);
+const TARGET_FILENAMES = new Set(["results.json", "trajectory-metrics.json", "session.jsonl", "reaper-trajectory.jsonl", "reaper-terminal-bench-result.json"]);
 const SKIP_DIRS = new Set([".git", "node_modules", "__pycache__", "sessions", "artifacts", "recordings"]);
 
 export async function scoreRunSet(root: string): Promise<ScoredRunSet> {
@@ -50,7 +50,7 @@ export async function scoreRunSet(root: string): Promise<ScoredRunSet> {
     } else if (name === "trajectory-metrics.json") {
       const record = await readTrajectoryMetrics(file);
       if (record) metrics.push(record);
-    } else if (name === "reaper-trajectory.jsonl") {
+    } else if (name === "session.jsonl" || name === "reaper-trajectory.jsonl") {
       metrics.push(...(await readTrajectorySessionMetrics(file)));
     } else if (name === "reaper-terminal-bench-result.json") {
       const bridge = await readBridgeResult(file);
@@ -157,11 +157,17 @@ async function readTrajectorySessionMetrics(file: string): Promise<MetricsRecord
     if (!line.trim()) continue;
     try {
       const record = JSON.parse(line) as Record<string, unknown>;
-      if (record.kind !== "session_metrics") continue;
+      const data =
+        record.kind === "session_metrics"
+          ? record
+          : record.kind === "entry" && record.customType === "session_metrics" && record.data && typeof record.data === "object"
+            ? (record.data as Record<string, unknown>)
+            : undefined;
+      if (!data) continue;
       output.push({
-        totalToolCalls: numberField(record.total_tool_calls) ?? numberField(record.tool_count) ?? 0,
-        maxActionRepeat: numberField(record.max_action_repeat) ?? 0,
-        stopReason: typeof record.stop_reason === "string" ? record.stop_reason : undefined,
+        totalToolCalls: numberField(data.total_tool_calls) ?? numberField(data.tool_count) ?? 0,
+        maxActionRepeat: numberField(data.max_action_repeat) ?? 0,
+        stopReason: typeof data.stop_reason === "string" ? data.stop_reason : typeof data.engine_stop_reason === "string" ? data.engine_stop_reason : undefined,
       });
     } catch {
       continue;

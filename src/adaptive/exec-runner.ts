@@ -459,10 +459,8 @@ export async function runExec(opts: ExecRunnerOptions): Promise<ExecRunnerResult
 }
 
 /**
- * Pull the run's UUID off the engine's trajectory path
- * (`.../runs/<runId>/logs/reaper-trajectory.jsonl`). Lets the run_end
- * envelope stamp the same run_id used on every prior session_start /
- * tool_call / thinking entry written by the engine.
+ * Pull the run's UUID off the engine's session path
+ * (`.../runs/<runId>/logs/session.jsonl`).
  */
 function deriveRunIdFromTrajectoryPath(p: string): string {
   if (!p) return "exec";

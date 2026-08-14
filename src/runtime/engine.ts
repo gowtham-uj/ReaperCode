@@ -31,6 +31,7 @@ import { resolveEffectivePermissionMode } from "../policy/mode.js";
 import { AuditLogger } from "../logging/audit.js";
 import { logLangfuseEvent } from "../logging/langfuse.js";
 import { TrajectoryLogger } from "../logging/trajectory.js";
+import { lastEntryId, tryAppendLiveMessage } from "../context/session-journal.js";
 import { generateFinalSummary, summarizeExplicitToolRun } from "./final-summary.js";
 import { classifyRunFinalStatus, persistRunFailure } from "./run-finalize.js";
 import { buildGeneralAgentTools, buildAgentToolDescriptor, userPromptRequestsScratchpad, type AgentToolDescriptor } from "./agent-tools.js";
@@ -401,6 +402,48 @@ async function persistLiveConversationSnapshot(runDir: string, messages: Generat
     }, null, 2),
     "utf8",
   );
+}
+
+async function appendNamedSessionLiveMessage(
+  input: {
+    workspaceRoot: string;
+    namedSession?: string | undefined;
+    runId: string;
+    message: {
+      role: "user" | "assistant" | "tool" | "system";
+      content: string;
+      tool_call_id?: string;
+      tool_calls?: Array<{ id: string; name: string; args: unknown }>;
+      name?: string;
+      is_error?: boolean;
+    };
+  },
+): Promise<void> {
+  const namedSession = input.namedSession;
+  if (!namedSession) return;
+  const runState = getRunState(input.runId);
+  try {
+    const nextLeaf = await tryAppendLiveMessage(
+      input.workspaceRoot,
+      namedSession,
+      {
+        role: input.message.role,
+        content: input.message.content,
+        ...(input.message.tool_call_id ? { tool_call_id: input.message.tool_call_id } : {}),
+        ...(input.message.tool_calls ? { tool_calls: input.message.tool_calls } : {}),
+        ...(input.message.name ? { name: input.message.name } : {}),
+        ...(typeof input.message.is_error === "boolean" ? { is_error: input.message.is_error } : {}),
+        ts: Date.now(),
+      },
+      runState.journalLeafId,
+    );
+    if (typeof nextLeaf === "string") {
+      runState.journalLeafId = nextLeaf;
+      runState.liveJournalWrites = true;
+    }
+  } catch {
+    /* best-effort — never break the run for journaling */
+  }
 }
 
 function hasUnexecutedActionPromise(value: string): boolean {
@@ -1014,6 +1057,14 @@ export class RuntimeEngine {
             // Session journaling slices the run's NEW turns off this prefix.
             runState.rehydratedCount = resumeMessages.length;
             runState.sessionResume = undefined;
+            try {
+              const named = getBoot().state.namedSession;
+              if (named) {
+                runState.journalLeafId = lastEntryId(this.input.workspaceRoot, named);
+              }
+            } catch {
+              /* best-effort */
+            }
             await this.trajectoryLogger.write({
               event_id: randomUUID(),
               run_id: getBoot().state.runId,
@@ -1215,6 +1266,16 @@ export class RuntimeEngine {
         if (!hasUserPromptAlready && rawUserPrompt) {
           liveConversation.push({ role: "user", name: CURRENT_REQUEST_MESSAGE_NAME, content: rawUserPrompt });
           await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
+          await appendNamedSessionLiveMessage({
+            workspaceRoot: this.input.workspaceRoot,
+            runId: getBoot().state.runId,
+            ...(getBoot().state.namedSession ? { namedSession: getBoot().state.namedSession } : {}),
+            message: {
+              role: "user",
+              name: CURRENT_REQUEST_MESSAGE_NAME,
+              content: rawUserPrompt,
+            },
+          });
         }
 
           const turnRequest: GenerateRequest = {
@@ -1471,6 +1532,15 @@ export class RuntimeEngine {
             if (turn.content) {
               liveConversation.push({ role: "assistant", content: turn.content });
               await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
+              await appendNamedSessionLiveMessage({
+                workspaceRoot: this.input.workspaceRoot,
+                runId: getBoot().state.runId,
+                ...(getBoot().state.namedSession ? { namedSession: getBoot().state.namedSession } : {}),
+                message: {
+                  role: "assistant",
+                  content: turn.content,
+                },
+              });
             }
             // Incomplete recovery (OMP): finishReason === "length" means the
             // model hit the output/context ceiling mid-turn. Shrink context
@@ -1530,6 +1600,20 @@ export class RuntimeEngine {
             })),
           });
           await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
+          await appendNamedSessionLiveMessage({
+            workspaceRoot: this.input.workspaceRoot,
+            runId: getBoot().state.runId,
+            ...(getBoot().state.namedSession ? { namedSession: getBoot().state.namedSession } : {}),
+            message: {
+              role: "assistant",
+              content: turn.content ?? "",
+              tool_calls: tc.map((c) => ({
+                id: c.id,
+                name: c.name,
+                args: (c.args ?? {}) as Record<string, unknown>,
+              })),
+            },
+          });
           // 2. Execute tools in parallel via the scheduler (island
           // partitioner). The scheduler returns one result per original
           // call in the model's batch, in original order. If a tool
@@ -1627,14 +1711,26 @@ export class RuntimeEngine {
                   ? `Error: ${result.error.message}${result.error.code ? ` (code=${result.error.code})` : ""}`
                   : "Error: tool returned a non-ok result");
             const toolContentTrust = classifyReadFileTrust(result, this.input.workspaceRoot);
+            const toolContent = markTrust(rawToolContent, toolContentTrust, result.name);
             liveConversation.push({
               role: "tool",
               tool_call_id: id,
               is_error: !result.ok,
-              content: markTrust(rawToolContent, toolContentTrust, result.name),
+              content: toolContent,
               timestamp: Date.now(),
             } as any);
             await persistLiveConversationSnapshot(runContext.runDir, liveConversation);
+            await appendNamedSessionLiveMessage({
+              workspaceRoot: this.input.workspaceRoot,
+              runId: getBoot().state.runId,
+              ...(getBoot().state.namedSession ? { namedSession: getBoot().state.namedSession } : {}),
+              message: {
+                role: "tool",
+                tool_call_id: id,
+                is_error: !result.ok,
+                content: toolContent,
+              },
+            });
           }
           if (scheduled.aborted) {
             break;

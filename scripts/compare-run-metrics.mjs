@@ -81,16 +81,22 @@ function summarize(input) {
   const toolCounts = Object.create(null);
   const bashCommands = [];
   const replaceFailures = [];
-  const trajectoryPath = path.join(runDir, 'logs', 'reaper-trajectory.jsonl');
+  const sessionPath = path.join(runDir, 'logs', 'session.jsonl');
+  const legacyPath = path.join(runDir, 'logs', 'reaper-trajectory.jsonl');
+  const trajectoryPath = existsSync(sessionPath) ? sessionPath : legacyPath;
   const trajectoryUnique = new Map();
   if (existsSync(trajectoryPath)) {
     for (const line of readFileSync(trajectoryPath, 'utf8').split(/\n/)) {
       if (!line.trim()) continue;
       const d = safeParse(line);
-      if (!d || d.kind !== 'tool_call') continue;
-      const key = `${d.decision_id ?? ''}:${d.tool_name ?? ''}:${d.status ?? ''}`;
-      trajectoryUnique.set(key, d);
-      if (d.tool_name === 'replace_in_file' && d.status === 'failed') replaceFailures.push(d);
+      if (!d) continue;
+      const isToolCall = d.kind === 'tool_call' || d.type === 'tool_started' || (d.kind === 'entry' && d.type === 'message' && d.message?.role === 'tool');
+      if (!isToolCall) continue;
+      const toolName = d.tool_name ?? d.toolName ?? d.message?.name ?? '';
+      const status = d.status ?? d.message?.status ?? (d.type === 'tool_started' ? 'started' : '');
+      const key = `${d.decision_id ?? d.toolCallId ?? d.message?.tool_call_id ?? ''}:${toolName}:${status}`;
+      trajectoryUnique.set(key, { ...d, tool_name: toolName, status });
+      if (toolName === 'replace_in_file' && status === 'failed') replaceFailures.push(d);
     }
   }
 

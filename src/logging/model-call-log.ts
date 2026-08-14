@@ -1,4 +1,4 @@
-import { mkdir, writeFile, appendFile, readdir, readFile } from "node:fs/promises";
+import { mkdir, writeFile, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { GenerateRequest, GenerateResult, EmbeddingRequest, EmbeddingResult, ResolvedModelProfile, StreamEvent } from "../model/types.js";
@@ -29,7 +29,6 @@ type ModelCallLogPayload = {
 
 let context: ModelCallLogContext | undefined;
 const counters = new Map<string, number>();
-const systemPrintedForRun = new Set<string>();
 
 export function setModelCallLogContext(next: ModelCallLogContext | undefined): void {
   context = next;
@@ -54,17 +53,6 @@ export async function logModelCall(payload: ModelCallLogPayload): Promise<void> 
     ...payload,
   }));
   await writeFile(path.join(dir, `${callId}.json`), JSON.stringify(safe, null, 2), "utf8");
-
-  try {
-    if (process.env.REAPER_DEBUG_TRANSCRIPT === "1" || process.env.REAPER_DEBUG_TRANSCRIPT === "true") {
-      const includeSystem = !systemPrintedForRun.has(active.runId);
-      const text = renderModelCallTranscript(callId, payload, { includeSystem });
-      if (includeSystem) systemPrintedForRun.add(active.runId);
-      await appendFile(path.join(dir, "TRANSCRIPT.md"), `${text}\n`, "utf8");
-    }
-  } catch {
-    /* best-effort. never break the model loop for logging */
-  }
 }
 
 /**

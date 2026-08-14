@@ -74,6 +74,11 @@ export interface RunState {
   // Number of rehydrated messages prepended on session resume.
   // Engine writes on consume, wiring reads on onRunComplete.
   rehydratedCount?: number | undefined;
+  // Live named-session journal leaf (updated after every mid-run append).
+  journalLeafId?: string | null | undefined;
+  // True once this run has written any live journal message entry.
+  // onRunComplete skips re-journaling the conversation delta when set.
+  liveJournalWrites?: boolean | undefined;
   // Full-summary applied (next-call replacement messages)
   fullSummaryApplied?: FullSummaryAppliedSlot | undefined;
   // In-flight full-summary promise (shared between async paths and PTL)

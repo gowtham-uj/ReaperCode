@@ -303,10 +303,10 @@ PATH=/opt/node22/bin:$PATH \
 
 Step 4 is the actual integration test that proves the model sees the tool, emits
 it correctly, and the runtime executes it. Look in
-`.reaper/runs/exec-*/logs/reaper-trajectory.jsonl` for your tool name in
-`tool_call` events with `status: completed`.
+`.reaper/runs/exec-*/logs/session.jsonl` for `tool_started` records and a
+following `message` entry with `role: tool`.
 
-If you only see `tool_call ... status: started` with no `completed`, the tool
+If you only see `tool_started` with no tool result message, the tool
 emitted but did not execute. Go back to §6.
 
 ---

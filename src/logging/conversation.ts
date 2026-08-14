@@ -1,4 +1,4 @@
-import { appendFile, mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { getReaperScratchpadPaths } from "../workspace/scratchpad.js";
@@ -36,23 +36,31 @@ export class ConversationLog {
   private async appendInternal(entry: TrajectoryEntry, slice: string): Promise<void> {
     await mkdir(path.dirname(this.filePath), { recursive: true });
     if (!this.headerWritten) {
-      const header = `# Conversation\n\nrun=${entry.run_id}  session=${entry.session_id}\n\nSystem prompt is not repeated here. See the first model-call JSON if you need the raw system text.\n\n`;
-      await appendFile(this.filePath, header, "utf8");
-      await writeFile(
-        this.manifestPath,
-        `${JSON.stringify(
-          {
-            trace: { file: "trajectory.jsonl", role: "trace" },
-            transcript: { file: "conversation.md", role: "transcript" },
-            debug_transcript: { file: "../model-calls/TRANSCRIPT.md", role: "other" },
-
-          },
-          null,
-          2,
-        )}\n`,
-        "utf8",
-      );
-      this.headerWritten = true;
+      let existing = "";
+      try {
+        existing = await readFile(this.filePath, "utf8");
+      } catch {
+        existing = "";
+      }
+      if (existing.trim()) {
+        this.headerWritten = true;
+      } else {
+        const header = `# Conversation\n\nrun=${entry.run_id}  session=${entry.session_id}\n\nSystem prompt is not repeated here. See the first model-call JSON if you need the raw system text.\n\n`;
+        await appendFile(this.filePath, header, "utf8");
+        await writeFile(
+          this.manifestPath,
+          `${JSON.stringify(
+            {
+              trace: { file: "session.jsonl", role: "trace" },
+              transcript: { file: "conversation.md", role: "transcript" },
+            },
+            null,
+            2,
+          )}\n`,
+          "utf8",
+        );
+        this.headerWritten = true;
+      }
     }
     await appendFile(this.filePath, slice, "utf8");
   }

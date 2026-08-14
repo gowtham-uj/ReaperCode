@@ -221,8 +221,10 @@ if (!runDir) {
 
 console.log(`\nRun dir: ${runDir}`);
 
-// Analyze the trajectory.
-const trajPath = path.join(runDir, "logs", "reaper-trajectory.jsonl");
+// Analyze the session log (legacy trajectory filename still accepted).
+const trajPath = existsSync(path.join(runDir, "logs", "session.jsonl"))
+  ? path.join(runDir, "logs", "session.jsonl")
+  : path.join(runDir, "logs", "reaper-trajectory.jsonl");
 const traj = existsSync(trajPath)
   ? readFileSync(trajPath, "utf8").split(/\n/).filter(Boolean).map((l) => {
       try { return JSON.parse(l); } catch { return null; }
@@ -230,7 +232,7 @@ const traj = existsSync(trajPath)
   : [];
 
 // Count shake events + extract aggregate stats.
-const shakeEvents = traj.filter((e) => e?.kind === "context_shake");
+const shakeEvents = traj.filter((e) => e?.kind === "context_shake" || e?.customType === "context_shake");
 const toolCallEvents = traj.filter((e) => e?.kind === "tool_call");
 const totalShaken = shakeEvents.reduce((s, e) => s + (e.shaken_results ?? 0), 0);
 const totalSavedChars = shakeEvents.reduce((s, e) => s + (e.saved_chars ?? 0), 0);

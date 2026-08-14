@@ -1,4 +1,4 @@
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { redactSecrets } from "./redaction.js";
@@ -17,11 +17,12 @@ import { getReaperScratchpadPaths } from "../workspace/scratchpad.js";
 export class SessionLogWriter {
   private readonly filePath: string;
   private readonly cwd: string;
-  private readonly clock: SessionClock;
+  private clock: SessionClock;
   private headerWritten = false;
   private leafId: string | null = null;
   private writeChain: Promise<void> = Promise.resolve();
   private sessionId: string | undefined;
+  private resumeChecked = false;
 
   constructor(workspaceRoot: string, options?: { runId?: string; filename?: string }) {
     const scratchpad = getReaperScratchpadPaths(workspaceRoot);
@@ -44,8 +45,47 @@ export class SessionLogWriter {
     return next;
   }
 
+  private async ensureResumeState(): Promise<void> {
+    if (this.resumeChecked) return;
+    this.resumeChecked = true;
+    let raw = "";
+    try {
+      raw = await readFile(this.filePath, "utf8");
+    } catch {
+      return;
+    }
+    if (!raw.trim()) return;
+
+    let maxSeq = 0;
+    let lastEntryId: string | null = null;
+    let sawHeader = false;
+    for (const line of raw.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try {
+        const parsed = JSON.parse(line) as { kind?: string; type?: string; seq?: number; id?: string };
+        if (parsed.kind === "header") {
+          sawHeader = true;
+          continue;
+        }
+        if (typeof parsed.seq === "number" && Number.isFinite(parsed.seq)) {
+          maxSeq = Math.max(maxSeq, parsed.seq);
+        }
+        if (parsed.kind === "entry" && typeof parsed.id === "string") {
+          lastEntryId = parsed.id;
+        }
+      } catch {
+        /* ignore corrupt prior lines */
+      }
+    }
+    if (!sawHeader) return;
+    this.headerWritten = true;
+    this.leafId = lastEntryId;
+    this.clock = createSessionClock({ seq: maxSeq, ids: maxSeq });
+  }
+
   private async writeTrajectoryInternal(entry: TrajectoryEntry): Promise<SessionMutation[]> {
     await mkdir(path.dirname(this.filePath), { recursive: true });
+    await this.ensureResumeState();
     if (!this.headerWritten) {
       this.sessionId = entry.session_id;
       const header: SessionHeader = buildSessionHeader({

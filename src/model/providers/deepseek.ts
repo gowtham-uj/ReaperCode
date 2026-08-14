@@ -55,7 +55,7 @@ export class DeepSeekClient implements ProviderModelClient {
       messages: buildDeepSeekMessages(request),
       temperature: request.temperature ?? profile.defaultParams?.temperature ?? 0.7,
       max_tokens: maxTokens,
-      tools: request.tools?.length ? request.tools : undefined,
+      tools: normalizeDeepSeekTools(request.tools),
       ...(request.responseFormat === "json" ? { response_format: { type: "json_object" } } : {}),
       ...buildDeepSeekThinkingParam(profile),
       stream: true,
@@ -202,8 +202,8 @@ export class DeepSeekClient implements ProviderModelClient {
       model: profile.model,
       messages: buildDeepSeekMessages(request),
       temperature: request.temperature ?? profile.defaultParams?.temperature ?? 0.7,
-      max_tokens: request.maxTokens ?? profile.defaultParams?.maxTokens ?? 4096,
-      tools: request.tools?.length ? request.tools : undefined,
+      max_tokens: getEffectiveMaxOutputTokens(profile, request.maxTokens),
+      tools: normalizeDeepSeekTools(request.tools),
       ...buildDeepSeekThinkingParam(profile),
       stream: true,
       ...(shouldRequestStreamUsage(profile) ? { stream_options: { include_usage: true } } : {}),
@@ -221,18 +221,19 @@ export class DeepSeekClient implements ProviderModelClient {
     });
 
     if (!res.ok) {
-      throw new Error(`DeepSeek stream request failed: HTTP ${res.status}`);
+      const errText = await res.text().catch(() => "");
+      throw new Error(`DeepSeek stream request failed: HTTP ${res.status}${errText ? ` — ${errText.slice(0, 300)}` : ""}`);
     }
 
     yield { type: "message_start", data: { provider: "deepseek", model: profile.model } };
 
     const reader = res.body?.getReader();
     if (!reader) throw new Error("No response body from DeepSeek");
-
     const decoder = this.sseDecoder;
     let buf = "";
     let finishReason: string | undefined;
     let usage: DeepSeekUsage | undefined;
+    const toolCallAccumulators = new Map<number, { id: string; name: string; args: string }>();
 
     try {
       while (true) {
@@ -257,12 +258,36 @@ export class DeepSeekClient implements ProviderModelClient {
               if (delta?.content) {
                 yield { type: "message_delta", content: delta.content, data: parsed };
               }
+              if (delta?.tool_calls) {
+                for (const tc of delta.tool_calls) {
+                  const idx = tc.index ?? 0;
+                  if (!toolCallAccumulators.has(idx)) {
+                    toolCallAccumulators.set(idx, { id: tc.id ?? "", name: "", args: "" });
+                  }
+                  const acc = toolCallAccumulators.get(idx)!;
+                  if (tc.id) acc.id = tc.id;
+                  if (tc.function?.name) acc.name += tc.function.name;
+                  if (tc.function?.arguments) acc.args += tc.function.arguments;
+                }
+              }
             } catch {}
           }
         }
       }
     } finally {
       reader.releaseLock();
+    }
+
+    for (const tc of toolCallAccumulators.values()) {
+      if (!tc.name) continue;
+      yield {
+        type: "tool_call",
+        data: {
+          id: tc.id || `tool_${tc.name}`,
+          name: tc.name,
+          arguments: tc.args || "{}",
+        },
+      };
     }
 
     yield {
@@ -280,11 +305,85 @@ export class DeepSeekClient implements ProviderModelClient {
   }
 }
 
-function buildDeepSeekMessages(request: GenerateRequest): Array<{ role: string; content: string }> {
-  return [
-    ...(request.system?.trim() ? [{ role: "system", content: request.system }] : []),
-    ...request.messages.map((message) => ({ role: message.role, content: message.content })),
-  ];
+function normalizeDeepSeekTools(tools: unknown[] | undefined): unknown[] | undefined {
+  if (!tools?.length) return undefined;
+  return tools.map((tool) => {
+    if (!tool || typeof tool !== "object") return tool;
+    const record = tool as Record<string, unknown>;
+    if (record.type === "function" && record.function && typeof record.function === "object") {
+      const fn = record.function as Record<string, unknown>;
+      return {
+        type: "function",
+        function: {
+          ...fn,
+          parameters: coerceObjectSchema(fn.parameters),
+        },
+      };
+    }
+    const name = typeof record.name === "string" ? record.name : undefined;
+    if (!name) return tool;
+    const description = typeof record.description === "string" ? record.description : undefined;
+    const parameters = coerceObjectSchema(
+      record.parameters ?? record.inputSchema ?? record.input_schema,
+    );
+    return {
+      type: "function",
+      function: {
+        name,
+        ...(description ? { description } : {}),
+        parameters,
+      },
+    };
+  });
+}
+
+function coerceObjectSchema(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const schema = value as Record<string, unknown>;
+    if (schema.type === "object" || schema.properties || schema.$ref) {
+      return schema.type ? schema : { ...schema, type: "object" };
+    }
+  }
+  return { type: "object", properties: {} };
+}
+
+function buildDeepSeekMessages(
+  request: GenerateRequest,
+): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  if (request.system?.trim()) {
+    out.push({ role: "system", content: request.system });
+  }
+  for (const message of request.messages) {
+    if (message.role === "tool") {
+      out.push({
+        role: "tool",
+        tool_call_id: message.tool_call_id ?? "",
+        content: message.content ?? "",
+      });
+      continue;
+    }
+    if (message.role === "assistant" && message.tool_calls?.length) {
+      out.push({
+        role: "assistant",
+        content: message.content ?? "",
+        tool_calls: message.tool_calls.map((call) => ({
+          id: call.id,
+          type: "function",
+          function: {
+            name: call.function.name,
+            arguments: call.function.arguments,
+          },
+        })),
+      });
+      continue;
+    }
+    out.push({
+      role: message.role,
+      content: message.content ?? "",
+    });
+  }
+  return out;
 }
 
 function describeDeepSeekPromptCache(profile: ResolvedModelProfile) {

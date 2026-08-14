@@ -1150,91 +1150,96 @@ export function createContextEngineeringHooks(
                   },
                 });
               }
-              const wire = Array.isArray(conversation)
-                ? (conversation as Array<Record<string, unknown>>)
-                : [];
-              let slice: Array<Record<string, unknown>> = [];
-              if (summarySlot && wire.length > 0) {
-                // Post-compact state: everything before the summary block is
-                // already represented by the compaction entry above.
-                let cut = -1;
-                for (let i = wire.length - 1; i >= 0; i -= 1) {
-                  const m = wire[i]!;
-                  if (
-                    m.role === "user" &&
-                    (
-                      m.name === "reaper_compaction_summary" ||
-                      (typeof m.content === "string" &&
-                        m.content.startsWith("Summary of prior context:"))
-                    )
-                  ) {
-                    cut = i;
-                    break;
+              // Live mid-run journaling already persisted the conversation
+              // parent chain. Only write the compaction entry above; do not
+              // re-append the same messages (would fork a second branch).
+              if (!runState.liveJournalWrites) {
+                const wire = Array.isArray(conversation)
+                  ? (conversation as Array<Record<string, unknown>>)
+                  : [];
+                let slice: Array<Record<string, unknown>> = [];
+                if (summarySlot && wire.length > 0) {
+                  // Post-compact state: everything before the summary block is
+                  // already represented by the compaction entry above.
+                  let cut = -1;
+                  for (let i = wire.length - 1; i >= 0; i -= 1) {
+                    const m = wire[i]!;
+                    if (
+                      m.role === "user" &&
+                      (
+                        m.name === "reaper_compaction_summary" ||
+                        (typeof m.content === "string" &&
+                          m.content.startsWith("Summary of prior context:"))
+                      )
+                    ) {
+                      cut = i;
+                      break;
+                    }
+                  }
+                  slice = cut >= 0 ? wire.slice(cut + 1) : wire;
+                } else if (wire.length > 0) {
+                  const rawCount = Number(runState.rehydratedCount ?? 0);
+                  slice = wire.slice(Number.isFinite(rawCount) && rawCount > 0 ? rawCount : 0);
+                }
+                // Harness-frame messages never enter the session: post-compact
+                // re-anchors are derivable, and the cockpit is replaced by the
+                // clean user intent.
+                const SKIP_PREFIXES = [
+                  "[Reaper context boundary]",
+                  "Summary of prior context:",
+                  "[Reaper session checkpoint v1]",
+                  "[Post-compact progress]",
+                  "[Post-compact re-anchor]",
+                ];
+                const payloads: Array<Record<string, unknown>> = [];
+                for (const m of slice) {
+                  const role = m.role;
+                  if (role !== "user" && role !== "assistant" && role !== "tool") continue;
+                  let content = typeof m.content === "string" ? m.content : "";
+                  if (role === "user") {
+                    if (SKIP_PREFIXES.some((p) => content.startsWith(p))) continue;
+                    if (content.startsWith("# Main Agent Cockpit") || content.startsWith("<<<REAPER_COCKPIT")) {
+                      // The cockpit is the harness-authored live context frame;
+                      // it must never be journaled as user history.
+                      continue;
+                    }
+                  }
+                  const toolCalls = Array.isArray(m.tool_calls)
+                    ? (m.tool_calls as Array<{ id?: string; function?: { name?: string; arguments?: string } }>).map((c) => ({
+                        id: String(c.id ?? ""),
+                        name: String(c.function?.name ?? ""),
+                        args: c.function?.arguments ?? "",
+                      }))
+                    : undefined;
+                  if (content.trim().length === 0 && (!toolCalls || toolCalls.length === 0)) continue;
+                  payloads.push({
+                    role,
+                    content,
+                    ...(typeof m.tool_call_id === "string" ? { tool_call_id: m.tool_call_id } : {}),
+                    ...(toolCalls && toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+                    ...(typeof m.name === "string" && m.name !== "reaper_current_request" ? { name: m.name } : {}),
+                    ...(typeof m.is_error === "boolean" ? { is_error: m.is_error } : {}),
+                    ts: Date.now(),
+                  });
+                }
+                if (payloads.length === 0) {
+                  // Fallback (no snapshot available): minimal final exchange.
+                  if (typeof userPrompt === "string" && userPrompt.trim().length > 0) {
+                    payloads.push({ role: "user", content: userPrompt.trim(), ts: Date.now() });
+                  }
+                  if (typeof assistantMessage === "string" && assistantMessage.trim().length > 0) {
+                    payloads.push({ role: "assistant", content: assistantMessage.trim(), ts: Date.now() });
                   }
                 }
-                slice = cut >= 0 ? wire.slice(cut + 1) : wire;
-              } else if (wire.length > 0) {
-                const rawCount = Number(runState.rehydratedCount ?? 0);
-                slice = wire.slice(Number.isFinite(rawCount) && rawCount > 0 ? rawCount : 0);
-              }
-              // Harness-frame messages never enter the session: post-compact
-              // re-anchors are derivable, and the cockpit is replaced by the
-              // clean user intent.
-              const SKIP_PREFIXES = [
-                "[Reaper context boundary]",
-                "Summary of prior context:",
-                "[Reaper session checkpoint v1]",
-                "[Post-compact progress]",
-                "[Post-compact re-anchor]",
-              ];
-              const payloads: Array<Record<string, unknown>> = [];
-              for (const m of slice) {
-                const role = m.role;
-                if (role !== "user" && role !== "assistant" && role !== "tool") continue;
-                let content = typeof m.content === "string" ? m.content : "";
-                if (role === "user") {
-                  if (SKIP_PREFIXES.some((p) => content.startsWith(p))) continue;
-                  if (content.startsWith("# Main Agent Cockpit") || content.startsWith("<<<REAPER_COCKPIT")) {
-                    // The cockpit is the harness-authored live context frame;
-                    // it must never be journaled as user history.
-                    continue;
-                  }
+                for (const payload of payloads) {
+                  await appendEntry(workspaceRoot, namedSession, {
+                    id: randomUUID(),
+                    parentId: lastEntryId(workspaceRoot, namedSession),
+                    type: "message",
+                    ts: new Date().toISOString(),
+                    payload: payload as any,
+                  });
                 }
-                const toolCalls = Array.isArray(m.tool_calls)
-                  ? (m.tool_calls as Array<{ id?: string; function?: { name?: string; arguments?: string } }>).map((c) => ({
-                      id: String(c.id ?? ""),
-                      name: String(c.function?.name ?? ""),
-                      args: c.function?.arguments ?? "",
-                    }))
-                  : undefined;
-                if (content.trim().length === 0 && (!toolCalls || toolCalls.length === 0)) continue;
-                payloads.push({
-                  role,
-                  content,
-                  ...(typeof m.tool_call_id === "string" ? { tool_call_id: m.tool_call_id } : {}),
-                  ...(toolCalls && toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
-                  ...(typeof m.name === "string" && m.name !== "reaper_current_request" ? { name: m.name } : {}),
-                  ...(typeof m.is_error === "boolean" ? { is_error: m.is_error } : {}),
-                  ts: Date.now(),
-                });
-              }
-              if (payloads.length === 0) {
-                // Fallback (no snapshot available): minimal final exchange.
-                if (typeof userPrompt === "string" && userPrompt.trim().length > 0) {
-                  payloads.push({ role: "user", content: userPrompt.trim(), ts: Date.now() });
-                }
-                if (typeof assistantMessage === "string" && assistantMessage.trim().length > 0) {
-                  payloads.push({ role: "assistant", content: assistantMessage.trim(), ts: Date.now() });
-                }
-              }
-              for (const payload of payloads) {
-                await appendEntry(workspaceRoot, namedSession, {
-                  id: randomUUID(),
-                  parentId: lastEntryId(workspaceRoot, namedSession),
-                  type: "message",
-                  ts: new Date().toISOString(),
-                  payload: payload as any,
-                });
               }
             }
           }

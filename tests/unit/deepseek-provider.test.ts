@@ -57,6 +57,81 @@ test("DeepSeek generate preserves stable system prefix and exposes cache usage",
   }
 });
 
+test("DeepSeek stream normalizes bare tools into OpenAI function shape", async () => {
+  const previousApiKey = process.env.DEEPSEEK_API_KEY;
+  process.env.DEEPSEEK_API_KEY = "test-key";
+  let capturedBody: any;
+  const fetchImpl: typeof fetch = async (_url, init) => {
+    capturedBody = JSON.parse(String(init?.body ?? "{}"));
+    return new Response(
+      [
+        `data: ${JSON.stringify({ model: "deepseek-v4-flash", choices: [{ delta: { content: "ok" } }] })}\n`,
+        `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } })}\n`,
+        "data: [DONE]\n",
+      ].join(""),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  };
+
+  try {
+    const client = new DeepSeekClient({ fetchImpl });
+    const events = [];
+    for await (const event of client.stream(
+      {
+        role: "executor",
+        messages: [{ role: "user", content: "hi" }],
+        tools: [
+          {
+            name: "bash",
+            description: "run a shell command",
+            inputSchema: { type: "object", properties: { cmd: { type: "string" } }, required: ["cmd"] },
+          },
+        ],
+      } as any,
+      profile(),
+    )) {
+      events.push(event);
+    }
+    assert.equal(capturedBody.tools[0].type, "function");
+    assert.equal(capturedBody.tools[0].function.name, "bash");
+    assert.ok(events.some((event) => event.type === "message_end"));
+  } finally {
+    restoreEnv("DEEPSEEK_API_KEY", previousApiKey);
+  }
+});
+
+test("DeepSeek stream coerces null tool parameters to object schema", async () => {
+  const previousApiKey = process.env.DEEPSEEK_API_KEY;
+  process.env.DEEPSEEK_API_KEY = "test-key";
+  let capturedBody: any;
+  const fetchImpl: typeof fetch = async (_url, init) => {
+    capturedBody = JSON.parse(String(init?.body ?? "{}"));
+    return new Response(
+      [
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] })}\n`,
+        "data: [DONE]\n",
+      ].join(""),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  };
+  try {
+    const client = new DeepSeekClient({ fetchImpl });
+    for await (const _event of client.stream(
+      {
+        role: "executor",
+        messages: [{ role: "user", content: "hi" }],
+        tools: [{ name: "replace_in_file", description: "edit", inputSchema: null }],
+      } as any,
+      profile(),
+    )) {
+      /* drain */
+    }
+    assert.equal(capturedBody.tools[0].function.parameters.type, "object");
+  } finally {
+    restoreEnv("DEEPSEEK_API_KEY", previousApiKey);
+  }
+});
+
 test("DeepSeek stream includes usage so cache hit rate can be audited", async () => {
   const previousApiKey = process.env.DEEPSEEK_API_KEY;
   process.env.DEEPSEEK_API_KEY = "test-key";

@@ -9,6 +9,8 @@ import {
   initJournal,
   journalExists,
   appendEntry,
+  appendLiveMessage,
+  tryAppendLiveMessage,
   readHeader,
   readEntries,
   buildActiveBranchMessages,
@@ -45,6 +47,57 @@ test("isValidSessionName accepts safe names", () => {
   assert.ok(isValidSessionName("session_001"));
   assert.ok(!isValidSessionName("a/b"));
   assert.ok(!isValidSessionName(""));
+});
+
+test("live mid-run appends keep a crash-resumable parent chain", async () => {
+  const ws = await freshWorkspace();
+  await initJournal({ name: "live-resume", workspaceRoot: ws, cwd: ws });
+
+  const userLeaf = await appendLiveMessage(ws, "live-resume", {
+    role: "user",
+    content: "fix the sum bug",
+  });
+  const assistantLeaf = await appendLiveMessage(
+    ws,
+    "live-resume",
+    {
+      role: "assistant",
+      content: "I'll edit the file",
+      tool_calls: [{ id: "c1", name: "replace_in_file", args: { path: "src/sum.js" } }],
+    },
+    userLeaf,
+  );
+  // Simulate crash after assistant tool-call write, before tool result / run_end.
+  const interrupted = buildActiveBranchMessages(ws, "live-resume");
+  assert.equal(interrupted.length, 2);
+  assert.equal(interrupted[0]?.role, "user");
+  assert.equal(interrupted[1]?.role, "assistant");
+  assert.equal(interrupted[1]?.tool_calls?.[0]?.name, "replace_in_file");
+
+  // Resume continues from prior leaf.
+  const toolLeaf = await tryAppendLiveMessage(
+    ws,
+    "live-resume",
+    {
+      role: "tool",
+      tool_call_id: "c1",
+      content: "ok",
+      is_error: false,
+    },
+    assistantLeaf,
+  );
+  assert.equal(typeof toolLeaf, "string");
+  const finalLeaf = await appendLiveMessage(
+    ws,
+    "live-resume",
+    { role: "assistant", content: "Fixed and verified." },
+    toolLeaf ?? null,
+  );
+  assert.ok(finalLeaf);
+  const resumed = buildActiveBranchMessages(ws, "live-resume");
+  assert.equal(resumed.length, 4);
+  assert.equal(resumed[2]?.role, "tool");
+  assert.equal(resumed[3]?.content, "Fixed and verified.");
 });
 
 test("initJournal creates a session with header and title slot", async () => {

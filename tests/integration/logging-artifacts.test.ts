@@ -31,8 +31,62 @@ test("trajectory logger writes a session header and sequenced mutations", async 
   assert.equal(lines[1]?.kind, "record");
   assert.equal(lines[1]?.type, "operation_started");
   assert.equal(lines[1]?.seq, 1);
-  const index = await readFile(path.join(workspaceRoot, ".reaper", "logs", "reaper-trajectory.index.json"), "utf8");
+  const index = await readFile(path.join(workspaceRoot, ".reaper", "logs", "session.index.json"), "utf8");
   assert.match(index, /event-1/);
+});
+
+test("second logger on same run resumes session.jsonl without a second header", async () => {
+  const workspaceRoot = await createTempWorkspace();
+  const first = new TrajectoryLogger(workspaceRoot, { runId: "run-resume" });
+  await first.write({
+    event_id: "event-start",
+    run_id: "run-resume",
+    session_id: "session-resume",
+    trace_id: "trace-resume",
+    timestamp: new Date().toISOString(),
+    log_schema_version: 1,
+    kind: "session_start",
+    level: "info",
+    user_intent_summary: "resume test",
+  });
+  await first.write({
+    event_id: "event-assistant",
+    run_id: "run-resume",
+    session_id: "session-resume",
+    trace_id: "trace-resume",
+    timestamp: new Date().toISOString(),
+    log_schema_version: 1,
+    kind: "assistant_message",
+    level: "info",
+    content: "mid-run text",
+    turn_index: 1,
+  });
+
+  const second = new TrajectoryLogger(workspaceRoot, { runId: "run-resume" });
+  await second.write({
+    event_id: "event-end",
+    run_id: "run-resume",
+    session_id: "session-resume",
+    trace_id: "trace-resume",
+    timestamp: new Date().toISOString(),
+    log_schema_version: 1,
+    kind: "run_end",
+    level: "info",
+    status: "completed",
+    final_assistant_message: "done",
+    duration_ms: 12,
+  });
+
+  const lines = (await readFile(first.path, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { kind: string; type?: string; seq?: number });
+  assert.equal(lines.filter((line) => line.kind === "header").length, 1);
+  assert.equal(lines.at(-1)?.type, "operation_finished");
+  assert.equal(lines.at(-1)?.seq, 3);
+  const conversation = await readFile(path.join(workspaceRoot, ".reaper", "runs", "run-resume", "logs", "conversation.md"), "utf8");
+  assert.match(conversation, /mid-run text/);
+  assert.equal((conversation.match(/^# Conversation/gm) ?? []).length, 1);
 });
 
 test("artifact store saves and retrieves tool output", async () => {

@@ -142,9 +142,9 @@ export interface SessionClock {
   nextId(): string;
 }
 
-export function createSessionClock(): SessionClock {
-  let seq = 0;
-  let ids = 0;
+export function createSessionClock(start?: { seq?: number; ids?: number }): SessionClock {
+  let seq = start?.seq ?? 0;
+  let ids = start?.ids ?? 0;
   return {
     nextSeq: () => {
       seq += 1;
@@ -263,7 +263,27 @@ export function mapTrajectoryToMutations(
           },
         ];
       }
-      return [custom("tool_end", data)];
+      return [
+        {
+          kind: "entry",
+          type: "message",
+          id: id(),
+          seq: seq(),
+          parentId,
+          timestamp: ts(),
+          lane,
+          message: {
+            role: "tool",
+            tool_call_id: entry.decision_id,
+            name: entry.tool_name,
+            content: entry.error ?? entry.output ?? "",
+            is_error: entry.is_error ?? entry.status === "failed",
+            duration_ms: entry.duration_ms,
+            turn_index: entry.turn_index,
+            status: entry.status,
+          },
+        },
+      ];
     case "thinking":
       return [
         {

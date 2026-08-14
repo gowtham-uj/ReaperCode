@@ -16,11 +16,11 @@ export class TrajectoryLogger {
   constructor(workspaceRoot: string, options?: { devMode?: boolean; sampleRate?: number; runId?: string }) {
     this.workspaceRoot = workspaceRoot;
     this.session = new SessionLogWriter(workspaceRoot, {
-      filename: "trajectory.jsonl",
+      filename: "session.jsonl",
       ...(options?.runId ? { runId: options.runId } : {}),
     });
     this.conversation = new ConversationLog(workspaceRoot, options?.runId);
-    this.index = new LogIndexFile(workspaceRoot, "reaper-trajectory.index.json", options?.runId);
+    this.index = new LogIndexFile(workspaceRoot, "session.index.json", options?.runId);
   }
 
   setTurnIndex(turnIndex: number): void {

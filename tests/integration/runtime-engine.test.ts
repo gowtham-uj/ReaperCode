@@ -93,7 +93,7 @@ test("runtime engine creates isolated run-local artifacts for placeholder trace 
 
   assert.match(result.state.runId, /^run-\d{14}-[a-f0-9]{8}$/);
   assert.notEqual(result.state.runId, "trace-1");
-  assert.equal(path.normalize(result.trajectoryPath), path.join(workspaceRoot, ".reaper", "runs", result.state.runId, "logs", "reaper-trajectory.jsonl"));
+  assert.equal(path.normalize(result.trajectoryPath), path.join(workspaceRoot, ".reaper", "runs", result.state.runId, "logs", "session.jsonl"));
 
   const runResult = JSON.parse(await readFile(path.join(workspaceRoot, ".reaper", "runs", result.state.runId, "result.json"), "utf8")) as {
     status: string;
