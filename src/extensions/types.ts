@@ -120,7 +120,7 @@ export interface ExtensionContributions {
  * is declared; `ExtensionPermissionManager.check` rejects the rest.
  */
 export type ExtensionPermission =
-  | "tools:read_file"
+  | "tools:read"
   | "tools:write_file"
   | "tools:edit_file"
   | "tools:delete_file"

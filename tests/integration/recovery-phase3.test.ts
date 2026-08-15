@@ -142,7 +142,7 @@ test("runtime engine flushes staged writes at turn completion", async () => {
   request.payload = {
     prompt: "Stage and flush writes",
     tool_calls: [
-      { id: "1", name: "replace_in_file", args: { path: "src/app.ts", oldString: "41", newString: "42" } },
+      { id: "1", name: "edit_file", args: { path: "src/app.ts", edits: [{ oldString: "41", newString: "42" }] } },
     ],
   };
 
@@ -191,8 +191,8 @@ test("runtime engine preserves successful writes when a sibling write fails", as
   request.payload = {
     prompt: "Cause write failure",
     tool_calls: [
-      { id: "1", name: "replace_in_file", args: { path: "src/app.ts", oldString: "41", newString: "42" } },
-      { id: "2", name: "replace_in_file", args: { path: "src/app.ts", oldString: "does-not-exist", newString: "x" } },
+      { id: "1", name: "edit_file", args: { path: "src/app.ts", edits: [{ oldString: "41", newString: "42" }] } },
+      { id: "2", name: "edit_file", args: { path: "src/app.ts", edits: [{ oldString: "does-not-exist", newString: "x" }] } },
     ],
   };
 

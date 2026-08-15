@@ -82,11 +82,11 @@ test("parseMainAgentToolCalls accepts reference-style read/write/edit tool names
     toolCalls: [
       { id: "1", name: "read", args: { path: "package.json" } },
       { id: "2", name: "write", args: { path: "src/index.ts", content: "export {};" } },
-      { id: "3", name: "edit", args: { path: "src/index.ts", oldString: "export {};", newString: "export const ok = true;" } },
+      { id: "3", name: "edit", args: { path: "src/index.ts", start_line: 1, end_line: 1, new_content: "export const ok = true;" } },
     ],
   });
 
-  assert.deepEqual(calls.map((call) => call.name), ["read_file", "write_file", "replace_in_file"]);
+  assert.deepEqual(calls.map((call) => call.name), ["file_view", "write_file", "file_edit"]);
   assert.deepEqual(calls[1]?.args, { path: "src/index.ts", content: "export {};" });
 });
 

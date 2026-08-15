@@ -97,8 +97,8 @@ test("history compaction preserves recent entries and pins latest verification f
     maxEntries: 2,
     latestVerificationFailure: "Expected 42 but got 41",
     toolResults: [
-      { toolCallId: "1", name: "read_file", ok: true, durationMs: 10 },
-      { toolCallId: "2", name: "replace_in_file", ok: true, durationMs: 20 },
+      { toolCallId: "1", name: "file_view", ok: true, durationMs: 10 },
+      { toolCallId: "2", name: "file_edit", ok: true, durationMs: 20 },
       { toolCallId: "3", name: "bash", ok: false, durationMs: 30, error: { code: "tool_error", message: "boom" } },
     ],
   });
@@ -131,7 +131,7 @@ test("tool result rendering exposes workspace path aliases for container runs", 
   try {
     const rendered = renderToolResultForModel({
       toolCallId: "read-log",
-      name: "read_file",
+      name: "file_view",
       ok: true,
       durationMs: 10,
       args: { path: "/tmp/reaper-tbench-abc/app/log.stack" },
@@ -177,7 +177,7 @@ test("runtime engine records content fingerprint and uses content prep on explic
   const request = createValidRequestEnvelope();
   request.payload = {
     prompt: "Read @src/app.ts and report the current answer.",
-    tool_calls: [{ id: "1", name: "read_file", args: { path: "src/app.ts" } }],
+    tool_calls: [{ id: "1", name: "file_view", args: { path: "src/app.ts" } }],
   };
 
   const engine = new RuntimeEngine({

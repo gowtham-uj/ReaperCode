@@ -58,7 +58,9 @@ export interface SandboxDecision {
  * allow list, since the only "deny" comes from policy violations).
  */
 const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
-  "read_file",
+  "file_view",
+  "file_scroll",
+  "file_find",
   "view_file",
   "grep_search",
   "list_directory",
@@ -78,7 +80,7 @@ const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
 
 const WORKSPACE_WRITE_TOOLS: ReadonlySet<string> = new Set([
   "write_file",
-  "replace_in_file",
+  "file_edit",
   "edit_file",
   "delete_file",
   "create_checkpoint",

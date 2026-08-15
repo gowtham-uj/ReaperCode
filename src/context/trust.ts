@@ -110,7 +110,7 @@ export function classifyToolResultTrust(
     }
   }
 
-  // `read_file` from a path outside the workspace is treated as
+  // `file_view` from a path outside the workspace is treated as
   // untrusted. We can't resolve `workspaceRoot` here without a
   // config parameter — the caller is expected to use
   // `classifyReadFileTrust(result, workspaceRoot)` for that case.
@@ -120,7 +120,7 @@ export function classifyToolResultTrust(
 
 /**
  * Variant of `classifyToolResultTrust` that also considers the path
- * for `read_file` calls. If the path is outside `workspaceRoot`,
+ * for `file_view` calls. If the path is outside `workspaceRoot`,
  * mark untrusted; otherwise trust.
  *
  * Used by `renderToolResultForModel` which has access to the active
@@ -131,8 +131,7 @@ export function classifyReadFileTrust(
   workspaceRoot: string | undefined,
 ): TrustLevel {
   if (
-    result.name !== "read_file"
-    && result.name !== "view_file"
+    result.name !== "view_file"
     && result.name !== "skim_file"
     && result.name !== "file_view"
     && result.name !== "file_scroll"

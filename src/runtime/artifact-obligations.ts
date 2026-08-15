@@ -88,7 +88,7 @@ function evaluateArtifactObligation(
 function isSuccessfulProducerForArtifact(result: ToolResult, artifact: string): boolean {
   if (!result.ok) return false;
   const args = recordArgs(result);
-  if (["write_file", "replace_in_file", "edit_file", ].includes(result.name)) {
+  if (["write_file", "file_edit", "edit_file"].includes(result.name)) {
     return typeof args.path === "string" && artifactPathMatches(args.path, artifact);
   }
   if (result.name !== "bash") return false;
@@ -99,7 +99,7 @@ function isSuccessfulProducerForArtifact(result: ToolResult, artifact: string): 
 function isSuccessfulArtifactObservation(result: ToolResult, artifact: string): boolean {
   if (!result.ok) return false;
   const args = recordArgs(result);
-  if (result.name === "read_file" || result.name === "view_file") {
+  if (result.name === "file_view" || result.name === "view_file") {
     return typeof args.path === "string" && artifactPathMatches(args.path, artifact);
   }
   if (result.name !== "bash") return false;
@@ -133,7 +133,7 @@ function extractMissingArtifactPaths(result: ToolResult): string[] {
   const message = `${result.error?.message ?? ""}`;
   const paths: string[] = [];
   const args = recordArgs(result);
-  if (result.name === "read_file" && typeof args.path === "string" && /ENOENT|no such file/i.test(message)) paths.push(args.path);
+  if ((result.name === "file_view" || result.name === "view_file") && typeof args.path === "string" && /ENOENT|no such file/i.test(message)) paths.push(args.path);
   for (const pattern of [
     /No such file or directory: ['"]([^'"]+)['"]/gi,
     /FileNotFoundError[^'"\n]*['"]([^'"]+)['"]/gi,

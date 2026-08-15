@@ -7,9 +7,9 @@
       "kind": "pinned_package",
       "extensions": [".ts", ".mts", ".cts"],
       "languages": ["ts"],
-      "package": "jsonc-parser",
-      "version": "2.2.1",
-      "import": "jsonc-parser",
+      "package": "typescript",
+      "version": "5.9.3",
+      "import": "typescript",
       "symbol": "lint"
     }
   ]

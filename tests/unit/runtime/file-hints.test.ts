@@ -167,8 +167,8 @@ test("extractFilePathsFromFailure dedupes when message and patterns repeat", () 
 
 test("inferFilesHintFromResults aggregates paths from args across many results", () => {
   const results = [
-    makeResult({ name: "read_file", args: { path: "src/a.ts" }, ok: true }),
-    makeResult({ name: "read_file", args: { path: "src/b.ts" }, ok: true }),
+    makeResult({ name: "file_view", args: { path: "src/a.ts" }, ok: true }),
+    makeResult({ name: "file_view", args: { path: "src/b.ts" }, ok: true }),
     makeResult({ name: "write_file", args: { targetPath: "src/c.ts" }, ok: true }),
     makeResult({ name: "write_file", args: { file: "src/d.ts" }, ok: true }),
   ];
@@ -178,8 +178,8 @@ test("inferFilesHintFromResults aggregates paths from args across many results",
 
 test("inferFilesHintFromResults filters out node_modules paths from args", () => {
   const results = [
-    makeResult({ name: "read_file", args: { path: "node_modules/lodash/index.js" }, ok: true }),
-    makeResult({ name: "read_file", args: { path: "src/foo.ts" }, ok: true }),
+    makeResult({ name: "file_view", args: { path: "node_modules/lodash/index.js" }, ok: true }),
+    makeResult({ name: "file_view", args: { path: "src/foo.ts" }, ok: true }),
   ];
   const hint = inferFilesHintFromResults(results);
   assert.deepEqual(hint, ["src/foo.ts"]);
@@ -187,7 +187,7 @@ test("inferFilesHintFromResults filters out node_modules paths from args", () =>
 
 test("inferFilesHintFromResults caps at 10 entries", () => {
   const results = Array.from({ length: 20 }, (_, i) =>
-    makeResult({ name: "read_file", args: { path: `src/file${i}.ts` }, ok: true }),
+    makeResult({ name: "file_view", args: { path: `src/file${i}.ts` }, ok: true }),
   );
   const hint = inferFilesHintFromResults(results);
   assert.equal(hint.length, 10);
@@ -195,9 +195,9 @@ test("inferFilesHintFromResults caps at 10 entries", () => {
 
 test("inferFilesHintFromResults dedupes across results", () => {
   const results = [
-    makeResult({ name: "read_file", args: { path: "src/foo.ts" }, ok: true }),
-    makeResult({ name: "read_file", args: { path: "src/foo.ts" }, ok: true }),
-    makeResult({ name: "read_file", args: { path: "src/foo.ts" }, ok: true }),
+    makeResult({ name: "file_view", args: { path: "src/foo.ts" }, ok: true }),
+    makeResult({ name: "file_view", args: { path: "src/foo.ts" }, ok: true }),
+    makeResult({ name: "file_view", args: { path: "src/foo.ts" }, ok: true }),
   ];
   const hint = inferFilesHintFromResults(results);
   assert.deepEqual(hint, ["src/foo.ts"]);
@@ -219,9 +219,9 @@ test("inferFilesHintFromResults surfaces error-message paths too", () => {
 
 test("inferFilesHintFromResults ignores non-string args.path", () => {
   const results = [
-    makeResult({ name: "read_file", args: { path: 42 }, ok: true }),
-    makeResult({ name: "read_file", args: { path: "" }, ok: true }),
-    makeResult({ name: "read_file", args: {}, ok: true }),
+    makeResult({ name: "file_view", args: { path: 42 }, ok: true }),
+    makeResult({ name: "file_view", args: { path: "" }, ok: true }),
+    makeResult({ name: "file_view", args: {}, ok: true }),
   ];
   const hint = inferFilesHintFromResults(results);
   assert.deepEqual(hint, []);

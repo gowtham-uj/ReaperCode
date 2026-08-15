@@ -71,20 +71,20 @@ test("session.jsonl message tree is crash-resumable via buildActiveBranchMessage
     event_id: "a1",
     kind: "assistant_message",
     content: "I'll edit the file",
-    tool_names: ["replace_in_file"],
-    tool_calls: [{ id: "c1", name: "replace_in_file", args: { path: "src/sum.js" } }],
+    tool_names: ["edit_file"],
+    tool_calls: [{ id: "c1", name: "edit_file", args: { path: "src/sum.js" } }],
   });
   const interrupted = buildActiveBranchMessages(ws, "live-resume");
   assert.equal(interrupted.length, 2);
   assert.equal(interrupted[0]?.role, "user");
   assert.equal(interrupted[1]?.role, "assistant");
-  assert.equal(interrupted[1]?.tool_calls?.[0]?.name, "replace_in_file");
+  assert.equal(interrupted[1]?.tool_calls?.[0]?.name, "edit_file");
 
   await logger.write({
     ...base,
     event_id: "t1",
     kind: "tool_call",
-    tool_name: "replace_in_file",
+    tool_name: "edit_file",
     decision_id: "c1",
     status: "completed",
     output: "ok",

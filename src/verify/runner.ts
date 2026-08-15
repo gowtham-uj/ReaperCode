@@ -425,7 +425,7 @@ function hasPriorPassingEvidenceWithoutFailure(input: {
 }
 
 function isMutationResult(result: { name: string; args?: unknown }): boolean {
-  if (result.name === "write_file" || result.name === "replace_in_file" || result.name === "delete_file" || result.name === "edit_file") return true;
+  if (result.name === "write_file" || result.name === "file_edit" || result.name === "delete_file" || result.name === "edit_file") return true;
   if (result.name !== "bash") return false;
   const args = result.args && typeof result.args === "object" ? (result.args as Record<string, unknown>) : {};
   const cmd = typeof args.cmd === "string" ? cmdNormalizeForMutation(args.cmd) : "";

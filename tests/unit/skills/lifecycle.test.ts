@@ -47,7 +47,7 @@ test("LC1: installFromPath writes manifest and trust.json", () => {
     description: "Install test",
     category: "bug-fixing",
     whenToUse: "always",
-    allowedTools: ["read_file"],
+    allowedTools: ["file_view"],
     trust: "user-trusted",
   }));
   writeFileSync(join(srcDir, "SKILL.md"), "# Install\n");
@@ -69,7 +69,7 @@ test("LC2: createDraft lands in drafts/ with trust=draft", () => {
     description: "Lifecycle test",
     category: "bug-fixing",
     whenToUse: "always",
-    allowedTools: ["read_file"],
+    allowedTools: ["file_view"],
     trust: "draft",
   }, "# Lifecycle\n");
   assert.equal(draft.trust, "draft");
@@ -85,7 +85,7 @@ test("LC3: testSkill runs validation commands and reports ok", async () => {
     description: "Testable",
     category: "bug-fixing",
     whenToUse: "always",
-    allowedTools: ["read_file"],
+    allowedTools: ["file_view"],
     trust: "draft",
     validation: { commands: [{ id: "noop", command: "true" }] },
   }, "# Testable\n");

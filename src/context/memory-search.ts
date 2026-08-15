@@ -9,7 +9,7 @@
  * The search is intentionally simple: keyword overlap scoring. We don't
  * pull in an embedding model here because the goal is a fast, local,
  * dependency-free retrieval over the summary index. The model can use
- * `read_file` to load the full body of any summary it picks.
+ * `file_view` to load the full body of any summary it picks.
  */
 
 import { loadAllSummaries, loadSummaryBody, type PersistentSummary } from "./persistent-summary.js";

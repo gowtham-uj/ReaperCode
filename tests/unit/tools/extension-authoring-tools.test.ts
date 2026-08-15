@@ -63,7 +63,7 @@ test("create_extension happy path lands dormant + project-untrusted", async () =
         description: "Says hello",
         main: "main.js",
         engines_reaper: "^1.0.0",
-        permissions: ["tools:read_file"],
+        permissions: ["tools:read"],
         source: MINIMAL_SOURCE,
         scope: "project",
       },

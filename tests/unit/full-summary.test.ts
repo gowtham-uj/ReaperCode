@@ -234,13 +234,13 @@ test("second compaction summarizes only the new epoch and preserves hard anchors
       content: "",
       tool_calls: [{
         id: "old-read",
-        function: { name: "read_file", arguments: JSON.stringify({ path: "src/old.ts" }) },
+        function: { name: "file_view", arguments: JSON.stringify({ path: "src/old.ts" }) },
       }],
     },
     {
       role: "tool",
       tool_call_id: "old-read",
-      name: "read_file",
+      name: "file_view",
       content: JSON.stringify({
         path: "src/old.ts",
         sha256: "c".repeat(64),
@@ -269,13 +269,13 @@ test("second compaction summarizes only the new epoch and preserves hard anchors
       content: "",
       tool_calls: [{
         id: "new-read",
-        function: { name: "read_file", arguments: JSON.stringify({ path: "src/new.ts" }) },
+        function: { name: "file_view", arguments: JSON.stringify({ path: "src/new.ts" }) },
       }],
     },
     {
       role: "tool",
       tool_call_id: "new-read",
-      name: "read_file",
+      name: "file_view",
       content: JSON.stringify({
         path: "src/new.ts",
         sha256: "d".repeat(64),
@@ -421,7 +421,7 @@ test("extractPostCompactProgressHints resumes without scratchpad nudges", async 
       tool_calls: [
         { function: { name: "scratchpad", arguments: JSON.stringify({ action: "append", note: "TOKEN" }) } },
         { function: { name: "bash", arguments: JSON.stringify({ cmd: "cat big/logdump.txt" }) } },
-        { function: { name: "read_file", arguments: JSON.stringify({ path: "src/legacy.ts" }) } },
+        { function: { name: "file_view", arguments: JSON.stringify({ path: "src/legacy.ts" }) } },
         { function: { name: "write_file", arguments: JSON.stringify({ path: "RESULT.json" }) } },
       ],
     },

@@ -66,9 +66,6 @@ test("engine-level: stripUnknownToolArgs treats empty-args known tool as known",
   assert.deepEqual(out.stripped, []);
 });
 
-test("engine-level: read_file and view_file have parallel arg shapes", () => {
-  // The two file-reading tools should accept the same key set. If
-  // they ever drift, a `view_file` call with only `path` would
-  // be misclassified.
-  assert.deepEqual(getAllowedArgs("read_file"), getAllowedArgs("view_file"));
+test("engine-level: file_view exposes its canonical arg shape", () => {
+  assert.deepEqual(getAllowedArgs("file_view"), ["path", "start_line", "window"]);
 });

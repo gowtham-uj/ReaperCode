@@ -151,26 +151,6 @@ export const WriteFileArgsSchema = z
   })
   .strict();
 
-export const ReplaceInFileArgsSchema = z
-  .union([
-    z
-      .object({
-        path: z.string().min(1),
-        oldString: z.string(),
-        newString: z.string(),
-        allowMultiple: z.boolean().optional(),
-      })
-      .strict(),
-    z
-      .object({
-        path: z.string().min(1),
-        startLine: z.number().int().positive(),
-        endLine: z.number().int().positive(),
-        content: z.string(),
-      })
-      .strict(),
-  ]);
-
 export const EditFileArgsSchema = z
   .object({
     path: z.string().min(1),
@@ -423,7 +403,6 @@ export const DelegateSubTaskSchema = z
 
 
 export const ToolCallSchema = z.discriminatedUnion("name", [
-  z.object({ id: z.string().min(1), name: z.literal("read_file"), args: ReadFileArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("view_file"), args: ViewFileArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("list_directory"), args: ListDirectoryArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("grep_search"), args: GrepSearchArgsSchema }).strict(),
@@ -439,7 +418,6 @@ export const ToolCallSchema = z.discriminatedUnion("name", [
   z.object({ id: z.string().min(1), name: z.literal("file_scroll"), args: FileScrollArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("file_find"), args: FileFindArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("file_edit"), args: FileEditArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("replace_in_file"), args: ReplaceInFileArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("edit_file"), args: EditFileArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("delete_file"), args: DeleteFileArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("bash"), args: BashArgsSchema }).strict(),

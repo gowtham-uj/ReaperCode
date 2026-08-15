@@ -9,7 +9,7 @@ function blockerCodes(result: ReturnType<typeof validateToolCallBatch>): string[
 
 test("accepts a valid main-agent tool call batch", () => {
   const result = validateToolCallBatch([
-    { name: "read_file", arguments: { path: "README.md" } },
+    { name: "file_view", arguments: { path: "README.md" } },
     { name: "grep_search", arguments: { pattern: "Reaper" } },
   ]);
 
@@ -75,7 +75,7 @@ test("invalid tool call shapes produce structured blockers", () => {
 });
 
 test("tool schema errors produce structured blockers", () => {
-  const result = validateToolCallBatch([{ name: "read_file", arguments: {} }], {
+  const result = validateToolCallBatch([{ name: "file_view", arguments: {} }], {
     validateSchema: () => ({ ok: false, details: ["arguments.path: Required"] }),
   });
 
@@ -85,7 +85,7 @@ test("tool schema errors produce structured blockers", () => {
 });
 
 test("non-array tool call input is rejected without throwing", () => {
-  const result = validateToolCallBatch({ name: "read_file", arguments: { path: "README.md" } });
+  const result = validateToolCallBatch({ name: "file_view", arguments: { path: "README.md" } });
 
   assert.equal(result.ok, false);
   assert.deepEqual(blockerCodes(result), ["tool_calls_not_array"]);

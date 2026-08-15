@@ -109,7 +109,6 @@ export function normalizeToolCall(input: unknown): unknown {
     let name = normalizeToolName(rawName, args);
     normalizedName = name;
     switch (name) {
-      case "read_file":
       case "view_file":
         args = {
           ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
@@ -147,42 +146,18 @@ export function normalizeToolCall(input: unknown): unknown {
           ...(typeof record.scrapePages === "number" ? { scrapePages: record.scrapePages } : {}),
         };
         break;
-      case "replace_in_file": {
-        const startLine =
-          typeof record.startLine === "number"
-            ? record.startLine
-            : typeof record.start_line === "number"
-              ? record.start_line
-              : undefined;
-        const endLine =
-          typeof record.endLine === "number"
-            ? record.endLine
-            : typeof record.end_line === "number"
-              ? record.end_line
-              : undefined;
-        if (startLine !== undefined && endLine !== undefined && typeof record.content === "string") {
-          args = {
-            ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
-            startLine,
-            endLine,
-            content: record.content,
-          };
-        } else {
-          args = {
-            ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
-            ...(normalizedOld !== undefined ? { oldString: normalizedOld } : {}),
-            ...(normalizedNew !== undefined ? { newString: normalizedNew } : {}),
-            ...(typeof record.allowMultiple === "boolean" ? { allowMultiple: record.allowMultiple } : {}),
-          };
-        }
-        break;
-      }
-      case "edit_file":
+      case "edit_file": {
+        const edits = Array.isArray(record.edits)
+          ? record.edits
+          : normalizedOld !== undefined || normalizedNew !== undefined
+            ? [{ oldString: normalizedOld ?? "", newString: normalizedNew ?? "" }]
+            : undefined;
         args = {
           ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
-          ...(Array.isArray(record.edits) ? { edits: record.edits } : {}),
+          ...(edits ? { edits } : {}),
         };
         break;
+      }
       case "write_file":
         args = {
           ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
@@ -501,8 +476,8 @@ function normalizeToolName(rawName: string | undefined, _args: unknown): string 
     request_human_approval: "request_human_approval",
     human_approval: "request_human_approval",
     is_human_intervening: "is_human_intervening",
-    read: "read_file",
-    open_file: "read_file",
+    read: "file_view",
+    open_file: "file_view",
     view_file: "view_file",
     view: "view_file",
     list: "list_directory",
@@ -512,9 +487,8 @@ function normalizeToolName(rawName: string | undefined, _args: unknown): string 
     write: "write_file",
     create_file: "write_file",
     write_to_file: "write_file",
-    edit: "replace_in_file",
-    edit_file: "replace_in_file",
-    replace: "replace_in_file",
+    edit: "file_edit",
+    replace: "file_edit",
     delete: "delete_file",
   };
   if (canonical && aliases[canonical]) {

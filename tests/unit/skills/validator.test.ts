@@ -49,7 +49,7 @@ test("AC3d: accepts a valid manifest", () => {
     description: "fine",
     category: "bug-fixing",
     whenToUse: "always",
-    allowedTools: ["read_file"],
+    allowedTools: ["file_view"],
     trust: "builtin",
   }));
   assert.equal(m.name, "ok-name");

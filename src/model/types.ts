@@ -163,6 +163,10 @@ export interface GenerateRequest {
     /** Internal error hint for `tool` messages; stripped before OpenAI wire. */
     is_error?: boolean;
     /** For `assistant` role: OpenAI chat-completions tool-call objects. */
+    /** For `assistant` role: provider reasoning/thinking text from the
+     * previous turn. DeepSeek thinking mode requires it round-tripped as
+     * `reasoning_content`; Anthropic-style clients map it to thinking blocks. */
+    reasoning?: string;
     tool_calls?: Array<{
       id: string;
       type: "function";

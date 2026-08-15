@@ -6,7 +6,6 @@ import {
   ReadBackgroundOutputArgsSchema,
   SignalProcessArgsSchema,
   WriteToProcessArgsSchema,
-  ReadFileArgsSchema,
   ViewFileArgsSchema,
   SkimFileArgsSchema,
   InspectEnvironmentArgsSchema,
@@ -15,7 +14,6 @@ import {
   GitStatusArgsSchema,
   GitDiffArgsSchema,
   WebSearchArgsSchema,
-  ReplaceInFileArgsSchema,
   EditFileArgsSchema,
   BashArgsSchema,
   BrowserControlArgsSchema,
@@ -73,14 +71,9 @@ import {
 } from "./types/hook-tools.schema.js";
 
 export const toolRegistry = {
-  read_file: {
-    description:
-      "Read file content. For large files, unbounded reads return only a preview; use startLine/endLine, grep_search, or skim_file to inspect the relevant region.",
-    argsSchema: ReadFileArgsSchema,
-  },
   view_file: {
     description:
-      "Read a bounded file window with line numbers. Use this instead of full read_file when diagnostics or grep point to a specific range.",
+      "Read a bounded file window with line numbers. Use this for a full file read; use file_view for ranged inspection when diagnostics or grep point to a specific range.",
     argsSchema: ViewFileArgsSchema,
   },
   list_directory: {
@@ -125,11 +118,6 @@ export const toolRegistry = {
     description: "Write complete file content. Creates the file if it doesn't exist and automatically creates parent directories. Use for new files or intentional full rewrites; prefer many focused write_file calls over one giant generated blob when creating several independent files.",
     argsSchema: WriteFileArgsSchema,
   },
-  replace_in_file: {
-    description:
-      "Replace text in a file. Prefer exact oldString/newString only when you just read the current text or are patching a small stable block. If a replace_in_file call fails with string-not-found, do not repeat the same oldString; immediately read_file around the target or retry with startLine/endLine/content using the current file text.",
-    argsSchema: ReplaceInFileArgsSchema,
-  },
   edit_file: {
     description: "Multi-block search and replace. Highly efficient for large files. Each edit must uniquely identify a block of code using 'oldString' and provide 'newString' for replacement. Automatically handles quote and whitespace normalization.",
     argsSchema: EditFileArgsSchema,
@@ -141,7 +129,7 @@ export const toolRegistry = {
   // ---- viewer tools (Phase 2: schemas registered, NOT in CORE_TOOL_NAMES yet).
   file_view: {
     description:
-      "View a numbered window of a file (default 50 lines starting at line 1). Preferred over read_file for inspection; the model always sees line numbers in the response. Use file_scroll to navigate within the same file. Bounded by file_line_limit_max (config; default 500 lines per response).",
+      "View a numbered window of a file (default 50 lines starting at line 1). The model always sees line numbers in the response. Use file_scroll to navigate within the same file. Bounded by file_line_limit_max (config; default 500 lines per response).",
     argsSchema: FileViewArgsSchema,
   },
   file_scroll: {
@@ -156,7 +144,7 @@ export const toolRegistry = {
   },
   file_edit: {
     description:
-      "Edit a single contiguous line range and run the configured language linter on the result. On lint failure the file is rolled back atomically and the error is returned to the model (file content is never left in a broken state). Preferred over replace_in_file for line-anchored edits because oldString never has to be guessed.",
+      "Edit a single contiguous line range and run the configured language linter on the result. On lint failure the file is rolled back atomically and the error is returned to the model (file content is never left in a broken state). Preferred for line-anchored edits because oldString never has to be guessed.",
     argsSchema: FileEditArgsSchema,
   },
   // -------------------------------------------------------------------------------
@@ -404,16 +392,8 @@ export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   // scratchpad from the system prompt — user request owns that.
 ]);
 
-// Tools that were demoted from CORE_TOOL_NAMES in Phase 4. Kept registered
-// in `toolRegistry` for back-compat but no longer in the model's per-turn
-// shortlist. The model reaches them via `search_tools("discover:read_file")`
-// or `search_tools("discover:replace_in_file")`. Phase 5 replaces the first
-// with an auto-aliased file_view shim; Phase 5 removes the second entirely
-// and substitutes a synonym alias that routes to file_edit's schema.
-export const DEMOTED_LEGACY_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
-  "read_file",
-  "replace_in_file",
-]);
+// `read_file` and `replace_in_file` were removed entirely — legacy `read`,
+// `edit`, `edit_file`, and `replace` names alias to `file_view` / `file_edit`.
 
 export type ToolName = keyof typeof toolRegistry;
 

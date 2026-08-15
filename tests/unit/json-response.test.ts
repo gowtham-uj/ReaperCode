@@ -37,7 +37,7 @@ test("stripLeadingReasoning: strips a closed <think> block (multi-line, balanced
 We need to call { "example": "code snippet" } first.
 Then { "second": "snippet" }.
 </think>
-{"assistant_message":"plan ready","tool_calls":[{"id":"1","name":"read_file","args":{"path":"foo"}}]}`;
+{"assistant_message":"plan ready","tool_calls":[{"id":"1","name":"file_view","args":{"path":"foo"}}]}`;
   const out = stripLeadingReasoning(input);
   // The leading newline before the JSON is preserved; the JSON parser
   // trims it. The important assertion is that no `<think>` reasoning text
@@ -48,7 +48,7 @@ Then { "second": "snippet" }.
   assert.ok(out.includes('"assistant_message"'));
   assert.equal(
     out.trim(),
-    '{"assistant_message":"plan ready","tool_calls":[{"id":"1","name":"read_file","args":{"path":"foo"}}]}',
+    '{"assistant_message":"plan ready","tool_calls":[{"id":"1","name":"file_view","args":{"path":"foo"}}]}',
   );
 });
 

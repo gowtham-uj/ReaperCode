@@ -142,19 +142,20 @@ function rewriteWorkspaceAliasPath(root: string, targetPath: string): string {
 function rewriteShellWorkspacePath(root: string, targetPath: string): string | undefined {
   const parts = targetPath.replace(/\\/g, "/").split("/").filter(Boolean);
   const workspaceName = path.basename(root).toLocaleLowerCase();
-  // Only honor the heuristic when the matched segment is the FIRST one
-  // in `parts` (i.e. the path begins with the workspace basename).
-  // Matching anywhere in the path is dangerous: `/etc/foo/x` would
-  // otherwise be silently rewritten as `<root>/x` even when the
-  // caller is talking about an unrelated `/foo/` directory elsewhere
-  // on the filesystem. Anchoring at index 0 keeps the heuristic useful
-  // for shell prompts printed by Docker/CI that always prefix
-  // `/<workspace>/...` while rejecting paths that just happen to
-  // share a basename.
+  // Only honor the heuristic when the matched segment leads the path:
+  // either as the first segment (Docker/CI shell prompts prefix
+  // `/<workspace>/...`) or as the second segment immediately after a
+  // shell temp alias (Git Bash/MSYS reports Windows temp workspaces as
+  // `/tmp/<workspace>/...`). Matching deeper in the path is dangerous:
+  // `/etc/foo/x` would otherwise be silently rewritten as `<root>/x`
+  // even when the caller is talking about an unrelated `/foo/` directory
+  // elsewhere on the filesystem.
   let workspaceIndex = -1;
   for (let index = parts.length - 1; index >= 0; index -= 1) {
     if (parts[index]?.toLocaleLowerCase() === workspaceName) {
-      if (index === 0) {
+      const leadsPath = index === 0;
+      const followsTmpAlias = index === 1 && parts[0]?.toLocaleLowerCase() === "tmp";
+      if (leadsPath || followsTmpAlias) {
         workspaceIndex = index;
       }
       break;

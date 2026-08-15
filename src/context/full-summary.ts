@@ -312,7 +312,7 @@ export function extractPostCompactProgressHints(
         if (name === "bash") {
           const cmd = typeof args.cmd === "string" ? args.cmd : typeof args.command === "string" ? args.command : "";
           if (/\bcat\b/.test(cmd) && !/\|\s*(?:head|tail)\b/.test(cmd)) sawBashCat = true;
-        } else if (["file_view", "file_find", "read_file", "view_file"].includes(name)) {
+        } else if (["file_view", "file_scroll", "file_find", "view_file"].includes(name)) {
           if (typeof args.path === "string" && args.path.trim()) viewed.add(args.path.trim());
         } else if (name === "write_file") {
           if (typeof args.path === "string" && args.path.trim()) written.add(args.path.trim());
@@ -354,7 +354,7 @@ function reattachRecentFiles(
     const m = messagesBeforeCut[i]!;
     if (m.role === "assistant" && Array.isArray(m.tool_calls)) {
       for (const tc of m.tool_calls) {
-        if (["file_view", "file_find", "file_edit", "read_file", "view_file"].includes(tc.function.name)) {
+        if (["file_view", "file_scroll", "file_find", "file_edit", "view_file"].includes(tc.function.name)) {
           try {
             const args = JSON.parse(tc.function.arguments) as { path?: string };
             if (args.path && !seen.has(args.path)) {

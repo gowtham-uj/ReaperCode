@@ -58,7 +58,7 @@ test("known tool resets consecutive unknown counter", async () => {
   assert.equal(r2.error?.code, "UNKNOWN_TOOL");
 
   // Known tool resets counter
-  const rKnown = await executor.execute({ id: "3", name: "read_file", args: { path: "README.md" } });
+  const rKnown = await executor.execute({ id: "3", name: "file_view", args: { path: "README.md" } });
   assert.equal(rKnown.ok, true);
 
   // Next unknown tool should NOT trigger loop guard because counter was reset

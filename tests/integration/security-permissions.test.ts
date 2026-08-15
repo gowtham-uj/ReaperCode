@@ -72,7 +72,7 @@ test("accept_edits allows safe reads", async () => {
   const executor = await createExecutor(workspaceRoot, "accept_edits");
   const result = await executor.execute({
     id: "read",
-    name: "read_file",
+    name: "file_view",
     args: { path: "README.md" },
   });
   assert.equal(result.ok, true);
@@ -205,7 +205,7 @@ test("distinct denial categories produce stable error codes", async () => {
 
   const esc = await executor.execute({
     id: "esc",
-    name: "read_file",
+    name: "file_view",
     args: { path: "../outside.txt" },
   });
   assert.equal(esc.ok, false);
@@ -229,7 +229,7 @@ test("distinct denial categories produce stable error codes", async () => {
 
   const ip = await executor.execute({
     id: "ip",
-    name: "read_file",
+    name: "view_file",
     args: { path: 42 },
   } as never);
   assert.equal(ip.ok, false);

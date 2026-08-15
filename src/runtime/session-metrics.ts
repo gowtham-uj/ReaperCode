@@ -13,7 +13,7 @@ export interface SessionMetricsSummary {
 }
 
 const VERIFY_CMD = /\b(npm\s+test|pnpm\s+test|yarn\s+test|node\s+--test|pytest|go\s+test|cargo\s+test|make\s+test|run-tests|tsc\s+--noEmit|npm\s+run\s+typecheck|npm\s+run\s+build|pnpm\s+build)\b/i;
-const MUTATING_TOOLS = new Set(["file_edit", "write_file", "replace_in_file", "delete_file", "apply_patch", "edit_file"]);
+const MUTATING_TOOLS = new Set(["file_edit", "write_file", "delete_file", "apply_patch", "edit_file"]);
 
 export function countVerificationAttempts(results: ToolResult[]): number {
   let count = 0;
@@ -136,7 +136,7 @@ export function normalizeArgs(toolName: string, args: unknown): string {
   if (toolName === "bash") {
     return stableJson({ cmd: normalizeVolatileText(typeof record.cmd === "string" ? record.cmd : "") });
   }
-  if (toolName === "read_file") {
+  if (toolName === "file_view" || toolName === "view_file") {
     return stableJson({ path: normalizeVolatileText(typeof record.path === "string" ? record.path : "") });
   }
   return stableJson(normalizeValue(record));

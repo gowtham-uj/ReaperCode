@@ -78,7 +78,7 @@ function buildReAnchorMessage(summary: PersistentSummary): string {
     "```",
     summary.body.slice(0, 500),
     "```",
-    "Use `read_file` on the .reaper/summaries/<id>.md to read the full summary.",
+    "Use `file_view` on the .reaper/summaries/<id>.md to read the full summary.",
   ].join("\n");
 }
 

@@ -8,9 +8,9 @@
  *   - web_fetch
  *   - MCP tools (mcp__ prefix)
  *   - shell commands that fetch from the network (curl output)
- *   - read_file of files outside the workspace
+ *   - file_view of files outside the workspace
  *
- * In-workspace read_file must remain unwrapped.
+ * In-workspace file_view must remain unwrapped.
  */
 
 import test from "node:test";
@@ -81,24 +81,24 @@ test("curl shell output is wrapped with untrusted markers", () => {
   assert.equal(markers.closes, 1, "curl command output should have exactly one close marker");
 });
 
-test("out-of-workspace read_file is wrapped with untrusted markers", () => {
+test("out-of-workspace file_view is wrapped with untrusted markers", () => {
   const result = makeResult({
-    name: "read_file",
+    name: "file_view",
     args: { path: "/etc/passwd" },
     output: "root:x:0:0:root:/root:/bin/bash",
   });
   const markers = markerCounts(result, WORKSPACE);
-  assert.equal(markers.opens, 1, "out-of-workspace read_file should have exactly one open marker");
-  assert.equal(markers.closes, 1, "out-of-workspace read_file should have exactly one close marker");
+  assert.equal(markers.opens, 1, "out-of-workspace file_view should have exactly one open marker");
+  assert.equal(markers.closes, 1, "out-of-workspace file_view should have exactly one close marker");
 });
 
-test("in-workspace read_file is NOT wrapped with untrusted markers", () => {
+test("in-workspace file_view is NOT wrapped with untrusted markers", () => {
   const result = makeResult({
-    name: "read_file",
+    name: "file_view",
     args: { path: `${WORKSPACE}/src/context/trust.ts` },
     output: "export const TRUSTED = true;",
   });
   const markers = markerCounts(result, WORKSPACE);
-  assert.equal(markers.opens, 0, "in-workspace read_file must not be wrapped");
-  assert.equal(markers.closes, 0, "in-workspace read_file must not be wrapped");
+  assert.equal(markers.opens, 0, "in-workspace file_view must not be wrapped");
+  assert.equal(markers.closes, 0, "in-workspace file_view must not be wrapped");
 });

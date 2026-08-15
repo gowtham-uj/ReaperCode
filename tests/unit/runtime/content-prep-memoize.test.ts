@@ -49,7 +49,7 @@ test("content-prep memoize: different toolResults miss the cache", async () => {
   await prepareRuntimeContent(
     baseInput({
       toolResults: [
-        { name: "read_file", toolCallId: "t1", ok: true, durationMs: 1, output: "different content" },
+        { name: "file_view", toolCallId: "t1", ok: true, durationMs: 1, output: "different content" },
       ],
     }),
     { memoize: true },

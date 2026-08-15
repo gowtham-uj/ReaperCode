@@ -21,7 +21,7 @@ function sseResponse(chunks: string[]): Response {
 
 test("normalizeLiteLLMStream yields a tool_call event when tool_calls finish_reason arrives", async () => {
   const response = sseResponse([
-    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\\"path\\":"}}]}}]}\n\n',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"file_view","arguments":"{\\"path\\":"}}]}}]}\n\n',
     'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"a.ts\\"}"}}]}}]}\n\n',
     'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n',
   ]);
@@ -31,7 +31,7 @@ test("normalizeLiteLLMStream yields a tool_call event when tool_calls finish_rea
   }
   const toolCalls = events.filter((e) => e.type === "tool_call");
   assert.equal(toolCalls.length, 1);
-  assert.equal(toolCalls[0]?.data?.name, "read_file");
+  assert.equal(toolCalls[0]?.data?.name, "file_view");
   assert.equal(toolCalls[0]?.data?.arguments, '{"path":"a.ts"}');
   assert.equal(events.at(-1)?.type, "message_end");
 });
@@ -71,14 +71,14 @@ test("parseMainAgentToolCallsDetailed separates valid calls from parse errors", 
   const response = {
     content: "",
     toolCalls: [
-      { id: "1", type: "function", function: { name: "read_file", arguments: '{"path":"a.ts"}' } },
+      { id: "1", type: "function", function: { name: "file_view", arguments: '{"path":"a.ts"}' } },
       { id: "2", type: "function", function: { name: "definitely_not_a_tool", arguments: "{}" } },
-      { id: "3", type: "function", function: { name: "read_file", arguments: '{"oops":' } },
+      { id: "3", type: "function", function: { name: "file_view", arguments: '{"oops":' } },
     ],
   };
   const { calls, parseErrors } = parseMainAgentToolCallsDetailed(response);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0]?.name, "read_file");
+  assert.equal(calls[0]?.name, "file_view");
   // Two parse errors: unknown tool name and bad args.
   assert.equal(parseErrors.length, 2);
   const feedback = buildToolCallParseErrorsFeedback(parseErrors);

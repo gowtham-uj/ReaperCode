@@ -367,6 +367,7 @@ function buildDeepSeekMessages(
       out.push({
         role: "assistant",
         content: message.content ?? "",
+        ...(message.reasoning ? { reasoning_content: message.reasoning } : {}),
         tool_calls: message.tool_calls.map((call) => ({
           id: call.id,
           type: "function",
@@ -381,6 +382,7 @@ function buildDeepSeekMessages(
     out.push({
       role: message.role,
       content: message.content ?? "",
+      ...(message.role === "assistant" && message.reasoning ? { reasoning_content: message.reasoning } : {}),
     });
   }
   return out;

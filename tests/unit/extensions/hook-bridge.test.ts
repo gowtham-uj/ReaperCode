@@ -29,9 +29,9 @@ test("bridge: bus.PreToolUse event reaches HookRunner", async () => {
   });
   const cleanup = installHookBridge({ hooks, bus, runner });
   // Emit and wait for the async bridge chain to land.
-  await bus.emit("PreToolUse", { payload: { toolName: "read_file" } });
+  await bus.emit("PreToolUse", { payload: { toolName: "file_view" } });
   await flush();
-  assert.ok(received.includes("read_file"), `expected read_file, got [${received.join(",")}]`);
+  assert.ok(received.includes("file_view"), `expected file_view, got [${received.join(",")}]`);
   cleanup();
 });
 

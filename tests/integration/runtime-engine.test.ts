@@ -33,8 +33,8 @@ test("runtime engine executes real tool calls and writes trajectory logs", async
   request.payload = {
     prompt: "Inspect and update the workspace",
     tool_calls: [
-      { id: "1", name: "read_file", args: { path: "src/app.ts" } },
-      { id: "2", name: "replace_in_file", args: { path: "src/app.ts", oldString: "41", newString: "42" } },
+      { id: "1", name: "file_view", args: { path: "src/app.ts" } },
+      { id: "2", name: "edit_file", args: { path: "src/app.ts", edits: [{ oldString: "41", newString: "42" }] } },
       { id: "3", name: "bash", args: { cmd: "node -e \"console.log('verify-ok')\"" } },
     ],
   };
@@ -557,9 +557,9 @@ test("autonomous runtime executes canonical main-agent tool calls", async () => 
       tool_calls: [
         { id: "write-alias", name: "write_file", args: { path: "alias.txt", content: "alias-ok\n" } },
         { id: "verify-alias", name: "bash", args: { cmd: "test \"$(cat alias.txt)\" = alias-ok" } },
-        { id: "replace-alias", name: "replace_in_file", args: { path: "alias.txt", oldString: "alias-ok", newString: "alias-replaced" } },
+        { id: "replace-alias", name: "edit_file", args: { path: "alias.txt", edits: [{ oldString: "alias-ok", newString: "alias-replaced" }] } },
         { id: "write-type-arguments", name: "write_file", args: { path: "alias-2.txt", content: "alias-2-ok\n" } },
-        { id: "read-wrapped-filepath", name: "read_file", args: { path: "alias.txt" } },
+        { id: "read-wrapped-filepath", name: "file_view", args: { path: "alias.txt" } },
         { id: "check-alias-2-exists", name: "bash", args: { cmd: "test -f alias-2.txt" } },
         { id: "check-alias-exists", name: "bash", args: { cmd: "test -f alias.txt" } },
         { id: "verify-alias-2", name: "bash", args: { cmd: "test \"$(cat alias-2.txt)\" = alias-2-ok" } },
@@ -657,13 +657,16 @@ test("autonomous runtime records a passing requested verifier as solved", async 
   const request = createValidRequestEnvelope();
   const verifyCommand = "node --test smoke.test.mjs";
   request.payload = {
-    prompt: "Run the requested verifier, then report completion.",
+    prompt: "Make a small change, run the requested verifier, then report completion.",
     verification: { command: verifyCommand, maxIterations: 1 },
   };
   const gateway = new StaticJsonGateway([
     {
       assistant_message: "",
-      tool_calls: [{ id: "verify-smoke", name: "bash", args: { cmd: verifyCommand } }],
+      tool_calls: [
+        { id: "write-notes", name: "write_file", args: { path: "notes.txt", content: "edit\n" } },
+        { id: "verify-smoke", name: "bash", args: { cmd: verifyCommand } },
+      ],
     },
     {
       assistant_message: "The requested verifier passed.",
@@ -759,7 +762,7 @@ test("runtime engine can summarize with a live model when available", { skip: !(
   const request = createValidRequestEnvelope();
   request.payload = {
     prompt: "Read the README and tell me what happened",
-    tool_calls: [{ id: "1", name: "read_file", args: { path: "README.md" } }],
+    tool_calls: [{ id: "1", name: "file_view", args: { path: "README.md" } }],
   };
 
   const { config, gateway } = createLiveDeepSeekGateway("runtime engine can summarize with a live model when available");

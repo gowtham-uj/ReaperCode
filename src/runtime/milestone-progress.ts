@@ -150,12 +150,12 @@ function isRuntimeCrash(result: ToolResult): boolean {
 
 function isReadOnlyResult(result: ToolResult): boolean {
   if (!result.ok) return false;
-  return ["read_file", "view_file", "skim_file", "list_directory", "grep_search", "inspect_environment", "web_search", "web_fetch"].includes(result.name);
+  return ["file_view", "file_scroll", "file_find", "view_file", "skim_file", "list_directory", "grep_search", "inspect_environment", "web_search", "web_fetch"].includes(result.name);
 }
 
 function isSuccessfulMutation(result: ToolResult): boolean {
   if (!result.ok) return false;
-  if (["write_file", "replace_in_file", "edit_file", "delete_file"].includes(result.name)) return true;
+  if (["write_file", "file_edit", "edit_file", "delete_file"].includes(result.name)) return true;
   return result.name === "bash" && /\b(?:mkdir|cp|mv|rm|ln|patch|sed\s+-i|perl\s+-pi|npm\s+install|pip\s+install)\b/i.test(commandOf(result));
 }
 

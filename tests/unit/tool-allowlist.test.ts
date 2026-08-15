@@ -13,13 +13,13 @@ import { KNOWN_TOOLS, isKnownToolName, getAllowedArgs } from "../../src/tools/to
 
 test("S8: KNOWN_TOOLS includes the previously-missing view_file", () => {
   assert.equal(KNOWN_TOOLS.has("view_file"), true);
-  assert.equal(KNOWN_TOOLS.has("read_file"), true);
+  assert.equal(KNOWN_TOOLS.has("read_file"), false);
   assert.equal(KNOWN_TOOLS.has("bash"), true);
 });
 
 test("S8: getAllowedArgs returns declared args for known tools", () => {
   assert.deepEqual(getAllowedArgs("view_file"), ["path", "startLine", "endLine"]);
-  assert.deepEqual(getAllowedArgs("read_file"), ["path", "startLine", "endLine"]);
+  assert.deepEqual(getAllowedArgs("read_file"), []);
   assert.deepEqual(getAllowedArgs("activate_skill"), ["name"]);
 });
 

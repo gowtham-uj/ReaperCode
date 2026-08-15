@@ -29,7 +29,6 @@ function dirKey(path: string | undefined): string[] {
 export function declaredResourcesForToolCall(call: ToolCall): ResourceKeys {
   const args = asRecord(call.args);
   switch (call.name) {
-    case "read_file":
     case "view_file":
     case "file_view":
     case "file_scroll":
@@ -38,7 +37,6 @@ export function declaredResourcesForToolCall(call: ToolCall): ResourceKeys {
       return { declared: true, keys: fileKey(stringArg(args, "path")) };
 
     case "write_file":
-    case "replace_in_file":
     case "edit_file":
     case "file_edit":
     case "delete_file":

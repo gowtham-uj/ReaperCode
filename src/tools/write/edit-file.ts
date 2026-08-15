@@ -94,7 +94,7 @@ export function applyEditFileContent(
     const { oldString, newString } = edit;
     const actualOldString = findLineEndingVariant(originalContent, oldString) ?? findQuoteNormalizedVariant(originalContent, oldString);
     if (!actualOldString) {
-      if (newString && findLineEndingVariant(originalContent, newString)) {
+      if (newString && newString.replace(/\s/g, "").length >= 3 && findLineEndingVariant(originalContent, newString)) {
         skippedAlreadyApplied++;
         continue;
       }
@@ -107,8 +107,8 @@ export function applyEditFileContent(
     const matches = allIndexesOf(originalContent, actualOldString);
     if (matches.length > 1) {
       throw new Error(
-        `Multiple matches found for block in file '${args.path}'. Provide more surrounding context, use replace_in_file with ` +
-        `startLine/endLine/content, or use replace_in_file with allowMultiple:true only when an intentional global replacement is safe.`,
+        `Multiple matches found for block in file '${args.path}'. Provide more surrounding context, or use file_edit with ` +
+        `start_line/end_line/new_content for a line-anchored replacement.`,
       );
     }
     const start = matches[0];

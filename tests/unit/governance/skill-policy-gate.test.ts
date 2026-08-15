@@ -17,7 +17,7 @@ function rec(name: string, trust: InstalledSkillRecord["trust"]): InstalledSkill
       description: name,
       category: "bug-fixing",
       whenToUse: "x",
-      allowedTools: ["read_file"],
+      allowedTools: ["file_view"],
       trust,
     },
     body: "SECRET BODY",

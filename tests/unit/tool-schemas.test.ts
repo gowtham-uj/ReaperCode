@@ -3,16 +3,6 @@ import assert from "node:assert/strict";
 
 import { ToolCallSchema } from "../../src/tools/types.js";
 
-test("accepts a valid read_file tool call", () => {
-  const toolCall = ToolCallSchema.parse({
-    id: "1",
-    name: "read_file",
-    args: { path: "README.md" },
-  });
-
-  assert.equal(toolCall.name, "read_file");
-});
-
 test("accepts a valid view_file tool call", () => {
   const toolCall = ToolCallSchema.parse({
     id: "view-1",

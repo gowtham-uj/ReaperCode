@@ -25,7 +25,7 @@ test("recognizes tasks and steps that require boundary preflight", () => {
 
 test("boundary inspect step cannot advance on ordinary reads alone", () => {
   const reads: ToolResult[] = [
-    { toolCallId: "read", name: "read_file", ok: true, durationMs: 1, args: { path: "src/format.ts" }, output: { content: "schema" } },
+    { toolCallId: "read", name: "file_view", ok: true, durationMs: 1, args: { path: "src/format.ts" }, output: { content: "schema" } },
   ];
   assert.match(getBoundaryPreflightBlocker(boundaryStep, reads) ?? "", /command-backed external-representation invariant/);
 });

@@ -145,7 +145,7 @@ test("OpenAI-compatible mapper converts internal tool schemas and omits JSON mod
       responseFormat: "json",
       tools: [
         {
-          name: "read_file",
+          name: "file_view",
           description: "Read a file",
           inputSchema: {
             type: "object",
@@ -163,7 +163,7 @@ test("OpenAI-compatible mapper converts internal tool schemas and omits JSON mod
     {
       type: "function",
       function: {
-        name: "read_file",
+        name: "file_view",
         description: "Read a file",
         parameters: {
           type: "object",

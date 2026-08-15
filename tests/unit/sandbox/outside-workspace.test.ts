@@ -4,7 +4,7 @@
  * the configured workspace root.
  *
  * These tests back the "outside_workspace" sandbox guarantee:
- *   - read_file, write_file, replace_in_file, delete_file,
+ *   - file_view, write_file, edit_file, delete_file,
  *     list_directory, grep_search, skim_file all reject
  *     escape paths with `error.code === "path_escape"`.
  *   - The error message names the offending path AND the workspace
@@ -22,7 +22,7 @@ import path from "node:path";
 
 import { readFileTool } from "../../../src/tools/read/read-file.js";
 import { writeFileTool } from "../../../src/tools/write/write-file.js";
-import { replaceInFileTool } from "../../../src/tools/write/replace-in-file.js";
+import { editFileTool } from "../../../src/tools/write/edit-file.js";
 import { deleteFileTool } from "../../../src/tools/write/delete-file.js";
 import { listDirectoryTool } from "../../../src/tools/read/list-directory.js";
 
@@ -67,12 +67,12 @@ async function expectPathEscape(
   }
 }
 
-test("read_file rejects absolute paths outside the workspace", async () => {
+test("file_view rejects absolute paths outside the workspace", async () => {
   const ws = await tempWorkspace();
   try {
     await expectPathEscape(
       () => readFileTool(ws, { path: "/etc/passwd" }),
-      "read_file(/etc/passwd)",
+      "file_view(/etc/passwd)",
     );
   } finally {
     await rm(ws, { recursive: true, force: true });
@@ -91,17 +91,16 @@ test("write_file rejects absolute paths outside the workspace", async () => {
   }
 });
 
-test("replace_in_file rejects absolute paths outside the workspace", async () => {
+test("edit_file rejects absolute paths outside the workspace", async () => {
   const ws = await tempWorkspace();
   try {
     await expectPathEscape(
       () =>
-        replaceInFileTool(ws, {
+        editFileTool(ws, {
           path: "/etc/hosts",
-          oldString: "x",
-          newString: "y",
+          edits: [{ oldString: "x", newString: "y" }],
         }),
-      "replace_in_file(/etc/hosts)",
+      "edit_file(/etc/hosts)",
     );
   } finally {
     await rm(ws, { recursive: true, force: true });
@@ -132,12 +131,12 @@ test("list_directory rejects absolute paths outside the workspace", async () => 
   }
 });
 
-test("read_file rejects parent-traversal paths outside the workspace", async () => {
+test("file_view rejects parent-traversal paths outside the workspace", async () => {
   const ws = await tempWorkspace();
   try {
     await expectPathEscape(
       () => readFileTool(ws, { path: "../../../etc/passwd" }),
-      "read_file(../../../etc/passwd)",
+      "file_view(../../../etc/passwd)",
     );
   } finally {
     await rm(ws, { recursive: true, force: true });
@@ -160,7 +159,7 @@ test("write_file rejects parent-traversal paths outside the workspace", async ()
   }
 });
 
-test("read_file rejects symlink traversal to outside the workspace", async (t) => {
+test("file_view rejects symlink traversal to outside the workspace", async (t) => {
   const ws = await tempWorkspace();
   const outside = await mkdtemp(path.join(tmpdir(), "reaper-sandbox-out-"));
   try {
@@ -180,7 +179,7 @@ test("read_file rejects symlink traversal to outside the workspace", async (t) =
 
     await expectPathEscape(
       () => readFileTool(ws, { path: "link.txt" }),
-      "read_file(symlink to outside)",
+      "file_view(symlink to outside)",
     );
   } finally {
     await rm(ws, { recursive: true, force: true });

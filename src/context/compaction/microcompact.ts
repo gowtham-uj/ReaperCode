@@ -31,11 +31,11 @@ export function microcompact(input: MicrocompactInput): MicrocompactOutput {
   const results = input.toolResults.map((r) => ({ ...r }));
   let reducedChars = 0;
 
-  // 1. Collapse repeated identical read_file/list_directory outputs
+  // 1. Collapse repeated identical file_view/list_directory outputs
   const seenOutputs = new Map<string, number>();
   for (let i = 0; i < results.length; i++) {
     const r = results[i]!;
-    if (!r.ok || !["read_file", "view_file", "list_directory", "grep_search", "skim_file"].includes(r.name)) continue;
+    if (!r.ok || !["file_view", "file_scroll", "view_file", "list_directory", "grep_search", "skim_file"].includes(r.name)) continue;
     const key = outputKey(r);
     const prevIndex = seenOutputs.get(key);
     if (prevIndex !== undefined && prevIndex < i) {
@@ -51,11 +51,11 @@ export function microcompact(input: MicrocompactInput): MicrocompactOutput {
     }
   }
 
-  // 2. Truncate large successful read_file outputs that exceed per-item budget
+  // 2. Truncate large successful file_view outputs that exceed per-item budget
   const perItemBudget = Math.max(2000, Math.floor(targetOutputChars / Math.max(1, results.filter((r) => r.ok).length)));
   for (let i = 0; i < results.length; i++) {
     const r = results[i]!;
-    if (!r.ok || (r.name !== "read_file" && r.name !== "view_file")) continue;
+    if (!r.ok || (r.name !== "file_view" && r.name !== "view_file")) continue;
     const chars = estimateChars(r);
     if (chars > perItemBudget) {
       const originalChars = chars;

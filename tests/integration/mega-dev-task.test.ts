@@ -9,7 +9,7 @@
  *
  * Scripted model walks through:
  *   1. list_directory  — survey the workspace
- *   2. read_file       — inspect src/math.ts for style conventions
+ *   2. file_view       — inspect src/math.ts for style conventions
  *   3. write_file      — create src/stats.ts (mean/median/stdev)
  *   4. write_file      — create src/stats.test.ts (3+ tests)
  *   5. write_file      — update README.md to mention the new module
@@ -239,7 +239,7 @@ test("mega dev task: add stats module with full test coverage", async () => {
     // 1. Survey the workspace.
     { tool_calls: [{ id: "list-src", name: "list_directory", args: { path: "src" } }] },
     // 2. Inspect math.ts for style conventions before writing stats.ts.
-    { tool_calls: [{ id: "read-math", name: "read_file", args: { path: "src/math.ts" } }] },
+    { tool_calls: [{ id: "read-math", name: "file_view", args: { path: "src/math.ts" } }] },
     // 3. Create the new stats module.
     {
       tool_calls: [
@@ -310,7 +310,7 @@ test("mega dev task: add stats module with full test coverage", async () => {
   const toolNamesInOrder = result.toolResults.map((r) => r.name);
   assert.deepEqual(
     toolNamesInOrder,
-    ["list_directory", "read_file", "write_file", "write_file", "write_file", "bash"],
+    ["list_directory", "file_view", "write_file", "write_file", "write_file", "bash"],
     "tool call sequence matches the scripted dev-task walk",
   );
   assert.ok(result.toolResults.every((r) => r.ok), `all tool calls should succeed: ${JSON.stringify(result.toolResults.filter((r) => !r.ok))}`);

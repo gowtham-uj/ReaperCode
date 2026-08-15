@@ -1393,6 +1393,7 @@ export class RuntimeEngine {
             liveConversation.push({
               role: "assistant",
               content: turn.content ?? "",
+              ...(turnReasoning ? { reasoning: turnReasoning } : {}),
             });
             liveConversation.push({ role: "user", content: feedback });
             await this.trajectoryLogger
@@ -1426,7 +1427,7 @@ export class RuntimeEngine {
               && (!turn.finishReason || turn.finishReason === "stop" || turn.finishReason === "end_turn")
             ) {
               prematureStopNudges += 1;
-              liveConversation.push({ role: "assistant", content: turn.content ?? "" });
+              liveConversation.push({ role: "assistant", content: turn.content ?? "", ...(turnReasoning ? { reasoning: turnReasoning } : {}) });
               liveConversation.push({
                 role: "user",
                 content:
@@ -1487,7 +1488,7 @@ export class RuntimeEngine {
               continue;
             }
             if (turn.content) {
-              liveConversation.push({ role: "assistant", content: turn.content });
+              liveConversation.push({ role: "assistant", content: turn.content, ...(turnReasoning ? { reasoning: turnReasoning } : {}) });
             }
             // Incomplete recovery (OMP): finishReason === "length" means the
             // model hit the output/context ceiling mid-turn. Shrink context
@@ -1536,6 +1537,7 @@ export class RuntimeEngine {
           liveConversation.push({
             role: "assistant",
             content: turn.content ?? "",
+            ...(turnReasoning ? { reasoning: turnReasoning } : {}),
             tool_calls: tc.map((c) => ({
               id: c.id,
               type: "function" as const,
@@ -2488,7 +2490,7 @@ export function selectMainAgentMaxTokensForTurn(input: {
 }): number {
   if (!detectBuildLikeTask(input.request)) return 32_000;
   const writeCount = input.state.toolResults.filter((result) =>
-    result.ok && ["write_file", "replace_in_file", "edit_file", "delete_file"].includes(result.name),
+    result.ok && ["write_file", "file_edit", "edit_file", "delete_file"].includes(result.name),
   ).length;
   // Large build tasks need more than the old 8192 cap, but an all-at-once
   // 32k first response can exceed the provider's request timeout before any
@@ -2580,15 +2582,12 @@ function normalizeExecutableToolCalls(toolCalls: ToolCall[]): ToolCall[] {
 }
 
 
-type LineRangeReplaceCall = Extract<ToolCall, { name: "replace_in_file" }> & {
-  args: { path: string; startLine: number; endLine: number; content: string };
-};
-export function isReadOnlyToolResult(result: ToolResult): boolean {
-  return ["read_file", "view_file", "list_directory", "grep_search", "skim_file", "inspect_env", "web_search", "web_fetch", "get_tool_output"].includes(result.name);
-}
 
+export function isReadOnlyToolResult(result: ToolResult): boolean {
+  return ["file_view", "file_scroll", "file_find", "view_file", "list_directory", "grep_search", "skim_file", "inspect_env", "web_search", "web_fetch", "get_tool_output"].includes(result.name);
+}
 function isMutationOrProducerResult(result: ToolResult): boolean {
-  if (["write_file", "replace_in_file", "edit_file", "delete_file"].includes(result.name)) return true;
+  if (["write_file", "file_edit", "edit_file", "delete_file"].includes(result.name)) return true;
   if (result.name !== "bash") return false;
   const command = getToolResultCommand(result);
   return isMutatingShellCommand(command) || isProducerOrVerificationCommand(command);
@@ -2631,7 +2630,7 @@ function getRepeatedDiagnosticFailure(results: ToolResult[]):
   const repeatedCount = diagnosticFailures.filter((result) => makeDiagnosticFailureSignature(result) === latestSignature).length;
   const recentFailedEdits = results
     .slice(-10)
-    .filter((result) => !result.ok && ["replace_in_file", "edit_file", "write_file"].includes(result.name)).length;
+    .filter((result) => !result.ok && ["file_edit", "edit_file", "write_file"].includes(result.name)).length;
   if (repeatedCount < 2 && recentFailedEdits < 2) return undefined;
   const related = diagnosticFailures.filter((result) => makeDiagnosticFailureSignature(result) === latestSignature).slice(-3);
   const errorLogs = related.map((result) => renderToolResultSnippet(result)).join("\n\n---\n\n").slice(0, 9000);
@@ -3086,7 +3085,7 @@ function collectExplicitStepFileReferences(step: ExecutionPlanStep, results: Too
   }
   for (const result of results.slice(-12)) {
     const args = result.args && typeof result.args === "object" ? (result.args as Record<string, unknown>) : {};
-    if (result.ok && ["write_file", "replace_in_file", "edit_file", ].includes(result.name) && typeof args.path === "string") {
+    if (result.ok && ["write_file", "file_edit", "edit_file"].includes(result.name) && typeof args.path === "string") {
       const normalized = normalizeWorkspaceRelativeReference(args.path);
       if (normalized && stepText.includes(normalized) && isUsefulExplicitFileReference(normalized)) {
         paths.add(normalized);
@@ -3234,7 +3233,7 @@ function hasSuccessfulArtifactValidationAfter(results: ToolResult[], artifact: s
   if (blockerIndex < 0) return false;
   return results.slice(blockerIndex + 1).some((result) => {
     if (!result.ok) return false;
-    if (result.name === "read_file") {
+    if (result.name === "file_view" || result.name === "view_file") {
       const args = result.args && typeof result.args === "object" ? (result.args as Record<string, unknown>) : {};
       return typeof args.path === "string" && artifactPathMatches(args.path, artifact);
     }
@@ -3345,7 +3344,7 @@ export function isRuntimeOrVerificationFailure(result: ToolResult): boolean {
 function extractMissingArtifactPaths(result: ToolResult): string[] {
   const paths: string[] = [];
   const args = result.args && typeof result.args === "object" ? (result.args as Record<string, unknown>) : {};
-  if (!result.ok && result.name === "read_file" && typeof args.path === "string" && /no such file|ENOENT/i.test(result.error?.message ?? "")) {
+  if (!result.ok && (result.name === "file_view" || result.name === "view_file") && typeof args.path === "string" && /no such file|ENOENT/i.test(result.error?.message ?? "")) {
     paths.push(args.path);
   }
   const message = result.error?.message ?? "";
@@ -3425,7 +3424,7 @@ function getToolResultSummary(result: ToolResult): string {
   return typeof args.summary === "string" ? args.summary : "";
 }
 function makeLowInformationToolCallSignature(call: ToolCall): string | undefined {
-  if (call.name === "read_file" || call.name === "view_file" || call.name === "file_view" || call.name === "file_scroll" || call.name === "list_directory") {
+  if (call.name === "view_file" || call.name === "file_view" || call.name === "file_scroll" || call.name === "list_directory") {
     const args = call.args as { path?: unknown; direction?: unknown; lines?: unknown; start_line?: unknown; window?: unknown };
     if (typeof args.path !== "string") return undefined;
     return `${call.name}:${JSON.stringify({ path: args.path, direction: args.direction, lines: args.lines, start_line: args.start_line, window: args.window })}`;
@@ -3452,7 +3451,7 @@ function makeLowInformationToolCallSignature(call: ToolCall): string | undefined
 }
 
 function makeLowInformationToolResultSignature(result: ToolResult): string | undefined {
-  if (result.name === "read_file" || result.name === "view_file" || result.name === "file_view" || result.name === "file_scroll" || result.name === "list_directory") {
+  if (result.name === "view_file" || result.name === "file_view" || result.name === "file_scroll" || result.name === "list_directory") {
     const args = result.args && typeof result.args === "object" ? (result.args as { path?: unknown; direction?: unknown; lines?: unknown; start_line?: unknown; window?: unknown }) : {};
     if (typeof args.path !== "string") return undefined;
     return `${result.name}:${JSON.stringify({ path: args.path, direction: args.direction, lines: args.lines, start_line: args.start_line, window: args.window })}`;
@@ -3481,9 +3480,8 @@ function makeToolResultActionSignature(result: ToolResult): string | undefined {
     const cmd = typeof args.cmd === "string" ? normalizeCommandForSignature(args.cmd) : "";
     return cmd ? `${result.name}:${JSON.stringify({ cmd })}` : undefined;
   }
-  if (result.name === "replace_in_file") {
-    if (typeof args.oldString !== "string") return undefined;
-    return `${result.name}:${JSON.stringify(Object.fromEntries(Object.entries(args).filter(([key]) => ["path", "oldString"].includes(key))))}`;
+  if (result.name === "file_edit") {
+    return `${result.name}:${JSON.stringify(Object.fromEntries(Object.entries(args).filter(([key]) => ["path", "start_line", "end_line", "new_content"].includes(key))))}`;
   }
   if (["edit_file", ].includes(result.name)) {
     return `${result.name}:${JSON.stringify(Object.fromEntries(Object.entries(args).filter(([key]) => ["path", "symbolName"].includes(key))))}`;
@@ -3652,7 +3650,7 @@ function normalizeCommandForSignature(command: string): string {
 
 function isLowInformationToolResult(result: ToolResult): boolean {
   if (result.name === "bash") return isLowInformationShellCommand(getToolResultCommand(result));
-  if (result.name !== "read_file" && result.name !== "view_file" && result.name !== "list_directory" && result.name !== "grep_search") return false;
+  if (result.name !== "file_view" && result.name !== "file_scroll" && result.name !== "view_file" && result.name !== "list_directory" && result.name !== "grep_search") return false;
   const args = result.args as { path?: unknown; pattern?: unknown };
   return result.name === "grep_search" ? typeof args.pattern === "string" : typeof args.path === "string";
 }
@@ -4113,7 +4111,7 @@ function shouldAdvanceBuildConfigStepToLaterImplementation(input: {
   const ids = new Set(input.toolCalls.map((call) => call.id));
   const currentResults = input.results.filter((result) => ids.has(result.toolCallId));
   const wroteBuildConfig = currentResults.some((result) => {
-    if (!result.ok || !["write_file", "replace_in_file", "edit_file", ].includes(result.name)) return false;
+    if (!result.ok || !["write_file", "file_edit", "edit_file"].includes(result.name)) return false;
     const args = result.args && typeof result.args === "object" ? (result.args as Record<string, unknown>) : {};
     const target = typeof args.path === "string" ? args.path.replace(/\\/g, "/") : "";
     return /(?:^|\/)(?:CMakeLists\.txt|Makefile|GNUMakefile|meson\.build|BUILD(?:\.bazel)?|WORKSPACE|configure\.ac|package\.json|pyproject\.toml|Cargo\.toml|go\.mod)$/i.test(
@@ -4174,7 +4172,7 @@ export function hasInformativeToolResultOutput(result: ToolResult): boolean {
   const stdout = typeof output.stdout === "string" ? output.stdout.trim() : "";
   const stderr = typeof output.stderr === "string" ? output.stderr.trim() : "";
   if (stdout || stderr) return true;
-  return ["read_file", "view_file", "list_directory", "grep_search", "skim_file", "inspect_environment"].includes(result.name);
+  return ["file_view", "file_scroll", "file_find", "view_file", "list_directory", "grep_search", "skim_file", "inspect_environment"].includes(result.name);
 }
 
 function hasLaterPlanStep(plan: ExecutionPlanStep[] | undefined, currentStepIndex: number): boolean {
@@ -4407,7 +4405,7 @@ function renderRecentToolResultsForPromptCompact(results: ToolResult[], feedback
 /**
  * Compact renderer for a single tool result. Preserves the path/cmd/exit/error
  * (what the model needs to decide the next action) but drops the full output
- * content. write_file/bash/read_file results all collapse to a
+ * content. write_file/bash/file_view results all collapse to a
  * one-line summary.
  */
 function renderRecentToolResultSummary(result: ToolResult): Record<string, unknown> {
@@ -4420,8 +4418,8 @@ function renderRecentToolResultSummary(result: ToolResult): Record<string, unkno
   const output = (result.output && typeof result.output === "object" ? result.output : {}) as Record<string, unknown>;
   const args = (result.args && typeof result.args === "object" ? result.args : {}) as Record<string, unknown>;
 
-  // read_file: just the path + line range + truncated marker. The model can re-read.
-  if (result.name === "read_file") {
+  // file_view / view_file: just the path + line range + truncated marker. The model can re-read.
+  if (result.name === "file_view" || result.name === "view_file") {
     const path = typeof output.path === "string" ? output.path : typeof args.path === "string" ? args.path : "";
     return {
       ...base,
@@ -4430,12 +4428,13 @@ function renderRecentToolResultSummary(result: ToolResult): Record<string, unkno
       ...(typeof output.endLine === "number" ? { endLine: output.endLine } : {}),
       ...(typeof output.totalLines === "number" ? { totalLines: output.totalLines } : {}),
       ...(output.truncated ? { truncated: true } : {}),
-      output: `read_file ${path} (lines ${output.startLine ?? "?"}-${output.endLine ?? "?"} of ${output.totalLines ?? "?"}) — content omitted to save context; re-read with grep_search or read_file when needed.`,
+      output: `file_view ${path} (lines ${output.startLine ?? "?"}-${output.endLine ?? "?"} of ${output.totalLines ?? "?"}) — content omitted to save context; re-read with grep_search or file_view when needed.`,
     };
   }
 
-  // write_file / replace_in_file: just the path + ok/error. Successful writes don't need to be re-shown.
-  if (result.name === "write_file" || result.name === "replace_in_file" || result.name === "edit_file") {
+  // write_file / file_edit / edit_file: just the path + ok/error. Successful writes don't need to be re-shown.
+  if (result.name === "write_file" || result.name === "file_edit" || result.name === "edit_file") {
+
     const path = typeof args.path === "string" ? args.path : "";
     if (result.ok) {
       return {
@@ -4521,7 +4520,7 @@ export function computeEditLocalityScore(results: ToolResult[]): number {
   const touched = collectRecentlyTouchedFiles(results);
   const edited = uniqueStrings(
     results
-      .filter((result) => ["write_file", "replace_in_file", "edit_file", "delete_file"].includes(result.name))
+      .filter((result) => ["write_file", "file_edit", "edit_file", "delete_file"].includes(result.name))
       .flatMap((result) => {
         const args = result.args && typeof result.args === "object" ? (result.args as Record<string, unknown>) : {};
         return typeof args.path === "string" ? [stripWorkspacePrefix(args.path)] : [];
@@ -4584,7 +4583,7 @@ function buildTrajectoryEfficiencyMetrics(input: {
   const uniqueCommands = new Set(commands);
   const editedFiles = uniqueStrings(
     toolResults
-      .filter((result) => ["write_file", "replace_in_file", "edit_file", "delete_file"].includes(result.name))
+      .filter((result) => ["write_file", "file_edit", "edit_file", "delete_file"].includes(result.name))
       .flatMap((result) => {
         const args = result.args && typeof result.args === "object" ? (result.args as Record<string, unknown>) : {};
         return typeof args.path === "string" ? [stripWorkspacePrefix(args.path)] : [];
@@ -4645,7 +4644,7 @@ function selectContextEfficientRecentResults(results: ToolResult[], count: numbe
   const seenLargeReadPaths = new Set<string>();
   for (let i = recent.length - 1; i >= 0; i--) {
     const result = recent[i]!;
-    if (result.name === "read_file" && isLargeToolOutput(result)) {
+    if ((result.name === "file_view" || result.name === "view_file") && isLargeToolOutput(result)) {
       const key = toolResultPath(result) ?? result.toolCallId;
       if (seenLargeReadPaths.has(key)) continue;
       seenLargeReadPaths.add(key);
@@ -4661,7 +4660,7 @@ function hasRecentLargeToolOutput(results: ToolResult[]): boolean {
 
 function isLargeToolOutput(result: ToolResult): boolean {
   const rendered = result.output === undefined ? "" : typeof result.output === "string" ? result.output : JSON.stringify(result.output);
-  return rendered.length > 4500 || (result.name === "read_file" && rendered.split(/\r?\n/).length > 120);
+  return rendered.length > 4500 || ((result.name === "file_view" || result.name === "view_file") && rendered.split(/\r?\n/).length > 120);
 }
 function toolResultPath(result: ToolResult): string | undefined {
   const output = result.output && typeof result.output === "object" ? (result.output as Record<string, unknown>) : {};
@@ -4800,14 +4799,11 @@ export function renderToolCallContract(runId?: string): string {
     "When checking an expected value, hash, count, schema, or exact content, encode the expectation in the command and exit nonzero on mismatch. Printing observed values for the model to compare is inspection, not verification.",
     "",
     "Available tools and exact argument shapes:",
-    "- read_file: {\"id\":\"read-1\",\"name\":\"read_file\",\"args\":{\"path\":\"server/app.js\"}}",
-    "- view_file: {\"id\":\"view-1\",\"name\":\"view_file\",\"args\":{\"path\":\"server/app.js\",\"startLine\":20,\"endLine\":60}}",
+    "- view_file: {\"id\":\"read-1\",\"name\":\"view_file\",\"args\":{\"path\":\"server/app.js\",\"startLine\":20,\"endLine\":60}}",
     "- list_directory: {\"id\":\"list-1\",\"name\":\"list_directory\",\"args\":{\"path\":\"server\"}}",
     "- grep_search: {\"id\":\"grep-1\",\"name\":\"grep_search\",\"args\":{\"pattern\":\"TODO\",\"path\":\"src\"}}",
     "- write_file: {\"id\":\"write-1\",\"name\":\"write_file\",\"args\":{\"path\":\"src/file.js\",\"content\":\"full file content\"}}",
-    "- replace_in_file exact: {\"id\":\"edit-1\",\"name\":\"replace_in_file\",\"args\":{\"path\":\"src/file.js\",\"oldString\":\"old exact text\",\"newString\":\"new exact text\"}}",
-    "- replace_in_file line range: {\"id\":\"edit-2\",\"name\":\"replace_in_file\",\"args\":{\"path\":\"src/file.js\",\"startLine\":10,\"endLine\":14,\"content\":\"replacement text\"}}",
-    "- edit_file: {\"id\":\"multi-edit-1\",\"name\":\"edit_file\",\"args\":{\"path\":\"src/file.js\",\"edits\":[{\"oldString\":\"old exact text\",\"newString\":\"new exact text\"}]}}",
+    "- file_edit: {\"id\":\"edit-1\",\"name\":\"file_edit\",\"args\":{\"path\":\"src/file.js\",\"edits\":[{\"oldString\":\"old exact text\",\"newString\":\"new exact text\"}]}}",
     "- delete_file: {\"id\":\"delete-1\",\"name\":\"delete_file\",\"args\":{\"path\":\"tmp/file.txt\"}}",
     "- bash: {\"id\":\"shell-1\",\"name\":\"bash\",\"args\":{\"cmd\":\"npm install\",\"description\":\"install declared project dependencies\",\"timeout\":300}}",
     "- bash background server: {\"id\":\"server-1\",\"name\":\"bash\",\"args\":{\"cmd\":\"npm run dev\",\"description\":\"start app server for runtime check\",\"timeout\":300,\"run_in_background\":true}}",
@@ -4980,20 +4976,6 @@ function normalizeToolCallInput(input: unknown): unknown {
   if (name === "write_file") {
     normalizeStringAlias(args, "content", ["contents", "body", "text", "data", "source"]);
   }
-  if (name === "replace_in_file") {
-    normalizeStringAlias(args, "oldString", ["old", "old_string", "old_str", "oldText", "old_text", "search", "find"]);
-    normalizeStringAlias(args, "newString", ["new", "new_string", "new_str", "newText", "new_text", "replacement", "replace"]);
-    normalizeNumberAlias(args, "startLine", ["start_line", "lineStart", "line_start"]);
-    normalizeNumberAlias(args, "endLine", ["end_line", "lineEnd", "line_end"]);
-    normalizeStringAlias(args, "content", ["contents", "body", "text", "data", "source"]);
-    if (typeof args.startLine === "number" && typeof args.endLine === "number" && typeof args.content !== "string" && typeof args.newString === "string") {
-      args.content = args.newString;
-    }
-    if (typeof args.startLine === "number" && typeof args.endLine === "number" && typeof args.content === "string") {
-      delete args.oldString;
-      delete args.newString;
-    }
-  }
   if (name === "advance_step") {
     normalizeStringAlias(args, "stepId", ["step_id", "step", "id"]);
     if (typeof args.summary !== "string") {
@@ -5026,7 +5008,6 @@ function normalizeToolCallInput(input: unknown): unknown {
     });
   }
   if (name === "edit_file" && !Array.isArray(args.edits) && typeof args.path === "string" && typeof args.instructions === "string") {
-    name = "read_file";
     delete args.instructions;
   }
   const stripResult = stripUnknownToolArgs(typeof name === "string" ? name : "", args);
@@ -5174,8 +5155,8 @@ function normalizeToolName(name: string): string {
   const normalizedLower = normalized.toLowerCase().replace(/[\s-]+/g, "_");
   const aliases: Record<string, string> = {
     bash: "bash",
-    read: "read_file",
-    readfile: "read_file",
+    read: "file_view",
+    readfile: "file_view",
     list: "list_directory",
     ls: "list_directory",
     grep: "grep_search",
@@ -5183,15 +5164,15 @@ function normalizeToolName(name: string): string {
     write: "write_file",
     write_to_file: "write_file",
     writefile: "write_file",
-    edit: "replace_in_file",
-    replace: "replace_in_file",
+    edit: "file_edit",
+    replace: "file_edit",
     delete: "delete_file",
     rm: "delete_file",
     advance: "advance_step",
-    replace_in_file_line_range: "replace_in_file",
-    replace_in_file_exact: "replace_in_file",
-    edit_file_line_range: "replace_in_file",
-    line_range_replace: "replace_in_file",
+    replace_in_file_line_range: "file_edit",
+    replace_in_file_exact: "file_edit",
+    edit_file_line_range: "file_edit",
+    line_range_replace: "file_edit",
   };
   return aliases[normalizedLower] ?? aliases[normalized.toLowerCase()] ?? normalized;
 }

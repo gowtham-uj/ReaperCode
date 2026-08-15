@@ -14,7 +14,7 @@ import { z } from "zod";
 const ID_REGEX = /^[a-z][a-z0-9-]{0,63}$/;
 
 const PERMISSIONS = [
-  "tools:read_file",
+  "tools:read",
   "tools:write_file",
   "tools:edit_file",
   "tools:delete_file",

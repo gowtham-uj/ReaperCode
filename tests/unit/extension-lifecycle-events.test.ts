@@ -37,7 +37,7 @@ test("ExtensionLifecycleEventBus dispatches session/model/tool/compaction/projec
     source: "main_agent",
     request: { role: "secondary_model", source: "main_agent", messages: [] },
   });
-  await bus.emit({ type: "after_tool_call", toolName: "read_file", result: { ok: true } });
+  await bus.emit({ type: "after_tool_call", toolName: "file_view", result: { ok: true } });
   await bus.emit({ type: "after_compaction", summary: "summary" });
   await bus.emit({ type: "project_trust", workspaceRoot: "/repo" });
 

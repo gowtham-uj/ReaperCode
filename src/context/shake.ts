@@ -161,7 +161,7 @@ function buildPlaceholder(
   toolCallArgs?: string,
 ): string {
   // For write_file/file_edit: extract the file path from args
-  if (toolName === "write_file" || toolName === "file_edit" || toolName === "replace_in_file") {
+  if (toolName === "write_file" || toolName === "file_edit" || toolName === "edit_file") {
     if (toolCallArgs) {
       try {
         const args = JSON.parse(toolCallArgs);
@@ -247,7 +247,7 @@ function getShakeReplacement(
   // bash needs a command-aware placeholder, so it has its own branch below.
   // For everything else, defer to the envelope.
   if (toolName !== "bash") {
-    // write/file-edit acks (write_file/file_edit/replace_in_file) are always
+    // write/file-edit acks (write_file/file_edit/edit_file) are always
     // safe to prune regardless of size; other safe tools only when they are
     // large enough to be worth a shake.
     const normalized = normalizeToolResult({

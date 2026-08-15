@@ -1,29 +1,10 @@
-import { readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 
-import { normalizeWorkspacePath } from "../../policy/paths.js";
-import { globalFileMutationQueue } from "./file-mutation-queue.js";
-
-export async function replaceInFileTool(
-  workspaceRoot: string,
-  args:
-    | { path: string; oldString: string; newString: string; allowMultiple?: boolean | undefined }
-    | { path: string; startLine: number; endLine: number; content: string },
-) {
-  const filePath = normalizeWorkspacePath(workspaceRoot, args.path);
-  return globalFileMutationQueue.run(filePath, async () => {
-    const content = await readFile(filePath, "utf8");
-
-    if ("startLine" in args) {
-      const { next, endLine } = replaceLineRange(content, args.startLine, args.endLine, args.content, args.path);
-      await writeFile(filePath, next, "utf8");
-      return { path: filePath, startLine: args.startLine, endLine, replacements: 1 };
-    }
-
-    const { next, replacements } = replaceExactString(content, args.oldString, args.newString, args.allowMultiple ?? false, args.path);
-    await writeFile(filePath, next, "utf8");
-    return { path: filePath, replacements };
-  });
-}
+/**
+ * Shared string-replacement helpers. The `replace_in_file` TOOL was removed
+ * (legacy `edit` / `edit_file` / `replace` names now alias to `file_edit`);
+ * the WAL recovery layer still uses these pure functions for replay.
+ */
 
 export function replaceExactString(
   content: string,
@@ -92,4 +73,9 @@ export function replaceLineRange(
   lines.splice(startLine - 1, endLine - startLine + 1, ...replacementLines);
   const next = lines.join("\n");
   return { next: hasFinalNewline || replacement.endsWith("\n") ? `${next}\n` : next, endLine };
+}
+
+/** Kept for WAL callers that used the old tool's path normalization. */
+export function normalizeReplacementPath(workspaceRoot: string, target: string): string {
+  return path.resolve(workspaceRoot, target);
 }

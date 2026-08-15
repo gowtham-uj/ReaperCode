@@ -123,7 +123,7 @@ test("executeStream composes on top of execute() — both paths remain callable"
 
     const call: ToolCall = {
       id: "comp-1",
-      name: "read_file",
+      name: "file_view",
       args: { path: "comp-target.txt" },
     };
 

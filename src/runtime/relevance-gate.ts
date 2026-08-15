@@ -44,7 +44,7 @@ export function classifyActionRelevance(
     negativeConstraints: string[];
   },
 ): { relevance: "DIRECTLY_RELEVANT" | "INDIRECTLY_RELEVANT" | "IRRELEVANT"; reason: string } {
-  if (["read_file", "view_file", "list_directory", "grep_search", "skim_file", "inspect_environment", "get_tool_output"].includes(call.name)) {
+  if (["file_view", "file_scroll", "file_find", "view_file", "list_directory", "grep_search", "skim_file", "inspect_environment", "get_tool_output"].includes(call.name)) {
     return { relevance: "DIRECTLY_RELEVANT", reason: "cheap inspection is allowed" };
   }
   const contractText = buildProblemContractText(input);
@@ -364,7 +364,7 @@ export function isLikelyFinalOutputPath(filePath: string): boolean {
 
 
 export function isTaskFacingDeliverableMutation(filePath: string, call: ToolCall, combinedText: string): boolean {
-  if (!["write_file", "replace_in_file", "edit_file", ].includes(call.name)) return false;
+  if (!["write_file", "file_edit", "edit_file"].includes(call.name)) return false;
   const normalized = stripWorkspacePrefix(normalizeArtifactPathForMatch(filePath));
   if (!normalized || isGeneratedOrBuildPath(normalized)) return false;
   if (isLintOrFormattingConfigPath(normalized) || isDependencyManifestPath(normalized)) return false;

@@ -186,17 +186,17 @@ export function summarizeSessionForCompaction(input: {
     }
   }
 
-  // 2. Files touched: collect from write_* / replace_*/ delete_file / read_file
+  // 2. Files touched: collect from write_* / file_edit / delete_file / file_view
   // (last 30 unique paths, ordered by recency).
   const fileWriteTools = new Set([
     "write_file",
-    "replace_in_file",
+    "file_edit",
     "edit_file",
     "delete_file",
     "create_checkpoint",
     "restore_checkpoint",
   ]);
-  const fileReadTools = new Set(["read_file", "view_file", "skim_file", "grep_search", "list_directory"]);
+  const fileReadTools = new Set(["file_view", "file_scroll", "file_find", "view_file", "skim_file", "grep_search", "list_directory"]);
   const seen = new Set<string>();
   const filesTouched: string[] = [];
   for (let i = input.toolResults.length - 1; i >= 0; i -= 1) {

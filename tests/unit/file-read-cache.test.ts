@@ -6,7 +6,7 @@ import path from "node:path";
 
 import { readFileTool } from "../../src/tools/read/read-file.js";
 
-test("read_file returns identical output for repeated reads of an unchanged file", async () => {
+test("file_view returns identical output for repeated reads of an unchanged file", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "reaper-readcache-"));
   const file = path.join(dir, "hello.txt");
   await writeFile(file, "hello\n", "utf8");
@@ -24,7 +24,7 @@ test("read_file returns identical output for repeated reads of an unchanged file
   assert.equal(a, b);
 });
 
-test("read_file result is not affected by arg-shape variations that map to the same window", async () => {
+test("file_view result is not affected by arg-shape variations that map to the same window", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "reaper-readcache-"));
   const file = path.join(dir, "lines.txt");
   const body = Array.from({ length: 50 }, (_, i) => `line ${i + 1}`).join("\n");

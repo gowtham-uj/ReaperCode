@@ -120,7 +120,7 @@ test("DeepSeek stream coerces null tool parameters to object schema", async () =
       {
         role: "executor",
         messages: [{ role: "user", content: "hi" }],
-        tools: [{ name: "replace_in_file", description: "edit", inputSchema: null }],
+        tools: [{ name: "file_edit", description: "edit", inputSchema: null }],
       } as any,
       profile(),
     )) {

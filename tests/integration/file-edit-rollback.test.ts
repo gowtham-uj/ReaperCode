@@ -170,12 +170,12 @@ test("file_edit on a file with no linter (not in manifest) permits the edit (cur
   });
 });
 
-test("Phase 4 contract: viewer tools ARE in CORE_TOOL_NAMES; demoted fallbacks are NOT", async () => {
-  const { CORE_TOOL_NAMES, DEMOTED_LEGACY_TOOL_NAMES } = await import("../../src/tools/registry.js");
+test("Phase 4 contract: viewer tools ARE in CORE_TOOL_NAMES; legacy tools are gone", async () => {
+  const { CORE_TOOL_NAMES, toolRegistry } = await import("../../src/tools/registry.js");
   assert.ok(CORE_TOOL_NAMES.has("file_view"));
   assert.ok(CORE_TOOL_NAMES.has("file_edit"));
-  assert.ok(DEMOTED_LEGACY_TOOL_NAMES.has("read_file"));
-  assert.ok(DEMOTED_LEGACY_TOOL_NAMES.has("replace_in_file"));
+  assert.ok(!Object.prototype.hasOwnProperty.call(toolRegistry, "read_file"));
+  assert.ok(!Object.prototype.hasOwnProperty.call(toolRegistry, "replace_in_file"));
 });
 
 // Suppress an unused-import warning for mkdir in case future tests use it.

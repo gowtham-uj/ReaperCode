@@ -18,7 +18,7 @@ test("AC7: extension install succeeds with valid manifest", () => {
     description: "Test extension",
     main: "dist/index.js",
     engines: { reaper: "^1.0.0" },
-    permissions: ["tools:read_file"],
+    permissions: ["tools:read"],
   }));
   writeFileSync(join(extSrc, "package.json"), JSON.stringify({
     name: "hello",

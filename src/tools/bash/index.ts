@@ -33,7 +33,7 @@ import { BASH_INPUT_DEFAULTS } from "./constants.js";
 export const bashTool = {
   name: "bash" as const,
   description:
-    "Run a shell command in the workspace. Prefer providing a concise `description` and explicit `timeout`. Use `run_in_background: true` for long-running servers or blocking operations. If output is large, inspect the returned `persisted_output_path` with read_file.",
+    "Run a shell command in the workspace. Prefer providing a concise `description` and explicit `timeout`. Use `run_in_background: true` for long-running servers or blocking operations. If output is large, inspect the returned `persisted_output_path` with file_view.",
   parameters: BashInputSchema,
   execute: executeBashCommand,
 };

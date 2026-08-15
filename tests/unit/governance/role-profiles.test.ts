@@ -34,7 +34,7 @@ test("each role profile has a complete shape", () => {
 
 test("read-only roles cannot call write tools", () => {
   const readOnlyRoles: PolicyRole[] = ["explorer", "architect", "critic", "browser"];
-  const writeTools = ["write_file", "replace_in_file", "edit_file", "delete_file"];
+  const writeTools = ["write_file", "file_edit", "edit_file", "delete_file"];
   for (const role of readOnlyRoles) {
     for (const tool of writeTools) {
       assert.equal(roleAllowsTool(role, tool), false, `${role} should not be allowed to call ${tool}`);
@@ -44,20 +44,20 @@ test("read-only roles cannot call write tools", () => {
 
 test("implementer, test, and root can call write tools", () => {
   for (const role of ["implementer", "test", "root"] as PolicyRole[]) {
-    for (const tool of ["write_file", "edit_file", "replace_in_file", "delete_file"]) {
+    for (const tool of ["write_file", "edit_file", "file_edit", "delete_file"]) {
       assert.equal(roleAllowsTool(role, tool), true, `${role} should be allowed to call ${tool}`);
     }
   }
 });
 
-test("reviewer cannot edit (write_file / edit_file / replace_in_file)", () => {
-  for (const tool of ["write_file", "edit_file", "replace_in_file", "delete_file"]) {
+test("reviewer cannot edit (write_file / edit_file / file_edit)", () => {
+  for (const tool of ["write_file", "edit_file", "file_edit", "delete_file"]) {
     assert.equal(roleAllowsTool("reviewer", tool), false);
   }
 });
 
 test("reviewer can read and run shell (read-only inspection)", () => {
-  for (const tool of ["read_file", "view_file", "grep_search", "list_directory", "bash"]) {
+  for (const tool of ["file_view", "view_file", "grep_search", "list_directory", "bash"]) {
     assert.equal(roleAllowsTool("reviewer", tool), true);
   }
 });

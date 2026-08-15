@@ -53,10 +53,10 @@ test("verified run knowledge commits a lesson and discoverable skill", async () 
   const toolResults: ToolResult[] = [
     {
       toolCallId: "write-1",
-      name: "replace_in_file",
+      name: "edit_file",
       ok: true,
       durationMs: 10,
-      args: { path: "src/app.ts", oldString: "41", newString: "42" },
+      args: { path: "src/app.ts", edits: [{ oldString: "41", newString: "42" }] },
       output: { path: "src/app.ts" },
     },
   ];

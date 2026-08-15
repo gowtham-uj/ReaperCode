@@ -23,7 +23,7 @@ test("AC2: loads user-global skills", () => {
       description: "Test skill.",
       category: "bug-fixing",
       whenToUse: "always",
-      allowedTools: ["read_file"],
+      allowedTools: ["file_view"],
       trust: "user-trusted",
     }),
   );

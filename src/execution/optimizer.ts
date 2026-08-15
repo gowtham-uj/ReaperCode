@@ -6,7 +6,7 @@
  * adds three Codex/Claude/OpenCode-style optimizations on top of
  * that pool:
  *
- * 1. **Deduplication** — multiple `read_file` calls for the same path
+ * 1. **Deduplication** — multiple `file_view` calls for the same path
  *    collapse to one call. The duplicates are returned as if they
  *    were executed (each caller gets the same result), but the
  *    underlying tool only runs once.
@@ -131,7 +131,6 @@ export function optimizeToolCallBatch(
 function dedupKey(call: ToolCall): string | undefined {
   const args = (call.args ?? {}) as Record<string, unknown>;
   switch (call.name) {
-    case "read_file":
     case "view_file":
     case "skim_file": {
       const path = typeof args.path === "string" ? args.path : undefined;

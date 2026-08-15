@@ -50,7 +50,6 @@ interface FileObservation {
 const READ_OBSERVATION_TOOLS: Readonly<Record<string, true>> = Object.freeze({
   file_view: true,
   file_scroll: true,
-  read_file: true,
   view_file: true,
 });
 const DEFAULT_SUPERSEDED = "[superseded: file re-read later]";
@@ -155,7 +154,7 @@ function extractFileObservation(
   const endLine = finiteInteger(result.endLine);
   const totalLines = finiteInteger(result.totalLines);
   const isImageWholeFile =
-    (toolName === "read_file" || toolName === "view_file") && result.kind === "image";
+    (toolName === "file_view" || toolName === "view_file") && result.kind === "image";
   const endLineExclusive =
     endLine === null
       ? null

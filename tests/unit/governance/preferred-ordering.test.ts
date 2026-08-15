@@ -21,10 +21,10 @@ test("write_file with no prior read returns an advisory", () => {
   assert.ok(adv.some((a) => a.ruleId.startsWith("ordering.write")));
 });
 
-test("write_file after read_file + inspect returns no write-without-read advisory", () => {
+test("write_file after file_view + inspect returns no write-without-read advisory", () => {
   const adv = getOrderingAdvisories({
     currentTool: "write_file",
-    recentTools: ["inspect_environment", "list_directory", "read_file"],
+    recentTools: ["inspect_environment", "list_directory", "file_view"],
     isSubagentCall: false,
   });
   // The "write_without_read" warning should NOT fire.
@@ -36,10 +36,6 @@ test("edit_file without prior read returns a warning", () => {
   assert.ok(adv.some((a) => a.ruleId === "ordering.edit_without_read"));
 });
 
-test("replace_in_file without prior read returns a warning", () => {
-  const adv = getOrderingAdvisories({ currentTool: "replace_in_file", recentTools: [], isSubagentCall: false });
-  assert.ok(adv.some((a) => a.ruleId === "ordering.replace_without_read"));
-});
 
 test("delete_file without prior read returns a warning", () => {
   const adv = getOrderingAdvisories({ currentTool: "delete_file", recentTools: [], isSubagentCall: false });
@@ -80,7 +76,7 @@ test("empty history returns no advisories for tools that don't have rules", () =
 });
 
 test("hasOrderingRules returns false for unordered tools", () => {
-  assert.equal(hasOrderingRules("read_file"), false);
+  assert.equal(hasOrderingRules("file_view"), false);
   assert.equal(hasOrderingRules("__nope__"), false);
 });
 
@@ -92,7 +88,7 @@ test("hasOrderingRules returns true for ordered tools", () => {
 
 test("metadata-driven advisories look at preferred_before", () => {
   const adv = getMetadataDrivenAdvisories("write_file", []);
-  // write_file's preferred_before includes read_file, so we
+  // write_file's preferred_before includes file_view, so we
   // should see at least one metadata-driven advisory.
   assert.ok(adv.length > 0, "should surface at least one metadata advisory");
   // The current implementation rolls all preferred tools into a
@@ -101,7 +97,7 @@ test("metadata-driven advisories look at preferred_before", () => {
 });
 
 test("metadata-driven advisories do not fire for satisfied preferences", () => {
-  const adv = getMetadataDrivenAdvisories("write_file", ["read_file", "view_file"]);
-  // read_file / view_file are in preferred_before, so no advisories.
+  const adv = getMetadataDrivenAdvisories("write_file", ["file_view", "view_file"]);
+  // file_view / view_file are in preferred_before, so no advisories.
   assert.equal(adv.length, 0);
 });

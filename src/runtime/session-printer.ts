@@ -87,13 +87,13 @@ export function printToolCalls(toolCalls: Array<{ name: string; args?: Record<st
 
 function summarizeToolCall(name: string, args: Record<string, unknown>): string {
   if (name === "write_file") return String(args.path ?? "");
-  if (name === "replace_in_file") return String(args.path ?? "");
+  if (name === "file_edit") return String(args.path ?? "");
   if (name === "bash") {
     const cmd = String(args.command ?? args.cmd ?? "");
     const short = cmd.length > 80 ? `${cmd.slice(0, 80)}…` : cmd;
     return short;
   }
-  if (name === "read_file") return String(args.path ?? "");
+  if (name === "file_view" || name === "view_file") return String(args.path ?? "");
   if (name === "list_directory") return String(args.path ?? "");
   if (name === "grep_search") {
     const pattern = String(args.pattern ?? "");

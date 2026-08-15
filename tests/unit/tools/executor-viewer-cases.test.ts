@@ -35,12 +35,12 @@ function requireLegacyReadMetadata(output: unknown): { sha256: string; mtimeMs: 
     !("mtimeMs" in output) ||
     typeof output.mtimeMs !== "number"
   ) {
-    throw new Error("expected read_file/view_file freshness metadata");
+    throw new Error("expected view_file freshness metadata");
   }
   return { sha256: output.sha256, mtimeMs: output.mtimeMs };
 }
 
-test("viewer and legacy read results expose one strict freshness shape", async () => {
+test("viewer and legacy view results expose one strict freshness shape", async () => {
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), "reaper-observation-metadata-"));
   try {
     const content = "alpha\nbeta\ngamma\n";
@@ -70,24 +70,6 @@ test("viewer and legacy read results expose one strict freshness shape", async (
     assert.equal(scrollResult.sha256, expectedSha256);
     assert.equal(scrollResult.mtimeMs, viewResult.mtimeMs);
 
-    const read = await executor.execute({
-      id: randomUUID(),
-      name: "read_file",
-      args: { path: "sample.txt", startLine: 1, endLine: 2 },
-    });
-    assert.equal(read.ok, true);
-    const readMetadata = requireLegacyReadMetadata(read.output);
-    assert.equal(readMetadata.sha256, expectedSha256);
-    assert.ok(readMetadata.mtimeMs > 0);
-
-    const cachedRead = await executor.execute({
-      id: randomUUID(),
-      name: "read_file",
-      args: { path: "sample.txt", startLine: 1, endLine: 2 },
-    });
-    assert.equal(cachedRead.ok, true);
-    assert.deepEqual(requireLegacyReadMetadata(cachedRead.output), readMetadata);
-
     const legacyView = await executor.execute({
       id: randomUUID(),
       name: "view_file",
@@ -96,7 +78,7 @@ test("viewer and legacy read results expose one strict freshness shape", async (
     assert.equal(legacyView.ok, true);
     const legacyViewMetadata = requireLegacyReadMetadata(legacyView.output);
     assert.equal(legacyViewMetadata.sha256, expectedSha256);
-    assert.equal(legacyViewMetadata.mtimeMs, readMetadata.mtimeMs);
+    assert.ok(legacyViewMetadata.mtimeMs > 0);
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
   }

@@ -15,8 +15,8 @@ import assert from "node:assert/strict";
 
 import { evaluateToolCall, isPolicyDenial, isPolicyApprovalRequired } from "../../../src/governance/policy-engine.js";
 
-test("role allow: root can call read_file", () => {
-  const d = evaluateToolCall({ toolName: "read_file", args: { path: "/tmp/x" }, callerRole: "root", trustedSandbox: false });
+test("role allow: root can call file_view", () => {
+  const d = evaluateToolCall({ toolName: "file_view", args: { path: "/tmp/x" }, callerRole: "root", trustedSandbox: false });
   assert.equal(d.verdict, "allow");
   assert.equal(d.code, "allow");
 });
@@ -39,8 +39,8 @@ test("role deny: reviewer cannot call write_file (reviewer is read-only on edits
   assert.equal(d.verdict, "deny");
 });
 
-test("role allow: implementer can call write_file and edit_file", () => {
-  for (const t of ["write_file", "edit_file", "replace_in_file"]) {
+test("role allow: implementer can call write_file, edit_file, and file_edit", () => {
+  for (const t of ["write_file", "edit_file", "file_edit"]) {
     const d = evaluateToolCall({ toolName: t, args: { path: "/tmp/x" }, callerRole: "implementer", trustedSandbox: false });
     assert.equal(d.verdict, "allow", `${t} should be allowed for implementer; got ${d.code}`);
   }
@@ -154,14 +154,14 @@ test("ordering advisories are not surfaced when preferences are met", () => {
     args: { path: "/tmp/x", content: "hi" },
     callerRole: "root",
     trustedSandbox: false,
-    recentTools: ["read_file", "view_file"],
+    recentTools: ["view_file"],
   });
   // The "write_without_read" warning should not fire.
   assert.ok(!d.advisories.some((a) => a.ruleId === "ordering.write_without_read"), `unexpected: ${d.advisories.map(a => a.ruleId).join(",")}`);
 });
 
 test("isPolicyDenial and isPolicyApprovalRequired are accurate", () => {
-  const allow = evaluateToolCall({ toolName: "read_file", args: { path: "/tmp/x" }, callerRole: "root", trustedSandbox: false });
+  const allow = evaluateToolCall({ toolName: "file_view", args: { path: "/tmp/x" }, callerRole: "root", trustedSandbox: false });
   const deny = evaluateToolCall({ toolName: "__nope__", args: {}, callerRole: "root", trustedSandbox: false });
   const approval = evaluateToolCall({ toolName: "computer_control", args: {}, callerRole: "root", trustedSandbox: false });
   assert.equal(isPolicyDenial(allow), false);
@@ -174,9 +174,9 @@ test("isPolicyDenial and isPolicyApprovalRequired are accurate", () => {
 
 
 test("metadata is surfaced on the decision for downstream consumers", () => {
-  const d = evaluateToolCall({ toolName: "read_file", args: { path: "/tmp/x" }, callerRole: "root", trustedSandbox: false });
+  const d = evaluateToolCall({ toolName: "file_view", args: { path: "/tmp/x" }, callerRole: "root", trustedSandbox: false });
   assert.ok(d.metadata);
-  assert.equal(d.metadata.name, "read_file");
+  assert.equal(d.metadata.name, "file_view");
   assert.equal(d.metadata.risk_level, "low");
 });
 

@@ -19,7 +19,7 @@ test("buildLiveOptimizationSnapshot counts recent tool calls and failures", () =
   const results: ToolResult[] = [
     mkResult({ name: "bash", args: { cmd: "ls" }, output: { stdout: "a", stderr: "", exitCode: 0, wouldBlock: false } }),
     mkResult({ name: "bash", args: { cmd: "ls" }, output: { stdout: "a", stderr: "", exitCode: 0, wouldBlock: false } }),
-    mkResult({ name: "read_file", args: { path: "src/x.ts" }, output: { path: "src/x.ts" } }),
+    mkResult({ name: "view_file", args: { path: "src/x.ts" }, output: { path: "src/x.ts" } }),
     mkResult({ name: "write_file", args: { path: "src/y.ts" }, output: { path: "src/y.ts" }, ok: false }),
   ];
   const snap = buildLiveOptimizationSnapshot(results);

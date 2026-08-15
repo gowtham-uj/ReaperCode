@@ -68,7 +68,7 @@ function scoreImportance(result: ToolResult, index: number, total: number): numb
   if (!result.ok) score += 50;
 
   // Writes are important
-  if (["write_file", "replace_in_file", "edit_file", "delete_file"].includes(result.name)) {
+  if (["write_file", "file_edit", "edit_file", "delete_file"].includes(result.name)) {
     score += 40;
   }
 
@@ -83,7 +83,7 @@ function scoreImportance(result: ToolResult, index: number, total: number): numb
   }
 
   // Reads are moderately important but less than writes
-  if (["read_file", "view_file", "grep_search"].includes(result.name)) {
+  if (["file_view", "file_scroll", "view_file", "grep_search"].includes(result.name)) {
     score += 15;
   }
 

@@ -52,7 +52,7 @@ export async function readFileTool(
     const notes = [
       "Image file read as an attachment payload.",
       resolvedFrom
-        ? `Requested path '${resolvedFrom}' was not found, so read_file used the unique same-basename match '${relativeWorkspacePath(workspaceRoot, filePath)}'.`
+        ? `Requested path '${resolvedFrom}' was not found, so file_view used the unique same-basename match '${relativeWorkspacePath(workspaceRoot, filePath)}'.`
         : "",
     ].filter(Boolean);
     return {
@@ -80,10 +80,10 @@ export async function readFileTool(
   const truncated = unbounded && end < lines.length;
   const notes = [
     truncated
-      ? "Large unbounded read was limited to a preview. Use grep_search, skim_file, or read_file with startLine/endLine for the relevant range."
+      ? "Large unbounded read was limited to a preview. Use grep_search, skim_file, or view_file with startLine/endLine for the relevant range."
       : "",
     resolvedFrom
-      ? `Requested path '${resolvedFrom}' was not found, so read_file used the unique same-basename match '${relativeWorkspacePath(workspaceRoot, filePath)}'.`
+      ? `Requested path '${resolvedFrom}' was not found, so file_view used the unique same-basename match '${relativeWorkspacePath(workspaceRoot, filePath)}'.`
       : "",
   ].filter(Boolean);
 

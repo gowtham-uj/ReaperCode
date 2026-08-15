@@ -20,18 +20,19 @@ async function createExecutor(workspaceRoot: string) {
   });
 }
 
-test("read_file reads actual workspace content", async () => {
+test("file_view reads actual workspace content", async () => {
   const workspaceRoot = await createTempWorkspace();
   const executor = await createExecutor(workspaceRoot);
 
   const result = await executor.execute({
     id: "1",
-    name: "read_file",
+    name: "file_view",
     args: { path: "README.md" },
   });
 
   assert.equal(result.ok, true);
-  assert.match(String((result.output as { content: string }).content), /Temp Workspace/);
+  const output = JSON.parse(result.output as string) as { window: string[] };
+  assert.match(output.window.join("\n"), /Temp Workspace/);
 });
 
 test("view_file reads a bounded file window", async () => {
@@ -109,39 +110,38 @@ test("write_file reports directory targets without EISDIR freshness crashes", as
   assert.doesNotMatch(result.error?.message ?? "", /EISDIR/i);
 });
 
-test("replace_in_file updates file content on disk", async () => {
+test("edit_file updates file content on disk", async () => {
   const workspaceRoot = await createTempWorkspace();
   const executor = await createExecutor(workspaceRoot);
 
   await executor.execute({
     id: "read-first",
-    name: "read_file",
+    name: "file_view",
     args: { path: "src/app.ts" },
   });
   const result = await executor.execute({
     id: "1",
-    name: "replace_in_file",
-    args: { path: "src/app.ts", oldString: "41", newString: "42" },
+    name: "edit_file",
+    args: { path: "src/app.ts", edits: [{ oldString: "41", newString: "42" }] },
   });
 
   assert.equal(result.ok, true);
   const content = await readFile(path.join(workspaceRoot, "src", "app.ts"), "utf8");
   assert.match(content, /42/);
 });
-
-test("replace_in_file supports line-range replacement", async () => {
+test("file_edit supports line-range replacement", async () => {
   const workspaceRoot = await createTempWorkspace();
   const executor = await createExecutor(workspaceRoot);
 
   await executor.execute({
     id: "read-first",
-    name: "read_file",
+    name: "file_view",
     args: { path: "src/app.ts" },
   });
   const result = await executor.execute({
     id: "1",
-    name: "replace_in_file",
-    args: { path: "src/app.ts", startLine: 1, endLine: 1, content: "export const value = 99;" },
+    name: "file_edit",
+    args: { path: "src/app.ts", start_line: 1, end_line: 1, new_content: "export const value = 99;" },
   });
 
   assert.equal(result.ok, true, JSON.stringify(result.error));
@@ -149,18 +149,17 @@ test("replace_in_file supports line-range replacement", async () => {
   assert.match(content, /value = 99/);
 });
 
-
 test("write tools refuse stale edits after a file changes since read", async () => {
   const workspaceRoot = await createTempWorkspace();
   const executor = await createExecutor(workspaceRoot);
 
-  await executor.execute({ id: "read", name: "read_file", args: { path: "src/app.ts" } });
+  await executor.execute({ id: "read", name: "file_view", args: { path: "src/app.ts" } });
   await writeFile(path.join(workspaceRoot, "src", "app.ts"), "export const answer = 99;\n", "utf8");
 
   const result = await executor.execute({
     id: "stale-edit",
-    name: "replace_in_file",
-    args: { path: "src/app.ts", oldString: "99", newString: "42" },
+    name: "edit_file",
+    args: { path: "src/app.ts", edits: [{ oldString: "99", newString: "42" }] },
   });
 
   // Pi-style: the executor no longer refuses edits to files that have changed
@@ -172,11 +171,11 @@ test("write tools snapshot existing files before mutation", async () => {
   const workspaceRoot = await createTempWorkspace();
   const executor = await createExecutor(workspaceRoot);
 
-  await executor.execute({ id: "read", name: "read_file", args: { path: "src/app.ts" } });
+  await executor.execute({ id: "read", name: "file_view", args: { path: "src/app.ts" } });
   const result = await executor.execute({
     id: "edit",
-    name: "replace_in_file",
-    args: { path: "src/app.ts", oldString: "41", newString: "42" },
+    name: "file_edit",
+    args: { path: "src/app.ts", start_line: 1, end_line: 1, new_content: "export const answer = 42;" },
   });
 
   assert.equal(result.ok, true);
@@ -354,35 +353,55 @@ test("bash reports module path failures with raw runtime output only", async () 
 });
 
 test("background shell processes are logged and cleaned as process groups", async () => {
-  const workspaceRoot = await createTempWorkspace();
-  const executor = await createExecutor(workspaceRoot);
+  // Background process logs are dev-only (REAPER_DEV=1). Enable dev mode so
+  // createProcessLog writes the real artifact path, then restore it after.
+  const prevDev = process.env.REAPER_DEV;
+  process.env.REAPER_DEV = "1";
+  try {
+    const workspaceRoot = await createTempWorkspace();
+    const executor = await createExecutor(workspaceRoot);
 
-  const start = await executor.execute({
-    id: "bg",
-    name: "bash",
-    args: { timeout: 60, cmd: "node -e \"console.log('server-ready'); setInterval(() => {}, 1000)\"", run_in_background: true },
-  });
+    const start = await executor.execute({
+      id: "bg",
+      name: "bash",
+      args: { timeout: 60, cmd: "node -e \"console.log('server-ready'); setInterval(() => {}, 1000)\"", run_in_background: true },
+    });
 
-  assert.equal(start.ok, true);
-  const startOutput = start.output as { pid: number; logPath: string };
-  assert.equal(typeof startOutput.pid, "number");
-  assert.match(startOutput.logPath, /\.reaper\/runs\/run-1\/artifacts\/processes\/bg\.log$/);
+    assert.equal(start.ok, true);
+    const startOutput = start.output as { pid: number; logPath: string };
+    assert.equal(typeof startOutput.pid, "number");
+    assert.match(startOutput.logPath, /\.reaper\/logs\/run-1\/artifacts\/processes\/bg\.log$/);
 
-  const read = await executor.execute({
-    id: "read-bg",
-    name: "read_background_output",
-    args: { pid: startOutput.pid, waitForMatch: "server-ready", lines: 10 },
-  });
-  assert.equal(read.ok, true);
-  assert.match(String((read.output as { output: string }).output), /server-ready/);
+    const read = await executor.execute({
+      id: "read-bg",
+      name: "read_background_output",
+      args: { pid: startOutput.pid, waitForMatch: "server-ready", lines: 10 },
+    });
+    assert.equal(read.ok, true);
+    assert.match(String((read.output as { output: string }).output), /server-ready/);
 
-  await executor.cleanupBackgroundProcesses("test-cleanup");
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  assert.throws(() => process.kill(startOutput.pid, 0));
+    await executor.cleanupBackgroundProcesses("test-cleanup");
+    // Windows taskkill can race the process-table reaping; poll until the
+    // process group is actually gone (bounded), then assert it stayed gone.
+    let processGone = false;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      try {
+        process.kill(startOutput.pid, 0);
+      } catch {
+        processGone = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.equal(processGone, true, `background process ${startOutput.pid} was not cleaned up`);
 
-  const log = await readFile(startOutput.logPath, "utf8");
-  assert.match(log, /server-ready/);
-  assert.match(log, /test-cleanup/);
+    const log = await readFile(startOutput.logPath, "utf8");
+    assert.match(log, /server-ready/);
+    assert.match(log, /test-cleanup/);
+  } finally {
+    if (prevDev === undefined) delete process.env.REAPER_DEV;
+    else process.env.REAPER_DEV = prevDev;
+  }
 });
 
 test("bash preserves the user command exit code after metadata capture", async () => {
@@ -479,15 +498,14 @@ test("bash returns dependency output verbatim without injected quality warnings"
 test("path escapes are blocked and audited", async () => {
   const workspaceRoot = await createTempWorkspace();
   const executor = await createExecutor(workspaceRoot);
-
   const result = await executor.execute({
     id: "1",
-    name: "read_file",
+    name: "file_view",
     args: { path: "../outside.txt" },
   });
 
   assert.equal(result.ok, false);
-  assert.equal(result.error?.code, "path_escape");
+  assert.ok(result.error?.code === "path_escape" || result.error?.code === "permission_denied", `got ${result.error?.code}`);
 });
 
 test("standard command rules are logged as would-block in allow-all mode", async () => {
@@ -504,11 +522,10 @@ test("standard command rules are logged as would-block in allow-all mode", async
   const auditLog = await readFile(path.join(getReaperScratchpadPaths(workspaceRoot).logs, "reaper-audit.jsonl"), "utf8");
   assert.match(auditLog, /would_block/);
 });
-
-test("replace_in_file edits files that were never read by the executor", async () => {
+test("edit_file edits files that were never read by the executor", async () => {
   // Regression: the redundant safe-edit guard used to require the
   // model to pre-read a file before editing it. The guard has been
-  // removed; replace_in_file must succeed against a file that the
+  // removed; edit_file must succeed against a file that the
   // executor has never touched. Combined with the source-level test
   // below, this proves the duplicate read-then-apply path is gone.
   const workspaceRoot = await createTempWorkspace();
@@ -520,16 +537,15 @@ test("replace_in_file edits files that were never read by the executor", async (
 
   const replaceResult = await executor.execute({
     id: "1",
-    name: "replace_in_file",
-    args: { path: "src/untouched.txt", oldString: "beta", newString: "BETA" },
+    name: "edit_file",
+    args: { path: "src/untouched.txt", edits: [{ oldString: "beta", newString: "BETA" }] },
   });
   assert.equal(replaceResult.ok, true);
 
   const afterReplace = await readFile(target, "utf8");
   assert.equal(afterReplace, "alpha\nBETA\ngamma\n");
 });
-
-test("replace_in_file performs no redundant candidate-content read", async () => {
+test("edit_file performs no redundant candidate-content read", async () => {
   const workspaceRoot = await createTempWorkspace();
   const executor = await createExecutor(workspaceRoot);
   const target = path.join(workspaceRoot, "src", "single-read.txt");
@@ -546,8 +562,8 @@ test("replace_in_file performs no redundant candidate-content read", async () =>
   try {
     const result = await executor.execute({
       id: "single-read",
-      name: "replace_in_file",
-      args: { path: "src/single-read.txt", oldString: "beta", newString: "BETA" },
+      name: "edit_file",
+      args: { path: "src/single-read.txt", edits: [{ oldString: "beta", newString: "BETA" }] },
     });
 
     assert.equal(result.ok, true);

@@ -1,6 +1,6 @@
 import { toolRegistry } from "../tools/registry.js";
 
-const coreToolOrder = ["read_file", "list_directory", "grep_search", "write_file", "replace_in_file", "bash"] as const;
+const coreToolOrder = ["view_file", "list_directory", "grep_search", "write_file", "file_edit", "bash"] as const;
 
 export interface ToolSearchOptions {
   catalog?: Record<string, { description: string }>;

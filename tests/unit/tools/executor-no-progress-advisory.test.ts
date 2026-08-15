@@ -1,6 +1,6 @@
 /**
  * No-progress re-read advisory: when the model reads the same file N times
- * in a row without intervening writes, the read_file tool result should
+ * in a row without intervening writes, the file_view tool result should
  * surface a non-blocking advisory note. The model can still re-read — we
  * just inject a `note` field that the cockpit can render and the runtime
  * can use to track no-progress trips.
@@ -42,7 +42,7 @@ test("no-progress advisory contract: cached re-read note mentions file write cou
     const fullPath = path.join(ws, filePath);
     await writeFile(fullPath, '{"name":"test"}', "utf8");
 
-    // The advisory is built by the executor inside read_file's cache-hit
+    // The advisory is built by the executor inside file_view's cache-hit
     // branch. We can't trivially call the executor in isolation (it needs
     // a full ToolExecutorOptions), so we document the expected output
     // shape here. The actual integration is exercised by the A/B run.
@@ -53,7 +53,7 @@ test("no-progress advisory contract: cached re-read note mentions file write cou
         "Read of 'package.json' returned the cached result (hit #6). " +
         "This file has been written 3× already; the cached content is the " +
         "current state. Re-reads are a no-progress signal — use " +
-        "replace_in_file or edit_file to make targeted changes instead.",
+        "file_edit or edit_file to make targeted changes instead.",
     };
     const advisoryForNeverWrittenFile = {
       hit: 6,

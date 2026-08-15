@@ -18,7 +18,7 @@ test("AC8: activate(ctx) is called and extension status becomes enabled", async 
     description: "Activate test",
     main: "dist/index.js",
     engines: { reaper: "^1.0.0" },
-    permissions: ["tools:read_file"],
+    permissions: ["tools:read"],
   }));
   writeFileSync(join(extSrc, "package.json"), JSON.stringify({
     name: "test-activate", version: "1.0.0", main: "dist/index.js",

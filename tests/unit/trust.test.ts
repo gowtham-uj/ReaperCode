@@ -19,7 +19,7 @@ test("web_search, web_fetch, and MCP tools are untrusted", () => {
 });
 
 test("in-workspace reads, grep, git are trusted by default", () => {
-  assert.equal(classifyToolResultTrust({ name: "read_file", args: { path: "src/index.ts" } }), "trusted");
+  assert.equal(classifyToolResultTrust({ name: "file_view", args: { path: "src/index.ts" } }), "trusted");
   assert.equal(classifyToolResultTrust({ name: "grep_search", args: { pattern: "TODO" } }), "trusted");
   assert.equal(classifyToolResultTrust({ name: "list_directory", args: {} }), "trusted");
   assert.equal(classifyToolResultTrust({ name: "git_status", args: {} }), "trusted");
@@ -59,11 +59,11 @@ test("local shell commands are trusted", () => {
   }
 });
 
-test("read_file outside the workspace root is untrusted", () => {
-  const result = { name: "read_file", args: { path: "/tmp/external.txt" } };
+test("file_view outside the workspace root is untrusted", () => {
+  const result = { name: "file_view", args: { path: "/tmp/external.txt" } };
   assert.equal(classifyReadFileTrust(result, "/workspace"), "untrusted");
   assert.equal(classifyReadFileTrust(result, undefined), "trusted");
-  const inside = { name: "read_file", args: { path: "/workspace/src/index.ts" } };
+  const inside = { name: "file_view", args: { path: "/workspace/src/index.ts" } };
   assert.equal(classifyReadFileTrust(inside, "/workspace"), "trusted");
 });
 

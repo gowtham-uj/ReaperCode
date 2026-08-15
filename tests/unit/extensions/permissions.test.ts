@@ -7,24 +7,24 @@ import { ExtensionPermissionManager } from "../../../src/extensions/permission-m
 
 test("AC11: check() returns true only for granted permissions", () => {
   const pm = new ExtensionPermissionManager();
-  pm.grant("ext1", ["tools:read_file"]);
-  assert.equal(pm.check("ext1", "tools:read_file"), true);
+  pm.grant("ext1", ["tools:read"]);
+  assert.equal(pm.check("ext1", "tools:read"), true);
   assert.equal(pm.check("ext1", "tools:write_file"), false);
-  assert.equal(pm.check("ext2", "tools:read_file"), false);
+  assert.equal(pm.check("ext2", "tools:read"), false);
 });
 
 test("AC11b: revoke() removes the permission", () => {
   const pm = new ExtensionPermissionManager();
-  pm.grant("ext1", ["tools:write_file", "tools:read_file"]);
+  pm.grant("ext1", ["tools:write_file", "tools:read"]);
   pm.revoke("ext1", "tools:write_file");
   assert.equal(pm.check("ext1", "tools:write_file"), false);
-  assert.equal(pm.check("ext1", "tools:read_file"), true);
+  assert.equal(pm.check("ext1", "tools:read"), true);
 });
 
 test("AC11c: list() returns the granted set", () => {
   const pm = new ExtensionPermissionManager();
-  pm.grant("ext-a", ["tools:network", "tools:read_file"]);
+  pm.grant("ext-a", ["tools:network", "tools:read"]);
   const list = pm.list("ext-a");
   assert.ok(list.includes("tools:network"));
-  assert.ok(list.includes("tools:read_file"));
+  assert.ok(list.includes("tools:read"));
 });

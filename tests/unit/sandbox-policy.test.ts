@@ -18,7 +18,7 @@ function evaluate(
 
 test("read_only mode allows reads but blocks writes and shell", () => {
   const policy = new SandboxPolicy({ mode: "read_only" });
-  assert.equal(policy.evaluate(call("read_file") as any).verdict, "allow");
+  assert.equal(policy.evaluate(call("file_view") as any).verdict, "allow");
   assert.equal(policy.evaluate(call("grep_search") as any).verdict, "allow");
   assert.equal(policy.evaluate(call("git_status") as any).verdict, "allow");
   assert.equal(policy.evaluate(call("write_file") as any).verdict, "needs_human_approval");
@@ -89,7 +89,7 @@ test("require_human_approval forces every mutating call through approval", () =>
     "needs_human_approval",
   );
   // Reads are still allowed.
-  assert.equal(policy.evaluate(call("read_file") as any).verdict, "allow");
+  assert.equal(policy.evaluate(call("file_view") as any).verdict, "allow");
 });
 
 test("unknown tools default to deny in every mode", () => {

@@ -59,7 +59,7 @@ test("every metadata entry has a complete shape", () => {
 });
 
 test("read-only tools have is_read_only=true and risk in {low, medium}", () => {
-  for (const name of ["read_file", "view_file", "list_directory", "grep_search", "skim_file", "inspect_environment", "get_tool_output", "search_tools"]) {
+  for (const name of ["file_view", "view_file", "list_directory", "grep_search", "skim_file", "inspect_environment", "get_tool_output", "search_tools"]) {
     const m = getToolMetadata(name);
     assert.ok(m, `${name} should have metadata`);
     assert.equal(m.is_read_only, true, `${name} should be is_read_only`);
@@ -69,7 +69,7 @@ test("read-only tools have is_read_only=true and risk in {low, medium}", () => {
 });
 
 test("write tools have can_modify_files=true", () => {
-  for (const name of ["write_file", "replace_in_file", "edit_file", "delete_file"]) {
+  for (const name of ["write_file", "file_edit", "edit_file", "delete_file"]) {
     const m = getToolMetadata(name);
     assert.ok(m, `${name} should have metadata`);
     assert.equal(m.can_modify_files, true, `${name} should modify files`);
@@ -115,14 +115,14 @@ test("the governance role layer is decoupled from sub-agent types", () => {
 });
 
 test("hasToolMetadata returns the documented booleans", () => {
-  assert.equal(hasToolMetadata("read_file"), true);
+  assert.equal(hasToolMetadata("file_view"), true);
   assert.equal(hasToolMetadata("__no_such_tool__"), false);
 });
 
 test("preferred_before for write tools includes read tools", () => {
   const m = getToolMetadata("write_file");
   assert.ok(m);
-  assert.ok(m.preferred_before.includes("read_file") || m.preferred_before.includes("view_file"));
+  assert.ok(m.preferred_before.includes("file_view") || m.preferred_before.includes("view_file"));
 });
 
 test("KNOWN_TOOLS and TOOL_METADATA agree on the union of tool names", () => {

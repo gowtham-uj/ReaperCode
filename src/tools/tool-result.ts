@@ -101,7 +101,7 @@ function summaryFor(name: string, ok: boolean, output: unknown, args: unknown, e
   const parsed = tryParseJson(output);
   const record = parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : undefined;
   const path = typeof record?.path === "string" ? record.path : pathFromArgs(args);
-  if (path && ["file_view", "file_scroll", "file_find", "read_file", "view_file", "write_file", "file_edit"].includes(name)) {
+  if (path && ["file_view", "file_scroll", "file_find", "view_file", "write_file", "file_edit"].includes(name)) {
     return `${name} ok: ${path}`;
   }
   if (name === "bash") {
@@ -114,7 +114,7 @@ function summaryFor(name: string, ok: boolean, output: unknown, args: unknown, e
 function detailsKind(name: string, output: unknown): NormalizedToolResultDetails["kind"] {
   if (output === undefined || output === null || output === "") return "none";
   if (tryParseJson(output) !== undefined) return "json";
-  if (["file_view", "file_scroll", "file_find", "read_file", "view_file", "skim_file"].includes(name)) return "file";
+  if (["file_view", "file_scroll", "file_find", "view_file", "skim_file"].includes(name)) return "file";
   if (["bash", "read_background_output", "job"].includes(name)) return "process";
   return "text";
 }
@@ -125,19 +125,16 @@ function safeToPrune(name: string, ok: boolean): boolean {
     "file_view",
     "file_scroll",
     "file_find",
-    "read_file",
     "view_file",
     "write_file",
     "file_edit",
-    "replace_in_file",
-    "replace_in_file",
     "edit_file",
     "bash",
   ].includes(name);
 }
 
 function pruneReplacement(name: string, bytes: number, args: unknown): string {
-  if (name === "write_file" || name === "file_edit" || name === "replace_in_file" || name === "edit_file") {
+  if (name === "write_file" || name === "file_edit" || name === "edit_file") {
     const path = pathFromArgs(args);
     return path ? `[${name}: ${path}]` : `[${name}: completed]`;
   }

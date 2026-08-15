@@ -36,6 +36,7 @@ import {
 import { buildChildEnv } from "../child-env.js";
 
 const CACHE_ROOT = ".reaper";
+import * as ts from "typescript";
 const LINTERS_DIR = "linters";
 
 /**
@@ -177,15 +178,23 @@ export class LinterRegistry {
 
     if (entry.kind === "pinned_package") {
       const attempt = await this.tryPinnedPackage(opts, entry, timeoutMs);
+      if (!attempt.ok && attempt.attempts?.includes("lint_unavailable")) {
+        return {
+          totalElapsedMs: Date.now() - started,
+          verdict: {
+            language,
+            source: "fallback_permissive",
+            ok: true,
+            message: `pinned linter for ${language} unavailable (${attempt.message}); falling back to permissive pass`,
+            attempts: attempt.attempts,
+          },
+        };
+      }
       return {
         totalElapsedMs: Date.now() - started,
         verdict: {
           language,
-          source: attempt.ok
-            ? "manifest_pinned"
-            : attempt.attempts?.includes("install_succeeded")
-              ? "manifest_pinned"
-              : "fallback_permissive",
+          source: "manifest_pinned",
           ok: attempt.ok,
           message: attempt.message,
           line: attempt.line,
@@ -219,6 +228,14 @@ export class LinterRegistry {
     timeoutMs: number,
   ): Promise<AttemptOutcome> {
     const attempts: string[] = [];
+
+    // Built-in TypeScript syntax lint. The bundled manifest pins `typescript`
+    // with symbol `lint`, which the package itself does not export — the
+    // registry provides the implementation directly (no workspace install).
+    if (entry.package === "typescript" && entry.symbol === "lint") {
+      attempts.push("builtin_ts_lint");
+      return normalizeLintResult(builtinTsSyntaxLint(opts.absPath, opts.content), attempts);
+    }
 
     const cacheDir = path.join(
       opts.workspaceRoot,
@@ -276,7 +293,7 @@ export class LinterRegistry {
     const installed = await this.ensureInstalled(opts.workspaceRoot, entry, cacheDir);
     const installLatencyMs = Date.now() - installStartedAt;
     if (!installed) {
-      attempts.push("install_failed");
+      attempts.push("install_failed", "lint_unavailable");
       return {
         ok: false,
         message: `lint_unavailable for ${entry.languages[0]}: install failed`,
@@ -288,6 +305,7 @@ export class LinterRegistry {
 
     attempts.push("install_succeeded");
     if (!existsSync(linterPkgManifest)) {
+      attempts.push("lint_unavailable");
       return {
         ok: false,
         message: `lint_unavailable for ${entry.languages[0]}: package not present after install`,
@@ -297,10 +315,12 @@ export class LinterRegistry {
       };
     }
 
+
     try {
       const result = await loadAndInvokeLinter(linterPkgPath, entry, opts, timeoutMs);
       return normalizeLintResult(result, attempts, installLatencyMs);
     } catch (error) {
+      attempts.push("lint_unavailable");
       return {
         ok: false,
         message: (error as Error).message,
@@ -398,6 +418,35 @@ export class LinterRegistry {
 // ============================================================================
 // Module-private helpers
 // ============================================================================
+
+function builtinTsSyntaxLint(absPath: string, content: string): { ok: boolean; message?: string; line?: number } {
+  const options: ts.CompilerOptions = {
+    target: ts.ScriptTarget.Latest,
+    module: ts.ModuleKind.ESNext,
+    noEmit: true,
+    skipLibCheck: true,
+    noLib: true,
+  };
+  const host = ts.createCompilerHost(options);
+  const originalGetSourceFile = host.getSourceFile.bind(host);
+  host.getSourceFile = (fileName, languageVersion, onError, shouldCreateNewSourceFile) =>
+    path.resolve(fileName) === path.resolve(absPath)
+      ? ts.createSourceFile(fileName, content, languageVersion, true, ts.ScriptKind.TS)
+      : originalGetSourceFile(fileName, languageVersion, onError, shouldCreateNewSourceFile);
+  const program = ts.createProgram([absPath], options, host);
+  const diagnostics = ts.getPreEmitDiagnostics(program).filter((d) =>
+    d.file !== undefined && path.resolve(d.file.fileName) === path.resolve(absPath),
+  );
+  if (diagnostics.length === 0) return { ok: true };
+  const first = diagnostics[0]!;
+  const position = (first.file ?? ts.createSourceFile(absPath, content, ts.ScriptTarget.Latest, true))
+    .getLineAndCharacterOfPosition(first.start ?? 0);
+  return {
+    ok: false,
+    message: ts.flattenDiagnosticMessageText(first.messageText, "\n"),
+    line: position.line + 1,
+  };
+}
 
 async function loadAndInvokeLinter(
   pkgPath: string,

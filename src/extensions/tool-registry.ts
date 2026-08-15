@@ -79,7 +79,7 @@ export function deriveRequiredPermission(name: string, metadata: ToolMetadata): 
     return "tools:write_file";
   }
   if (metadata.can_affect_host) return "tools:network";
-  return "tools:read_file";
+  return "tools:read";
 }
 
 const DEFAULT_EXTENSION_TOOL_TIMEOUT_MS = 30_000;

@@ -30,9 +30,7 @@ const TOOL_FAMILY: Record<string, ToolFamily> = {
   file_edit: "edit",
   write_file: "edit",
   edit_file: "edit",
-  replace_in_file: "edit",
   delete_file: "edit",
-  read_file: "file",
   view_file: "file",
   list_directory: "file",
   grep_search: "search",
@@ -109,7 +107,6 @@ const TOOL_CAPABILITY: Record<string, CapabilityTier> = {
   file_find: "read",
   list_directory: "read",
   grep_search: "read",
-  read_file: "read",
   view_file: "read",
   skim_file: "read",
   inspect_environment: "read",
@@ -129,7 +126,6 @@ const TOOL_CAPABILITY: Record<string, CapabilityTier> = {
   file_edit: "write",
   write_file: "write",
   edit_file: "write",
-  replace_in_file: "write",
   delete_file: "write",
 
   // Exec tools
@@ -178,7 +174,6 @@ const TOOL_CONCURRENCY: Record<string, ToolConcurrency> = {
   file_find: "shared",
   list_directory: "shared",
   grep_search: "shared",
-  read_file: "shared",
   view_file: "shared",
   skim_file: "shared",
   inspect_environment: "shared",
@@ -198,7 +193,6 @@ const TOOL_CONCURRENCY: Record<string, ToolConcurrency> = {
   file_edit: "exclusive",
   write_file: "exclusive",
   edit_file: "exclusive",
-  replace_in_file: "exclusive",
   delete_file: "exclusive",
 
   // Exec / shell tools are exclusive
@@ -266,7 +260,6 @@ const TOOL_CONTEXT_COST: Record<string, ContextCost> = {
   git_status: "low",
   git_diff: "low",
   activate_skill: "low",
-  read_file: "low",
   view_file: "low",
   skim_file: "low",
   inspect_environment: "low",
@@ -313,7 +306,6 @@ const TOOL_ALIASES: Record<string, readonly string[]> = {
   file_edit: ["edit_lines", "line_edit", "replace_lines"],
   write_file: ["create_file", "write", "save_file"],
   edit_file: ["edit", "patch"],
-  replace_in_file: ["replace", "find_replace"],
   delete_file: ["rm", "remove_file"],
   list_directory: ["ls", "dir", "list_files"],
   grep_search: ["grep", "search_files", "rg", "ripgrep"],

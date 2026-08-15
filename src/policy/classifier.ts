@@ -121,7 +121,7 @@ export class PermissionClassifier {
     }
 
     // Read tools are always safe
-    if (["read_file", "list_directory", "grep_search", "skim_file", "get_tool_output",
+    if (["file_view", "file_scroll", "file_find", "view_file", "list_directory", "grep_search", "skim_file", "get_tool_output",
           "read_background_output"].includes(call.name)) {
       return { outcome: "safe", reasoning: "Read-only tool", confidence: 1.0 };
     }
@@ -157,7 +157,7 @@ export class PermissionClassifier {
     }
 
     // Write tools — safe in accept_edits, needs confirmation otherwise
-    if (["write_file", "replace_in_file", "edit_file", "delete_file"].includes(call.name)) {
+    if (["write_file", "file_edit", "edit_file", "delete_file"].includes(call.name)) {
       if (this.mode === "accept_edits") {
         return { outcome: "safe", reasoning: "File write — auto-accepted", confidence: 0.85 };
       }

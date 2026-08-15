@@ -8,7 +8,7 @@ import {
 
 test("classifyToolResult returns isCheck=false for non-shell tools", () => {
   const orch = new VerificationOrchestrator();
-  assert.equal(orch.classifyToolResult({ toolName: "read_file", args: { path: "x" }, ok: true }).isCheck, false);
+  assert.equal(orch.classifyToolResult({ toolName: "file_view", args: { path: "x" }, ok: true }).isCheck, false);
 });
 
 test("classifyToolResult returns isCheck=false for shell tools that don't match a verification pattern", () => {

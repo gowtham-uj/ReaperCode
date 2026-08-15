@@ -107,7 +107,7 @@ test("AC9e: executeTool times out hung extension tools", async () => {
     definition: { name: "ext.read", description: "Slow read" },
     metadata: READ_METADATA,
     handler: () => new Promise((resolve) => setTimeout(() => resolve({ ok: true }), 1_000)),
-    grantedPermissions: ["tools:read_file"],
+    grantedPermissions: ["tools:read"],
   });
 
   const started = Date.now();
@@ -138,7 +138,7 @@ test("AC9f: executeTool passes an abort signal to cooperative extension tools", 
         setTimeout(() => resolve({ ok: true }), 1_000);
       });
     },
-    grantedPermissions: ["tools:read_file"],
+    grantedPermissions: ["tools:read"],
   });
 
   const result = await reg.executeTool("ext.read", {}, {
@@ -177,7 +177,7 @@ test("AC9g: executeTool validates args against extension tool schema before invo
       invoked = true;
       return { ok: true };
     },
-    grantedPermissions: ["tools:read_file"],
+    grantedPermissions: ["tools:read"],
   });
 
   const missing = await reg.executeTool("ext.read", { limit: 10 }, {

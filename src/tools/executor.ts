@@ -31,7 +31,6 @@ import { NativeComputerController, type NativeComputerToolName } from "./compute
 import { toolRegistry } from "./registry.js";
 import { deleteFileTool } from "./write/delete-file.js";
 import { editFileTool } from "./write/edit-file.js";
-import { replaceInFileTool } from "./write/replace-in-file.js";
 import { writeFileTool } from "./write/write-file.js";
 import { executeSearchTools } from "./write/search-tools.js";
 import { executeApplyPatch } from "./apply-patch.js";
@@ -413,8 +412,8 @@ export class ToolExecutor {
     this.consecutiveUnknownTools = 0;
 
     // ---- Phase 3 viewer tools.
-    //    Keep these as first-class model-facing tools. Do NOT alias legacy
-    //    read_file/replace_in_file into viewer calls — the model should see,
+    //    Keep these as first-class model-facing tools. Legacy read/edit
+    //    aliases are handled by normalizeToolName; the model should see,
     //    choose, and learn the viewer names directly from their descriptions.
     const callNameRaw = (call.name ?? "") as string;
     if (
@@ -428,9 +427,37 @@ export class ToolExecutor {
         name: callNameRaw,
         args: (call.args ?? {}) as Record<string, unknown>,
       };
-      const dirForViewer = await this.resolveExistingPathCase(
-        (callAnyBypass.args as { path?: string }).path ?? "",
-      );
+      let dirForViewer: string;
+      try {
+        dirForViewer = await this.resolveExistingPathCase(
+          (callAnyBypass.args as { path?: string }).path ?? "",
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await this.trajectoryLogger.write({
+          event_id: randomUUID(),
+          run_id: this.options.runId,
+          session_id: this.options.sessionId,
+          trace_id: this.options.traceId,
+          timestamp: new Date(start).toISOString(),
+          log_schema_version: 1,
+          kind: "tool_call",
+          level: this.options.logLevel,
+          tool_name: callNameRaw,
+          decision_id: decisionId,
+          status: "failed",
+          args: callAnyBypass.args,
+          error: { code: "path_escape", message },
+        });
+        return {
+          toolCallId: call.id,
+          name: call.name,
+          ok: false,
+          durationMs: Date.now() - start,
+          args: call.args,
+          error: { code: "path_escape", message },
+        };
+      }
       if (callAnyBypass.name === "file_edit") {
         await this.snapshotBeforeMutation(dirForViewer, "file_edit");
         this.fileWriteCounts.set(
@@ -950,13 +977,11 @@ export class ToolExecutor {
     }
 
     switch (call.name) {
-      case "read_file":
       case "view_file":
         {
-          const parsedArgs =
-            call.name === "view_file" ? toolRegistry.view_file.argsSchema.parse(call.args) : toolRegistry.read_file.argsSchema.parse(call.args);
+          const parsedArgs = toolRegistry.view_file.argsSchema.parse(call.args);
           const args = { ...parsedArgs, path: await this.resolveExistingPathCase(parsedArgs.path) };
-          const unboundedRead = call.name === "read_file" && args.startLine === undefined && args.endLine === undefined;
+          const unboundedRead = args.startLine === undefined && args.endLine === undefined;
           if (unboundedRead) {
             this.fullReadPaths.add(args.path);
           }
@@ -1165,14 +1190,6 @@ export class ToolExecutor {
           await this.snapshotBeforeMutation(args.path, "write_file");
           this.fileWriteCounts.set(args.path, (this.fileWriteCounts.get(args.path) ?? 0) + 1);
           return writeFileTool(this.options.workspaceRoot, args);
-        }
-      case "replace_in_file":
-        {
-          const parsedArgs = toolRegistry.replace_in_file.argsSchema.parse(call.args);
-          const args = { ...parsedArgs, path: await this.resolveExistingPathCase(parsedArgs.path) } as typeof parsedArgs;
-          await this.snapshotBeforeMutation(args.path, "replace_in_file");
-          this.fileWriteCounts.set(args.path, (this.fileWriteCounts.get(args.path) ?? 0) + 1);
-          return replaceInFileTool(this.options.workspaceRoot, args);
         }
       case "edit_file":
         {

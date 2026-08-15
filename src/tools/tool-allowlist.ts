@@ -13,7 +13,6 @@
  */
 
 const TOOL_ALLOWED_ARGS: Record<string, readonly string[]> = {
-  read_file: ["path", "startLine", "endLine"],
   view_file: ["path", "startLine", "endLine"],
   file_view: ["path", "start_line", "window"],
   file_scroll: ["path", "direction", "lines"],
@@ -25,7 +24,6 @@ const TOOL_ALLOWED_ARGS: Record<string, readonly string[]> = {
   inspect_environment: [],
   web_search: ["query", "engine", "maxResults", "scrapePages"],
   write_file: ["path", "content"],
-  replace_in_file: ["path", "oldString", "newString", "allowMultiple", "startLine", "endLine", "content"],
   edit_file: ["path", "edits"],
   delete_file: ["path"],
   bash: ["cmd", "description", "timeout", "run_in_background"],

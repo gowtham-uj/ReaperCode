@@ -9,7 +9,7 @@ const HASH_B = "b".repeat(64);
 function assistantWithRead(
   callId: string,
   filePath: string,
-  name = "read_file",
+  name = "view_file",
 ) {
   return {
     role: "assistant",

@@ -15,7 +15,7 @@ test("artifact obligation ledger requires a producer and strict contract verific
     successfulShell("produce", "python generate.py outputs/report.json", "wrote outputs/report.json"),
     {
       toolCallId: "read",
-      name: "read_file",
+      name: "file_view",
       ok: true,
       durationMs: 1,
       args: { path: "outputs/report.json" },

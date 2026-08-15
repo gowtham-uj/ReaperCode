@@ -7,12 +7,12 @@ import { composeAbortSignals } from "../../src/util/abort-signal.js";
 
 test("main-agent system prompt stays stable when the provider tool list changes", () => {
   const tools = [
-    { name: "read_file", description: "Read a file" },
-    { name: "replace_in_file", description: "Patch a file" },
+    { name: "file_view", description: "Read a file" },
+    { name: "file_edit", description: "Patch a file" },
   ];
   const system = buildMainAgentSystemPrompt({}, { availableTools: tools });
   assert.equal(system, buildMainAgentSystemPrompt({}));
-  assert.doesNotMatch(system, /# Tool inventory|- read_file|- replace_in_file|browser_control/);
+  assert.doesNotMatch(system, /# Tool inventory|- file_view|- file_edit|browser_control/);
 });
 
 test("composeAbortSignals returns undefined when no signals are provided", () => {

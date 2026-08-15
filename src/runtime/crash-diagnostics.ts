@@ -13,7 +13,7 @@ export function hasUnresolvedRuntimeCrash(results: ToolResult[]): boolean {
 }
 
 export function isCrashDiagnosticToolCall(call: ToolCall): boolean {
-  if (["read_file", "view_file", "skim_file", "grep_search", "list_directory", "inspect_environment", "web_search", "web_fetch"].includes(call.name)) {
+  if (["file_view", "file_scroll", "file_find", "view_file", "skim_file", "grep_search", "list_directory", "inspect_environment", "web_search", "web_fetch"].includes(call.name)) {
     return true;
   }
   if (call.name !== "bash") return false;

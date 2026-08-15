@@ -15,7 +15,7 @@ test("F4: ExtensionBus registers and emits handlers in order", async () => {
   const seen: string[] = [];
   bus.on("PreToolUse", () => seen.push("a"));
   bus.on("PreToolUse", () => seen.push("b"));
-  await bus.emit("PreToolUse", { tool: "read_file" });
+  await bus.emit("PreToolUse", { tool: "file_view" });
   assert.deepEqual(seen, ["a", "b"]);
 });
 

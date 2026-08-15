@@ -36,7 +36,7 @@ test("runtime appends checkpoint and git state results after mutating batches on
   mutatingRequest.payload = {
     prompt: "Mutate a tracked file",
     tool_calls: [
-      { id: "mutate-1", name: "replace_in_file", args: { path: "src/app.ts", oldString: "41", newString: "42" } },
+      { id: "mutate-1", name: "edit_file", args: { path: "src/app.ts", edits: [{ oldString: "41", newString: "42" }] } },
     ],
   };
 
@@ -46,7 +46,7 @@ test("runtime appends checkpoint and git state results after mutating batches on
     requestEnvelope: mutatingRequest,
   }).run();
 
-  assert.equal(mutatingResult.toolResults[0]?.name, "replace_in_file");
+  assert.equal(mutatingResult.toolResults[0]?.name, "edit_file");
   assert.ok(mutatingResult.toolResults.some((result) => result.name === "create_checkpoint" && result.ok));
   assert.ok(mutatingResult.toolResults.some((result) => result.name === "git_status" && result.ok));
   assert.ok(mutatingResult.toolResults.some((result) => result.name === "git_diff" && result.ok));
@@ -55,7 +55,7 @@ test("runtime appends checkpoint and git state results after mutating batches on
   readOnlyRequest.payload = {
     prompt: "Read a tracked file",
     tool_calls: [
-      { id: "read-1", name: "read_file", args: { path: "src/app.ts" } },
+      { id: "read-1", name: "file_view", args: { path: "src/app.ts" } },
     ],
   };
   const readOnlyResult = await new RuntimeEngine({

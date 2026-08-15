@@ -81,7 +81,7 @@ test("rescue watchdog resets stagnation and attempt count after meaningful progr
   });
   const edit: ToolResult = {
     toolCallId: "edit",
-    name: "replace_in_file",
+    name: "edit_file",
     ok: true,
     durationMs: 1,
     args: { path: "package.json" },

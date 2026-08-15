@@ -62,7 +62,7 @@ my_tool: {
 Also decide:
 
 - Add to `CORE_TOOL_NAMES` if it should always be rendered with full schema.
-- Add to `DEMOTED_LEGACY_TOOL_NAMES` if it replaces a legacy tool.
+- Removed legacy tools (`read_file`, `replace_in_file`) must NOT be re-added: their names alias to `file_view` / `file_edit` in `normalizeToolName`.
 
 ### 2.2 `src/tools/types.ts` (the discriminated union)
 

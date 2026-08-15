@@ -25,11 +25,9 @@ const FILE_TOOLS = new Set([
   "file_view",
   "file_scroll",
   "file_find",
-  "read_file",
   "view_file",
   "file_edit",
   "write_file",
-  "replace_in_file",
 ]);
 
 export interface CompactionFileObservation {

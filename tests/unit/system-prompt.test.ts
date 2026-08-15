@@ -29,11 +29,11 @@ test("main-agent system prompt includes required requirements text", () => {
 
 test("main-agent system prompt ignores dynamic tool inventory", () => {
   const system = buildMainAgentSystemPrompt({}, {
-    availableTools: [{ name: "read_file" }, { name: "bash" }],
+    availableTools: [{ name: "file_view" }, { name: "bash" }],
   });
   assert.equal(system, MAIN_AGENT_SYSTEM_PROMPT_TEXT);
   assert.doesNotMatch(system, /# Tool inventory/);
-  assert.doesNotMatch(system, /^- read_file$/m);
+  assert.doesNotMatch(system, /^- file_view$/m);
 });
 
 test("main-agent system prompt ignores tool descriptions", () => {

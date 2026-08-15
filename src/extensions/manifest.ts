@@ -29,7 +29,7 @@ import {
 } from "./types.js";
 
 const VALID_PERMISSIONS: readonly ExtensionPermission[] = [
-  "tools:read_file", "tools:write_file", "tools:edit_file", "tools:delete_file",
+  "tools:read", "tools:write_file", "tools:edit_file", "tools:delete_file",
   "tools:bash", "tools:network",
   "shell:low", "shell:medium", "shell:high",
   "memory:project:read", "memory:project:write",

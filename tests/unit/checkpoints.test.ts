@@ -32,7 +32,7 @@ test("checkpoint creation captures metadata and dirty files", async () => {
 });
 
 test("mutation checkpoint classifier skips read-only and checkpoint-only batches", () => {
-  assert.equal(batchNeedsMutationCheckpoint([{ name: "read_file" }, { name: "git_status" }]), false);
+  assert.equal(batchNeedsMutationCheckpoint([{ name: "file_view" }, { name: "git_status" }]), false);
   assert.equal(batchNeedsMutationCheckpoint([{ name: "create_checkpoint" }]), false);
   assert.equal(batchNeedsMutationCheckpoint([{ name: "write_file" }]), true);
   assert.equal(batchNeedsMutationCheckpoint([{ name: "bash" }]), true);

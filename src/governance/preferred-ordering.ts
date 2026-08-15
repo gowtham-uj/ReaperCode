@@ -73,7 +73,7 @@ const RULES: Record<string, Predicate[]> = {
       if (history.length === 0) {
         return { severity: "info", ruleId: "ordering.write_first_no_history", message: "Writing a file before any read; consider inspecting the target path first." };
       }
-      const lastRead = findLast(history, (t) => t === "read_file" || t === "view_file" || t === "grep_search" || t === "skim_file" || t === "list_directory" || t === "inspect_environment");
+      const lastRead = findLast(history, (t) => t === "file_view" || t === "file_scroll" || t === "view_file" || t === "grep_search" || t === "skim_file" || t === "list_directory" || t === "inspect_environment");
       if (lastRead === null) {
         return { severity: "warn", ruleId: "ordering.write_without_read", message: "write_file called without any prior read/list/grep in this run. Verify the target path before overwriting." };
       }
@@ -83,7 +83,7 @@ const RULES: Record<string, Predicate[]> = {
 
   edit_file: [
     (history) => {
-      const lastRead = findLast(history, (t) => t === "read_file" || t === "view_file" || t === "grep_search" || t === "skim_file");
+      const lastRead = findLast(history, (t) => t === "file_view" || t === "file_scroll" || t === "view_file" || t === "grep_search" || t === "skim_file");
       if (lastRead === null) {
         return { severity: "warn", ruleId: "ordering.edit_without_read", message: "edit_file called without a prior read of the target file. Read the file first to confirm context." };
       }
@@ -91,19 +91,11 @@ const RULES: Record<string, Predicate[]> = {
     },
   ],
 
-  replace_in_file: [
-    (history) => {
-      const lastRead = findLast(history, (t) => t === "read_file" || t === "view_file");
-      if (lastRead === null) {
-        return { severity: "warn", ruleId: "ordering.replace_without_read", message: "replace_in_file called without a prior read of the target file." };
-      }
-      return null;
-    },
-  ],
+
 
   delete_file: [
     (history) => {
-      const lastRead = findLast(history, (t) => t === "read_file" || t === "view_file" || t === "list_directory");
+      const lastRead = findLast(history, (t) => t === "file_view" || t === "file_scroll" || t === "view_file" || t === "list_directory");
       if (lastRead === null) {
         return { severity: "warn", ruleId: "ordering.delete_without_read", message: "delete_file called without a prior read or listing." };
       }
@@ -114,7 +106,7 @@ const RULES: Record<string, Predicate[]> = {
   // ---- Shell: warn if a shell command is issued before inspecting the environment ----
   bash: [
     (history) => {
-      const lastInspect = findLast(history, (t) => t === "inspect_environment" || t === "list_directory" || t === "read_file" || t === "view_file");
+      const lastInspect = findLast(history, (t) => t === "inspect_environment" || t === "list_directory" || t === "file_view" || t === "view_file");
       if (lastInspect === null && history.length > 0) {
         return { severity: "info", ruleId: "ordering.shell_no_inspect", message: "Running a shell command without a prior inspect_environment / list_directory. Consider inspecting first." };
       }

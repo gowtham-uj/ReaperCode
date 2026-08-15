@@ -41,7 +41,7 @@ test("parses a valid agent event envelope", () => {
     ...createValidRequestEnvelope(),
     message_type: "tool_call_completed",
     payload: {
-      tool: "read_file",
+      tool: "file_view",
       status: "completed",
     },
   });

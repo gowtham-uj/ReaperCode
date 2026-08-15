@@ -183,7 +183,6 @@ export function classifyToolCall(call: ToolCall): ExecutionKind {
     return "read";
   }
   if (
-    call.name === "read_file" ||
     call.name === "view_file" ||
     call.name === "file_view" ||
     call.name === "file_scroll" ||
@@ -199,7 +198,6 @@ export function classifyToolCall(call: ToolCall): ExecutionKind {
   if (
     call.name === "write_file" ||
     call.name === "file_edit" ||
-    call.name === "replace_in_file" ||
     call.name === "edit_file" ||
     call.name === "delete_file" ||
     call.name === "create_checkpoint" ||

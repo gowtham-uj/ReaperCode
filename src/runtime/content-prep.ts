@@ -309,7 +309,7 @@ function hasSuccessfulWorkspaceWrite(toolResults: ToolResult[]): boolean {
   return toolResults.some(
     (result) => {
       if (!result.ok) return false;
-      if (["write_file", "file_edit", "replace_in_file", "edit_file", "delete_file"].includes(result.name)) return true;
+      if (["write_file", "file_edit", "edit_file", "delete_file"].includes(result.name)) return true;
       if (result.name === "bash") {
         const args = (result.args ?? {}) as { cmd?: unknown; command?: unknown };
         const cmd = typeof args.cmd === "string"

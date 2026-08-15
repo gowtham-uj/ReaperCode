@@ -55,7 +55,7 @@ test("classifyToolResultTrust marks MCP tools as untrusted (mcp__ prefix)", () =
 });
 
 test("classifyToolResultTrust marks in-workspace tools as trusted", () => {
-  assert.equal(classifyToolResultTrust({ name: "read_file" }), "trusted");
+  assert.equal(classifyToolResultTrust({ name: "file_view" }), "trusted");
   assert.equal(classifyToolResultTrust({ name: "bash" }), "trusted");
   assert.equal(classifyToolResultTrust({ name: "grep_search" }), "trusted");
   assert.equal(classifyToolResultTrust({ name: "write_file" }), "trusted");
@@ -63,7 +63,7 @@ test("classifyToolResultTrust marks in-workspace tools as trusted", () => {
 
 test("classifyReadFileTrust treats paths inside workspaceRoot as trusted", () => {
   const result = makeResult({
-    name: "read_file",
+    name: "file_view",
     args: { path: "/home/user/project/src/foo.ts" },
   });
   assert.equal(classifyReadFileTrust(result, "/home/user/project"), "trusted");
@@ -71,7 +71,7 @@ test("classifyReadFileTrust treats paths inside workspaceRoot as trusted", () =>
 
 test("classifyReadFileTrust treats paths outside workspaceRoot as untrusted", () => {
   const result = makeResult({
-    name: "read_file",
+    name: "file_view",
     args: { path: "/etc/passwd" },
   });
   assert.equal(classifyReadFileTrust(result, "/home/user/project"), "untrusted");
@@ -79,7 +79,7 @@ test("classifyReadFileTrust treats paths outside workspaceRoot as untrusted", ()
 
 test("classifyReadFileTrust treats sibling-directory reads as untrusted", () => {
   const result = makeResult({
-    name: "read_file",
+    name: "file_view",
     args: { path: "/home/user/other-project/foo.ts" },
   });
   assert.equal(classifyReadFileTrust(result, "/home/user/project"), "untrusted");
@@ -136,7 +136,7 @@ test("wrapUntrustedContent is idempotent — re-wrapping doesn't double-tag", ()
 });
 
 test("markTrust is a no-op for trusted content", () => {
-  const out = markTrust("hello", "trusted", "tool read_file");
+  const out = markTrust("hello", "trusted", "tool file_view");
   assert.equal(out, "hello");
   const markers = countUntrustedMarkers(out);
   assert.equal(markers.opens, 0);
@@ -175,7 +175,7 @@ test("renderToolResultForModel wraps an untrusted tool's output with markers", (
 
 test("renderToolResultForModel does NOT wrap a trusted tool's output", () => {
   const result = makeResult({
-    name: "read_file",
+    name: "file_view",
     args: { path: "/workspace/src/foo.ts" },
     output: "export const x = 1;\n",
   });
@@ -186,9 +186,9 @@ test("renderToolResultForModel does NOT wrap a trusted tool's output", () => {
   assert.equal(markers.closes, 0);
 });
 
-test("renderToolResultForModel marks out-of-workspace read_file as untrusted", () => {
+test("renderToolResultForModel marks out-of-workspace file_view as untrusted", () => {
   const result = makeResult({
-    name: "read_file",
+    name: "file_view",
     args: { path: "/etc/passwd" },
     output: "root:x:0:0:...",
   });

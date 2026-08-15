@@ -45,7 +45,7 @@ export function compactToolHistory(input: HistoryCompactionInput): CompactedHist
 }
 
 function traditionalCompact(input: HistoryCompactionInput): CompactedHistory {
-  const writeTools = new Set(["write_file", "replace_in_file", "edit_file", "delete_file", "bash"]);
+  const writeTools = new Set(["write_file", "file_edit", "edit_file", "delete_file", "bash"]);
   const maxEntries = Math.max(0, input.maxEntries);
   const fileOpsSummary = summarizeFileOps(input.toolResults);
   const latestFailureSummary = summarizeLatestFailure(input.toolResults);
@@ -85,7 +85,7 @@ function traditionalCompact(input: HistoryCompactionInput): CompactedHistory {
         ...(latestFailureSummary ? [latestFailureSummary] : []),
         ...compactRepeatedObservations(
           input.toolResults.map((result, index) => {
-            const isStale = index < lastWriteIndex && ["read_file", "view_file", "list_directory", "grep_search", "skim_file"].includes(result.name);
+            const isStale = index < lastWriteIndex && ["file_view", "file_scroll", "file_find", "view_file", "list_directory", "grep_search", "skim_file"].includes(result.name);
             const prefix = isStale ? "[STALE Observation]" : "[Observation]";
             return `${prefix} ${summarizeToolResult(result, 600)}`;
           }),
@@ -115,7 +115,7 @@ function traditionalCompact(input: HistoryCompactionInput): CompactedHistory {
   compacted = compactRepeatedObservations(
     truncatedMiddle.map((result, idx) => {
       const actualIdx = idx + (middlePart.length - truncatedMiddle.length) + firstCount;
-      const isStale = actualIdx < lastWriteIndex && ["read_file", "view_file", "list_directory", "grep_search", "skim_file"].includes(result.name);
+      const isStale = actualIdx < lastWriteIndex && ["file_view", "file_scroll", "file_find", "view_file", "list_directory", "grep_search", "skim_file"].includes(result.name);
       const prefix = isStale ? "[STALE Observation]" : "[Observation]";
       return `${prefix} ${summarizeToolResult(result, 600)}`;
     }),
@@ -173,8 +173,8 @@ function summarizeFileOps(results: ToolResult[]): string | undefined {
     const args = result.args && typeof result.args === "object" ? (result.args as Record<string, unknown>) : {};
     const path = typeof args.path === "string" ? args.path : undefined;
     if (!path) continue;
-    if (["read_file", "view_file", "skim_file"].includes(result.name)) read.add(path);
-    if (["write_file", "replace_in_file", "edit_file", ].includes(result.name)) modified.add(path);
+    if (["file_view", "file_scroll", "file_find", "view_file", "skim_file"].includes(result.name)) read.add(path);
+    if (["write_file", "file_edit", "edit_file"].includes(result.name)) modified.add(path);
     if (result.name === "delete_file") deleted.add(path);
   }
   const parts = [
@@ -220,7 +220,7 @@ let defaultWorkspaceRoot: string | undefined;
  * `renderToolResultForModel` when its call site does not provide one.
  * The runtime sets this once per run so that diagnostic summaries,
  * context budget estimates, and other internal render paths classify
- * `read_file` results correctly without threading `workspaceRoot`
+ * `file_view` results correctly without threading `workspaceRoot`
  * through every pure helper.
  */
 export function setDefaultWorkspaceRoot(workspaceRoot: string | undefined): void {
@@ -244,7 +244,7 @@ export interface RenderToolResultForModelOptions {
    * Phase T2.5: workspace root used by `classifyReadFileTrust` to
    * distinguish in-workspace file reads (trusted) from
    * out-of-workspace reads (untrusted). When omitted, the
-   * `read_file` family falls back to the tool-name-only heuristic
+   * `file_view` family falls back to the tool-name-only heuristic
    * (trusted). Always pass this from the engine so external reads
    * are correctly classified.
    */
@@ -323,8 +323,8 @@ function renderOutputForModel(
 
   // Phase T2.5: classify trust and wrap string output with markers
   // for external-content tools. MCP, web_search, web_fetch, and
-  // out-of-workspace read_file are marked untrusted. Object output
-  // (e.g. read_file with structured metadata) is rendered as JSON
+  // out-of-workspace file_view are marked untrusted. Object output
+  // (e.g. file_view with structured metadata) is rendered as JSON
   // and the JSON itself is wrapped — the marker boundary is the
   // string level since the model sees the rendered string.
   const workspaceRoot = resolveWorkspaceRoot(options.workspaceRoot);
@@ -357,7 +357,7 @@ function renderOutputForModel(
 
 function renderCompactOutputForModel(output: unknown, result: ToolResult, maxChars: number): Record<string, unknown> {
   const metadata = output && typeof output === "object" ? extractModelMetadata(output as Record<string, unknown>) : {};
-  if (result.name === "read_file" && output && typeof output === "object") {
+  if ((result.name === "file_view" || result.name === "view_file") && output && typeof output === "object") {
     const record = output as Record<string, unknown>;
     const path = typeof record.path === "string" ? record.path : metadata.path;
     const startLine = record.startLine;
@@ -371,7 +371,7 @@ function renderCompactOutputForModel(output: unknown, result: ToolResult, maxCha
       outputPreview: truncateMiddle(content, Math.min(maxChars, 1400)),
       outputCompactedForModel: true,
       contextInstruction:
-        "Large read_file content was compacted. If exact code is needed, use grep_search or read_file with a narrow line range around the cited symbol/diagnostic.",
+        "Large file_view content was compacted. If exact code is needed, use grep_search or file_view with a narrow line range around the cited symbol/diagnostic.",
     };
   }
 

@@ -117,7 +117,7 @@ export function shouldAllowDependencyManifestRepairDespiteDiagnosticTarget(call:
 }
 
 export function isDependencyManifestMutation(call: ToolCall): boolean {
-  if (!["write_file", "replace_in_file", "edit_file", "delete_file"].includes(call.name)) return false;
+  if (!["write_file", "file_edit", "edit_file", "delete_file"].includes(call.name)) return false;
   const args = call.args && typeof call.args === "object" ? (call.args as Record<string, unknown>) : {};
   return typeof args.path === "string" && isDependencyManifestPath(args.path);
 }
@@ -215,7 +215,7 @@ export function hasDiagnosticTargetBeenAddressedSince(targetPath: string, failin
   const normalizedFailingCommand = normalizeDiagnosticCommand(failingCommand);
   const failingCwd = extractLeadingCdDirectory(failingCommand);
   for (const result of laterResults) {
-    if (result.name === "write_file" || result.name === "replace_in_file" || result.name === "edit_file" || result.name === "delete_file") {
+    if (result.name === "write_file" || result.name === "file_edit" || result.name === "edit_file" || result.name === "delete_file") {
       const args = result.args && typeof result.args === "object" ? (result.args as Record<string, unknown>) : {};
       const changedPath = typeof args.path === "string" ? normalizeArtifactPathForMatch(stripWorkspacePrefix(args.path)) : "";
       if (result.ok && changedPath && (changedPath === target || path.basename(changedPath) === basename)) return true;
@@ -345,7 +345,7 @@ export function shellCommandCreatesOrChecksDirectory(command: string, relativeDi
 }
 
 export function isCheapDiagnosticInspection(call: ToolCall): boolean {
-  return ["read_file", "view_file", "grep_search", "skim_file", "list_directory", "inspect_environment", "get_tool_output"].includes(call.name);
+  return ["file_view", "file_scroll", "file_find", "view_file", "grep_search", "skim_file", "list_directory", "inspect_environment", "get_tool_output"].includes(call.name);
 }
 
 export function isExpensiveOrMutatingFollowup(call: ToolCall): boolean {
@@ -405,7 +405,7 @@ export function renderApiMismatchRecoveryGuidance(toolResults: ToolResult[]): st
     sourceFiles.length ? `Cited files:\n${sourceFiles.map((filePath) => `- ${filePath}`).join("\n")}` : "Cited files: unavailable",
     "Required next behavior:",
     "- Do not guess replacement APIs or keep expanding the generated source.",
-    "- Inspect the actual declarations/exports/schema/types around the cited symbols first using grep_search or bounded read_file.",
+    "- Inspect the actual declarations/exports/schema/types around the cited symbols first using grep_search or bounded file_view.",
     "- Patch only the adapter/call site or smallest declaration-compatible region.",
     "- Prefer a minimal compiling adapter/skeleton before adding more behavior.",
     "- Rerun the same narrow build/typecheck/runtime command that produced the diagnostic.",
