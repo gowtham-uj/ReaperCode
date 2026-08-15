@@ -12,14 +12,10 @@ You need Node 22 and npm (no build step, no `node_modules` — `reaper` is shipp
 
 ### Install as a CLI (recommended)
 
-The repo is private, so install straight from the git URL. npm pulls the repo through git, so authenticate once with either SSH or a GitHub token that has `repo` scope:
+The repo is public but not published to the npm registry, so install straight from the git URL — no auth needed:
 
 ```bash
-# SSH
-npm install -g git+ssh://git@github.com/gowtham-uj/ReaperCode.git
-
-# HTTPS with a Personal Access Token (repo scope)
-npm install -g git+https://<TOKEN>@github.com/gowtham-uj/ReaperCode.git
+npm install -g git+https://github.com/gowtham-uj/ReaperCode.git
 ```
 
 Then run it anywhere:
