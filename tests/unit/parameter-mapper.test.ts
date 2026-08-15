@@ -178,6 +178,89 @@ test("OpenAI-compatible mapper converts internal tool schemas and omits JSON mod
   assert.equal(payload.response_format, undefined);
 });
 
+test("assistant reasoning is echoed as reasoning_content for DeepSeek thinking models", () => {
+  const payload = mapGenerateRequestToLiteLLM(
+    {
+      role: "secondary_model",
+      messages: [
+        { role: "user", content: "do it" },
+        {
+          role: "assistant",
+          content: "",
+          reasoning: "thinking out loud",
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: { name: "ls", arguments: "{}" },
+            },
+          ],
+        },
+        { role: "tool", tool_call_id: "call_1", content: "ok" },
+      ],
+    },
+    profileWithModel("deepseek", "deepseek-v4-flash"),
+  );
+
+  const messages = payload.messages as Array<Record<string, unknown>>;
+  assert.equal(messages[1]?.reasoning_content, "thinking out loud");
+  assert.deepEqual(messages[1]?.tool_calls, [
+    {
+      id: "call_1",
+      type: "function",
+      function: { name: "ls", arguments: "{}" },
+    },
+  ]);
+});
+
+test("assistant reasoning is echoed as reasoning_content for plain assistant messages", () => {
+  const payload = mapGenerateRequestToLiteLLM(
+    {
+      role: "secondary_model",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "hello", reasoningContent: "hidden chain" },
+      ],
+    },
+    profileWithModel("litellm", "deepseek-v4-flash"),
+  );
+
+  const messages = payload.messages as Array<Record<string, unknown>>;
+  assert.equal(messages[1]?.reasoning_content, "hidden chain");
+});
+
+test("OpenAI reasoning-effort models do NOT echo reasoning_content but forward reasoning_effort", () => {
+  const payload = mapGenerateRequestToLiteLLM(
+    {
+      role: "secondary_model",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "hello", reasoning: "chain" },
+      ],
+    },
+    { ...profileWithModel("litellm", "gpt-5"), defaultParams: { reasoningEffort: "high" } },
+  );
+
+  const messages = payload.messages as Array<Record<string, unknown>>;
+  assert.equal("reasoning_content" in (messages[1] ?? {}), false);
+  assert.equal((payload as { reasoning_effort?: string }).reasoning_effort, "high");
+});
+
+test("thinking disabled maps to reasoning_effort none for OpenAI reasoning models", () => {
+  const previous = process.env.REAPER_THINKING;
+  process.env.REAPER_THINKING = "off";
+  const payload = mapGenerateRequestToLiteLLM(
+    {
+      role: "secondary_model",
+      messages: [{ role: "user", content: "hi" }],
+    },
+    profileWithModel("litellm", "o4-mini"),
+  );
+  restoreEnv("REAPER_THINKING", previous);
+
+  assert.equal((payload as { reasoning_effort?: string }).reasoning_effort, "none");
+});
+
 function profile(provider: string, promptCache?: { enabled: boolean; minContentChars?: number }): ResolvedModelProfile {
   return {
     provider,
@@ -192,6 +275,13 @@ function profile(provider: string, promptCache?: { enabled: boolean; minContentC
       embeddings: false,
     },
     ...(promptCache ? { defaultParams: { promptCache } } : {}),
+  };
+}
+
+function profileWithModel(provider: string, model: string): ResolvedModelProfile {
+  return {
+    ...profile(provider),
+    model,
   };
 }
 
