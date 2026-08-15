@@ -34,6 +34,7 @@ import {
 } from "./types.js";
 
 import { buildChildEnv } from "../child-env.js";
+import { bundledLinterManifest } from "../../util/bundled-assets.js";
 
 const CACHE_ROOT = ".reaper";
 import * as ts from "typescript";
@@ -110,7 +111,8 @@ export class LinterRegistry {
        try {
          raw = await readFile(defaultManifestPath, "utf8");
        } catch {
-         raw = undefined;
+         // Single-file bundle: the manifest is inlined as a compile-time asset.
+         raw = bundledLinterManifest();
        }
      }
      if (!raw) {
