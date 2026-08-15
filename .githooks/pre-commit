@@ -1,0 +1,11 @@
+#!/bin/sh
+# Rebuild the single-file reaper bundle and stage it before every commit,
+# so the committed bin/reaper.mjs always matches the committed source.
+# A failed build aborts the commit.
+set -e
+
+echo "[pre-commit] building bin/reaper.mjs ..."
+node scripts/build-bundle.mjs
+
+# Stage the freshly built bundle so it rides along with this commit.
+git add bin/reaper.mjs
