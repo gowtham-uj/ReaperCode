@@ -8,7 +8,27 @@ This is a CLI. There is no chat UI in the repo. It is experimental. Use it on a 
 
 ## Install
 
-You need Node 22 and npm.
+You need Node 22 and npm (no build step, no `node_modules` — `reaper` is shipped as a single self-contained file).
+
+### Install as a CLI (recommended)
+
+The repo is private, so install straight from the git URL. npm pulls the repo through git, so authenticate once with either SSH or a GitHub token that has `repo` scope:
+
+```bash
+# SSH
+npm install -g git+ssh://git@github.com/gowtham-uj/ReaperCode.git
+
+# HTTPS with a Personal Access Token (repo scope)
+npm install -g git+https://<TOKEN>@github.com/gowtham-uj/ReaperCode.git
+```
+
+Then run it anywhere:
+
+```bash
+reaper exec run --prompt "Add a README section about setup" --provider minimax --model MiniMax-M3
+```
+
+### Build from source
 
 ```bash
 git clone https://github.com/gowtham-uj/ReaperCode.git
