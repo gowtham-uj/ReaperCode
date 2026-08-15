@@ -1,6 +1,25 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
-import { chromium, type Browser, type BrowserContext, type LaunchOptions, type Locator, type Page } from "playwright";
+import type { Browser, BrowserContext, LaunchOptions, Locator, Page } from "playwright";
+
+/** Lazily resolve the `playwright` package so the standalone binary does not
+ *  require it at startup. `playwright` (and its bundled browser) is optional:
+ *  the browser/computer tools are the only consumers, and the core agent must
+ *  boot without it. Throws a clean, actionable error when it is absent. */
+async function loadChromium(): Promise<typeof import("playwright")["chromium"]> {
+  try {
+    const { chromium } = await import("playwright");
+    return chromium;
+  } catch (error) {
+    if (error instanceof Error && (error as NodeJS.ErrnoException).code === "MODULE_NOT_FOUND") {
+      throw new Error(
+        "Browser tool is unavailable: the `playwright` package is not installed in this build. " +
+          "Use a full `npm install reaper` install (or run with `tsx` from source) to enable browser/computer tools.",
+      );
+    }
+    throw error;
+  }
+}
 
 import type { BrowserControlArgs, ComputerControlArgs } from "../types.js";
 import { getBrowserTunables } from "../../config/config-tunables.js";
@@ -266,6 +285,7 @@ export class ComputerBrowserController {
       if (getBrowserTunables().executablePath) {
         launchOptions.executablePath = getBrowserTunables().executablePath;
       }
+      const chromium = await loadChromium();
       this.browser = await chromium.launch(launchOptions);
       this.headless = requestedHeadless;
     }
