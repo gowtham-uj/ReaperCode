@@ -1,0 +1,26 @@
+#!/bin/sh
+# This repo has one author. Claude Code appends
+# "Co-Authored-By: Claude <noreply@anthropic.com>" (and similar ads).
+# GitHub treats that as a second author. Strip it before the commit is created.
+set -e
+file="$1"
+[ -n "$file" ] && [ -f "$file" ] || exit 0
+python3 - "$file" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+drop = re.compile(
+    r"^(?:"
+    r"Co-Authored-By:\s*Claude\s*<[^>]*>"
+    r"|Co-Authored-By:\s*.*<[^>]*@anthropic\.com>"
+    r"|(?:🤖\s*)?Generated with .*Claude Code.*"
+    r")$",
+    re.IGNORECASE,
+)
+kept = [line for line in path.read_text().splitlines() if not drop.match(line.strip())]
+while kept and not kept[-1].strip():
+    kept.pop()
+path.write_text("\n".join(kept) + "\n")
+PY

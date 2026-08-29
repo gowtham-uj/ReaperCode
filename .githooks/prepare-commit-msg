@@ -1,0 +1,4 @@
+#!/bin/sh
+# Same strip as commit-msg, so the trailer is gone even if a later
+# helper rewrites the message file during the commit.
+exec "$(dirname "$0")/commit-msg" "$1"
