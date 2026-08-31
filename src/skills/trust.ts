@@ -136,11 +136,25 @@ export class TrustResolver {
     if (!existsSync(file)) return null;
     try {
       const raw = readFileSync(file, "utf8");
-      const parsed = JSON.parse(raw) as SkillTrustRecord;
-      if (parsed && parsed.skillPath === skillPath && typeof parsed.trust === "string") {
-        this.cache.set(skillPath, parsed);
-        return parsed;
+      const parsed = JSON.parse(raw) as Partial<SkillTrustRecord>;
+      if (!parsed || parsed.skillPath !== skillPath || typeof parsed.trust !== "string") {
+        return null;
       }
+      // A trust.json next to a repo-adjacent (project) skill is writable
+      // by anything that can touch the workspace, so it must never be
+      // able to elevate trust on its own. Only a user-decided record
+      // (`skill trust`) may grant trust above `project-untrusted`, and
+      // even then only for skills under the user's own home.
+      if (parsed.trust === "user-trusted" || parsed.trust === "extension-inherited") {
+        if (parsed.decidedBy !== "user") return null;
+        if (!isUnder(skillPath, this.opts.userHomeSkillsDir)) return null;
+      }
+      if (!["builtin", "user-trusted", "project-untrusted", "extension-inherited", "draft"].includes(parsed.trust)) {
+        return null;
+      }
+      const record = parsed as SkillTrustRecord;
+      this.cache.set(skillPath, record);
+      return record;
     } catch { /* ignore */ }
     return null;
   }
@@ -171,7 +185,11 @@ function mapExtensionTrust(t: ExtensionTrust): SkillTrust {
   switch (t) {
     case "builtin": return "builtin";
     case "user-trusted": return "extension-inherited";
-    case "project-untrusted": return "extension-inherited";
+    // A project-untrusted extension must not have its skills become
+    // loadable just because they were shipped inside an extension.
+    // Carry the parent's real (untrusted) tier so `SkillRegistry.trusted()`
+    // and `recordToReaperSkill` keep `disableModelInvocation` set.
+    case "project-untrusted": return "project-untrusted";
   }
 }
 

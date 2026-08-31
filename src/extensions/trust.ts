@@ -109,11 +109,24 @@ export class ExtensionTrustResolver {
     if (!existsSync(file)) return null;
     try {
       const raw = readFileSync(file, "utf8");
-      const parsed = JSON.parse(raw) as ExtensionTrustRecord;
-      if (parsed && parsed.installPath === installPath && typeof parsed.trust === "string") {
-        this.cache.set(installPath, parsed);
-        return parsed;
+      const parsed = JSON.parse(raw) as Partial<ExtensionTrustRecord>;
+      if (!parsed || parsed.installPath !== installPath || typeof parsed.trust !== "string") {
+        return null;
       }
+      if (!["builtin", "user-trusted", "project-untrusted"].includes(parsed.trust)) {
+        return null;
+      }
+      // A trust.json next to a repo-adjacent (project) extension is
+      // writable by anything that can touch the workspace. Only a
+      // user-decided record (`extensions trust`) may grant trust, and
+      // only for extensions under the user's own home.
+      if (parsed.trust === "user-trusted") {
+        if (parsed.decidedBy !== "user") return null;
+        if (!isUnder(installPath, this.opts.userHomeExtensionsDir)) return null;
+      }
+      const record = parsed as ExtensionTrustRecord;
+      this.cache.set(installPath, record);
+      return record;
     } catch { /* ignore */ }
     return null;
   }

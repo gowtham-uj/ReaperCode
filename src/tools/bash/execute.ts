@@ -33,6 +33,8 @@ export interface BashExecutionContext {
    * exposing the partial-update channel to interested callers.
    */
   onPartialUpdate?: BashPartialUpdateCallback | undefined;
+  /** Raw stdout/stderr chunks for app-server streaming. */
+  onOutput?: (stream: "stdout" | "stderr", text: string) => void | Promise<void>;
   /**
    * Optional allowlist forwarded to the child environment builder. Names
    * on this list are preserved even when the sensitive-name classifier
@@ -122,6 +124,7 @@ export async function executeBashCommand(
     ctx.ruleContext,
     ctx.runtime,
     ctx.childEnvAllowlist ? { allowlist: ctx.childEnvAllowlist } : undefined,
+    ctx.onOutput,
   );
 
   if (isBackgroundShellResult(raw)) {

@@ -25,7 +25,7 @@ test("crash diagnostics recognize debugger, sanitizer, layout, and read-only pro
     { id: "asan", name: "bash", args: { cmd: "clang++ -g -fsanitize=address main.cpp", timeout: 30 } },
     { id: "gdb", name: "bash", args: { cmd: "gdb -batch -ex bt ./app", timeout: 30 } },
     { id: "layout", name: "bash", args: { cmd: "printf 'sizeof record' && ./layout_probe", timeout: 30 } },
-    { id: "read", name: "view_file", args: { path: "src/main.cpp" } },
+    { id: "read", name: "view_file", args: { path: "src/main.cpp", startLine: 1, endLine: 40 } },
   ];
 
   assert.equal(calls.every(isCrashDiagnosticToolCall), true);

@@ -7,11 +7,13 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { pushModelCallContext, recordModelCall } from "../../src/model/observability.js";
+import { runWithReaperDevMode } from "../../src/runtime/dev-mode.js";
 
 const execFile = promisify(execFileCallback);
 
 test("recordModelCall writes a generation event with prompt and response to the run-scoped log", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "reaper-model-call-"));
+  await runWithReaperDevMode(true, async () => {
   const release = pushModelCallContext({
     workspaceRoot: root,
     runId: "test-run",
@@ -68,6 +70,7 @@ test("recordModelCall writes a generation event with prompt and response to the 
   assert.equal(event.metadata.usage.inputTokens, 2000);
   assert.match(event.input.prompt, /Plan the task/);
   assert.match(event.output.content, /"steps":\[\]/);
+  });
   await rm(root, { recursive: true, force: true });
 });
 

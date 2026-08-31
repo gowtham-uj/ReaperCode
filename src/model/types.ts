@@ -96,6 +96,13 @@ export const ModelCapabilitiesSchema = z
     jsonMode: z.boolean(),
     structuredOutput: z.boolean(),
     embeddings: z.boolean(),
+    // Vision flags. Optional (default false) so existing configs and
+    // tests that omit them still parse; the adaptive capability registry
+    // maps these onto its `imageInput`/`videoInput` fields so the
+    // screenshot/computer-bridge path is gated by real model truth
+    // instead of a permanently-undefined `imageInput`.
+    imageInput: z.boolean().optional(),
+    videoInput: z.boolean().optional(),
     maxContextTokens: z.number().int().positive().optional(),
     maxOutputTokens: z.number().int().positive().optional(),
   })

@@ -1,4 +1,6 @@
 
+import { assertPublicUrl } from "../../util/ssrf-guard.js";
+
 export interface WebFetchArgs {
   url: string;
   extractText?: boolean;
@@ -15,6 +17,11 @@ export async function webFetchTool(args: WebFetchArgs): Promise<{
   if (!/^https?:\/\//i.test(url)) {
     url = "https://" + url;
   }
+
+  // Reject SSRF targets (localhost, private/link-local/metadata IPs, internal
+  // hostnames) before issuing the request. redirect:"follow" would otherwise
+  // let an external URL bounce into an internal endpoint.
+  await assertPublicUrl(url);
 
   const res = await fetch(url, {
     headers: {

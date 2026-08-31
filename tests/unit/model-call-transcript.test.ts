@@ -10,6 +10,7 @@ import {
   renderModelCallTranscript,
   collectModelCallTranscripts,
 } from "../../src/logging/model-call-log.js";
+import { runWithReaperDevMode } from "../../src/runtime/dev-mode.js";
 
 test("renderModelCallTranscript includes system, messages, and output", () => {
   const text = renderModelCallTranscript("0001-generate", {
@@ -50,6 +51,7 @@ test("logModelCall writes json and does not write a fat transcript by default", 
   const root = mkdtempSync(path.join(tmpdir(), "reaper-model-io-"));
   const fakeGithubToken = `ghp_${"D".repeat(36)}`;
   try {
+    await runWithReaperDevMode(true, async () => {
     setModelCallLogContext({ workspaceRoot: root, runId: "run-test" });
     await logModelCall({
       kind: "generate",
@@ -82,6 +84,7 @@ test("logModelCall writes json and does not write a fat transcript by default", 
       fatMissing = true;
     }
     assert.equal(fatMissing, true);
+    });
   } finally {
     setModelCallLogContext(undefined);
     rmSync(root, { recursive: true, force: true });

@@ -18,9 +18,40 @@
  */
 
 import { DEFAULT_MODEL_CAPABILITIES, type ModelCapabilities } from "./types.js";
+import type { ModelCapabilities as ProfileModelCapabilities } from "../model/types.js";
 
 export { DEFAULT_MODEL_CAPABILITIES };
 export type { ModelCapabilities };
+
+/**
+ * Convert a canonical model-profile capability block (the `.strict()`
+ * `ModelCapabilitiesSchema` from `src/model/types.ts`) into the adaptive
+ * registry's runtime capability shape.
+ *
+ * This is the single migration point between the two contracts. Exec
+ * providers describe themselves through the profile schema
+ * (`streaming`/`toolCalling`/`jsonMode`/`imageInput`/...); the adaptive
+ * registry reads `imageInput`/`videoInput`/`toolUse`. Without this
+ * bridge `isVisualSupported()` would read an always-undefined
+ * `imageInput` and the visual path would be silently dead for every
+ * exec provider.
+ */
+export function adaptiveCapabilitiesFromProfile(caps: ProfileModelCapabilities): ModelCapabilities {
+  return {
+    imageInput: caps.imageInput ?? false,
+    videoInput: caps.videoInput ?? false,
+    toolUse: caps.toolCalling,
+    streaming: caps.streaming,
+    // The profile schema has no parallel-tool flag; native tool calling
+    // is the closest signal. Providers that forbid parallel tool use can
+    // override via an explicit registry.
+    parallelToolUse: caps.toolCalling,
+    ...(caps.maxContextTokens !== undefined ? { maxInputTokens: caps.maxContextTokens } : {}),
+    ...(caps.maxOutputTokens !== undefined ? { maxOutputTokens: caps.maxOutputTokens } : {}),
+    detectedAt: new Date(0).toISOString(),
+    source: "explicit",
+  };
+}
 
 export interface ModelCapabilitiesRegistryOptions {
   /** Explicit capability list. Wins over probe. */
@@ -38,6 +69,15 @@ export class ModelCapabilitiesRegistry {
     this.explicit = opts.capabilities;
     this.probeFn = opts.probe;
     this.cached = this.explicit ?? { ...DEFAULT_MODEL_CAPABILITIES, detectedAt: new Date().toISOString() };
+  }
+
+  /**
+   * Build a registry from a canonical model-profile capability block,
+   * so exec providers can seed the visual/tool-use flags without
+   * hand-constructing the adaptive shape.
+   */
+  static fromProfile(caps: ProfileModelCapabilities): ModelCapabilitiesRegistry {
+    return new ModelCapabilitiesRegistry({ capabilities: adaptiveCapabilitiesFromProfile(caps) });
   }
 
   /** Refresh the cached capabilities by calling the probe. */

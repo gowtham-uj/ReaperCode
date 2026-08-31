@@ -58,6 +58,7 @@ export async function searchMemory(
   options: MemorySearchOptions = {},
 ): Promise<MemorySearchHit[]> {
   const maxHits = options.maxHits ?? DEFAULT_MAX_HITS;
+  const includeBody = options.includeBody ?? false;
   const summaries = loadAllSummaries(workspaceRoot).filter((s) => {
     if (options.sessionId && s.sessionId !== options.sessionId) return false;
     if (options.since && s.createdAt < options.since) return false;
@@ -68,14 +69,18 @@ export async function searchMemory(
   if (queryTokens.size === 0) {
     // No query tokens: return the most recent N.
     const recent = summaries.slice(-maxHits);
-    return recent.map((s) => summaryToHit(s, 0, options.includeBody ?? false, workspaceRoot));
+    return recent.map((s) => summaryToHit(s, 0, includeBody, workspaceRoot));
   }
   const hits: MemorySearchHit[] = [];
   for (const s of summaries) {
-    const haystackTokens = tokenize(`${s.body} ${s.query ?? ""}`);
+    // Score against the FULL body, not the 500-char index preview. Key
+    // facts in sections 4-9 were invisible to retrieval when scoring only
+    // `bodyPreview`, silently dropping evidence across long sessions.
+    const fullBody = includeBody ? s.body : (s.file ? await loadSummaryBody(workspaceRoot, s.id) : s.body) ?? s.body;
+    const haystackTokens = tokenize(`${fullBody} ${s.query ?? ""}`);
     let score = 0;
     for (const t of queryTokens) if (haystackTokens.has(t)) score += 1;
-    if (score > 0) hits.push(summaryToHit(s, score, options.includeBody ?? false, workspaceRoot));
+    if (score > 0) hits.push(summaryToHit(s, score, includeBody, workspaceRoot));
   }
   hits.sort((a, b) => b.score - a.score || b.createdAt.localeCompare(a.createdAt));
   return hits.slice(0, maxHits);
@@ -90,8 +95,9 @@ function summaryToHit(
   const hit: MemorySearchHit = {
     id: s.id,
     createdAt: s.createdAt,
-    file: `${workspaceRoot}/.reaper/summaries/...`, // placeholder; real path is in index
-    bodyPreview: s.body,
+    // Real absolute path so `file_view` can actually open the summary.
+    file: s.file ?? `${workspaceRoot}/.reaper/summaries/${s.id}.md`,
+    bodyPreview: s.body.slice(0, 500),
     score,
   };
   if (s.query) hit.query = s.query;

@@ -16,38 +16,54 @@ import type { HookEvent, HookEventName, HookHandler, HookResult } from "./types.
 const DEFAULT_OUTPUT_LIMIT = 4096;
 const SECURITY_EVENTS: HookEventName[] = ["PreToolUse", "Stop", "UserPromptSubmit", "PreSkillInvoke"];
 
-/** Map a HookEventName to the corresponding ExtensionBus event.
- *  Returns null when the bus has no matching event (e.g. "Stop",
- *  which is an engine-level event the bus does not mirror). */
+/**
+ * Map a HookEventName to the corresponding ExtensionBus event.
+ *
+ * Returns null only when the bus genuinely has no equivalent (`Stop`,
+ * the memory/compaction events, the streaming deltas) — those stay
+ * hook-only. Previously the mapping collapsed an entire case group to
+ * `null` except `SessionEnd`, so `PreToolUse`/`PostToolUse` and the
+ * skill-invoke events never reached the bus at all, and the bus-declared
+ * `SkillSelected` / `FileChanged` events had no mapping either.
+ */
 function toExtensionEvent(name: HookEventName): ExtensionEvent | null {
   switch (name) {
     case "PreToolUse":
+      return "PreToolUse";
     case "PostToolUse":
+    case "PostToolUseFailure":
+      return "PostToolUse";
     case "PreSkillInvoke":
+      return "PreSkillInvoke";
     case "PostSkillInvoke":
+      return "PostSkillInvoke";
+    case "SkillSelected":
+      return "SkillSelected";
+    case "FileChanged":
+      return "FileChanged";
     case "SessionStart":
+      return "SessionStart";
     case "SessionEnd":
+      return "SessionShutdown";
+    case "EngineTurnComplete":
+      return "CompleteTask";
+    // No bus equivalent — these remain hook-only.
+    case "Stop":
+    case "UserPromptSubmit":
+    case "SkillCreated":
+    case "MemoryCandidate":
     case "MemoryWritten":
     case "MemoryRejected":
     case "VisualArtifactAdded":
     case "VisualAnalysisCompleted":
     case "PreCompact":
     case "PostCompact":
-      // Bus-level equivalents. We map any *additional* lifecycle
-      // events the bus does not declare to a sensible "CompleteTask"
-      // sentinel so consumers that listen on that get visibility.
-      return name === "SessionEnd" ? "SessionShutdown" : null;
-    case "UserPromptSubmit":
-    case "SkillCreated":
-    case "MemoryCandidate":
-    case "PostToolUseFailure":
     case "AssistantStreamDelta":
     case "AssistantStreamComplete":
     case "AssistantMessageDelta":
     case "AssistantMessageComplete":
     case "ReasoningDelta":
     case "ReasoningComplete":
-    case "EngineTurnComplete":
       return null;
     default:
       return null;
@@ -116,7 +132,12 @@ export class Hooks {
     // swallowed because the runtime is already in a committed state.
     const busEvent = toExtensionEvent(event.name);
     if (busEvent) {
-      getExtensionBus().emit(busEvent, { event: event.name, payload: event.payload, result }).catch(() => {});
+      // `hookOrigin` marks this as a re-emit of a hook that already ran.
+      // The hook bridge subscribes to *both* surfaces, so without the
+      // marker every mapped event would dispatch to the HookRunner twice.
+      getExtensionBus()
+        .emit(busEvent, { event: event.name, payload: event.payload, result, hookOrigin: true })
+        .catch(() => {});
     }
     return result;
   }

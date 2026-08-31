@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { logLangfuseEvent } from "../logging/langfuse.js";
 import { displayModelProfile, getLegacyModelRole, resolveModelRoleAlias } from "./types.js";
@@ -37,18 +38,32 @@ export interface ModelCallContext {
   system?: string;
 }
 
-let activeStack: ModelCallContext[] = [];
+interface ModelCallContextStore {
+  stack: ModelCallContext[];
+}
+
+const modelCallContextStorage = new AsyncLocalStorage<ModelCallContextStore>();
+const legacyActiveStack: ModelCallContext[] = [];
+
+/** Run work with a model-call context isolated to the current async call tree. */
+export function runWithModelCallContext<T>(ctx: ModelCallContext, fn: () => T): T {
+  const parent = modelCallContextStorage.getStore()?.stack ?? [];
+  return modelCallContextStorage.run({ stack: [...parent, ctx] }, fn);
+}
 
 export function pushModelCallContext(ctx: ModelCallContext): () => void {
-  activeStack.push(ctx);
+  const scopedStack = modelCallContextStorage.getStore()?.stack;
+  const stack = scopedStack ?? legacyActiveStack;
+  stack.push(ctx);
   return () => {
-    const idx = activeStack.lastIndexOf(ctx);
-    if (idx >= 0) activeStack.splice(idx, 1);
+    const idx = stack.lastIndexOf(ctx);
+    if (idx >= 0) stack.splice(idx, 1);
   };
 }
 
 export function getActiveModelCallContext(): ModelCallContext | undefined {
-  return activeStack.length ? activeStack[activeStack.length - 1] : undefined;
+  const stack = modelCallContextStorage.getStore()?.stack ?? legacyActiveStack;
+  return stack.length ? stack[stack.length - 1] : undefined;
 }
 
 export async function recordModelCall(record: ModelCallRecord, messages: Array<{ role: string; content: string }>, response: { content: string; finishReason?: string; toolCalls?: unknown[] }): Promise<void> {

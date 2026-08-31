@@ -12,6 +12,8 @@
  * default the user would see if they ran `reaper init-config`.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import type { ReaperConfig } from "./model-config.js";
 import {
   clampSoftCapTokens,
@@ -253,7 +255,7 @@ const DEFAULTS: TunablesCache = {
     mainAgentTransportRetryLimit: 2,
     modelCallTimeoutMs: 120_000,
     modelRouterLlmDecisions: false,
-    permissionMode: "yolo",
+    permissionMode: "accept_edits",
     printReasoning: false,
     progressGuardV2: true,
     rescueMaxAttemptsPerDiagnostic: 1,
@@ -282,11 +284,12 @@ const DEFAULTS: TunablesCache = {
 };
 
 let CACHE: TunablesCache = structuredClone(DEFAULTS);
+const tunablesStorage = new AsyncLocalStorage<TunablesCache>();
 
-export function applyConfigToTunables(config: ReaperConfig): TunablesCache {
+function buildTunables(config: ReaperConfig): TunablesCache {
   const rt = config.runtimeTunables;
   const cm = (config as { contextManagement?: Record<string, number | boolean | string | null> }).contextManagement ?? {};
-  CACHE = {
+  return {
     bash: {
       defaultTimeoutMs: rt.bashDefaultTimeoutMs,
       idleTimeoutMs: rt.bashIdleTimeoutMs,
@@ -390,45 +393,55 @@ export function applyConfigToTunables(config: ReaperConfig): TunablesCache {
       workspacePathAliases: rt.workspacePathAliases,
     },
   };
+}
+
+/** Apply config to the process fallback used outside a managed run scope. */
+export function applyConfigToTunables(config: ReaperConfig): TunablesCache {
+  CACHE = buildTunables(config);
   return CACHE;
+}
+
+/** Run work with an isolated set of tunables for the current async call tree. */
+export function runWithConfigTunables<T>(config: ReaperConfig, fn: () => T): T {
+  return tunablesStorage.run(buildTunables(config), fn);
 }
 
 export function getTunables(): Readonly<TunablesCache> {
-  return CACHE;
+  return tunablesStorage.getStore() ?? CACHE;
 }
 
 export function getBashTunables(): Readonly<TunablesCache["bash"]> {
-  return CACHE.bash;
+  return getTunables().bash;
 }
 
 export function getContextTunables(): Readonly<TunablesCache["contextManagement"]> {
-  return CACHE.contextManagement;
+  return getTunables().contextManagement;
 }
 
 export function getBgTunables(): Readonly<TunablesCache["bg"]> {
-  return CACHE.bg;
+  return getTunables().bg;
 }
 
 export function getEngineTunables(): Readonly<TunablesCache["engine"]> {
-  return CACHE.engine;
+  return getTunables().engine;
 }
 
 export function getRetryTunables(): Readonly<TunablesCache["retry"]> {
-  return CACHE.retry;
+  return getTunables().retry;
 }
 
 export function getSandboxTunables(): Readonly<TunablesCache["sandbox"]> {
-  return CACHE.sandbox;
+  return getTunables().sandbox;
 }
 
 export function getComputerTunables(): Readonly<TunablesCache["computer"]> {
-  return CACHE.computer;
+  return getTunables().computer;
 }
 
 export function getBrowserTunables(): Readonly<TunablesCache["browser"]> {
-  return CACHE.browser;
+  return getTunables().browser;
 }
 
 export function getConcurrencyTunables(): Readonly<TunablesCache["concurrency"]> {
-  return CACHE.concurrency;
+  return getTunables().concurrency;
 }

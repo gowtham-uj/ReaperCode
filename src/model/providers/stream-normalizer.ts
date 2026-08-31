@@ -14,13 +14,6 @@
  */
 import type { StreamEvent } from "../types.js";
 
-/**
- * Module-level UTF-8 decoder reused across every streaming
- * response. Constructing one per call costs ~1µs + a finalizer; on
- * busy turns the allocation shows up in profiles.
- */
-const SSE_DECODER = new TextDecoder();
-
 interface OpenAIToolCallDelta {
   index?: number;
   id?: string;
@@ -111,7 +104,10 @@ export async function* normalizeLiteLLMStream(
     throw new Error("LiteLLM streaming response did not include a body");
   }
 
-  const decoder = SSE_DECODER;
+  // A fresh decoder per call: TextDecoder carries inter-call UTF-8 state with
+  // `{ stream: true }`, so a module-level singleton would let a pending
+  // multi-byte sequence from one concurrent stream corrupt another's decode.
+  const decoder = new TextDecoder();
   const state = createState();
   let buffer = "";
   const reader = response.body.getReader();
@@ -132,6 +128,7 @@ export async function* normalizeLiteLLMStream(
         const payload = line.slice("data:".length).trim();
         if (payload === "[DONE]") {
           if (!state.ended) {
+            const hadToolCalls = state.toolCalls.size > 0;
             for (const tc of state.toolCalls.values()) {
               if (tc.emitted) continue;
               yield {
@@ -146,8 +143,7 @@ export async function* normalizeLiteLLMStream(
             yield {
               type: "message_end",
               data: {
-                finishReason: state.finishReason ?? "tool_calls",
-                ...(state.finishReason && state.finishReason !== "stop" ? {} : { finishReason: "tool_calls" }),
+                finishReason: state.finishReason ?? (hadToolCalls ? "tool_calls" : "stop"),
               },
             };
             state.ended = true;

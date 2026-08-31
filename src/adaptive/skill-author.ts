@@ -32,6 +32,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, unlinkSync, rmdirSync } from "node:fs";
 import { join,  dirname} from "node:path";
+import os from "node:os";
 
 import type { ReaperSkill, SkillScope, SkillType, SkillValidationSpec, SkillMemoryPolicy, SkillReference } from "./types.js";
 
@@ -174,9 +175,9 @@ export function validateSkillFields(fm: Record<string, unknown>): { ok: true; no
 /*                              Skill IO                                       */
 /* -------------------------------------------------------------------------- */
 
-export function skillDirName(workspaceRoot: string, scope: SkillScope, builtinRoot?: string): string {
+export function skillDirName(workspaceRoot: string, scope: SkillScope, builtinRoot?: string, userHome?: string): string {
   if (scope === "project") return join(workspaceRoot, ".reaper", "skills");
-  if (scope === "user") return join(process.env.HOME ?? "~", ".reaper", "skills");
+  if (scope === "user") return join(userHome ?? os.homedir(), ".reaper", "skills");
   if (scope === "builtin") return builtinRoot ?? join(workspaceRoot, ".reaper", "skills-builtin");
   throw new Error(`unknown scope ${scope}`);
 }
@@ -310,15 +311,29 @@ export interface CreateSkillInput {
 }
 
 export function createSkill(input: CreateSkillInput): ReaperSkill {
-  const dir = skillDirName(input.workspaceRoot, input.scope, input.builtinRoot);
-  if (input.scope === "user" && input.userHome) {
-    const homeDir = join(input.userHome, ".reaper", "skills");
-    return createSkillAt(homeDir, input);
-  }
+  const dir = skillDirName(input.workspaceRoot, input.scope, input.builtinRoot, input.userHome);
   return createSkillAt(dir, input);
 }
 
+/**
+ * C5: reject skill names that could escape the skill directory via path
+ * traversal (`..`), separators, or absolute paths before any `join`. This
+ * is a hard gate shared by create/disable/delete so a crafted name can
+ * neither write outside `~/.reaper/skills` nor recursively delete an
+ * arbitrary user-writable directory.
+ */
+const SAFE_SKILL_NAME_RE = /^[A-Za-z0-9._-]+$/;
+
+function assertSafeSkillName(name: string): void {
+  if (!SAFE_SKILL_NAME_RE.test(name) || name === "." || name === "..") {
+    throw new Error(
+      `Invalid skill name '${name}': only letters, digits, '.', '_' and '-' are allowed, and it must not be a path.`,
+    );
+  }
+}
+
 function createSkillAt(baseDir: string, input: CreateSkillInput): ReaperSkill {
+  assertSafeSkillName(input.name);
   const skillDir = join(baseDir, input.name);
   mkdirSync(skillDir, { recursive: true });
   const now = new Date().toISOString();
@@ -386,10 +401,11 @@ export function serializeSkill(s: ReaperSkill): string {
 }
 
 export function disableSkill(workspaceRoot: string, name: string, scope: SkillScope, builtinRoot?: string, userHome?: string, reason?: string): boolean {
+  assertSafeSkillName(name);
   // Resolve target path directly without calling skillDirName with the
   // awkward empty-string sentinel — pick the right base by scope.
-  const baseDir = scope === "user" && userHome
-    ? join(userHome, ".reaper", "skills")
+  const baseDir = scope === "user"
+    ? join(userHome ?? os.homedir(), ".reaper", "skills")
     : scope === "builtin" && builtinRoot
       ? builtinRoot
       : join(workspaceRoot, ".reaper", "skills");
@@ -403,8 +419,9 @@ export function disableSkill(workspaceRoot: string, name: string, scope: SkillSc
 }
 
 export function deleteSkill(workspaceRoot: string, name: string, scope: SkillScope, builtinRoot?: string, userHome?: string): boolean {
+  assertSafeSkillName(name);
   let target: string;
-  if (scope === "user" && userHome) target = join(userHome, ".reaper", "skills", name);
+  if (scope === "user") target = join(userHome ?? os.homedir(), ".reaper", "skills", name);
   else if (scope === "builtin" && builtinRoot) target = join(builtinRoot, name);
   else target = join(workspaceRoot, ".reaper", "skills", name);
   if (!existsSync(target)) return false;

@@ -65,6 +65,64 @@ node bin/reaper exec run \
   --prompt "Find flaky tests and tell me which ones"
 ```
 
+## WebSocket app server
+
+Run Reaper as a persistent JSON-RPC 2.0 server:
+
+```bash
+reaper app-server --listen ws://127.0.0.1:0 --workspace /path/to/project
+```
+
+The first stdout line is a machine-readable ready record with the port chosen by the OS:
+
+```json
+{"type":"reaper.app-server.ready","protocolVersion":1,"url":"ws://127.0.0.1:43127/","healthUrl":"http://127.0.0.1:43127/healthz","pid":12345}
+```
+
+Loopback listeners can run without authentication. A non-loopback listener refuses to start unless you pass a bearer token. Browser WebSocket connections are rejected by default because they send an `Origin` header.
+
+```bash
+reaper app-server \
+  --listen ws://0.0.0.0:8787 \
+  --auth-token-file ~/.reaper/app-server-token \
+  --max-concurrent-turns 2
+```
+
+Clients send the token as `Authorization: Bearer <token>` during the WebSocket upgrade. Reaper never writes this token into thread metadata or journals.
+
+Every connection must initialize before calling another method:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientInfo":{"name":"my-ui"}}}
+```
+
+Start a persistent thread, then start a turn:
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"thread/start","params":{"threadId":"fix-auth","provider":"openai","model":"gpt-5.4","subscribe":true}}
+{"jsonrpc":"2.0","id":3,"method":"turn/start","params":{"threadId":"fix-auth","input":[{"type":"text","text":"Find and fix the authentication race"}]}}
+```
+
+The server sends assistant text, reasoning, tool lifecycle, and command output as separate notifications while the turn is running. It uses Codex-style item shapes and methods such as `item/started`, `item/agentMessage/delta`, `item/reasoning/textDelta`, `item/commandExecution/outputDelta`, `item/completed`, and `turn/completed`. `item/completed` carries the authoritative final item, while delta notifications carry only the text or output to append.
+
+Threads outlive WebSocket connections. Disconnecting removes that client's subscription but does not stop the turn. Reconnect with `thread/resume` and an `afterSequence` offset to replay the bounded in-memory event window. Use `thread/read` to load persisted conversation history after a process restart.
+
+```json
+{"jsonrpc":"2.0","id":4,"method":"thread/resume","params":{"threadId":"fix-auth","afterSequence":120,"subscribe":true}}
+{"jsonrpc":"2.0","id":5,"method":"turn/steer","params":{"threadId":"fix-auth","turnId":"turn-id-from-start","message":"Also add a regression test"}}
+{"jsonrpc":"2.0","id":6,"method":"turn/interrupt","params":{"threadId":"fix-auth","turnId":"turn-id-from-start"}}
+```
+
+Steering is applied at the next model-loop boundary. It does not alter a provider request already in flight.
+
+Reaper threads use `yolo` permission mode by default, matching `reaper exec run`. Normal tools do not ask for approval in this mode, though hard-deny safety rules still apply. A thread started with `strict`, `auto`, or `accept_edits` can receive server-initiated approval requests such as `item/commandExecution/requestApproval`. The client answers with the same JSON-RPC id:
+
+```json
+{"jsonrpc":"2.0","id":"server-request-id","result":{"decision":"accept"}}
+```
+
+A timeout, interrupt, thread closure, or reviewer disconnect never auto-approves a pending tool.
+
 ## Providers
 
 `--provider` accepts:

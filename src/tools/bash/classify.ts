@@ -77,6 +77,13 @@ export function classifyBashCommand(command: string): BashClassification {
     return { category: "network", readOnly: false, reason: "External network fetch", network: true };
   }
 
+  // In-place editors write the workspace even with no redirection.
+  // `sed -i`, `perl -i`, and GNU `awk -i inplace` all rewrite their
+  // input files, so they must not fall through to the read allowlist.
+  if (hasInPlaceEdit(command)) {
+    return { category: "write", readOnly: false, reason: "In-place file edit", network: false };
+  }
+
   if (READ_COMMANDS.has(first) && !hasRedirectOut) {
     return { category: "read", readOnly: true, reason: `read command: ${first}${hasPipe ? " (piped)" : ""}`, network: false };
   }
@@ -86,6 +93,21 @@ export function classifyBashCommand(command: string): BashClassification {
   }
 
   return { category: "unknown", readOnly: false, reason: "Command not classified as read-only", network: false };
+}
+
+/**
+ * Detect in-place editing invocations. `sed`/`perl` accept `-i`
+ * standalone, bundled (`-ni`, `-i.bak`), or as `--in-place`; gawk uses
+ * `-i inplace`.
+ */
+function hasInPlaceEdit(command: string): boolean {
+  // `--in-place[=SUFFIX]`, or a short-flag cluster containing `i`
+  // (`-i`, `-i.bak`, `-pi`, `-ni`). Over-approximating toward "write"
+  // is the safe direction for a read-only classification.
+  if (/\b(?:sed|perl)\b[^|;&]*\s--in-place\b/.test(command)) return true;
+  if (/\b(?:sed|perl)\b[^|;&]*\s-[A-Za-z]*i(?:[A-Za-z]*|\.\S*)(?:\s|$)/.test(command)) return true;
+  if (/\b(?:g?awk)\b[^|;&]*\s-i\s+inplace\b/.test(command)) return true;
+  return false;
 }
 
 export function isReadOnlyBashCommand(command: string): { allow: boolean; reason: string } {

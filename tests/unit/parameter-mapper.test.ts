@@ -219,7 +219,7 @@ test("assistant reasoning is echoed as reasoning_content for plain assistant mes
       role: "secondary_model",
       messages: [
         { role: "user", content: "hi" },
-        { role: "assistant", content: "hello", reasoningContent: "hidden chain" },
+        { role: "assistant", content: "hello", reasoning: "hidden chain" },
       ],
     },
     profileWithModel("litellm", "deepseek-v4-flash"),

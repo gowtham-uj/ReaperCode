@@ -55,6 +55,8 @@ export interface PersistentSummary {
   reattachedFiles: number;
   query?: string;
   body: string;
+  /** Absolute path to the summary's `.md` file (when loaded from the index). */
+  file?: string;
   epoch?: number;
   checkpoint?: CompactionCheckpoint;
 }
@@ -254,6 +256,7 @@ export function loadAllSummaries(workspaceRoot: string): PersistentSummary[] {
         ...(r.query !== undefined ? { query: r.query } : {}),
         ...(r.epoch !== undefined ? { epoch: r.epoch } : {}),
         ...(r.checkpoint !== undefined ? { checkpoint: r.checkpoint } : {}),
+        file: r.file,
         body: r.bodyPreview, // not the full body, lazy-loaded below
       });
     } catch {

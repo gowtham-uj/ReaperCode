@@ -105,7 +105,12 @@ export function installHookBridge(opts: BridgeOptions): () => void {
   // to each event we know about and forward.
   for (const event of BRIDGE_BUS_EVENTS) {
     const off = bus.on(event, (e, payload) => {
-      const rec = (payload as { payload?: Record<string, unknown> } | undefined)?.payload ?? {};
+      const envelope = payload as { payload?: Record<string, unknown>; hookOrigin?: boolean } | undefined;
+      // `Hooks.emit` re-emits mapped events onto the bus. Those already
+      // dispatched via the Hooks subscription above, so forwarding them
+      // again would run every extension handler twice.
+      if (envelope?.hookOrigin === true) return undefined;
+      const rec = envelope?.payload ?? {};
       schedule(() => { void opts.runner.dispatch(event, rec); }, microtask);
       return undefined;
     });

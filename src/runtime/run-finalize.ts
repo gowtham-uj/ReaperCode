@@ -66,7 +66,13 @@ export function classifyRunFinalStatus(state: {
   split?: SplitToolCalls | undefined;
   toolResults: ToolResult[] | undefined;
   completionGateExhausted?: boolean | undefined;
-}): "completed" | "failed" {
+  aborted?: boolean | undefined;
+  loopCapped?: boolean | undefined;
+}): "completed" | "failed" | "cancelled" {
+  // R4: an abort or iteration-cap stop must never be reported as a
+  // natural "completed" run. Check these before any completion shortcut.
+  if (state.aborted) return "cancelled";
+  if (state.loopCapped) return "cancelled";
   if (state.completionGateExhausted) return "failed";
   if (state.explicitVerification?.ok === false) return "failed";
   // Verification MUST be checked before any completion-signal shortcut.

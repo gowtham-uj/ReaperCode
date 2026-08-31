@@ -21,6 +21,7 @@ export async function executeToolCalls(
   for (const island of partition.islands) {
     if (abortSignal?.aborted) {
       await recoverySession.abort("Execution aborted by signal");
+      markRolledBack(results, pendingWriteResultIndexes, "Execution aborted by signal");
       return { results, aborted: true };
     }
 
@@ -51,11 +52,21 @@ export async function executeToolCalls(
 
   if (abortSignal?.aborted) {
     await recoverySession.abort("Execution aborted by signal");
+    markRolledBack(results, pendingWriteResultIndexes, "Execution aborted by signal");
     return { results, aborted: true };
   }
 
   if (recoverySession.hasPendingWrites()) {
-    await recoverySession.flushFinal();
+    try {
+      await recoverySession.flushFinal();
+    } catch (error) {
+      // Flush failure (e.g. merge conflict) means the staged writes were NOT
+      // applied to disk. Mark every pending write result rolled back so the
+      // model does not keep building on a file that never landed (V3).
+      const cause = error instanceof Error ? error.message : String(error);
+      markRolledBack(results, pendingWriteResultIndexes, cause);
+      throw error;
+    }
   }
 
   return { results, aborted: false };
@@ -116,7 +127,7 @@ async function executeConcurrent(
 ): Promise<ToolResult[]> {
   if (pool.length === 0) return [];
   const effectiveConcurrency = Math.max(1, Math.min(concurrency, pool.length));
-  const settled: Array<{ result: ToolResult; index: number; completedAt: bigint }> = [];
+  const settled: Array<{ result: ToolResult; index: number }> = [];
   let cursor = 0;
   // Bounded-concurrency runner: a small semaphore ensures we never
   // have more than `effectiveConcurrency` in-flight promises, and
@@ -134,7 +145,7 @@ async function executeConcurrent(
     const p = (async () => {
       try {
         const result = await executeOne(call, executor);
-        settled.push({ result, index, completedAt: process.hrtime.bigint() });
+        settled.push({ result, index });
       } finally {
         inFlight -= 1;
       }

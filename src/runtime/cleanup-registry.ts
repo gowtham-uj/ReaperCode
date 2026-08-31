@@ -1,52 +1,98 @@
 /**
- * Cleanup Registry: global LIFO registry for graceful shutdown resources.
- * Pattern borrowed from cc-haha's cleanupRegistry.ts.
+ * Cleanup registry with one LIFO scope per async Reaper run.
+ *
+ * Callers outside a managed run keep using the legacy process scope. Crash
+ * handlers drain every live scope because an uncaught process error affects
+ * all runs, while normal run completion drains only its own scope.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { isReaperDevMode } from "./dev-mode.js";
+
 export type CleanupFn = () => Promise<void>;
 
-const registry = new Set<CleanupFn>();
-let activeRunDir: string | undefined;
-let handlersInstalled = false;
-
-export function registerCleanup(fn: CleanupFn): () => void {
-  registry.add(fn);
-  return () => {
-    registry.delete(fn);
-  };
+interface CleanupScope {
+  registry: Set<CleanupFn>;
+  runDir?: string;
 }
 
-export async function runCleanupFunctions(): Promise<void> {
-  const entries = Array.from(registry);
-  registry.clear();
-  // Drain in LIFO order
-  for (let i = entries.length - 1; i >= 0; i--) {
+const cleanupStorage = new AsyncLocalStorage<CleanupScope>();
+const legacyScope: CleanupScope = { registry: new Set<CleanupFn>() };
+const activeScopes = new Set<CleanupScope>();
+let handlersInstalled = false;
+
+function currentScope(): CleanupScope {
+  return cleanupStorage.getStore() ?? legacyScope;
+}
+
+async function drainScope(scope: CleanupScope): Promise<void> {
+  const entries = Array.from(scope.registry);
+  scope.registry.clear();
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
     try {
-      await entries[i]!();
+      await entries[index]!();
     } catch {
-      // Individual cleanup failures must not stop the chain
+      // Individual cleanup failures must not stop the chain.
     }
   }
 }
 
+/** Run work in an isolated cleanup scope and always drain it on exit. */
+export async function runWithCleanupScope<T>(
+  runDir: string | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const scope: CleanupScope = {
+    registry: new Set<CleanupFn>(),
+    ...(runDir ? { runDir } : {}),
+  };
+  activeScopes.add(scope);
+  try {
+    return await cleanupStorage.run(scope, fn);
+  } finally {
+    await drainScope(scope);
+    activeScopes.delete(scope);
+  }
+}
+
+export function registerCleanup(fn: CleanupFn): () => void {
+  const scope = currentScope();
+  scope.registry.add(fn);
+  return () => {
+    scope.registry.delete(fn);
+  };
+}
+
+/** Drain the active run scope, or the legacy scope outside a managed run. */
+export async function runCleanupFunctions(): Promise<void> {
+  await drainScope(currentScope());
+}
+
+/** Drain every live run plus the legacy scope after a process-level failure. */
+export async function runAllCleanupFunctions(): Promise<void> {
+  const scopes = new Set<CleanupScope>([legacyScope, ...activeScopes]);
+  await Promise.all(Array.from(scopes, (scope) => drainScope(scope)));
+}
+
 export function getRegisteredCleanupCount(): number {
-  return registry.size;
+  return currentScope().registry.size;
 }
 
 export function clearCleanupRegistry(): void {
-  registry.clear();
+  currentScope().registry.clear();
 }
 
 export function setActiveRunDir(runDir: string | undefined): void {
-  activeRunDir = runDir;
+  const scope = currentScope();
+  if (runDir) scope.runDir = runDir;
+  else delete scope.runDir;
 }
 
 export function getActiveRunDir(): string | undefined {
-  return activeRunDir;
+  return currentScope().runDir;
 }
 
 export function installCrashHandlers(): void {
@@ -55,23 +101,19 @@ export function installCrashHandlers(): void {
 
   process.on("uncaughtException", async (error) => {
     console.error("[reaper] uncaughtException:", error);
-    await writeCrashResult(error, "uncaughtException");
-    await runCleanupFunctions();
+    await writeCrashResults(error, "uncaughtException");
+    await runAllCleanupFunctions();
     process.exit(1);
   });
 
   process.on("unhandledRejection", async (reason) => {
     console.error("[reaper] unhandledRejection:", reason);
     const error = reason instanceof Error ? reason : new Error(String(reason));
-    await writeCrashResult(error, "unhandledRejection");
-    await runCleanupFunctions();
+    await writeCrashResults(error, "unhandledRejection");
+    await runAllCleanupFunctions();
     process.exit(1);
   });
 
-  // Signal handlers: SIGTERM/SIGINT/SIGHUP leave orphan run dirs with
-  // no result.json unless we synthesize one. Without these, the next
-  // orphan-reap scan picks up a half-written run dir and the user has
-  // no record of why their run died.
   const onSignal = (signal: NodeJS.Signals): void => {
     void handleSignal(signal);
   };
@@ -81,27 +123,34 @@ export function installCrashHandlers(): void {
 }
 
 async function handleSignal(signal: NodeJS.Signals): Promise<void> {
-  // Avoid recursion if a signal fires during shutdown.
   try {
     process.removeAllListeners(signal);
   } catch {
-    // ignore
+    // Ignore listener cleanup failures during shutdown.
   }
   const error = new Error(`received ${signal}`);
   error.name = "SignalInterruption";
-  await writeCrashResult(error, signal);
-  await runCleanupFunctions();
-  // 128 + conventional signal number so shell sees the right code.
+  await writeCrashResults(error, signal);
+  await runAllCleanupFunctions();
   const code = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 129;
   process.exit(code);
 }
 
-async function writeCrashResult(error: Error, cause: string): Promise<void> {
-  if (!activeRunDir || !isReaperDevMode()) return;
+async function writeCrashResults(error: Error, cause: string): Promise<void> {
+  if (!isReaperDevMode()) return;
+  const runDirs = new Set<string>();
+  if (legacyScope.runDir) runDirs.add(legacyScope.runDir);
+  for (const scope of activeScopes) {
+    if (scope.runDir) runDirs.add(scope.runDir);
+  }
+  await Promise.all(Array.from(runDirs, (runDir) => writeCrashResult(runDir, error, cause)));
+}
+
+async function writeCrashResult(runDir: string, error: Error, cause: string): Promise<void> {
   try {
-    await mkdir(activeRunDir, { recursive: true });
+    await mkdir(runDir, { recursive: true });
     await writeFile(
-      path.join(activeRunDir, "result.json"),
+      path.join(runDir, "result.json"),
       JSON.stringify(
         {
           status: "crashed",
@@ -118,6 +167,6 @@ async function writeCrashResult(error: Error, cause: string): Promise<void> {
       "utf8",
     );
   } catch {
-    // Best-effort crash write
+    // Best-effort crash write.
   }
 }

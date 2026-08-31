@@ -5,7 +5,7 @@ import {
 } from "../event-formatter.js";
 import { parseJsonRpcRequest } from "../json-rpc.js";
 import { parseAgentRequestEnvelope, type TransportKind } from "../schemas.js";
-import { ConnectionPolicyError, SessionNotFoundError } from "../errors.js";
+import { describeConnectionError } from "../errors.js";
 import { SessionGateway } from "../session-gateway.js";
 
 export class WebSocketAdapter {
@@ -23,11 +23,11 @@ export class WebSocketAdapter {
       const response = formatJsonRpcSuccess(rpcRequest.id, result);
       return [...notifications, response].map((item) => JSON.stringify(item));
     } catch (error) {
-      const response = formatJsonRpcError(
-        rpcRequest.id,
-        error instanceof ConnectionPolicyError ? 403 : error instanceof SessionNotFoundError ? 404 : 500,
-        error instanceof Error ? error.message : "Unknown websocket adapter failure",
-      );
+      const info = describeConnectionError(error);
+      const response = formatJsonRpcError(rpcRequest.id, info.status, info.message, {
+        reason: info.code,
+        ...(info.issues !== undefined ? { issues: info.issues } : {}),
+      });
       return [JSON.stringify(response)];
     }
   }

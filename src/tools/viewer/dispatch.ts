@@ -11,7 +11,6 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -39,6 +38,21 @@ export interface ViewerDispatchContext {
   /** Optional callbacks the executor can wire in (snapshotting, write counts, …) */
   onBeforeView?: (path: string) => Promise<void>;
   onBeforeEdit?: (path: string) => Promise<void>;
+  /**
+   * Staged (write-ahead-log) view of the workspace. When the executor runs
+   * with a recovery session, `write_file`/`edit_file` stage content in the
+   * WAL rather than writing it to disk, so a viewer that reads the
+   * filesystem directly would report a just-written file as not found and
+   * an edited file with pre-edit content.
+   *
+   * `readStaged` returns the staged content, `null` when the path is
+   * staged for deletion, and `undefined` when nothing is staged for it
+   * (read from disk as usual). `writeStaged`, when present, replaces the
+   * viewer's own disk write so `file_edit` participates in the same
+   * atomic flush/rollback as every other mutation.
+   */
+  readStaged?: (absPath: string) => Promise<string | null | undefined>;
+  writeStaged?: (absPath: string, content: string) => Promise<void>;
 }
 
 interface ToolCallLike {
@@ -79,15 +93,45 @@ function countMatches(lines: string[], pattern: string, caseInsensitive: boolean
   }).length;
 }
 
-async function sha256OfPath(absPath: string): Promise<{ sha: string; mtimeMs: number; totalLines: number; content: string } | null> {
+interface FileState {
+  sha: string;
+  mtimeMs: number;
+  totalLines: number;
+  content: string;
+}
+
+function fileStateFromContent(content: string, mtimeMs: number): FileState {
+  return {
+    sha: createHash("sha256").update(content).digest("hex"),
+    mtimeMs,
+    totalLines: content.length === 0 ? 0 : content.split("\n").length,
+    content,
+  };
+}
+
+async function sha256OfPath(absPath: string): Promise<FileState | null> {
   try {
     const [content, st] = await Promise.all([readFile(absPath, "utf8"), stat(absPath)]);
-    const totalLines = content.length === 0 ? 0 : content.split("\n").length;
-    const sha = createHash("sha256").update(content).digest("hex");
-    return { sha, mtimeMs: Math.floor(st.mtimeMs), totalLines, content };
+    return fileStateFromContent(content, Math.floor(st.mtimeMs));
   } catch {
     return null;
   }
+}
+
+/**
+ * Read a file the way every viewer handler should: staged content first,
+ * disk as the fallback. Returns null when the file is absent from both
+ * (or staged for deletion).
+ */
+async function readViewerFile(absPath: string, ctx: ViewerDispatchContext): Promise<FileState | null> {
+  if (ctx.readStaged) {
+    const staged = await ctx.readStaged(absPath);
+    if (staged === null) return null; // staged for deletion
+    // Staged content has no disk mtime; 0 is a stable sentinel that keeps
+    // the viewer registry's freshness comparison self-consistent.
+    if (staged !== undefined) return fileStateFromContent(staged, 0);
+  }
+  return sha256OfPath(absPath);
 }
 
 function normalizeWorkspacePath(workspaceRoot: string, p: string): string | null {
@@ -137,14 +181,11 @@ async function handleFileView(
   if (!absPath) {
     return fail("permission_denied", `file_view: path "${parsed.data.path}" is not within the workspace root`);
   }
-  if (!existsSync(absPath)) {
-    return fail("not_found", `file_view: file not found: ${absPath}`);
-  }
   if (ctx.onBeforeView) await ctx.onBeforeView(absPath);
 
-  const fileState = await sha256OfPath(absPath);
+  const fileState = await readViewerFile(absPath, ctx);
   if (!fileState) {
-    return fail("io_error", `file_view: failed to read ${absPath}`);
+    return fail("not_found", `file_view: file not found: ${absPath}`);
   }
 
   const window = parsed.data.window ?? DEFAULT_WINDOW;
@@ -192,13 +233,10 @@ async function handleFileScroll(
   if (!absPath) {
     return fail("permission_denied", `file_scroll: path "${parsed.data.path}" is not within the workspace root`);
   }
-  if (!existsSync(absPath)) {
-    return fail("not_found", `file_scroll: file not found: ${absPath}`);
-  }
   if (ctx.onBeforeView) await ctx.onBeforeView(absPath);
 
-  const fileState = await sha256OfPath(absPath);
-  if (!fileState) return fail("io_error", `file_scroll: failed to read ${absPath}`);
+  const fileState = await readViewerFile(absPath, ctx);
+  if (!fileState) return fail("not_found", `file_scroll: file not found: ${absPath}`);
 
   // Ensure the registry has an entry for this path before scrolling.
   ctx.viewerRegistry.readOrInit(
@@ -254,13 +292,10 @@ async function handleFileFind(
   if (!absPath) {
     return fail("permission_denied", `file_find: path "${parsed.data.path}" is not within the workspace root`);
   }
-  if (!existsSync(absPath)) {
-    return fail("not_found", `file_find: file not found: ${absPath}`);
-  }
   if (ctx.onBeforeView) await ctx.onBeforeView(absPath);
 
-  const fileState = await sha256OfPath(absPath);
-  if (!fileState) return fail("io_error", `file_find: failed to read ${absPath}`);
+  const fileState = await readViewerFile(absPath, ctx);
+  if (!fileState) return fail("not_found", `file_find: file not found: ${absPath}`);
   const lines = fileState.content.split("\n");
 
   // Ensure registered before .find() so the anchor survives.
@@ -310,15 +345,11 @@ async function handleFileEdit(
   }
   if (ctx.onBeforeEdit) await ctx.onBeforeEdit(absPath);
 
-  let preContent: string | null = null;
-  try {
-    preContent = await readFile(absPath, "utf8");
-  } catch {
-    preContent = null;
-  }
-  if (preContent === null) {
+  const preState = await readViewerFile(absPath, ctx);
+  if (!preState) {
     return fail("not_found", `file_edit: file not found or not readable: ${absPath}`);
   }
+  const preContent = preState.content;
 
   const allLines = preContent.length === 0 ? [] : preContent.split("\n");
   const totalLines = allLines.length;
@@ -362,9 +393,15 @@ async function handleFileEdit(
     );
   }
 
-  // Persist + read back to refresh registry
-  await writeFile(absPath, postContent, "utf8");
-  const postFileState = await sha256OfPath(absPath);
+  // Persist + read back to refresh registry. When the executor supplies a
+  // staging sink the edit joins the WAL instead of hitting disk, so it
+  // flushes (or rolls back) atomically with the rest of the turn.
+  if (ctx.writeStaged) {
+    await ctx.writeStaged(absPath, postContent);
+  } else {
+    await writeFile(absPath, postContent, "utf8");
+  }
+  const postFileState = await readViewerFile(absPath, ctx);
   if (postFileState) {
     ctx.viewerRegistry.noteEdit(
       absPath,

@@ -433,9 +433,17 @@ export function isSensitiveEnvName(name: string, allowlist: ReadonlySet<string>)
   if (!name) return false;
   const normalized = name.toUpperCase();
 
-  // Allowlist always wins. Compare case-insensitively everywhere so a
-  // workspace opt-in via `childEnvAllowlist: ["my_token"]` matches even
-  // if the env actually contains `MY_TOKEN`.
+  // Always-drop list beats the allowlist — these control Node/shell
+  // behavior and are injection primitives, so a workspace must not be
+  // able to opt them back in.
+  for (const alwaysDrop of ALWAYS_DROP_EXACT) {
+    if (alwaysDrop.toUpperCase() === normalized) return true;
+  }
+
+  // Allowlist wins over the generic sensitive-name classification.
+  // Compare case-insensitively everywhere so a workspace opt-in via
+  // `childEnvAllowlist: ["my_token"]` matches even if the env actually
+  // contains `MY_TOKEN`.
   for (const allowed of allowlist) {
     if (allowed.toUpperCase() === normalized) return false;
   }
@@ -443,11 +451,6 @@ export function isSensitiveEnvName(name: string, allowlist: ReadonlySet<string>)
   // Never drop lookalikes.
   for (const lookalike of SENSITIVE_LOOKALIKE_EXACT) {
     if (lookalike.toUpperCase() === normalized) return false;
-  }
-
-  // Always-drop list.
-  for (const alwaysDrop of ALWAYS_DROP_EXACT) {
-    if (alwaysDrop.toUpperCase() === normalized) return true;
   }
 
   // Explicit exact matches.

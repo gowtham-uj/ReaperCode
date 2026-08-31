@@ -82,3 +82,30 @@ test("classifyRunFinalStatus: completionGateExhausted always returns failed", ()
   });
   assert.equal(status, "failed");
 });
+
+test("classifyRunFinalStatus: aborted run is cancelled, never completed", () => {
+  const status = classifyRunFinalStatus({
+    toolResults: [okResult()],
+    mode: "autonomous",
+    aborted: true,
+  });
+  assert.equal(status, "cancelled");
+});
+
+test("classifyRunFinalStatus: iteration-capped run is cancelled", () => {
+  const status = classifyRunFinalStatus({
+    toolResults: [okResult()],
+    mode: "autonomous",
+    loopCapped: true,
+  });
+  assert.equal(status, "cancelled");
+});
+
+test("classifyRunFinalStatus: abort overrides a would-be completed natural stop", () => {
+  const status = classifyRunFinalStatus({
+    toolResults: [okResult("bash")],
+    mode: "autonomous",
+    aborted: true,
+  });
+  assert.equal(status, "cancelled");
+});

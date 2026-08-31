@@ -11,6 +11,8 @@ import { loadLocalRules } from "../policy/local-rules.js";
 import { PathPolicyError } from "../policy/paths.js";
 import { evaluateCommandPolicy, type SafetyProfile } from "../policy/rules.js";
 import { PermissionClassifier, type PermissionMode, type PermissionClassification } from "../policy/classifier.js";
+import { evaluateToolCall, isPolicyDenial } from "../governance/policy-engine.js";
+import { SandboxPolicy, sandboxToClassification, type SandboxMode } from "../policy/sandbox.js";
 import { resolveEffectivePermissionMode } from "../policy/mode.js";
 import type { RecoverySession } from "../recovery/session.js";
 import { classifyToolCall } from "../execution/planner.js";
@@ -21,7 +23,7 @@ import { normalizeToolCall } from "./normalize.js";
 import { grepSearchTool } from "./read/grep-search.js";
 import { getToolOutputTool } from "./read/get-tool-output.js";
 import { listDirectoryTool } from "./read/list-directory.js";
-import { readFileTool, type ReadFileToolResult } from "./read/read-file.js";
+import { readFileTool, renderTextReadResult, type ReadFileToolResult } from "./read/read-file.js";
 import { skimFileTool } from "./read/skim-file.js";
 import { inspectEnvironmentTool } from "./read/inspect-env.js";
 import { activateSkillTool } from "./read/activate-skill.js";
@@ -29,8 +31,8 @@ import { webSearchTool, type WebSearchArgs } from "./read/web-search.js";
 import { ComputerBrowserController } from "./browser/computer-browser.js";
 import { NativeComputerController, type NativeComputerToolName } from "./computer/native-computer.js";
 import { toolRegistry } from "./registry.js";
-import { deleteFileTool } from "./write/delete-file.js";
-import { editFileTool } from "./write/edit-file.js";
+import { assertDeletablePath, deleteFileTool } from "./write/delete-file.js";
+import { applyEditFileContent, editFileTool } from "./write/edit-file.js";
 import { writeFileTool } from "./write/write-file.js";
 import { executeSearchTools } from "./write/search-tools.js";
 import { executeApplyPatch } from "./apply-patch.js";
@@ -49,6 +51,8 @@ import { normalizeWorkspacePath, relativeWorkspacePath } from "../policy/paths.j
 import { BackgroundProcessManager } from "./background-process-manager.js";
 import { createCheckpoint, restoreCheckpoint } from "../runtime/checkpoints.js";
 import { getGitDiffState, getGitStatusState, summarizeGitDiffState } from "../runtime/diff-state.js";
+import { emitRuntimeEvent, type RuntimeEventSink } from "../runtime/events.js";
+import type { ToolApprovalRequester } from "./approval.js";
 
 /**
  * Workflow 3 structured error types. The outer `catch` block in
@@ -89,6 +93,22 @@ export interface ToolExecutorOptions {
   logLevel: "info" | "debug" | "trace";
   safetyProfile: SafetyProfile;
   permissionMode?: PermissionMode;
+  /**
+   * Optional governance role for the caller. "root" is the main agent;
+   * sub-agents thread their assigned role (explorer/implementer/test/
+   * reviewer/critic/browser/architect). When omitted, the executor runs
+   * without the role-based policy gate (the existing PermissionClassifier
+   * still applies) so legacy direct-construction callers are unchanged.
+   */
+  callerRole?: string;
+  /**
+   * When true, the run is inside a trusted sandbox and high-risk shell
+   * commands / approval-required tools skip the per-call approval gate.
+   * Default false (fail closed for direct callers).
+   */
+  trustedSandbox?: boolean;
+  /** Sandbox mode. When set, SandboxPolicy gates mutating tools/shell. */
+  sandboxMode?: SandboxMode;
   trajectoryLogger?: TrajectoryLogger;
   auditLogger?: AuditLogger;
   recoverySession?: RecoverySession;
@@ -96,6 +116,9 @@ export interface ToolExecutorOptions {
   runDir?: string;
   artifactsDir?: string;
   shellRunner?: ShellRunner;
+  eventSink?: RuntimeEventSink;
+  approvalRequester?: ToolApprovalRequester;
+  abortSignal?: AbortSignal;
   /**
    * Workflow 3: optional allowlist forwarded to the child-env builder
    * for any Reaper-spawned child (foreground bash, background bash,
@@ -158,7 +181,12 @@ export type ShellRunner = (
   workspaceRoot: string,
   args: { cmd: string; timeoutMs?: number; idleTimeoutMs?: number; isBackground?: boolean },
   workingDirectory: string,
-  runtime: { runId: string; artifactDir: string; toolCallId: string },
+  runtime: {
+    runId: string;
+    artifactDir: string;
+    toolCallId: string;
+    onOutput?: (stream: "stdout" | "stderr", text: string) => void | Promise<void>;
+  },
 ) => Promise<import("./bash/index.js").BashExecutionResult>;
 
 
@@ -281,6 +309,12 @@ export class ToolExecutor {
    *  sanitized child environment builder. */
   private readonly permissionMode: PermissionMode;
   private readonly childEnvAllowlist: ReadonlyArray<string>;
+  /** Governance wiring (V4): role-based policy + sandbox mode. Undefined
+   *  unless the runtime opted in — preserves legacy direct construction. */
+  private readonly callerRole: string | undefined;
+  private readonly trustedSandbox: boolean;
+  private readonly sandboxPolicy: SandboxPolicy | undefined;
+  private readonly recentTools: string[] = [];
 
   constructor(private readonly options: ToolExecutorOptions) {
     void ensureReaperScratchpad(options.workspaceRoot);
@@ -294,11 +328,205 @@ export class ToolExecutor {
     this.permissionMode = resolvedMode;
     this.permissionClassifier = new PermissionClassifier(resolvedMode);
     this.childEnvAllowlist = options.childEnvAllowlist ?? [];
+    this.callerRole = options.callerRole;
+    this.trustedSandbox = options.trustedSandbox ?? false;
+    this.sandboxPolicy = options.sandboxMode ? new SandboxPolicy({ mode: options.sandboxMode }) : undefined;
     this.currentWorkingDirectory = options.workspaceRoot;
     this.backgroundProcessManager = new BackgroundProcessManager({
       runId: options.runId,
       workspaceRoot: options.workspaceRoot,
     });
+  }
+
+  /**
+   * V4: governance/sandbox gate. Runs BEFORE the PermissionClassifier and
+   * returns a blocking `ToolResult` when the sandbox mode or the caller's
+   * role policy denies the call, or undefined when the call may proceed.
+   *
+   * The role-policy engine (`evaluateToolCall`) is intentionally skipped for
+   * the "root" caller: root may call every registered tool and is governed
+   * by the existing PermissionClassifier + hard-deny rules. Sub-agent roles
+   * (explorer/implementer/test/reviewer/critic/browser/architect) get the
+   * full role-profile gate, which is what the governance layer was built for.
+   */
+  private async applyGovernanceGates(
+    call: { id: string; name: string; args: unknown },
+    decisionId: string,
+    start: number,
+  ): Promise<ToolResult | undefined> {
+    const toolCall = call as ToolCall;
+
+    if (this.sandboxPolicy) {
+      const decision = this.sandboxPolicy.evaluate(toolCall);
+      const classification = sandboxToClassification(decision);
+      if (classification.outcome === "dangerous") {
+        await this.writePolicyDeny(decisionId, decision.ruleId ?? "sandbox_deny", "deny");
+        return {
+          toolCallId: call.id,
+          name: call.name,
+          ok: false as const,
+          durationMs: Date.now() - start,
+          args: call.args,
+          error: { code: "sandbox_denied", message: decision.reason },
+        };
+      }
+      if (classification.outcome === "needs_confirmation" && this.permissionMode !== "yolo") {
+        try {
+          await this.requestApprovalForTool(toolCall, decisionId, classification);
+        } catch (error) {
+          return {
+            toolCallId: call.id,
+            name: call.name,
+            ok: false as const,
+            durationMs: Date.now() - start,
+            args: call.args,
+            error: {
+              code: error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : "approval_required",
+              message: error instanceof Error ? error.message : String(error),
+            },
+          };
+        }
+      }
+    }
+
+    if (this.callerRole && this.callerRole !== "root") {
+      const decision = evaluateToolCall({
+        toolName: call.name,
+        args: (call.args ?? {}) as Record<string, unknown>,
+        callerRole: this.callerRole,
+        trustedSandbox: this.trustedSandbox,
+        ...(this.recentTools.length > 0 ? { recentTools: this.recentTools } : {}),
+      });
+      if (isPolicyDenial(decision)) {
+        await this.writePolicyDeny(decisionId, decision.code, "deny");
+        return {
+          toolCallId: call.id,
+          name: call.name,
+          ok: false as const,
+          durationMs: Date.now() - start,
+          args: call.args,
+          error: { code: decision.code, message: decision.reason },
+        };
+      }
+      if (decision.verdict === "require_approval" && this.permissionMode !== "yolo") {
+        try {
+          await this.requestApprovalForTool(toolCall, decisionId, {
+            outcome: "needs_confirmation",
+            reasoning: decision.reason,
+            confidence: 0.95,
+            ruleMatch: decision.code,
+          });
+        } catch (error) {
+          return {
+            toolCallId: call.id,
+            name: call.name,
+            ok: false as const,
+            durationMs: Date.now() - start,
+            args: call.args,
+            error: {
+              code: error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : "approval_required",
+              message: error instanceof Error ? error.message : String(error),
+            },
+          };
+        }
+      }
+    }
+
+    return undefined;
+  }
+
+  private async writePolicyDeny(
+    decisionId: string,
+    policyId: string,
+    outcome: "allow" | "deny" | "skip" | "approval_required",
+  ): Promise<void> {
+    await this.trajectoryLogger.write({
+      event_id: randomUUID(),
+      run_id: this.options.runId,
+      session_id: this.options.sessionId,
+      trace_id: this.options.traceId,
+      timestamp: new Date().toISOString(),
+      log_schema_version: 1,
+      kind: "policy_decision",
+      level: this.options.logLevel,
+      decision_id: decisionId,
+      policy_id: policyId,
+      outcome,
+    });
+  }
+
+  private async requestApprovalForTool(
+    call: ToolCall,
+    decisionId: string,
+    classification: PermissionClassification,
+  ): Promise<void> {
+    const approvalId = randomUUID();
+    await this.trajectoryLogger.write({
+      event_id: randomUUID(),
+      run_id: this.options.runId,
+      session_id: this.options.sessionId,
+      trace_id: this.options.traceId,
+      timestamp: new Date().toISOString(),
+      log_schema_version: 1,
+      kind: "policy_decision",
+      level: this.options.logLevel,
+      decision_id: decisionId,
+      policy_id: "classifier_needs_confirmation",
+      outcome: "approval_required",
+    });
+    await emitRuntimeEvent(this.options.eventSink, {
+      type: "approval.requested",
+      approvalId,
+      toolCallId: call.id,
+      toolName: call.name,
+      reason: classification.reasoning,
+    });
+    const requester = this.options.approvalRequester;
+    if (!requester) {
+      throw new ApprovalRequiredError(
+        "classifier",
+        `Tool '${call.name}' requires explicit user approval in mode '${this.permissionMode}': ${classification.reasoning}`,
+      );
+    }
+    const decision = await requester.requestApproval(
+      {
+        approvalId,
+        runId: this.options.runId,
+        sessionId: this.options.sessionId,
+        toolCall: call,
+        workspaceRoot: this.options.workspaceRoot,
+        workingDirectory: this.currentWorkingDirectory,
+        permissionMode: this.permissionMode,
+        reason: classification.reasoning,
+        ...(classification.ruleMatch ? { ruleMatch: classification.ruleMatch } : {}),
+      },
+      this.options.abortSignal,
+    );
+    await emitRuntimeEvent(this.options.eventSink, {
+      type: "approval.resolved",
+      approvalId,
+      toolCallId: call.id,
+      decision,
+    });
+    await this.trajectoryLogger.write({
+      event_id: randomUUID(),
+      run_id: this.options.runId,
+      session_id: this.options.sessionId,
+      trace_id: this.options.traceId,
+      timestamp: new Date().toISOString(),
+      log_schema_version: 1,
+      kind: "policy_decision",
+      level: this.options.logLevel,
+      decision_id: decisionId,
+      policy_id: "classifier_needs_confirmation",
+      outcome: decision === "approved" ? "allow" : "deny",
+    });
+    if (decision !== "approved") {
+      throw new ApprovalRequiredError(
+        `approval_${decision}`,
+        `Tool '${call.name}' was not approved (${decision}).`,
+      );
+    }
   }
 
   /**
@@ -365,6 +593,23 @@ export class ToolExecutor {
   }
 
   async execute(call: ToolCall): Promise<ToolResult> {
+    await emitRuntimeEvent(this.options.eventSink, { type: "tool.started", toolCall: call });
+    try {
+      const result = await this.executeInternal(call);
+      await emitRuntimeEvent(this.options.eventSink, { type: "tool.completed", toolCall: call, result });
+      return result;
+    } catch (error) {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      await emitRuntimeEvent(this.options.eventSink, {
+        type: "tool.failed",
+        toolCall: call,
+        error: { name: normalized.name, message: normalized.message },
+      });
+      throw error;
+    }
+  }
+
+  private async executeInternal(call: ToolCall): Promise<ToolResult> {
     // Normalize tool call aliases before validation
     const normalizedCall = normalizeToolCall(call) as ToolCall;
     const start = Date.now();
@@ -459,6 +704,34 @@ export class ToolExecutor {
         };
       }
       if (callAnyBypass.name === "file_edit") {
+        const viewerCall = callAnyBypass as ToolCall;
+        // V4: sandbox/role governance gate applies to viewer writes too
+        // (read_only must block file_edit; sub-agent roles must be honored).
+        const governanceBlock = await this.applyGovernanceGates(viewerCall, decisionId, start);
+        if (governanceBlock) {
+          return governanceBlock;
+        }
+        const classification = this.permissionClassifier.classifyToolCall(viewerCall);
+        if (classification.outcome === "needs_confirmation" && this.permissionMode !== "yolo") {
+          try {
+            await this.requestApprovalForTool(viewerCall, decisionId, classification);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            return {
+              toolCallId: call.id,
+              name: call.name,
+              ok: false,
+              durationMs: Date.now() - start,
+              args: call.args,
+              error: {
+                code: error instanceof Error && "code" in error && typeof error.code === "string"
+                  ? error.code
+                  : "approval_required",
+                message,
+              },
+            };
+          }
+        }
         await this.snapshotBeforeMutation(dirForViewer, "file_edit");
         this.fileWriteCounts.set(
           dirForViewer,
@@ -483,6 +756,7 @@ export class ToolExecutor {
         workspaceRoot: this.options.workspaceRoot,
         viewerRegistry: this.viewerRegistry,
         linterRegistry: this.linterRegistry,
+        ...this.stagedViewerContext(),
       });
       const result: ToolResult = {
         toolCallId: call.id,
@@ -565,6 +839,14 @@ export class ToolExecutor {
     });
 
     try {
+      // V4: sandbox/role governance gate (runs BEFORE the classifier so
+      // sandbox modes and sub-agent role profiles are enforced, not just
+      // the binary safe/dangerous classifier).
+      const governanceBlock = await this.applyGovernanceGates(parsedCall, decisionId, start);
+      if (governanceBlock) {
+        return governanceBlock;
+      }
+
       // Permission classifier — runs in every mode. In yolo the
       // fast-path returns `safe` for almost everything, but the hard-
       // deny patterns still trip and surface a real
@@ -594,29 +876,7 @@ export class ToolExecutor {
         );
       }
       if (classification.outcome === "needs_confirmation" && this.permissionMode !== "yolo") {
-        // Strict / auto / accept_edits demand a real approval for
-        // anything not in the fast-path safe list. We surface an
-        // approval_required result instead of executing, so the
-        // model can route to whatever real approval path exists
-        // (CLI prompt, human_intervention tool, etc.). We do NOT
-        // invent an approval path or silently downgrade.
-        await this.trajectoryLogger.write({
-          event_id: randomUUID(),
-          run_id: this.options.runId,
-          session_id: this.options.sessionId,
-          trace_id: this.options.traceId,
-          timestamp: new Date().toISOString(),
-          log_schema_version: 1,
-          kind: "policy_decision",
-          level: this.options.logLevel,
-          decision_id: decisionId,
-          policy_id: "classifier_needs_confirmation",
-          outcome: "approval_required",
-        });
-        throw new ApprovalRequiredError(
-          "classifier",
-          `Tool '${parsedCall.name}' requires explicit user approval in mode '${this.permissionMode}': ${classification.reasoning}`,
-        );
+        await this.requestApprovalForTool(parsedCall, decisionId, classification);
       }
 
       // PreToolUse hook envelope. A handler returning { allow: false }
@@ -717,6 +977,11 @@ export class ToolExecutor {
         args: parsedCall.args,
         output: finalOutput,
       };
+
+      // Keep a bounded recent-tools window for the governance ordering
+      // advisories (write-before-read detection etc.).
+      this.recentTools.push(parsedCall.name);
+      if (this.recentTools.length > 16) this.recentTools.shift();
 
       await this.trajectoryLogger.write({
         event_id: randomUUID(),
@@ -963,6 +1228,7 @@ export class ToolExecutor {
         workspaceRoot: this.options.workspaceRoot,
         viewerRegistry: this.viewerRegistry,
         linterRegistry: this.linterRegistry,
+        ...this.stagedViewerContext(),
       });
       // Wrap the viewer's ToolResult-like into the executor's envelope.
       return {
@@ -1004,11 +1270,13 @@ export class ToolExecutor {
             await this.recordReadState(args.path, unboundedRead && !isTruncatedTextRead(cached.output), beforeReadSnapshot);
             return this.withReadCacheNote(cached.output, cached.hits);
           }
-          const result = await readFileTool(this.options.workspaceRoot, {
-            path: args.path,
-            ...(args.startLine !== undefined ? { startLine: args.startLine } : {}),
-            ...(args.endLine !== undefined ? { endLine: args.endLine } : {}),
-          });
+          const result = this.recoverySession?.wal.hasEntry(args.path)
+            ? await this.readStagedFile(args.path, args)
+            : await readFileTool(this.options.workspaceRoot, {
+                path: args.path,
+                ...(args.startLine !== undefined ? { startLine: args.startLine } : {}),
+                ...(args.endLine !== undefined ? { endLine: args.endLine } : {}),
+              });
           if (unboundedRead && isTruncatedTextRead(result)) {
             this.fullReadPaths.delete(args.path);
           }
@@ -1029,6 +1297,11 @@ export class ToolExecutor {
       case "list_directory":
         {
           const args = toolRegistry.list_directory.argsSchema.parse(call.args);
+          // V1: when there are pending staged mutations, reflect them in the
+          // listing so the model doesn't see a pre-staging directory view.
+          if (this.recoverySession?.wal.hasEntries()) {
+            return this.recoverySession.wal.listDirectory(args.path, args.includeHidden ?? false);
+          }
           return listDirectoryTool(this.options.workspaceRoot, {
             path: args.path,
             ...(args.includeHidden !== undefined ? { includeHidden: args.includeHidden } : {}),
@@ -1037,6 +1310,13 @@ export class ToolExecutor {
       case "grep_search":
         {
           const args = toolRegistry.grep_search.argsSchema.parse(call.args);
+          if (this.recoverySession?.wal.hasEntries()) {
+            return this.recoverySession.wal.grepSearch({
+              pattern: args.pattern,
+              ...(args.path !== undefined ? { path: args.path } : {}),
+              ...(args.include !== undefined ? { include: args.include } : {}),
+            });
+          }
           return grepSearchTool(this.options.workspaceRoot, {
             pattern: args.pattern,
             ...(args.path !== undefined ? { path: args.path } : {}),
@@ -1187,8 +1467,19 @@ export class ToolExecutor {
       case "write_file":
         {
           const args = toolRegistry.write_file.argsSchema.parse(call.args);
-          await this.snapshotBeforeMutation(args.path, "write_file");
-          this.fileWriteCounts.set(args.path, (this.fileWriteCounts.get(args.path) ?? 0) + 1);
+          const targetPath = await this.resolveExistingPathCase(args.path);
+          await this.snapshotBeforeMutation(targetPath, "write_file");
+          this.fileWriteCounts.set(targetPath, (this.fileWriteCounts.get(targetPath) ?? 0) + 1);
+          // V1: route through the WAL so `hasPendingWrites()` reflects the
+          // real pending mutation and rollback/abort can actually undo it.
+          if (this.recoverySession) {
+            await this.recoverySession.wal.stageWrite(targetPath, args.content);
+            return {
+              path: normalizeWorkspacePath(this.options.workspaceRoot, targetPath),
+              bytesWritten: Buffer.byteLength(args.content, "utf8"),
+              staged: true,
+            };
+          }
           return writeFileTool(this.options.workspaceRoot, args);
         }
       case "edit_file":
@@ -1197,6 +1488,20 @@ export class ToolExecutor {
           const args = { ...parsedArgs, path: await this.resolveExistingPathCase(parsedArgs.path) };
           await this.snapshotBeforeMutation(args.path, "edit_file");
           this.fileWriteCounts.set(args.path, (this.fileWriteCounts.get(args.path) ?? 0) + 1);
+          if (this.recoverySession) {
+            // Stage-first edit: apply the edit against the WAL's materialized
+            // view of the file so chained edits compose and reads observe the
+            // pending change, without touching disk.
+            const current = await this.recoverySession.wal.readText(args.path);
+            const applied = applyEditFileContent(current, args);
+            await this.recoverySession.wal.stageWrite(args.path, applied.content);
+            return {
+              path: normalizeWorkspacePath(this.options.workspaceRoot, args.path),
+              appliedEdits: applied.appliedEdits,
+              skippedAlreadyApplied: applied.skippedAlreadyApplied,
+              staged: true,
+            };
+          }
           return editFileTool(this.options.workspaceRoot, args);
         }
       case "delete_file":
@@ -1205,6 +1510,12 @@ export class ToolExecutor {
           const args = { ...parsedArgs, path: await this.resolveExistingPathCase(parsedArgs.path) };
           await this.snapshotBeforeMutation(args.path, "delete_file");
           this.fileWriteCounts.set(args.path, (this.fileWriteCounts.get(args.path) ?? 0) + 1);
+          if (this.recoverySession) {
+            const absolutePath = normalizeWorkspacePath(this.options.workspaceRoot, args.path);
+            assertDeletablePath(this.options.workspaceRoot, absolutePath);
+            await this.recoverySession.wal.stageDelete(args.path);
+            return { path: absolutePath, deleted: true, staged: true };
+          }
           return deleteFileTool(this.options.workspaceRoot, args);
         }
       case "bash": {
@@ -1300,6 +1611,14 @@ export class ToolExecutor {
           });
         }
 
+        const shellOutputSink = this.options.eventSink
+          ? (stream: "stdout" | "stderr", text: string) => emitRuntimeEvent(this.options.eventSink, {
+              type: "command.output.delta",
+              toolCallId: call.id,
+              stream,
+              text,
+            })
+          : undefined;
         const bashCtx = {
           workspaceRoot: this.options.workspaceRoot,
           workingDirectory: this.currentWorkingDirectory,
@@ -1309,7 +1628,9 @@ export class ToolExecutor {
             runId: this.options.runId,
             artifactDir: this.options.artifactsDir ?? path.join(getReaperScratchpadPaths(this.options.workspaceRoot).logs, this.options.runId, "artifacts"),
             toolCallId: call.id,
+            ...(shellOutputSink ? { onOutput: shellOutputSink } : {}),
           },
+          ...(shellOutputSink ? { onOutput: shellOutputSink } : {}),
           ...(this.childEnvAllowlist.length > 0 ? { childEnvAllowlist: this.childEnvAllowlist } : {}),
         };
 
@@ -1383,7 +1704,14 @@ export class ToolExecutor {
 
         const view = await this.recoverySession.createNonBarrierCommandView();
         try {
-          const result = await runBash(view.path, view.path, rewriteWorkspaceRootInShellCommand(effectiveCommand, this.options.workspaceRoot, view.path));
+          // Rewrite every materialized root, not just the primary one — in a
+          // multi-root workspace an absolute path into a secondary root would
+          // otherwise escape the view and read pre-edit disk content.
+          let viewCommand = effectiveCommand;
+          for (const { root, viewPath } of view.roots) {
+            viewCommand = rewriteWorkspaceRootInShellCommand(viewCommand, root, viewPath);
+          }
+          const result = await runBash(view.path, view.path, viewCommand);
 
           if (isBackgroundBashResult(result)) {
             const entry: ManagedBackgroundProcess = {
@@ -1431,10 +1759,26 @@ export class ToolExecutor {
       case "wait":
       case "start_live_view":
       case "stop_live_view":
-      case "request_human_approval":
       case "is_human_intervening": {
         const args = toolRegistry[call.name].argsSchema.parse(call.args) as Record<string, unknown>;
         return this.getNativeComputerController().execute(call.name as NativeComputerToolName, args, this.toolRuntimeMetadata(call.id));
+      }
+      case "request_human_approval": {
+        const args = toolRegistry.request_human_approval.argsSchema.parse(call.args) as Record<string, unknown>;
+        if (this.options.approvalRequester) {
+          // In strict/auto mode the classifier gate immediately above already
+          // obtained approval before dispatch reached this switch. YOLO and
+          // accept_edits still honor this tool's explicit request here.
+          if (this.permissionMode !== "strict" && this.permissionMode !== "auto") {
+            await this.requestApprovalForTool(call, call.id, {
+              outcome: "needs_confirmation",
+              reasoning: typeof args.reason === "string" ? args.reason : "Agent requested human approval",
+              confidence: 1,
+            });
+          }
+          return { success: true, decision: "approved", externalApproval: true };
+        }
+        return this.getNativeComputerController().execute("request_human_approval", args, this.toolRuntimeMetadata(call.id));
       }
       case "web_fetch": {
         const fetchArgs = toolRegistry.web_fetch.argsSchema.parse(call.args);
@@ -1658,6 +2002,63 @@ export class ToolExecutor {
     if (snapshot.sha256 !== null) {
       this.readFileState.set(absolutePath, { ...snapshot, fullyRead: true });
     }
+  }
+
+  /**
+   * Staged read/write hooks for the viewer tools (`file_view`,
+   * `file_scroll`, `file_find`, `file_edit`).
+   *
+   * `write_file`/`edit_file` stage into the WAL rather than writing to
+   * disk (V1), so viewers that read the filesystem directly would report a
+   * just-written file as not-found and show pre-edit content for an edited
+   * one. Returns an empty object when there is no recovery session, so the
+   * viewers fall back to plain disk access.
+   */
+  private stagedViewerContext(): {
+    readStaged?: (absPath: string) => Promise<string | null | undefined>;
+    writeStaged?: (absPath: string, content: string) => Promise<void>;
+  } {
+    const recoverySession = this.recoverySession;
+    if (!recoverySession) return {};
+    return {
+      readStaged: async (absPath) => {
+        if (!recoverySession.wal.hasEntry(absPath)) return undefined;
+        try {
+          return await recoverySession.wal.readText(absPath);
+        } catch {
+          return null; // staged for deletion
+        }
+      },
+      writeStaged: (absPath, content) => recoverySession.wal.stageWrite(absPath, content),
+    };
+  }
+
+  /**
+   * Read a file that has a pending WAL entry (staged write or staged delete).
+   * Reads the staged content rather than the stale on-disk bytes so the model
+   * observes the post-write view; a staged delete surfaces as a not-found
+   * error mirroring the direct-disk ENOENT path.
+   */
+  private async readStagedFile(
+    targetPath: string,
+    args: { startLine?: number; endLine?: number },
+  ): Promise<ReadFileToolResult> {
+    const absolutePath = normalizeWorkspacePath(this.options.workspaceRoot, targetPath);
+    let content: string;
+    try {
+      content = await this.recoverySession!.wal.readText(targetPath);
+    } catch (error) {
+      if (error instanceof Error && /staged for deletion/i.test(error.message)) {
+        throw new Error(`File '${targetPath}' is staged for deletion and no longer exists.`);
+      }
+      throw error;
+    }
+    return renderTextReadResult({
+      filePath: absolutePath,
+      content,
+      ...(args.startLine !== undefined ? { startLine: args.startLine } : {}),
+      ...(args.endLine !== undefined ? { endLine: args.endLine } : {}),
+    });
   }
 
   private async getFreshnessSnapshot(targetPath: string, absolutePath = normalizeWorkspacePath(this.options.workspaceRoot, targetPath)): Promise<{ sha256: string | null; mtimeMs: number | null }> {

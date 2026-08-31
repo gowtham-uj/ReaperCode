@@ -31,12 +31,14 @@ export function isPermissionMode(value: unknown): value is PermissionMode {
 
 /**
  * Normalize an arbitrary input (config field, env override, runtime
- * tunable, CLI flag) into a valid PermissionMode. Falls back to
- * `"yolo"` for backward-compatible trusted local use.
+ * tunable, CLI flag) into a valid PermissionMode. Invalid or missing
+ * input falls back to `"accept_edits"` — the safe default — rather
+ * than `"yolo"`, so an unset or malformed config can never silently
+ * grant allow-all shell access.
  */
 export function resolveEffectivePermissionMode(input: unknown): PermissionMode {
   if (isPermissionMode(input)) return input;
-  return "yolo";
+  return "accept_edits";
 }
 
 /**

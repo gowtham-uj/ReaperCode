@@ -71,10 +71,36 @@ export async function readFileTool(
     };
   }
   const content = contentBuffer.toString("utf8");
+  return renderTextReadResult({
+    filePath,
+    content,
+    ...(args.startLine !== undefined ? { startLine: args.startLine } : {}),
+    ...(args.endLine !== undefined ? { endLine: args.endLine } : {}),
+    ...(resolvedFrom
+      ? { resolvedFrom, resolvedPath: relativeWorkspacePath(workspaceRoot, filePath) }
+      : {}),
+  });
+}
+
+/**
+ * Render the numbered-window text read result from already-loaded content.
+ * Extracted so the executor's WAL-aware read path (which sources content
+ * from staged WAL entries instead of disk) produces byte-identical output
+ * to the direct-disk path.
+ */
+export function renderTextReadResult(input: {
+  filePath: string;
+  content: string;
+  startLine?: number;
+  endLine?: number;
+  resolvedFrom?: string;
+  resolvedPath?: string;
+}): TextReadFileResult {
+  const { filePath, content, resolvedFrom, resolvedPath } = input;
   const lines = content.split(/\r?\n/);
-  const unbounded = args.startLine === undefined && args.endLine === undefined;
-  const start = Math.max(1, args.startLine ?? 1);
-  const requestedEnd = args.endLine ?? lines.length;
+  const unbounded = input.startLine === undefined && input.endLine === undefined;
+  const start = Math.max(1, input.startLine ?? 1);
+  const requestedEnd = input.endLine ?? lines.length;
   const end = Math.min(lines.length, unbounded ? Math.min(requestedEnd, DEFAULT_UNBOUNDED_MAX_LINES) : requestedEnd);
   const selected = lines.slice(start - 1, end).map((line, index) => `${start + index}: ${line}`);
   const truncated = unbounded && end < lines.length;
@@ -83,7 +109,7 @@ export async function readFileTool(
       ? "Large unbounded read was limited to a preview. Use grep_search, skim_file, or view_file with startLine/endLine for the relevant range."
       : "",
     resolvedFrom
-      ? `Requested path '${resolvedFrom}' was not found, so file_view used the unique same-basename match '${relativeWorkspacePath(workspaceRoot, filePath)}'.`
+      ? `Requested path '${resolvedFrom}' was not found, so file_view used the unique same-basename match '${resolvedPath ?? filePath}'.`
       : "",
   ].filter(Boolean);
 
@@ -95,12 +121,8 @@ export async function readFileTool(
     totalLines: lines.length,
     truncated,
     ...(notes.length ? { note: notes.join(" ") } : {}),
-    ...(resolvedFrom
-      ? {
-          resolvedFrom,
-          resolvedPath: relativeWorkspacePath(workspaceRoot, filePath),
-        }
-      : {}),
+    ...(resolvedFrom ? { resolvedFrom } : {}),
+    ...(resolvedPath ? { resolvedPath } : {}),
     content: selected.join("\n"),
   };
 }

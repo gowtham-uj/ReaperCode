@@ -1,4 +1,6 @@
 
+import { assertPublicUrl } from "../../util/ssrf-guard.js";
+
 interface SearchResult {
   title: string;
   url: string;
@@ -183,12 +185,16 @@ function dedupeByUrl(results: SearchResult[]): SearchResult[] {
 
 // ===== HTTP Helpers =====
 async function fetchText(url: string, fetchImpl: any, timeoutMs: number): Promise<string> {
+  // Scraped result URLs come from a third-party index and may point at
+  // internal hosts. Enforce the same SSRF guard web-fetch uses.
+  await assertPublicUrl(url);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetchImpl(url, {
       signal: controller.signal,
       headers: { "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" },
+      redirect: "follow",
     });
     return await response.text();
   } finally {

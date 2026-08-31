@@ -142,6 +142,13 @@ export class PersistentMemoryStore {
     if (!found) return null;
     if (!found.editable) return null;
     Object.assign(found, patch, { updatedAt: new Date().toISOString() });
+    // Re-redact after merging. `remember` redacts sensitive content on the
+    // way in, but `update` bypassed that entirely — patching `content` (or
+    // flipping `sensitive` to true on an existing record) wrote raw
+    // secrets straight through to the on-disk JSONL.
+    if (found.sensitive && found.scope !== "secret") {
+      found.content = this.redactIfSensitive(found.content);
+    }
     if (found.scope !== "transient" && found.scope !== "secret") {
       this.rebuildScope(found.scope);
     }

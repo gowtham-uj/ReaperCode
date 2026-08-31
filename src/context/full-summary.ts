@@ -126,24 +126,24 @@ function groupMessagesByApiRound(messages: Array<{ role: string }>): Array<{ sta
 }
 
 function truncateHeadForPTL(messages: Array<{ role: string; content?: string; tool_call_id?: string; tool_calls?: unknown[] }>, minChars: number, tokenGap: number): { messages: typeof messages; dropped: number; savedChars: number } {
-  // Drop oldest API-round groups whose total content is >= minChars.
+  // Drop the OLDEST API-round groups whose total content is >= minChars.
+  // `groupMessagesByApiRound` returns rounds in chronological order, so we
+  // walk them forward and accumulate until we hit the char target. Sorting
+  // by content size (the old behavior) dropped the LARGEST rounds first —
+  // usually the most recent, most informative tool-output rounds — while
+  // stale head context survived. Preserve the facts the summarizer must see.
   const rounds = groupMessagesByApiRound(messages);
-  const sortedDescendingByContent = rounds
-    .map((r) => ({
-      range: r,
-      chars: messages.slice(r.start, r.end + 1).reduce((s, mm) => s + ((mm.content as string | undefined)?.length ?? 0), 0),
-    }))
-    .filter((r) => r.chars >= minChars)
-    .sort((a, b) => b.chars - a.chars);
   let dropped = 0;
   let savedChars = 0;
   const indicesToDrop = new Set<number>();
   // Cap the number of rounds we'll drop in one call to prevent infinite loops.
   const MAX_ROUNDS_PER_TRUNCATE = 16;
-  for (const r of sortedDescendingByContent.slice(0, MAX_ROUNDS_PER_TRUNCATE)) {
-    for (let i = r.range.start; i <= r.range.end; i += 1) indicesToDrop.add(i);
-    savedChars += r.chars;
+  for (const r of rounds.slice(0, MAX_ROUNDS_PER_TRUNCATE)) {
+    const chars = messages.slice(r.start, r.end + 1).reduce((s, mm) => s + ((mm.content as string | undefined)?.length ?? 0), 0);
+    for (let i = r.start; i <= r.end; i += 1) indicesToDrop.add(i);
+    savedChars += chars;
     dropped += 1;
+    if (savedChars >= minChars) break;
   }
   const kept = messages.filter((_, i) => !indicesToDrop.has(i));
   return { messages: kept, dropped, savedChars };

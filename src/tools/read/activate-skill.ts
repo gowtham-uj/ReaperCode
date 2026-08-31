@@ -1,8 +1,10 @@
 import { readFile, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { existsSync } from "node:fs";
+import os from "node:os";
 
 import { SkillMemoryRegistry } from "../../adaptive/skill-memory-registry.js";
+import { readDisabledMarker } from "../../skills/discovery.js";
 
 /**
  * Simple frontmatter stripper.
@@ -138,11 +140,14 @@ async function resolveSkillFile(
 export async function activateSkillTool(workspaceRoot: string, args: { name: string }) {
   const name = validateSkillName(args?.name);
 
+  // Align the scanned directories with what skill discovery actually
+  // enumerates (project-local and user-home `.reaper/skills`). The old
+  // extra roots (`.opencode`, `.pi`, bare `skills`) were never
+  // enumerated by discovery, so a body living there would bypass the
+  // trust/disable gate — the exact divergence S4 flags.
   const skillDirs = [
-    path.join(workspaceRoot, ".opencode", "skills"),
     path.join(workspaceRoot, ".reaper", "skills"),
-    path.join(workspaceRoot, ".pi", "skills"),
-    path.join(workspaceRoot, "skills"),
+    path.join(os.homedir(), ".reaper", "skills"),
   ];
 
   // Registry allowlist: a skill must be registered before we will
@@ -159,7 +164,9 @@ export async function activateSkillTool(workspaceRoot: string, args: { name: str
 
   // Model-invocation guard: disableModelInvocation is the canonical
   // field; disableAutoInvocation is the legacy alias. If either is
-  // set, refuse to surface the body to the model.
+  // set, refuse to surface the body to the model. The flag encodes
+  // both trust (untrusted skills are persisted with it set) and an
+  // explicit `skill disable`.
   if (registered.disableModelInvocation === true || registered.disableAutoInvocation === true) {
     throw new Error(
       `Skill '${name}' has disableModelInvocation=true and cannot be activated.`,
@@ -171,6 +178,16 @@ export async function activateSkillTool(workspaceRoot: string, args: { name: str
     throw new Error(
       `Skill '${name}' is registered in the registry but no on-disk file was found ` +
         `in any of the skill directories: ${skillDirs.join(", ")}.`,
+    );
+  }
+
+  // Defense-in-depth: honor the on-disk `disabled` marker even if the
+  // registry index has not been re-synced since the disable. The
+  // marker lives in the skill's own folder, which we just resolved.
+  const marker = readDisabledMarker(path.dirname(resolved.realPath));
+  if (marker !== null) {
+    throw new Error(
+      `Skill '${name}' is disabled and cannot be activated (${marker}).`,
     );
   }
 

@@ -1,6 +1,8 @@
 import {
+  BadRequestError,
   ConnectionPolicyError,
   ConnectionTimeoutError,
+  NoActiveTurnError,
   SessionNotFoundError,
 } from "./errors.js";
 import { enforceConnectionPolicies, InMemoryRateLimiter, parseConnectionPolicies, type Clock } from "./policies.js";
@@ -35,10 +37,24 @@ export interface SessionGatewayResponse {
   resumed: boolean;
 }
 
+export interface SessionGatewayHandleOptions {
+  /**
+   * Called for each event as it is produced, enabling true incremental
+   * streaming. May return a promise for backpressure. The terminal
+   * cancel/error events synthesized by the gateway are also delivered here.
+   */
+  onEvent?: (event: AgentEventEnvelope) => void | Promise<void>;
+}
+
 interface SessionRecord {
   snapshot: SessionSnapshot;
+  /** Re-entrancy guard scoped to this session so concurrent sessions don't collide. */
+  guard: QueryGuard;
   activeAbort?: AbortController;
 }
+
+/** Upper bound on events retained per session for `session_resume` replay. */
+const MAX_SESSION_EVENTS = 200;
 
 class RequestAbortedError extends Error {
   constructor(message: string) {
@@ -54,7 +70,6 @@ const systemClock: Clock = {
 export class SessionGateway {
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly rateLimiter;
-  private readonly queryGuard = new QueryGuard();
 
   constructor(
     private readonly handler: AgentTurnHandler,
@@ -64,7 +79,11 @@ export class SessionGateway {
     this.rateLimiter = new InMemoryRateLimiter(policies.rateLimit.maxRequests, policies.rateLimit.windowMs, clock);
   }
 
-  async handleRequest(request: AgentRequestEnvelope, transport: TransportKind): Promise<SessionGatewayResponse> {
+  async handleRequest(
+    request: AgentRequestEnvelope,
+    transport: TransportKind,
+    options: SessionGatewayHandleOptions = {},
+  ): Promise<SessionGatewayResponse> {
     enforceConnectionPolicies(request, this.policies, this.rateLimiter);
 
     if (request.message_type === "session_resume") {
@@ -73,8 +92,11 @@ export class SessionGateway {
         throw new SessionNotFoundError(request.session_id);
       }
 
-      const offsetRaw = request.payload.event_offset;
-      const eventOffset = typeof offsetRaw === "number" && Number.isInteger(offsetRaw) && offsetRaw >= 0 ? offsetRaw : 0;
+      const eventOffset = this.normalizeEventOffset(
+        request.payload.event_offset,
+        session.snapshot.lastEvents.length,
+        request.session_id,
+      );
 
       session.snapshot.updatedAt = new Date(this.clock.now()).toISOString();
       return {
@@ -88,8 +110,11 @@ export class SessionGateway {
 
     if (request.message_type === "cancel_request" || request.message_type === "abort_execution") {
       const session = this.sessions.get(request.session_id);
-      if (!session?.activeAbort) {
+      if (!session) {
         throw new SessionNotFoundError(request.session_id);
+      }
+      if (!session.activeAbort) {
+        throw new NoActiveTurnError(request.session_id);
       }
 
       session.activeAbort.abort(request.message_type);
@@ -98,8 +123,9 @@ export class SessionGateway {
         message: request.message_type === "cancel_request" ? "Active request cancelled" : "Execution aborted",
       });
       session.snapshot.status = "cancelled";
-      session.snapshot.lastEvents = [event];
+      this.appendEvents(session, [event]);
       session.snapshot.updatedAt = new Date(this.clock.now()).toISOString();
+      await options.onEvent?.(event);
 
       return {
         sessionId: request.session_id,
@@ -111,20 +137,17 @@ export class SessionGateway {
     }
 
     const session = this.getOrCreateSession(request);
-    const abortController = new AbortController();
-    session.activeAbort = abortController;
-    session.snapshot.status = "running";
-    session.snapshot.lastRequestId = request.request_id;
-    session.snapshot.updatedAt = new Date(this.clock.now()).toISOString();
 
     let guardGen: number;
     try {
-      guardGen = this.queryGuard.start();
+      guardGen = session.guard.start();
     } catch (error) {
       if (error instanceof ReentrantQueryError) {
+        // Reject before touching session state so a rejected request never
+        // clobbers the running turn's abort controller or status.
         const event = this.createSystemEvent(request, "error", { code: "REENTRANT_QUERY", message: error.message });
-        session.snapshot.status = "error";
-        session.snapshot.lastEvents = [event];
+        this.appendEvents(session, [event]);
+        await options.onEvent?.(event);
         return {
           sessionId: request.session_id,
           requestId: request.request_id,
@@ -136,16 +159,26 @@ export class SessionGateway {
       throw error;
     }
 
+    const abortController = new AbortController();
+    session.activeAbort = abortController;
+    session.snapshot.status = "running";
+    session.snapshot.lastRequestId = request.request_id;
+    session.snapshot.updatedAt = new Date(this.clock.now()).toISOString();
+
     try {
-      this.queryGuard.markRunning(guardGen);
+      session.guard.markRunning(guardGen);
       const iterable = await this.handler(request, {
         signal: abortController.signal,
         session: { ...session.snapshot },
         transport,
       });
-      const events = await this.collectEvents(iterable, request, abortController);
+      const events = await this.collectEvents(iterable, request, abortController, async (event) => {
+        // Commit partial events to history as they arrive so a cancel/error
+        // mid-turn preserves everything emitted before the failure.
+        this.appendEvents(session, [event]);
+        await options.onEvent?.(event);
+      });
       session.snapshot.status = "completed";
-      session.snapshot.lastEvents = events;
       session.snapshot.updatedAt = new Date(this.clock.now()).toISOString();
 
       return {
@@ -158,8 +191,9 @@ export class SessionGateway {
     } catch (error) {
       const event = this.createSystemEvent(request, "error", this.mapError(error));
       session.snapshot.status = abortController.signal.aborted ? "cancelled" : "error";
-      session.snapshot.lastEvents = [event];
+      this.appendEvents(session, [event]);
       session.snapshot.updatedAt = new Date(this.clock.now()).toISOString();
+      await options.onEvent?.(event);
 
       return {
         sessionId: request.session_id,
@@ -169,10 +203,53 @@ export class SessionGateway {
         resumed: false,
       };
     } finally {
-      this.queryGuard.finish(guardGen);
+      session.guard.finish(guardGen);
       if (session.activeAbort === abortController) {
         delete session.activeAbort;
       }
+    }
+  }
+
+  /**
+   * Stream a turn's events incrementally as the handler yields them, then
+   * resolve with the final {@link SessionGatewayResponse}. This is the
+   * streaming analogue of {@link handleRequest} — callers can
+   * `for await (const event of gateway.streamRequest(request, transport))`.
+   */
+  async *streamRequest(
+    request: AgentRequestEnvelope,
+    transport: TransportKind,
+  ): AsyncGenerator<AgentEventEnvelope, SessionGatewayResponse> {
+    const queue: AgentEventEnvelope[] = [];
+    const waiters: Array<() => void> = [];
+    let final: SessionGatewayResponse | undefined;
+    let failure: unknown;
+
+    const notify = (): void => {
+      while (waiters.length > 0) waiters.shift()!();
+    };
+
+    this.handleRequest(request, transport, {
+      onEvent: (event) => {
+        queue.push(event);
+        notify();
+      },
+    }).then(
+      (result) => {
+        final = result;
+        notify();
+      },
+      (error) => {
+        failure = error;
+        notify();
+      },
+    );
+
+    while (true) {
+      while (queue.length > 0) yield queue.shift()!;
+      if (failure !== undefined) throw failure;
+      if (final !== undefined) return final;
+      await new Promise<void>((resolve) => waiters.push(resolve));
     }
   }
 
@@ -192,15 +269,33 @@ export class SessionGateway {
         lastRequestId: request.request_id,
         lastEvents: [],
       },
+      guard: new QueryGuard(),
     };
     this.sessions.set(request.session_id, record);
     return record;
+  }
+
+  /** Append events to the session's bounded replay history instead of clobbering it. */
+  private appendEvents(session: SessionRecord, events: AgentEventEnvelope[]): void {
+    session.snapshot.lastEvents = session.snapshot.lastEvents.concat(events).slice(-MAX_SESSION_EVENTS);
+  }
+
+  private normalizeEventOffset(raw: unknown, total: number, sessionId: string): number {
+    const offset = typeof raw === "number" && Number.isInteger(raw) && raw >= 0 ? raw : 0;
+    if (offset > total) {
+      throw new BadRequestError(
+        `event_offset ${offset} exceeds the ${total} retained event(s) for session '${sessionId}'`,
+        "INVALID_EVENT_OFFSET",
+      );
+    }
+    return offset;
   }
 
   private async collectEvents(
     iterable: AsyncIterable<AgentEventEnvelope>,
     request: AgentRequestEnvelope,
     abortController: AbortController,
+    onEvent?: (event: AgentEventEnvelope) => void | Promise<void>,
   ): Promise<AgentEventEnvelope[]> {
     const iterator = iterable[Symbol.asyncIterator]();
     const events: AgentEventEnvelope[] = [];
@@ -233,7 +328,9 @@ export class SessionGateway {
           break;
         }
 
-        events.push(this.normalizeEvent(step.value, request));
+        const normalized = this.normalizeEvent(step.value, request);
+        events.push(normalized);
+        await onEvent?.(normalized);
       } finally {
         if (timer) {
           clearTimeout(timer);

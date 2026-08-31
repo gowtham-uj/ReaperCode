@@ -17,6 +17,9 @@
  * the registry here for persistence.
  */
 
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
 import type { SkillMemoryRegistry } from "../adaptive/skill-memory-registry.js";
 import type { ReaperSkill } from "../adaptive/types.js";
 import type { ToolMetadata } from "../governance/tool-metadata.js";
@@ -29,7 +32,12 @@ export interface SkillRegistryOptions {
   builtinMetadata: Record<string, ToolMetadata>;
   /** Extension-registered tools keyed by name. */
   extensionTools?: Record<string, ToolMetadata>;
+  /** Optional persistence target so enable/disable survive reload. */
+  memory?: SkillMemoryRegistry;
 }
+
+/** Marker file written next to a disabled skill's manifest. */
+const DISABLED_MARKER = "disabled";
 
 export class SkillRegistry {
   private readonly opts: SkillRegistryOptions;
@@ -48,31 +56,48 @@ export class SkillRegistry {
   }
 
   /**
-   * Enable a skill — clears `disableModelInvocation` on the legacy
-   * ReaperSkill via SkillMemoryRegistry, and updates the in-memory
-   * record so future syncTo() writes carry the change. The trust
-   * value is preserved; only the invocation gate flips.
+   * Enable a skill — clears `disabled` in memory, removes the on-disk
+   * marker, and re-persists via the memory registry so the change
+   * survives a reload. The trust value is preserved; only the
+   * invocation gate flips.
    */
   enable(name: string): boolean {
     const r = this.records.get(name);
     if (!r) return false;
-    this.records.set(name, { ...r, disabled: false });
-    // No re-sync needed: the body still has disableModelInvocation
-    // tied to trust; enable() here is a runtime gate override.
+    const { disabledReason: _drop, ...rest } = r;
+    const next: InstalledSkillRecord = { ...rest, disabled: false };
+    this.records.set(name, next);
+    if (r.skillDir) {
+      try { rmSync(join(r.skillDir, DISABLED_MARKER), { force: true }); } catch { /* best effort */ }
+    }
+    this.syncToMemory();
     return true;
   }
 
   /**
    * Disable a skill — sets the runtime gate so `activate_skill`
-   * refuses to load the body, even for trusted skills. Persisted
-   * via the memory registry on next syncTo().
+   * refuses to load the body, even for trusted skills. Persisted both
+   * as a `disabled` marker next to the manifest (read back by
+   * discovery on the next boot) and via the memory registry.
    */
   disable(name: string, reason?: string): boolean {
     const r = this.records.get(name);
     if (!r) return false;
     const next: InstalledSkillRecord = { ...r, disabled: true, ...(reason !== undefined ? { disabledReason: reason } : {}) };
     this.records.set(name, next);
+    if (r.skillDir) {
+      try {
+        mkdirSync(r.skillDir, { recursive: true });
+        writeFileSync(join(r.skillDir, DISABLED_MARKER), next.disabledReason ?? "disabled", "utf8");
+      } catch { /* best effort */ }
+    }
+    this.syncToMemory();
     return true;
+  }
+
+  private syncToMemory(): void {
+    if (!this.opts.memory) return;
+    this.syncTo(this.opts.memory);
   }
 
   /** Remove a record. Returns true if removed. */
@@ -170,9 +195,12 @@ export class SkillRegistry {
 
 function recordToReaperSkill(r: InstalledSkillRecord): ReaperSkill {
   // Map the new InstalledSkillRecord → the legacy ReaperSkill shape
-  // that SkillMemoryRegistry persists. Trust below user-trusted means
-  // disableModelInvocation is set, so activate_skill refuses the body.
+  // that SkillMemoryRegistry persists. Trust below user-trusted OR an
+  // explicit `disabled` flag means disableModelInvocation is set, so
+  // activate_skill refuses the body. `disabled` must round-trip through
+  // persistence, not just live in the in-memory record.
   const trusted = r.trust === "builtin" || r.trust === "user-trusted" || r.trust === "extension-inherited";
+  const disabled = r.disabled === true || !trusted;
   const scope: ReaperSkill["scope"] =
     r.scope === "builtin" ? "builtin" : r.scope === "user" ? "user" : "project";
   const allowedTools = r.manifest.allowedTools ?? [];
@@ -199,8 +227,8 @@ function recordToReaperSkill(r: InstalledSkillRecord): ReaperSkill {
     type: "prompt",
     scope,
     whenToUse,
-    disableAutoInvocation: !trusted,
-    disableModelInvocation: !trusted,
+    disableAutoInvocation: disabled,
+    disableModelInvocation: disabled,
     arguments: args,
     allowedTools,
     memoryPolicy,

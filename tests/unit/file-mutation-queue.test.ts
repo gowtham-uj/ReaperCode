@@ -6,7 +6,6 @@ import path from "node:path";
 
 import { FileMutationQueue } from "../../src/tools/write/file-mutation-queue.js";
 import { applyEditFileContent, editFileTool } from "../../src/tools/write/edit-file.js";
-import { replaceInFileTool } from "../../src/tools/write/replace-in-file.js";
 import { writeFileTool } from "../../src/tools/write/write-file.js";
 
 async function tempDir(prefix: string): Promise<string> {
@@ -106,7 +105,7 @@ test("actual write tools use queued writes and preserve final file consistency",
   await mkdir(path.join(dir, "src"), { recursive: true });
   await writeFileTool(dir, { path: "src/a.txt", content: "one\ntwo\nthree\n" });
   await Promise.all([
-    replaceInFileTool(dir, { path: "src/a.txt", oldString: "one", newString: "ONE" }),
+    editFileTool(dir, { path: "src/a.txt", edits: [{ oldString: "one", newString: "ONE" }] }),
     editFileTool(dir, { path: "src/a.txt", edits: [{ oldString: "three", newString: "THREE" }] }),
   ]);
   const finalContent = await readFile(path.join(dir, "src/a.txt"), "utf8");

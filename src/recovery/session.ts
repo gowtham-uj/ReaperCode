@@ -84,6 +84,12 @@ export class RecoverySession {
   }
 
   async flushForBarrier(): Promise<{ written: number; deleted: number }> {
+    // Capture a restore point BEFORE the first durable flush. Once staged
+    // writes land on disk, the only way to undo them is a checkpoint restore,
+    // so a missing checkpoint would make abort() a silent no-op after a
+    // barrier (V2). ensureCheckpoint() is idempotent and no-ops on
+    // non-git workspaces (where disk-level rollback is best-effort anyway).
+    await this.ensureCheckpoint();
     const result = await this.flushFinal();
     this.barrierFlushed = true;
     return result;
@@ -107,6 +113,10 @@ export class RecoverySession {
   }
 
   async abort(cause: string): Promise<void> {
+    // Restore whenever durable writes have already crossed a barrier and a
+    // checkpoint exists — a WAL rollback alone cannot undo on-disk changes.
+    // When nothing has been flushed yet, staged entries were never applied to
+    // disk, so clearing the WAL (rollback) is exactly the right undo.
     if (this.barrierFlushed && this.checkpoint) {
       await this.restoreCheckpoint(cause);
       return;
@@ -141,13 +151,23 @@ export class RecoverySession {
     return this.wal.hasEntries();
   }
 
-  async createNonBarrierCommandView(): Promise<{ path: string; cleanup: () => Promise<void> }> {
+  async createNonBarrierCommandView(): Promise<{
+    path: string;
+    /** Every materialized root, as `{ root, viewPath }`, primary first. */
+    roots: Array<{ root: string; viewPath: string }>;
+    cleanup: () => Promise<void>;
+  }> {
     const tempRoot = await mkdtemp(path.join(os.tmpdir(), "reaper-wal-view-"));
-    await this.wal.createMaterializedView(tempRoot);
+    const roots = await this.wal.createMaterializedView(tempRoot);
     return {
       path: tempRoot,
+      roots,
       cleanup: async () => {
-        await removeTempRootWithRetry(tempRoot);
+        // Secondary roots live in sibling directories, so removing the
+        // primary temp dir alone would leak them.
+        for (const { viewPath } of roots) {
+          await removeTempRootWithRetry(viewPath);
+        }
       },
     };
   }

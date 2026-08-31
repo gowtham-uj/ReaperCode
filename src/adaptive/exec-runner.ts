@@ -24,7 +24,9 @@
 import { RuntimeEngine } from "../runtime/engine.js";
 import { ConfiguredModelGateway } from "../model/gateway.js";
 import { ProviderMultiplexerClient } from "../model/providers/provider-client.js";
-import type { ModelCapabilities } from "../model/types.js";
+import type { ModelCapabilities as ProfileModelCapabilities } from "../model/types.js";
+import type { ModelCapabilities as AdaptiveModelCapabilities } from "./types.js";
+import { ModelCapabilitiesRegistry } from "./model-capabilities.js";
 import { isValidSessionName } from "../context/session-journal.js";
 import { TrajectoryLogger } from "../logging/trajectory.js";
 import { randomUUID } from "node:crypto";
@@ -81,6 +83,15 @@ export interface ExecRunnerResult {
   toolResults: Array<{ id: string; name: string; result: unknown }>;
   trajectoryPath: string;
   contentFingerprint?: string;
+  /**
+   * The model's resolved capability set, migrated to the adaptive
+   * registry shape (imageInput/videoInput/toolUse/...). Present on every
+   * run, including failures that happen after config build, so callers
+   * can gate the visual/computer-bridge path from the same truth the
+   * exec providers advertised — instead of a permanently-undefined
+   * `imageInput` (see C2).
+   */
+  capabilities?: AdaptiveModelCapabilities;
   verification?: {
     ok: boolean;
     reason?: string;
@@ -113,13 +124,43 @@ export function deriveExecFinalStatus(input: {
   return "failed";
 }
 
-const DEFAULT_CAPABILITIES: ModelCapabilities = {
+const DEFAULT_CAPABILITIES: ProfileModelCapabilities = {
   streaming: true,
   toolCalling: true,
   jsonMode: true,
   structuredOutput: true,
   embeddings: false,
+  // Vision is opt-in: none of the text-first exec providers (deepseek,
+  // kimi, miniMax, etc.) are marked vision-capable here. Set imageInput
+  // via an explicit profile to enable the screenshot/computer-bridge path.
+  imageInput: false,
+  videoInput: false,
 };
+
+/**
+ * Resolve the exec config's model capabilities into the adaptive
+ * registry shape. The exec config advertises the profile contract
+ * (`streaming`/`toolCalling`/`imageInput`/...); the adaptive registry
+ * (and thus `VisualInputAnalyzer.isAvailable()`) reads
+ * `imageInput`/`videoInput`/`toolUse`. `fromProfile` is the single
+ * migration point between the two contracts.
+ */
+export function resolveExecCapabilities(config: unknown): AdaptiveModelCapabilities {
+  const profile = extractProfileCapabilities(config);
+  return ModelCapabilitiesRegistry.fromProfile(profile).current();
+}
+
+function extractProfileCapabilities(config: unknown): ProfileModelCapabilities {
+  const models = (config as { models?: Record<string, { capabilities?: ProfileModelCapabilities } | undefined> }).models;
+  const defaultModel = models?.["default_model"];
+  const caps = defaultModel?.capabilities;
+  if (!caps) {
+    // Fall back to the safe minimum when the config has no capabilities
+    // block (should not happen — buildConfig always sets one).
+    return { streaming: true, toolCalling: true, jsonMode: true, structuredOutput: true, embeddings: false, imageInput: false, videoInput: false };
+  }
+  return caps;
+}
 
 function pickAuthToken(provider: ExecProvider): string | undefined {
   if (provider === "minimax") {
@@ -245,6 +286,10 @@ export function buildConfig(opts: ExecRunnerOptions): unknown {
       },
       runtime: {
         voteAttempts: 1,
+        // `reaper exec` is the explicit single-prompt, non-interactive
+        // runner — it is intentionally yolo. Every other entrypoint
+        // defaults to accept_edits.
+        permissionMode: "yolo",
       },
     };
   }
@@ -279,6 +324,7 @@ export function buildConfig(opts: ExecRunnerOptions): unknown {
     },
     runtime: {
       voteAttempts: 1,
+      permissionMode: "yolo",
     },
   };
 }
@@ -336,12 +382,42 @@ export function buildRequestEnvelope(opts: ExecRunnerOptions): unknown {
   };
 }
 
+/**
+ * Environment variables `buildConfig` writes so the provider clients pick
+ * up credentials at request time. `runExec` snapshots these before
+ * building the config and restores them when the run ends, so a single
+ * `exec` call does not permanently rewrite the credentials of a
+ * long-lived host process that embeds the runner.
+ */
+const EXEC_MUTATED_ENV_KEYS = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_BASE_URL",
+  "OPENAI_API_KEY",
+  "OPENAI_CODEX_ACCESS_TOKEN",
+  "DEEPSEEK_API_KEY",
+  "NURALWATT_API_KEY",
+  "NURALWATT_API_KEY2",
+] as const;
+
+function snapshotExecEnv(): Map<string, string | undefined> {
+  return new Map(EXEC_MUTATED_ENV_KEYS.map((key) => [key, process.env[key]]));
+}
+
+function restoreExecEnv(snapshot: Map<string, string | undefined>): void {
+  for (const [key, value] of snapshot) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+}
+
 export async function runExec(opts: ExecRunnerOptions): Promise<ExecRunnerResult> {
   const startedAt = Date.now();
+  const envSnapshot = snapshotExecEnv();
   let config: unknown;
   try {
     config = buildConfig(opts);
   } catch (e) {
+    restoreExecEnv(envSnapshot);
     return {
       status: "failed",
       assistantMessage: "",
@@ -353,6 +429,7 @@ export async function runExec(opts: ExecRunnerOptions): Promise<ExecRunnerResult
     };
   }
   if (opts.session !== undefined && !isValidSessionName(opts.session)) {
+    restoreExecEnv(envSnapshot);
     return {
       status: "failed",
       assistantMessage: "",
@@ -366,6 +443,10 @@ export async function runExec(opts: ExecRunnerOptions): Promise<ExecRunnerResult
   const client = new ProviderMultiplexerClient();
   const gateway = new ConfiguredModelGateway(config, client);
   const requestEnvelope = buildRequestEnvelope(opts);
+  // C2: resolve the model's advertised capabilities into the adaptive
+  // registry shape up front, so a caller can gate the visual path on
+  // the same truth the provider advertised (rather than undefined).
+  const capabilities = resolveExecCapabilities(config);
   const abort = new AbortController();
   const engine = new RuntimeEngine({
     config,
@@ -382,6 +463,14 @@ export async function runExec(opts: ExecRunnerOptions): Promise<ExecRunnerResult
   // can pass --timeout-ms N. N=0 is the canonical "no Reaper timer".
   const timeoutMs = opts.timeoutMs ?? 0;
   const timer = timeoutMs > 0 ? setTimeout(() => abort.abort(), timeoutMs) : undefined;
+  // Ctrl-C / SIGTERM must unwind through the same path as a timeout:
+  // abort the engine so `finally` runs (gateway disposed, `run_end`
+  // envelope appended, env restored). Without this the default signal
+  // disposition kills the process mid-run, leaking the provider
+  // connection and truncating the trajectory with no terminal event.
+  const onSignal = (): void => abort.abort();
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
   // Terminal `run_end` envelope appended to the same trajectory file
   // the engine is writing — keeps the live stream readable for
   // harnesses that `tail -f` the JSONL or pipe stdout (--stream-events).
@@ -429,6 +518,7 @@ export async function runExec(opts: ExecRunnerOptions): Promise<ExecRunnerResult
         kind: String((n as { kind?: string }).kind ?? "info"),
         message: String((n as { message?: string }).message ?? ""),
       })),
+      capabilities,
     };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
@@ -455,14 +545,18 @@ export async function runExec(opts: ExecRunnerOptions): Promise<ExecRunnerResult
       events: 0,
       durationMs: Date.now() - startedAt,
       notices: [{ kind: "error", message }],
+      capabilities,
     };
   } finally {
     clearTimeout(timer);
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
     try {
       await gateway.dispose();
     } catch {
       /* ignore */
     }
+    restoreExecEnv(envSnapshot);
   }
 }
 

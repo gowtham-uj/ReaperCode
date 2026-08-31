@@ -24,6 +24,8 @@
  * touch the executor. The scheduler still drives the actual execution.
  */
 
+import nodePath from "node:path";
+
 import type { ResourceKeys, ToolCall } from "../tools/types.js";
 import { declaredResourcesForToolCall } from "../tools/resource-keys.js";
 import { classifyToolCall, type ExecutionKind } from "./planner.js";
@@ -130,32 +132,40 @@ export function optimizeToolCallBatch(
  */
 function dedupKey(call: ToolCall): string | undefined {
   const args = (call.args ?? {}) as Record<string, unknown>;
+  const argPath = (): string | undefined => (typeof args.path === "string" ? normalizeDedupPath(args.path) : undefined);
   switch (call.name) {
     case "view_file":
     case "skim_file": {
-      const path = typeof args.path === "string" ? args.path : undefined;
+      const target = argPath();
       const start = typeof args.startLine === "number" ? args.startLine : "";
       const end = typeof args.endLine === "number" ? args.endLine : "";
-      return path ? `read:${call.name}:${path}:${start}:${end}` : undefined;
+      return target ? `read:${call.name}:${target}:${start}:${end}` : undefined;
     }
     case "list_directory": {
-      const path = typeof args.path === "string" ? args.path : undefined;
-      return path ? `list_directory:${path}` : undefined;
+      const target = argPath();
+      return target ? `list_directory:${target}` : undefined;
     }
     case "grep_search": {
       const pattern = typeof args.pattern === "string" ? args.pattern : undefined;
-      const path = typeof args.path === "string" ? args.path : "";
-      return pattern ? `grep:${pattern}:${path}` : undefined;
+      const target = argPath() ?? "";
+      return pattern ? `grep:${pattern}:${target}` : undefined;
     }
     case "git_status":
       return "git_status";
-    case "git_diff": {
-      const path = typeof args.path === "string" ? args.path : "";
-      return `git_diff:${path}`;
-    }
+    case "git_diff":
+      return `git_diff:${argPath() ?? ""}`;
     default:
       return undefined;
   }
+}
+
+/**
+ * Collapse path spellings that name the same file so duplicate reads
+ * dedup. Mirrors `normalizePathKey` in tools/resource-keys.ts — see
+ * there for why case is folded unconditionally.
+ */
+function normalizeDedupPath(target: string): string {
+  return nodePath.normalize(target).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 
 export function partitionsForParallelExecution(

@@ -86,6 +86,8 @@ export async function callMainAgent(input: MainAgentCallInput): Promise<MainAgen
 export interface MainAgentStreamCallbacks {
   onMessageDelta?: (text: string) => void | Promise<void>;
   onReasoningDelta?: (text: string) => void | Promise<void>;
+  /** Keep CLI output by default; app-server turns disable process writes. */
+  writeHumanOutput?: boolean;
 }
 
 export async function streamMainAgentResponse(
@@ -121,15 +123,17 @@ export async function streamMainAgentResponse(
     if (event.type === "message_delta") {
       if (typeof event.content === "string") {
         content += event.content;
-        // Live stream actual model output — stderr in stream-events mode
-        writeHumanOutput(event.content);
+        // Live stream actual model output for CLI callers only.
+        if (callbacks.writeHumanOutput !== false) writeHumanOutput(event.content);
         await callbacks.onMessageDelta?.(event.content);
       }
       const data = asRecord(event.data);
       if (typeof data?.reasoningContent === "string") {
         reasoningContent += data.reasoningContent;
-        // Live stream reasoning as dimmed "thinking" text (stderr in stream mode)
-        writeHumanOutput(dim(data.reasoningContent, process.stdout as NodeJS.WriteStream));
+        // Live stream reasoning as dimmed thinking text for CLI callers.
+        if (callbacks.writeHumanOutput !== false) {
+          writeHumanOutput(dim(data.reasoningContent, process.stdout as NodeJS.WriteStream));
+        }
         await callbacks.onReasoningDelta?.(data.reasoningContent);
       }
       continue;
@@ -137,7 +141,9 @@ export async function streamMainAgentResponse(
     if (event.type === "reasoning_delta") {
       if (typeof event.content === "string") {
         reasoningContent += event.content;
-        writeHumanOutput(dim(event.content, process.stdout as NodeJS.WriteStream));
+        if (callbacks.writeHumanOutput !== false) {
+          writeHumanOutput(dim(event.content, process.stdout as NodeJS.WriteStream));
+        }
         await callbacks.onReasoningDelta?.(event.content);
       }
       continue;

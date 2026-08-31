@@ -128,9 +128,13 @@ export function isReadOnlyShellCommand(cmd: string): boolean {
     // explicitly opts in.
     return false;
   }
-  // Tokenize: strip leading `sudo`, `cd <dir> &&`, env assignments.
+  // `sudo` escalates privilege, so the read-only allowlist no longer
+  // describes the blast radius (`sudo ls /root` reads outside the
+  // workspace; the elevated context makes any misclassification far
+  // worse). Never strip it — treat any sudo invocation as not read-only.
+  if (/^\s*sudo\b/.test(cmd)) return false;
+  // Tokenize: strip `cd <dir> &&` and env assignments.
   const stripped = cmd
-    .replace(/^\s*(?:sudo\s+)?/, "")
     .replace(/^\s*(?:cd\s+\S+\s*(?:&&|;)\s*)+/, "")
     .replace(/^\s*[A-Z_][A-Z0-9_]*=\S*\s+/, "");
   const match = stripped.match(/^\s*(\S+)/);
@@ -172,10 +176,13 @@ const READ_ONLY_GIT_SUBCOMMANDS = new Set([
   "help",
   "version",
   "shortlog",
-  "reflog",
-  "stash",
   "show-branch",
   "grep",
+  // NOTE: `stash` and `reflog` are deliberately absent. `git stash`
+  // mutates the worktree and index (it is `stash push` by default);
+  // `git reflog` is read-only in its bare form but `reflog expire`/
+  // `reflog delete` rewrite reflog state, and this allowlist matches on
+  // the subcommand alone.
 ]);
 
 export function classifyToolCall(call: ToolCall): ExecutionKind {

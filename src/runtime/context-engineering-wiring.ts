@@ -722,15 +722,41 @@ export function createContextEngineeringHooks(
       // #13: Compact tool history (T2.5)
       let toolHistoryCompacted = 0;
       try {
+        // Reconstruct the originating tool name + args for each tool
+        // message from the preceding assistant `tool_calls` block so the
+        // compactor sees real per-message identity instead of a hardcoded
+        // `name: "tool"`. `ok` must reflect `is_error`, otherwise the
+        // file-ops/latest-failure summaries mislabel every failed write as
+        // a successful generic tool.
+        const toolMeta = new Map<string, { name: string; args: unknown }>();
+        for (const m of working as Array<Record<string, unknown>>) {
+          const calls = (m as any)?.tool_calls;
+          if (m && (m as any).role === "assistant" && Array.isArray(calls)) {
+            for (const c of calls) {
+              const id = c?.id;
+              const name = c?.function?.name ?? c?.name;
+              const args = c?.function?.arguments ?? c?.args;
+              if (typeof id === "string" && typeof name === "string") {
+                toolMeta.set(id, { name, args });
+              }
+            }
+          }
+        }
         const toolResults = (working as Array<Record<string, unknown>>)
           .filter((m) => m && (m as any).role === "tool" && (m as any).content)
-          .map((m) => ({
-            name: "tool",
-            durationMs: 0,
-            ok: true as const,
-            toolCallId: (m as any).tool_call_id ?? "",
-            output: (m as any).content,
-          }));
+          .map((m) => {
+            const id = (m as any).tool_call_id ?? "";
+            const meta = toolMeta.get(id);
+            const output = (m as any).content;
+            return {
+              name: meta?.name ?? "tool",
+              durationMs: 0,
+              ok: !((m as any).is_error === true),
+              toolCallId: id,
+              output,
+              ...(meta?.args !== undefined ? { args: meta.args } : {}),
+            };
+          });
         if (toolResults.length > 0) {
           const compact = compactToolHistory({
             toolResults,
@@ -750,6 +776,18 @@ export function createContextEngineeringHooks(
               }
               return m;
             });
+            // Insert the compacted summaries of the dropped middle results
+            // as synthetic context so the evidence survives — the full
+            // middle messages are not deleted, but the summarizer's
+            // distilled form is what the model actually reads next turn.
+            if (compact.compacted.length > 0) {
+              const summaryBlock = compact.compacted.join("\n");
+              working = [...(working as unknown[]), {
+                role: "user",
+                name: "reaper_tool_compaction",
+                content: `[Context Memory: compacted tool history]\n${summaryBlock}`,
+              }];
+            }
           }
         }
       } catch {

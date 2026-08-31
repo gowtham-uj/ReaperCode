@@ -46,6 +46,7 @@ import { SlashCommandRegistry, ConsoleHost } from "../extensions/slash-command-r
 import { registerBuiltinCommands } from "../commands/index.js";
 import { builtinSkillsRoot } from "../skills/built-in/index.js";
 import { runExec, type ExecRunnerOptions } from "./exec-runner.js";
+import { startAppServer } from "../app-server/server.js";
 
 
 export interface ReaperCLIOptions {
@@ -86,6 +87,10 @@ export class ReaperCLI {
     try {
       switch (group) {
         case "skill":   return await this.skill(subcommand, rest);
+        // C3: `skills` is advertised as a top-level alias in
+        // scripts/run-reaper.ts but had no case here, so `reaper skills
+        // list` always exited 2. Route it to the same handler.
+        case "skills":  return await this.skill(subcommand, rest);
         case "extensions": return await this.extensions(subcommand, rest);
         case "memory":  return await this.memory_(subcommand, rest);
         case "visual":  return await this.visual_(subcommand, rest);
@@ -93,6 +98,7 @@ export class ReaperCLI {
         case "redact":  return await this.redactCmd(undefined, subcommand !== undefined ? [subcommand, ...rest] : rest);
         case "slash":   return await this.slash(subcommand, subcommand !== undefined ? rest : []);
         case "exec":    return await this.execGroup(subcommand, rest);
+        case "app-server": return await this.appServer(subcommand !== undefined ? [subcommand, ...rest] : rest);
         default:        return { exitCode: 2, stdout: "", stderr: `unknown group "${group}"` };
       }
     } catch (e) {
@@ -151,7 +157,9 @@ export class ReaperCLI {
   }
 
   private async skillCreate(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    const opts = parseFlags(args);
+    const parsed = parseFlags(args);
+    if (parsed.error) return { exitCode: 2, stdout: "", stderr: parsed.error };
+    const opts = parsed.flags;
     if (typeof opts.name !== "string") return { exitCode: 2, stdout: "", stderr: "--name required" };
     if (typeof opts.description !== "string") return { exitCode: 2, stdout: "", stderr: "--description required" };
     if (typeof opts.scope !== "string" || !["project", "user", "builtin"].includes(opts.scope)) {
@@ -308,17 +316,91 @@ export class ReaperCLI {
   }
 
   /* --- redact --- */
-  /** `reaper redact <file|stdin text...>`. The first non-flag argument is
-   *  treated as a file path if it exists on disk; otherwise the
-   *  remaining arguments are joined as inline text. */
-  private async redactCmd(_sub: string | undefined, args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    let text = "";
-    if (args.length === 0) return { exitCode: 2, stdout: "", stderr: "redact: text or file path required" };
-    const first = args[0]!;
-    if (existsSync(first)) text = readFileSync(first, "utf8");
-    else text = args.join(" ");
+  /**
+   * `reaper redact --file <path>` or `reaper redact --text <text...>`.
+   *
+   * Mode is explicit. The previous behaviour ("treat argument 1 as a file
+   * if it happens to exist") silently changed meaning based on the
+   * filesystem: a literal string that collided with a real path caused the
+   * file's contents to be read and printed instead of the text the caller
+   * asked to redact — leaking whatever that file held. Bare positional
+   * arguments are still accepted as text, but never auto-resolved to a
+   * path.
+   */
+  private async redactCmd(sub: string | undefined, args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    const argv = sub === undefined ? args : [sub, ...args];
+    const parsed = parseFlags(argv);
+    if (parsed.error) return { exitCode: 2, stdout: "", stderr: parsed.error };
+    const file = parsed.flags["file"];
+    const inlineText = parsed.flags["text"];
+    if (file !== undefined && inlineText !== undefined) {
+      return { exitCode: 2, stdout: "", stderr: "redact: use only one of --file or --text" };
+    }
+
+    let text: string;
+    if (file !== undefined) {
+      if (!existsSync(file)) return { exitCode: 2, stdout: "", stderr: `redact: file not found: ${file}` };
+      try {
+        text = readFileSync(file, "utf8");
+      } catch (error) {
+        return { exitCode: 2, stdout: "", stderr: `redact: unreadable file: ${error instanceof Error ? error.message : String(error)}` };
+      }
+    } else {
+      text = inlineText ?? parsed.positionals.join(" ");
+      if (!text) return { exitCode: 2, stdout: "", stderr: "redact: --text <text> or --file <path> required" };
+    }
+
     const { redacted, redactions } = redactSecrets(text);
     return { exitCode: 0, stdout: JSON.stringify({ redacted, redactions }, null, 2) + "\n", stderr: "" };
+  }
+
+  /* --- app server --- */
+  private async appServer(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    const parsed = parseFlags(args);
+    if (parsed.error) return { exitCode: 2, stdout: "", stderr: parsed.error };
+    const flags = parsed.flags;
+    const listen = flags["listen"] ?? "ws://127.0.0.1:0";
+    let authToken = flags["auth-token"];
+    const authTokenFile = flags["auth-token-file"];
+    if (authToken && authTokenFile) {
+      return { exitCode: 2, stdout: "", stderr: "Use only one of --auth-token or --auth-token-file" };
+    }
+    if (authTokenFile) {
+      try {
+        authToken = readFileSync(authTokenFile, "utf8").trim();
+      } catch (error) {
+        return {
+          exitCode: 2,
+          stdout: "",
+          stderr: `--auth-token-file unreadable: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
+    const maxConcurrentTurns = parsePositiveIntegerFlag(flags["max-concurrent-turns"], 2, "--max-concurrent-turns");
+    const maxMessageBytes = parsePositiveIntegerFlag(flags["max-message-bytes"], 1024 * 1024, "--max-message-bytes");
+    const workspaceRoot = flags["workspace"] ?? this.opts.workspaceRoot;
+    const server = await startAppServer({
+      workspaceRoot,
+      listen,
+      ...(authToken ? { authToken } : {}),
+      maxConcurrentTurns,
+      maxMessageBytes,
+    });
+    process.stdout.write(`${JSON.stringify(server.ready)}\n`);
+
+    await new Promise<void>((resolve) => {
+      let stopping = false;
+      const stop = (): void => {
+        if (stopping) return;
+        stopping = true;
+        process.off("SIGINT", stop);
+        process.off("SIGTERM", stop);
+        void server.stop().finally(resolve);
+      };
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+    });
+    return { exitCode: 0, stdout: "", stderr: "" };
   }
 
   /* --- usage --- */
@@ -327,7 +409,9 @@ export class ReaperCLI {
     if (sub !== "run") {
       return { exitCode: 2, stdout: "", stderr: `exec subcommand required (run); got "${sub ?? ""}"` };
     }
-    const flags = parseFlags(args);
+    const parsed = parseFlags(args, ["json", "stream-events"]);
+    if (parsed.error) return { exitCode: 2, stdout: "", stderr: parsed.error };
+    const flags = parsed.flags;
     const promptFile = typeof flags["prompt-file"] === "string" ? flags["prompt-file"] : undefined;
     let prompt = flags["prompt"] ?? "";
     if (!prompt && promptFile) {
@@ -346,7 +430,7 @@ export class ReaperCLI {
       }
     }
     if (!prompt) {
-      prompt = args.filter((a) => !a.startsWith("--")).join(" ").trim();
+      prompt = parsed.positionals.join(" ").trim();
     }
     if (!prompt) {
       return { exitCode: 2, stdout: "", stderr: "exec run --prompt <text> required (or pass the prompt positionally)" };
@@ -430,7 +514,20 @@ export class ReaperCLI {
         }
       }
       // In prod mode, model output was already streamed live — nothing extra to print.
-      const summary = lines.length ? lines.join("\n") + "\n" : "";
+      let summary = lines.length ? lines.join("\n") + "\n" : "";
+      // C1: a non-completed run must never fail silently. In prod
+      // (`REAPER_DEV` unset) the human summary is empty, so a failure
+      // returned exit code 1 with no diagnostic. Always surface the
+      // status + error notices to stderr on incomplete runs; keep stdout
+      // clean for `--json`/`--stream-events` consumers.
+      if (result.status !== "completed") {
+        const failureLines = [`exec run ${result.status}`];
+        const errors = result.notices.filter((n) => n.kind === "error");
+        for (const n of errors) failureLines.push(`  ${n.message}`);
+        if (errors.length === 0 && result.assistantMessage) failureLines.push(`  ${result.assistantMessage.slice(0, 500)}`);
+        if (errors.length === 0) failureLines.push("  (no error notice was recorded — see the trajectory for details)");
+        summary = `${summary}${failureLines.join("\n")}\n`;
+      }
       // When stream-events is enabled, stdout is the pure JSONL event
       // stream; route the human summary to stderr so consumers can
       // pipe it without parsing noise.
@@ -457,6 +554,7 @@ export class ReaperCLI {
       "  capability  show | probe",
       "  redact      <file|->",
       "  exec        run --prompt <text> [--session <name>] [--workspace <dir>] [--model <id>] [--provider anthropic|openai|openai-codex|minimax|deepseek|nuralwatt|nuralwatt2] [--reasoning-effort low|medium|high] [--thinking on|off] [--max-tokens N] [--timeout-ms N] [--json] [--stream-events]",
+      "  app-server  [--listen ws://127.0.0.1:0] [--workspace <dir>] [--auth-token <token>|--auth-token-file <path>] [--max-concurrent-turns N]",
     ].join("\n");
     return { exitCode: 0, stdout: usage + "\n", stderr: "" };
   }
@@ -465,7 +563,7 @@ export class ReaperCLI {
 
   private ensureNewSkillRegistry(): { registry: SkillRegistry; lifecycle: SkillLifecycle } {
     if (!this._newSkillRegistry) {
-      this._newSkillRegistry = new SkillRegistry({ builtinMetadata: {} });
+      this._newSkillRegistry = new SkillRegistry({ builtinMetadata: {}, memory: this.skillRegistry });
       // Load built-ins so `skill list` shows all 17.
       try {
         const userHome = this.opts.userHome ?? process.env.HOME ?? "";
@@ -513,8 +611,10 @@ export class ReaperCLI {
   }
 
   private async skillAdd(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    const opts = parseFlags(args);
-    const from = typeof opts.from === "string" ? opts.from : args[0];
+    const parsed = parseFlags(args, ["trust"]);
+    if (parsed.error) return { exitCode: 2, stdout: "", stderr: parsed.error };
+    const opts = parsed.flags;
+    const from = typeof opts.from === "string" ? opts.from : parsed.positionals[0];
     if (!from) return { exitCode: 2, stdout: "", stderr: "--from <path> required" };
     const scope = opts.scope === "project" ? "project" : "user";
     const trust = opts.trust === "true" || opts.trust === "1";
@@ -636,8 +736,10 @@ export class ReaperCLI {
   }
 
   private async extAdd(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    const opts = parseFlags(args);
-    const from = typeof opts.from === "string" ? opts.from : args[0];
+    const parsed = parseFlags(args, ["trust"]);
+    if (parsed.error) return { exitCode: 2, stdout: "", stderr: parsed.error };
+    const opts = parsed.flags;
+    const from = typeof opts.from === "string" ? opts.from : parsed.positionals[0];
     if (!from) return { exitCode: 2, stdout: "", stderr: "--from <path> required" };
     const scope = opts.scope === "project" ? "project" : "user";
     const trust = opts.trust === "true" || opts.trust === "1";
@@ -742,20 +844,77 @@ export class ReaperCLI {
 
 /* --- helpers --- */
 
-function parseFlags(args: string[]): Record<string, string> {
-  const out: Record<string, string> = {};
+function parsePositiveIntegerFlag(value: string | undefined, fallback: number, name: string): number {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${name} must be a positive integer`);
+  return parsed;
+}
+
+interface ParsedFlags {
+  flags: Record<string, string>;
+  /** Non-flag arguments, plus everything after a `--` terminator. */
+  positionals: string[];
+  /** Set when the argv is malformed; callers should exit 2 with this. */
+  error?: string;
+}
+
+/**
+ * Parse `--flag value` / `--flag=value` / `--boolean` argv.
+ *
+ * Three things the previous parser got wrong:
+ *  - A value-taking flag with no value (`--provider` at end of argv, or
+ *    `--provider --json`) silently became the string `"true"`, which then
+ *    flowed into provider/model selection as a bogus value.
+ *  - `--key=value` was not understood at all; the whole token became a
+ *    flag name.
+ *  - There was no `--` terminator, so a positional that happens to start
+ *    with `--` could not be passed.
+ *
+ * Flags named in `booleanFlags` take no value; every other flag requires
+ * one, and its absence is a hard error rather than a silent default.
+ */
+function parseFlags(args: string[], booleanFlags: readonly string[] = []): ParsedFlags {
+  const booleans = new Set(booleanFlags);
+  const flags: Record<string, string> = {};
+  const positionals: string[] = [];
   let i = 0;
   while (i < args.length) {
     const a = args[i]!;
-    if (a.startsWith("--")) {
-      const k = a.slice(2);
-      const v = args[i + 1] && !args[i + 1]!.startsWith("--") ? args[i + 1]! : "true";
-      out[k] = v;
-      i += v === "true" ? 1 : 2;
-    } else {
-      i++;
+    if (a === "--") {
+      positionals.push(...args.slice(i + 1));
+      break;
     }
+    if (!a.startsWith("--")) {
+      positionals.push(a);
+      i += 1;
+      continue;
+    }
+
+    const body = a.slice(2);
+    const eq = body.indexOf("=");
+    if (eq >= 0) {
+      const key = body.slice(0, eq);
+      if (!key) return { flags, positionals, error: `malformed flag "${a}"` };
+      flags[key] = body.slice(eq + 1);
+      i += 1;
+      continue;
+    }
+
+    if (!body) return { flags, positionals, error: `malformed flag "${a}"` };
+    if (booleans.has(body)) {
+      flags[body] = "true";
+      i += 1;
+      continue;
+    }
+
+    const next = args[i + 1];
+    if (next === undefined || next === "--" || next.startsWith("--")) {
+      return { flags, positionals, error: `--${body} requires a value` };
+    }
+    flags[body] = next;
+    i += 2;
   }
-  return out;
+  return { flags, positionals };
 }
 

@@ -15,14 +15,14 @@ import type { AgentEventEnvelope, AgentRequestEnvelope, TransportKind } from "..
 import type { ToolCall } from "../tools/types.js";
 import { TrajectoryLogger } from "../logging/trajectory.js";
 import type { ReaperRunContext } from "./run-manager.js";
-import type { RuntimeEngineResult, SplitToolCalls } from "./engine.js";
+import type { AdvisoryToolCall, AdvancementSignalCall, RuntimeEngineResult, SplitToolCalls } from "./engine.js";
 import { isReaperDevMode } from "./dev-mode.js";
 export function inferTransport(value: unknown): TransportKind {
   const allowed = new Set<TransportKind>(["stdio", "http_json", "http_sse", "websocket", "webhook"]);
   return typeof value === "string" && allowed.has(value as TransportKind) ? (value as TransportKind) : "stdio";
 }
 
-export async function persistRunResult(runContext: ReaperRunContext, result: RuntimeEngineResult, status: "completed" | "failed"): Promise<void> {
+export async function persistRunResult(runContext: ReaperRunContext, result: RuntimeEngineResult, status: "completed" | "failed" | "cancelled"): Promise<void> {
   if (!isReaperDevMode()) return;
   await mkdir(runContext.runDir, { recursive: true });
   const completedAt = new Date().toISOString();
@@ -64,7 +64,7 @@ export async function persistRunResult(runContext: ReaperRunContext, result: Run
  */
 export async function refreshRunManifest(
   runContext: ReaperRunContext,
-  stamp: { status: "completed" | "failed"; completedAt: string },
+  stamp: { status: "completed" | "failed" | "cancelled"; completedAt: string },
 ): Promise<void> {
   const manifestPath = path.join(runContext.runDir, "manifest.json");
   let base: Record<string, unknown> = {};
@@ -155,7 +155,51 @@ export async function logModelResponseTrace(input: {
 }
 
 export function splitControlToolCalls(toolCalls: ToolCall[]): SplitToolCalls {
-  return { executableToolCalls: toolCalls };
+  const executableToolCalls: ToolCall[] = [];
+  const advisoryToolCalls: AdvisoryToolCall[] = [];
+  let advancementSignal: AdvancementSignalCall | undefined;
+
+  for (const call of toolCalls) {
+    // Compare against a widened string so narrowing the discriminated
+    // union does not collapse `call` to `never` inside the branch.
+    const name: string = call.name;
+    if (name === "advance_step") {
+      const args = (call.args ?? {}) as Record<string, unknown>;
+      const evidence = Array.isArray(args.evidence)
+        ? args.evidence.filter((item): item is string => typeof item === "string")
+        : typeof args.evidence === "string"
+          ? [args.evidence]
+          : undefined;
+      advancementSignal = {
+        id: call.id,
+        name: "advance_step",
+        args: {
+          summary: typeof args.summary === "string" && args.summary.trim()
+            ? args.summary
+            : typeof args.stepId === "string"
+              ? args.stepId
+              : "step advanced",
+          ...(evidence && evidence.length > 0 ? { evidence } : {}),
+        },
+      };
+      continue;
+    }
+    if (name === "update_plan" || name === "update_todo") {
+      advisoryToolCalls.push({
+        id: call.id,
+        name,
+        args: (call.args ?? {}) as Record<string, unknown>,
+      });
+      continue;
+    }
+    executableToolCalls.push(call);
+  }
+
+  return {
+    executableToolCalls,
+    ...(advisoryToolCalls.length > 0 ? { advisoryToolCalls } : {}),
+    ...(advancementSignal ? { advancementSignal } : {}),
+  };
 }
 
 // Phase T3.11: file-hint helpers moved to ./file-hints.ts

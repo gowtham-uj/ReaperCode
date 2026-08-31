@@ -181,18 +181,52 @@ function singularizeToken(token: string): string {
   return token;
 }
 
-function labelsReferToSamePopulation(left: string, right: string): boolean {
-  if (!left || !right) return false;
-  return left === right || left.includes(right) || right.includes(left);
+/**
+ * Generic tokens that appear in many unrelated count labels. Two labels
+ * sharing only one of these say nothing about whether they count the same
+ * population, so they never establish a relation on their own.
+ */
+const GENERIC_LABEL_TOKENS = new Set([
+  "item", "items", "entry", "value", "record", "result", "row", "line", "element",
+  "data", "input", "output", "size", "length", "num", "all", "the", "and", "for",
+  "from", "with", "per", "each", "any", "new", "old", "max", "min", "avg",
+]);
+
+function labelTokens(label: string): string[] {
+  return label.split(/\s+/).filter(Boolean);
 }
 
+/**
+ * Do two count labels name the same population?
+ *
+ * Matching is token-based, not substring-based. Raw substring matching
+ * treated `cat` and `category` (and `user` / `superuser`) as the same
+ * population, so unrelated counts were reported as contradictions. Labels
+ * agree when their token sets are equal, or when one is a subset of the
+ * other and the shared tokens include at least one meaningful noun (so
+ * `record` vs `error record` does not match on `record` alone).
+ */
+function labelsReferToSamePopulation(left: string, right: string): boolean {
+  if (!left || !right) return false;
+  if (left === right) return true;
+  const leftTokens = new Set(labelTokens(left));
+  const rightTokens = new Set(labelTokens(right));
+  if (leftTokens.size === 0 || rightTokens.size === 0) return false;
+
+  const [smaller, larger] = leftTokens.size <= rightTokens.size ? [leftTokens, rightTokens] : [rightTokens, leftTokens];
+  for (const token of smaller) {
+    if (!larger.has(token)) return false;
+  }
+  return [...smaller].some((token) => !GENERIC_LABEL_TOKENS.has(token));
+}
+
+/**
+ * Weaker relation used for unique-vs-population comparisons: the labels
+ * must share at least one meaningful (non-generic) token.
+ */
 function labelsLookRelated(left: string, right: string): boolean {
   if (labelsReferToSamePopulation(left, right)) return true;
-  const leftTokens = new Set(left.split(/\s+/).filter(Boolean));
-  const rightTokens = new Set(right.split(/\s+/).filter(Boolean));
-  if (leftTokens.size === 0 || rightTokens.size === 0) return false;
-  for (const token of leftTokens) {
-    if (rightTokens.has(token)) return true;
-  }
-  return false;
+  const rightTokens = new Set(labelTokens(right));
+  if (rightTokens.size === 0) return false;
+  return labelTokens(left).some((token) => rightTokens.has(token) && !GENERIC_LABEL_TOKENS.has(token));
 }

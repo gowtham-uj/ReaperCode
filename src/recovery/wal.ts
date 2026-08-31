@@ -37,6 +37,10 @@ export class WriteAheadLog {
     return this.entries.size > 0;
   }
 
+  hasEntry(targetPath: string): boolean {
+    return this.entries.has(this.getAbsolutePath(targetPath));
+  }
+
   getStagedEntries(): Array<{ path: string; stagedContent: string | null }> {
     return [...this.entries.values()].map((entry) => ({ path: entry.path, stagedContent: entry.stagedContent }));
   }
@@ -235,16 +239,41 @@ export class WriteAheadLog {
     this.entries.clear();
   }
 
-  async createMaterializedView(targetRoot: string): Promise<void> {
-    await rm(targetRoot, { recursive: true, force: true });
-    await mkdir(path.dirname(targetRoot), { recursive: true });
-    
-    // Copy all roots into targetRoot? Or just primary? 
-    // Materialized view is typically for the primary root or the single worktree
-    await cp(this.primaryRoot, targetRoot, {
+  /**
+   * Materialize every configured workspace root, staged writes included, so
+   * a non-barrier shell command observes pending edits instead of stale
+   * disk content.
+   *
+   * The primary root is materialized at `targetRoot`; each additional root
+   * gets a sibling directory. Previously only the primary root was copied
+   * and non-primary entries were skipped outright, so in a multi-root
+   * workspace a command would silently read pre-edit content for every
+   * secondary root.
+   *
+   * Returns the root -> view mapping so callers can rewrite absolute paths
+   * for *all* roots and clean up every directory that was created.
+   */
+  async createMaterializedView(targetRoot: string): Promise<Array<{ root: string; viewPath: string }>> {
+    const views = this.workspaceRoots.map((root, index) => ({
+      root,
+      viewPath: index === 0 ? targetRoot : `${targetRoot}-root-${index}`,
+    }));
+
+    for (const { root, viewPath } of views) {
+      await this.materializeRoot(root, viewPath);
+    }
+
+    return views;
+  }
+
+  private async materializeRoot(root: string, viewPath: string): Promise<void> {
+    await rm(viewPath, { recursive: true, force: true });
+    await mkdir(path.dirname(viewPath), { recursive: true });
+
+    await cp(root, viewPath, {
       recursive: true,
       filter: (source) => {
-        const relative = path.relative(this.primaryRoot, source);
+        const relative = path.relative(root, source);
         if (!relative) {
           return true;
         }
@@ -253,19 +282,19 @@ export class WriteAheadLog {
       },
     });
 
-    await linkDependencyDirectories(this.primaryRoot, targetRoot);
+    await linkDependencyDirectories(root, viewPath);
 
     for (const entry of this.entries.values()) {
-      // Only materialize entries belonging to primary root for now
+      let owningRoot: string;
       try {
-        const root = this.resolvePath(entry.path);
-        if (root !== this.primaryRoot) continue;
+        owningRoot = this.resolvePath(entry.path);
       } catch {
         continue;
       }
+      if (owningRoot !== root) continue;
 
-      const relativePath = path.relative(this.primaryRoot, entry.path);
-      const targetPath = path.join(targetRoot, relativePath);
+      const relativePath = path.relative(root, entry.path);
+      const targetPath = path.join(viewPath, relativePath);
       if (entry.stagedContent === null) {
         await rm(targetPath, { force: true, recursive: true }).catch(() => undefined);
         continue;

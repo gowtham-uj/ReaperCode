@@ -56,6 +56,13 @@ export async function commitVerifiedRunKnowledge(input: {
   };
 }): Promise<VerifiedKnowledgeCommitResult> {
   if (input.verification?.ok !== true) return {};
+  // A zero exit code is not evidence. Durable "verified" memory must be
+  // backed by a real test/build/typecheck/lint/artifact check —
+  // otherwise `echo done` would mint a lesson claiming the workflow was
+  // proven. When the caller supplied a grounded signal, require it to be
+  // grounded; when it supplied none we cannot tell, so stay conservative
+  // and skip the commit.
+  if (input.verification.groundedSignal?.grounded !== true) return {};
 
   const changedFileTypes = inferChangedFileTypes(input.toolResults);
   const tags = inferKnowledgeTags(input.prompt, input.toolResults, input.verification).slice(0, 14);

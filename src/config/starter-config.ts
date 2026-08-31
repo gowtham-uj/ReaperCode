@@ -162,7 +162,7 @@ export function buildStarterConfig(input: { defaultModel?: string; defaultProvid
       mainAgentTransportRetryLimit: 2,
       modelCallTimeoutMs: 120_000,
       modelRouterLlmDecisions: false,
-      permissionMode: "yolo",
+      permissionMode: "accept_edits",
       printReasoning: false,
       progressGuardV2: true,
       rescueMaxAttemptsPerDiagnostic: 1,

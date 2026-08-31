@@ -141,7 +141,7 @@ function hasAnyPriorBoundaryMarkerEvidence(results: ToolResult[]): boolean {
   const toolchain = /\bBOUNDARY_TOOLCHAIN_AVAILABLE\s*[:=]\s*(?:true|false|yes|no|0|1)\b/i.test(text);
   const presentCount = (evidence ? 1 : 0) + (composite ? 1 : 0) + (decision ? 1 : 0) + (strategy ? 1 : 0);
   if (presentCount >= 3 && toolchain) return true;
-  return true;
+  return false;
 }
 
 export function getBoundaryPreflightBlocker(

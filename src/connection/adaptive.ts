@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { formatHttpJsonResult, formatJsonRpcError, formatJsonRpcNotifications, formatJsonRpcSuccess, formatSseEvents } from "./event-formatter.js";
 import { parseJsonRpcRequest, type JsonRpcRequest } from "./json-rpc.js";
 import { AgentRequestEnvelopeSchema, parseAgentRequestEnvelope, type AgentRequestEnvelope, type TransportKind } from "./schemas.js";
-import { ConnectionPolicyError, SessionNotFoundError } from "./errors.js";
+import { describeConnectionError } from "./errors.js";
 import { SessionGateway } from "./session-gateway.js";
 
 export interface AdaptiveConnectionInput {
@@ -114,14 +114,19 @@ function formatAdaptiveError(
   transport: TransportKind,
   rpcRequest: JsonRpcRequest | undefined,
 ): AdaptiveConnectionResponse {
-  const code = error instanceof ConnectionPolicyError ? 403 : error instanceof SessionNotFoundError ? 404 : 500;
-  const message = error instanceof Error ? error.message : "Unknown adaptive connection failure";
+  const info = describeConnectionError(error);
+  const errorBody = {
+    code: info.status,
+    reason: info.code,
+    message: info.message,
+    ...(info.issues !== undefined ? { issues: info.issues } : {}),
+  };
 
   if (transport === "http_sse") {
     return {
       transport,
       contentType: "text/event-stream",
-      body: `event: error\ndata: ${JSON.stringify({ code, message })}\n\nevent: done\ndata: {}\n\n`,
+      body: `event: error\ndata: ${JSON.stringify(errorBody)}\n\nevent: done\ndata: {}\n\n`,
     };
   }
 
@@ -129,7 +134,12 @@ function formatAdaptiveError(
     return {
       transport,
       contentType: transport === "stdio" ? "application/x-ndjson" : "application/json",
-      body: JSON.stringify(formatJsonRpcError(rpcRequest?.id ?? "adaptive-error", code, message)),
+      body: JSON.stringify(
+        formatJsonRpcError(rpcRequest?.id ?? "adaptive-error", info.status, info.message, {
+          reason: info.code,
+          ...(info.issues !== undefined ? { issues: info.issues } : {}),
+        }),
+      ),
     };
   }
 
@@ -138,7 +148,7 @@ function formatAdaptiveError(
     contentType: "application/json",
     body: {
       status: "error",
-      error: { code, message },
+      error: errorBody,
       events: [],
     },
   };

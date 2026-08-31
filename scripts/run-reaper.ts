@@ -11,13 +11,19 @@
  */
 
 import path from "node:path";
+import os from "node:os";
 import { mkdirSync, readFileSync, existsSync } from "node:fs";
 
 function loadEnvFiles(): void {
+  // C4: resolve the user home via os.homedir() (correct on Windows, where
+  // process.env.HOME is unset and `~` is not a real path), and NEVER
+  // auto-load the working directory's `.env`. A repo-controlled `.env`
+  // would otherwise seed `*_API_KEY`/`ANTHROPIC_API_KEY` into the process
+  // before any model call — a secret-injection vector on arbitrary repos.
+  const home = os.homedir();
   const candidates = [
-    path.join(process.env.HOME ?? "~", ".reaper", ".env"),
-    path.join(process.env.HOME ?? "~", ".hermes", ".env"),
-    path.resolve(process.cwd(), ".env"),
+    path.join(home, ".reaper", ".env"),
+    path.join(home, ".hermes", ".env"),
   ];
   for (const envPath of candidates) {
     if (!existsSync(envPath)) continue;
@@ -58,6 +64,7 @@ const TOP_LEVEL_COMMANDS = new Set([
   "capability",
   "redact",
   "slash",
+  "app-server",
 ]);
 
 function pickWorkspaceRoot(argv: string[]): string {

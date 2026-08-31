@@ -25,7 +25,7 @@ test("applyConfigToTunables populates the cache from the config", () => {
   assert.equal(all.bash.defaultTimeoutMs, 600_000);
   assert.equal(all.bash.idleTimeoutMs, 5_000);
   assert.equal(all.bg.termGraceMs, 5_000);
-  assert.equal(all.engine.permissionMode, "yolo");
+  assert.equal(all.engine.permissionMode, "accept_edits");
   assert.equal(all.engine.strictCompletionGate, true);
   assert.equal(all.retry.maxRetries, 3);
 });

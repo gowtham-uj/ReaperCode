@@ -50,18 +50,10 @@ export interface LiteLLMAttemptEvent {
 export class LiteLLMProviderClient implements ProviderModelClient {
   private readonly fetchImpl: typeof fetch;
   private readonly dispatcher: unknown | undefined;
-  /**
-   * Cached UTF-8 decoder for the SSE hot path. Constructing a
-   * `TextDecoder` per turn costs ~1µs in V8 plus a finalizer; on
-   * multi-turn sessions we keep one per client instance so each
-   * streaming response reuses it.
-   */
-  private readonly sseDecoder: TextDecoder;
 
   constructor(private readonly options: LiteLLMGatewayOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.dispatcher = options.dispatcher;
-    this.sseDecoder = new TextDecoder();
   }
 
   async generate(request: GenerateRequest, profile: ResolvedModelProfile): Promise<GenerateResult> {
@@ -151,7 +143,9 @@ export class LiteLLMProviderClient implements ProviderModelClient {
     const reader = response.body?.getReader();
     if (!reader) throw new Error("No response body");
 
-    const decoder = this.sseDecoder;
+    // Fresh decoder per call — TextDecoder keeps inter-call UTF-8 state under
+    // `{ stream: true }`, so a shared decoder would corrupt concurrent streams.
+    const decoder = new TextDecoder();
     let content = "";
     let reasoningContent = "";
     let finishReason: string | undefined;
@@ -248,15 +242,21 @@ export class LiteLLMProviderClient implements ProviderModelClient {
   }
 
   async *stream(request: GenerateRequest, profile: ResolvedModelProfile): AsyncIterable<StreamEvent> {
+    // Apply the same effective max-output-token cap the buffered path uses,
+    // and compose the caller's abort signal with the retry signal so a user
+    // cancel actually interrupts an in-flight streaming call.
+    const maxTokens = getEffectiveMaxOutputTokens(profile, request.maxTokens);
     const response = await this.fetchWithRetries(
-      (signal) =>
-        this.fetchImpl(this.resolveUrl(profile, "/chat/completions"), {
+      (signal) => {
+        const composed = composeAbortSignals(signal, request.abortSignal);
+        return this.fetchImpl(this.resolveUrl(profile, "/chat/completions"), {
           method: "POST",
           headers: this.buildHeaders(profile),
-          body: JSON.stringify(mapStreamRequestToLiteLLM(request, profile)),
-          ...(signal ? { signal } : {}),
+          body: JSON.stringify(mapStreamRequestToLiteLLM({ ...request, maxTokens }, profile)),
+          ...(composed ? { signal: composed } : {}),
           ...(this.dispatcher ? { dispatcher: this.dispatcher as NonNullable<Parameters<typeof fetch>[1]> extends { dispatcher?: infer D } ? D : never } : {}),
-        }),
+        });
+      },
       profile,
       "stream",
     );

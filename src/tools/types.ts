@@ -401,6 +401,43 @@ export const DelegateSubTaskSchema = z
   })
   .strict();
 
+// ── Control-plane tool schemas ───────────────────────────────────────────
+// `advance_step` / `update_plan` / `update_todo` are advisory control
+// signals, NOT registry tools. They are intentionally absent from
+// `toolRegistry` / `CORE_TOOL_NAMES` (so they never reach the default
+// model-facing wire surface), but they MUST be present in
+// `ToolCallSchema` so that when the model emits them (per system-prompt
+// guidance) the calls survive `ToolCallSchema.safeParse` and reach
+// `splitControlToolCalls` instead of being dropped as schema rejections.
+// The arg objects are non-strict on purpose: control calls are advisory,
+// and unknown/extra keys are stripped rather than rejecting the whole call.
+
+export const AdvanceStepArgsSchema = z.object({
+  summary: z.string().optional(),
+  stepId: z.string().optional(),
+  evidence: z.union([z.string(), z.array(z.string())]).optional(),
+});
+
+export const UpdatePlanArgsSchema = z.object({
+  markdown: z.string().optional(),
+  activePlanMarkdown: z.string().optional(),
+  candidate: z.boolean().optional(),
+  steps: z.array(z.unknown()).optional(),
+});
+
+export const UpdateTodoArgsSchema = z.object({
+  append: z.boolean().optional(),
+  items: z.array(
+    z.object({
+      id: z.string().min(1),
+      content: z.string().min(1),
+      status: z.string().optional(),
+      priority: z.string().optional(),
+      evidence: z.string().optional(),
+      done: z.boolean().optional(),
+    }),
+  ),
+});
 
 export const ToolCallSchema = z.discriminatedUnion("name", [
   z.object({ id: z.string().min(1), name: z.literal("view_file"), args: ViewFileArgsSchema }).strict(),
@@ -467,6 +504,10 @@ export const ToolCallSchema = z.discriminatedUnion("name", [
   z.object({ id: z.string().min(1), name: z.literal("eval"), args: EvalArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("job"), args: JobArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("diagnostics"), args: DiagnosticsArgsSchema }).strict(),
+  // Control-plane signals (advisory; see schemas above).
+  z.object({ id: z.string().min(1), name: z.literal("advance_step"), args: AdvanceStepArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("update_plan"), args: UpdatePlanArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("update_todo"), args: UpdateTodoArgsSchema }).strict(),
 ]);
 
 export const ToolResultSchema = z

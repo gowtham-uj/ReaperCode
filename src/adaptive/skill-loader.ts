@@ -54,14 +54,63 @@ function readIgnoreFile(path: string): string[] {
     .filter((l) => l && !l.startsWith("#"));
 }
 
-function shouldIgnore(rel: string, patterns: string[]): boolean {
-  for (const p of patterns) {
-    if (!p) continue;
-    if (p.endsWith("/")) {
-      if (rel === p.slice(0, -1) || rel.startsWith(p)) return true;
+const globCache = new Map<string, RegExp>();
+
+/**
+ * Compile a gitignore-style pattern into a regex matched against a
+ * single path segment or a full relative path.
+ *
+ * `*` matches within one segment, `**` matches across segments, `?`
+ * matches one non-separator character. Previously patterns were compared
+ * literally, so the extremely common `*.tmp` / `build-*` forms in a
+ * `.gitignore` never matched anything and the ignore file was
+ * effectively inert.
+ */
+function globToRegExp(glob: string): RegExp {
+  const cached = globCache.get(glob);
+  if (cached) return cached;
+  let out = "";
+  for (let i = 0; i < glob.length; i += 1) {
+    const ch = glob[i]!;
+    if (ch === "*") {
+      if (glob[i + 1] === "*") {
+        out += ".*";
+        i += 1;
+      } else {
+        out += "[^/]*";
+      }
+    } else if (ch === "?") {
+      out += "[^/]";
     } else {
-      if (rel === p || rel.endsWith(sep + p)) return true;
+      out += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
     }
+  }
+  const re = new RegExp(`^${out}$`);
+  globCache.set(glob, re);
+  return re;
+}
+
+function shouldIgnore(rel: string, patterns: string[]): boolean {
+  // Normalize to POSIX separators so patterns behave the same on Windows.
+  const posixRel = rel.split(sep).join("/");
+  const basename = posixRel.split("/").pop() ?? posixRel;
+  for (const raw of patterns) {
+    if (!raw) continue;
+    const negated = raw.startsWith("!");
+    if (negated) continue; // Negations are not supported; ignoring them is the safe direction.
+    const dirOnly = raw.endsWith("/");
+    const pattern = (dirOnly ? raw.slice(0, -1) : raw).replace(/^\.\//, "");
+    if (!pattern) continue;
+
+    const re = globToRegExp(pattern);
+    // Anchored pattern (contains a slash): match the full relative path.
+    if (pattern.includes("/")) {
+      if (re.test(posixRel) || posixRel.startsWith(`${pattern}/`)) return true;
+      continue;
+    }
+    // Unanchored: match any path segment, gitignore-style.
+    if (re.test(basename)) return true;
+    if (posixRel.split("/").some((segment) => re.test(segment))) return true;
   }
   return false;
 }
@@ -91,8 +140,11 @@ export function loadSkillsFromDir(opts: LoadSkillsFromDirOptions): SkillLoaderEn
 
   const maxDepth = opts.maxDepth ?? 6;
   const out: SkillLoaderEntry[] = [];
+  // Explicit patterns from the caller are authoritative — do not augment
+  // them with on-disk ignore files.
+  const collectNested = opts.ignoreFiles === undefined;
 
-  const walk = (dir: string, depth: number) => {
+  const walk = (dir: string, depth: number, inherited: string[]) => {
     if (depth > maxDepth) return;
     let entries: string[];
     try {
@@ -100,6 +152,17 @@ export function loadSkillsFromDir(opts: LoadSkillsFromDirOptions): SkillLoaderEn
     } catch {
       return;
     }
+    // Ignore files apply to their own directory and everything below it.
+    // Reading only the root's meant a nested `.gitignore` was silently
+    // ignored and its excluded files were loaded as skills.
+    const ignore = collectNested && depth > 0
+      ? [
+          ...inherited,
+          ...readIgnoreFile(join(dir, ".gitignore")),
+          ...readIgnoreFile(join(dir, ".ignore")),
+          ...readIgnoreFile(join(dir, ".fdignore")),
+        ]
+      : inherited;
     const skillMd = entries.find((e) => e === "SKILL.md");
     if (skillMd) {
       const fullPath = join(dir, skillMd);
@@ -123,7 +186,7 @@ export function loadSkillsFromDir(opts: LoadSkillsFromDirOptions): SkillLoaderEn
       if (shouldIgnore(rel, ignore)) continue;
       if (st.isDirectory()) {
         if (entry.startsWith(".")) continue;
-        walk(fullPath, depth + 1);
+        walk(fullPath, depth + 1, ignore);
       } else if (st.isFile() && entry.endsWith(".md")) {
         out.push({
           name: entry.replace(/\.md$/, ""),
@@ -135,7 +198,7 @@ export function loadSkillsFromDir(opts: LoadSkillsFromDirOptions): SkillLoaderEn
     }
   };
 
-  walk(root, 0);
+  walk(root, 0, ignore);
   return out;
 }
 

@@ -136,6 +136,7 @@ function loadSkillFolder(
     declaredTrust: manifest.trust,
     ...(extension ? { extensionTrust: extension.extensionTrust } : {}),
   });
+  const disabled = readDisabledMarker(folder);
   const record: InstalledSkillRecord = {
     manifest,
     body,
@@ -145,6 +146,7 @@ function loadSkillFolder(
     scope,
     installedAt: Date.now(),
     manifestSha256: sha256OfManifest(manifest),
+    ...(disabled !== null ? { disabled: true, disabledReason: disabled } : {}),
   };
   if (extension) record.extensionId = extension.extensionId;
   return { ok: true, record };
@@ -170,4 +172,22 @@ export function ensureDir(path: string): void {
   // The actual mkdirSync happens in writeSkillManifest — this helper
   // is a typed no-op for symmetry with the discovery API.
   void parent;
+}
+
+/**
+ * Read a skill folder's `disabled` marker (written by
+ * `SkillRegistry.disable`). Returns the marker's reason text, or null
+ * when the skill is not disabled. Shared by discovery (boot-time) and
+ * the `activate_skill` tool (activation-time) so a disabled skill
+ * stays disabled across reloads.
+ */
+export function readDisabledMarker(skillDir: string): string | null {
+  const markerPath = join(skillDir, "disabled");
+  if (!existsSync(markerPath)) return null;
+  try {
+    const reason = readFileSync(markerPath, "utf8").trim();
+    return reason.length > 0 ? reason : "disabled";
+  } catch {
+    return "disabled";
+  }
 }

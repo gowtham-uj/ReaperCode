@@ -8,8 +8,9 @@
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { existsSync } from "node:fs";
 import { z } from "zod";
+
+import { normalizeWorkspacePath, PathPolicyError } from "../policy/paths.js";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -56,7 +57,7 @@ export interface FilePatch {
 export interface ApplyPatchResult {
   files: Array<{
     path: string;
-    action: "created" | "modified" | "unchanged";
+    action: "created" | "modified" | "unchanged" | "error";
     additions: number;
     removals: number;
     diagnostics: string[];
@@ -81,13 +82,19 @@ export interface ApplyPatchResult {
  * - Context lines, removals, additions
  */
 export function parsePatch(patchText: string): FilePatch[] {
-  const lines = patchText.split("\n");
+  // Strip a single trailing newline so the final hunk isn't polluted with a
+  // synthetic empty context line; the split below would otherwise emit one.
+  let text = patchText;
+  if (text.endsWith("\r\n")) text = text.slice(0, -2);
+  else if (text.endsWith("\n")) text = text.slice(0, -1);
+
+  const lines = text.split("\n");
   const patches: FilePatch[] = [];
   let currentPatch: FilePatch | null = null;
   let currentHunk: PatchHunk | null = null;
 
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
+    const line = lines[i]!.replace(/\r$/, "");
 
     // File header
     if (line.startsWith("--- ")) {
@@ -171,6 +178,26 @@ export function parsePatch(patchText: string): FilePatch[] {
     patches.push(currentPatch);
   }
 
+  // Validate that every hunk consumes exactly the line counts declared in its
+  // header. A malformed hunk would otherwise shift every subsequent hunk and
+  // silently write corrupt output.
+  for (const patch of patches) {
+    for (const hunk of patch.hunks) {
+      const consumedOld = hunk.lines.filter((entry) => entry.type === "context" || entry.type === "remove").length;
+      const consumedNew = hunk.lines.filter((entry) => entry.type === "context" || entry.type === "add").length;
+      if (consumedOld !== hunk.oldCount) {
+        throw new Error(
+          `apply_patch: hunk @@ -${hunk.oldStart},${hunk.oldCount} @@ in ${patch.newPath} consumes ${consumedOld} old line(s); malformed hunk.`,
+        );
+      }
+      if (consumedNew !== hunk.newCount) {
+        throw new Error(
+          `apply_patch: hunk @@ +${hunk.newStart},${hunk.newCount} @@ in ${patch.newPath} consumes ${consumedNew} new line(s); malformed hunk.`,
+        );
+      }
+    }
+  }
+
   return patches;
 }
 
@@ -199,53 +226,63 @@ async function applyFilePatch(
     // File doesn't exist yet
   }
 
-  if (filePatch.isNew && fileExists) {
-    // File already exists but patch says new — merge by replacing
-  }
-
   if (!filePatch.isNew && !fileExists) {
     throw new Error(`Cannot patch non-existent file: ${filePatch.newPath}`);
   }
 
   const oldLines = oldContent.split("\n");
-  let resultLines: string[] = [];
+  const resultLines: string[] = [];
   let currentOldLine = 0;
   let additions = 0;
   let removals = 0;
 
-  // Tolerate at most this many context-line mismatches before treating the
-  // hunk as not applied. Without a ceiling, a single stray space in the
-  // patch silently corrupts the file because the runner silently keeps
-  // the expected line instead of the supplied context.
-  const CONTEXT_MISMATCH_LIMIT = 4;
-  let contextMismatches = 0;
-  const mismatchedLines: number[] = [];
-
   for (const hunk of filePatch.hunks) {
+    // Anchor to the hunk's declared start line. A start past EOF is a hard
+    // failure — it means the patch was generated against different content.
+    const targetLine = hunk.oldStart > 0 ? hunk.oldStart - 1 : 0;
+    if (targetLine > oldLines.length) {
+      throw new Error(
+        `apply_patch: hunk starts at line ${hunk.oldStart} but ${filePatch.newPath} only has ${oldLines.length} line(s). Re-read the file and regenerate the patch.`,
+      );
+    }
+
     // Copy unchanged lines before this hunk
-    const oldStartIndex = hunk.oldStart > 0 ? hunk.oldStart - 1 : 0;
-    while (currentOldLine < oldStartIndex && currentOldLine < oldLines.length) {
+    while (currentOldLine < targetLine && currentOldLine < oldLines.length) {
       resultLines.push(oldLines[currentOldLine]!);
       currentOldLine++;
     }
+    if (currentOldLine < targetLine) {
+      throw new Error(`apply_patch: cannot seek hunk to line ${hunk.oldStart} in ${filePatch.newPath}`);
+    }
 
-    // Apply hunk
+    // Apply hunk with strict matching — any context or removal mismatch is a
+    // hard failure, so a stale patch never partially rewrites a file.
     for (const hunkLine of hunk.lines) {
       if (hunkLine.type === "context") {
-        const expected = oldLines[currentOldLine] ?? "";
-        if (hunkLine.content !== expected) {
-          contextMismatches += 1;
-          if (mismatchedLines.length < CONTEXT_MISMATCH_LIMIT) {
-            mismatchedLines.push(currentOldLine + 1);
-          }
+        if (currentOldLine >= oldLines.length) {
+          throw new Error(`apply_patch: context line past end of file in ${filePatch.newPath} (hunk @@ -${hunk.oldStart},${hunk.oldCount} @@)`);
         }
-        resultLines.push(expected);
+        const actual = oldLines[currentOldLine]!;
+        if (hunkLine.content !== actual) {
+          throw new Error(
+            `apply_patch: context mismatch in ${filePatch.newPath} at line ${currentOldLine + 1}: expected ${JSON.stringify(hunkLine.content)} but found ${JSON.stringify(actual)}. Re-read the file and regenerate the patch.`,
+          );
+        }
+        resultLines.push(actual);
         currentOldLine++;
       } else if (hunkLine.type === "add") {
         resultLines.push(hunkLine.content);
         additions++;
       } else if (hunkLine.type === "remove") {
-        // Skip the old line (removal)
+        if (currentOldLine >= oldLines.length) {
+          throw new Error(`apply_patch: removal past end of file in ${filePatch.newPath} (hunk @@ -${hunk.oldStart},${hunk.oldCount} @@)`);
+        }
+        const actual = oldLines[currentOldLine]!;
+        if (hunkLine.content !== actual) {
+          throw new Error(
+            `apply_patch: removal mismatch in ${filePatch.newPath} at line ${currentOldLine + 1}: expected ${JSON.stringify(hunkLine.content)} but found ${JSON.stringify(actual)}. Re-read the file and regenerate the patch.`,
+          );
+        }
         currentOldLine++;
         removals++;
       }
@@ -261,15 +298,6 @@ async function applyFilePatch(
   const newContent = resultLines.join("\n");
   const action = filePatch.isNew ? "created" : (newContent === oldContent ? "unchanged" : "modified");
 
-  if (contextMismatches > CONTEXT_MISMATCH_LIMIT) {
-    // The patch does not actually match the source. Refuse to write —
-    // otherwise we silently drop the model's intended content into the
-    // file and the only signal is "the file changed but doesn't compile".
-    throw new Error(
-      `apply_patch: ${contextMismatches} context-line mismatches in ${filePatch.newPath} (lines ${mismatchedLines.join(", ")}…) — patch does not match the source file. Re-read the file and regenerate the patch.`,
-    );
-  }
-
   if (!dryRun && action !== "unchanged") {
     await mkdir(dirname(fullPath), { recursive: true });
     await writeFile(fullPath, newContent, "utf8");
@@ -281,24 +309,22 @@ async function applyFilePatch(
     additions,
     removals,
     newContent,
-    ...(contextMismatches > 0
-      ? {
-          diagnostics: {
-            contextMismatches,
-            mismatchedLines,
-            warning: `${contextMismatches} context-line mismatch(es) in ${filePatch.newPath}; the surrounding file content was preserved.`,
-          },
-        }
-      : {}),
   };
 }
 
 function resolvePath(toolPath: string, workspaceRoot: string): string {
-  if (toolPath.startsWith("/")) {
-    // Absolute path — within workspace root
-    return toolPath;
+  // Every patch path — absolute or relative — is routed through the same
+  // workspace-boundary guard used by the other file tools. Absolute paths
+  // escaping the root, `..` traversal, and symlinks pointing outside the
+  // workspace are all rejected here.
+  try {
+    return normalizeWorkspacePath(workspaceRoot, toolPath);
+  } catch (error) {
+    if (error instanceof PathPolicyError) {
+      throw new Error(`apply_patch: refusing to write outside the workspace: ${error.message}`);
+    }
+    throw error;
   }
-  return `${workspaceRoot}/${toolPath}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -327,6 +353,7 @@ export async function executeApplyPatch(
   const fileResults: ApplyPatchResult["files"] = [];
   let totalAdditions = 0;
   let totalRemovals = 0;
+  let allApplied = true;
 
   for (const filePatch of patches) {
     try {
@@ -341,9 +368,12 @@ export async function executeApplyPatch(
       totalAdditions += result.additions;
       totalRemovals += result.removals;
     } catch (error) {
+      // Report a real failure instead of silently claiming "unchanged".
+      // `applied` is only true when every file in the patch applied.
+      allApplied = false;
       fileResults.push({
         path: filePatch.newPath,
-        action: "unchanged",
+        action: "error",
         additions: 0,
         removals: 0,
         diagnostics: [error instanceof Error ? error.message : String(error)],
@@ -355,7 +385,7 @@ export async function executeApplyPatch(
     files: fileResults,
     totalAdditions,
     totalRemovals,
-    applied: !dryRun,
+    applied: allApplied && !dryRun,
     dry_run: dryRun,
   };
 }

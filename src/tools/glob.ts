@@ -7,9 +7,11 @@
  * - returns structured results with file count
  */
 
-import { readdir, stat } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { z } from "zod";
+
+import { normalizeWorkspacePath } from "../policy/paths.js";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -107,7 +109,10 @@ export async function executeGlob(
   workspaceRoot: string,
   searchPath?: string,
 ): Promise<GlobResult> {
-  const baseDir = searchPath ? join(workspaceRoot, searchPath) : workspaceRoot;
+  // Route the search directory through the workspace-boundary guard so `..`
+  // traversal and absolute paths escaping the root are rejected, keeping glob
+  // results within the workspace.
+  const baseDir = normalizeWorkspacePath(workspaceRoot, searchPath ?? ".");
   const regex = globToRegex(pattern);
 
   const allFiles: string[] = [];
@@ -119,6 +124,9 @@ export async function executeGlob(
       relativePath: relative(workspaceRoot, fullPath).replace(/\\/g, "/"),
     }))
     .filter((f) => {
+      // Drop any match whose relative path escapes the root (defense-in-depth
+      // in case a symlinked directory sneaks a `..`-prefixed path through).
+      if (f.relativePath === ".." || f.relativePath.startsWith("../")) return false;
       // Match against relative path
       return regex.test(f.relativePath) || regex.test(f.relativePath.replace(/^\.\//, ""));
     })

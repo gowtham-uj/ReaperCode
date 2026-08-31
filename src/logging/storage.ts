@@ -25,7 +25,6 @@ export interface JsonlStorageOptions {
 
 export class JsonlStorage {
   private readonly filePath: string;
-  private readonly rawFilePath: string;
   private readonly maxBytes: number;
   private readonly rotationPolicy: RotationPolicy;
   private readonly devMode: boolean;
@@ -57,7 +56,6 @@ export class JsonlStorage {
   constructor(options: JsonlStorageOptions) {
     const logsRoot = resolveLogRoot(options.workspaceRoot, options.runId);
     this.filePath = path.join(logsRoot, options.filename);
-    this.rawFilePath = path.join(logsRoot, `raw_${options.filename}`);
     this.maxBytes = options.maxBytes ?? 100 * 1024 * 1024;
     this.rotationPolicy = options.rotationPolicy ?? {
       ...defaultRotationPolicy(),
@@ -160,10 +158,6 @@ export class JsonlStorage {
     this.currentOffset += Buffer.byteLength(serialized, "utf8");
     this.currentMtimeMs = Date.now();
 
-    if (this.devMode) {
-      await appendFile(this.rawFilePath, `${JSON.stringify(entry)}\n`, "utf8");
-    }
-
     return { offset, serialized };
   }
 
@@ -213,12 +207,6 @@ export class JsonlStorage {
     if (lines.length > 0) {
       await appendFile(this.filePath, lines.join(""), "utf8");
       this.currentMtimeMs = Date.now();
-      if (this.devMode) {
-        const raws = entries
-          .map((e) => `${JSON.stringify(e)}\n`)
-          .join("");
-        await appendFile(this.rawFilePath, raws, "utf8");
-      }
     }
     return out;
   }

@@ -71,10 +71,21 @@ export async function runDelegatedPlan(input: {
             toolCalls: input.toolCallsBySubtask[task.id] ?? [],
           });
 
-          const verification = await selectVerificationCommand(sandbox.worktreePath, { command: task.verificationCommand ?? "" } as { command: string });
-          const verificationResult = verification ? await runVerificationCommand(sandbox.worktreePath, verification) : undefined;
-          if (!verificationResult?.ok) {
-            throw new Error(verificationResult?.output ?? "Subtask verification failed");
+          // V6: only fail when verification was actually attempted and failed.
+          // An empty/absent explicit command must not fabricate an empty-command
+          // "verification" run, and auto-discovery returning nothing means "no
+          // verification configured" — not "verification failed".
+          const explicitCommand = typeof task.verificationCommand === "string" && task.verificationCommand.trim().length > 0
+            ? task.verificationCommand
+            : undefined;
+          const verification = explicitCommand !== undefined
+            ? await selectVerificationCommand(sandbox.worktreePath, { command: explicitCommand })
+            : await selectVerificationCommand(sandbox.worktreePath);
+          if (verification) {
+            const verificationResult = await runVerificationCommand(sandbox.worktreePath, verification);
+            if (!verificationResult?.ok) {
+              throw new Error(verificationResult?.output ?? "Subtask verification failed");
+            }
           }
 
           await commitAll(sandbox.worktreePath, `reaper subtask ${task.id}`);

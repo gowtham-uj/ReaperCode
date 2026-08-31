@@ -91,6 +91,17 @@ export async function gitStatus(workspaceRoot: string): Promise<string> {
   return runGit(workspaceRoot, ["status", "--short"]);
 }
 
+/**
+ * Untracked, non-ignored paths relative to `workspaceRoot`. Uses
+ * `--others --exclude-standard` (rather than parsing `status --short`) so
+ * the output is one NUL-free path per line with no status prefix to strip
+ * and no quoting applied to paths containing spaces.
+ */
+export async function listUntrackedFiles(workspaceRoot: string): Promise<string[]> {
+  const out = await runGit(workspaceRoot, ["ls-files", "--others", "--exclude-standard"]);
+  return out ? out.split("\n").filter((line) => line.length > 0) : [];
+}
+
 export async function commitAll(workspaceRoot: string, message: string): Promise<void> {
   await runGit(workspaceRoot, ["add", "-A", "."]);
   await runGit(workspaceRoot, ["reset", "--", ".reaper"]).catch(() => undefined);

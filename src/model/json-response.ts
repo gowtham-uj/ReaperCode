@@ -8,13 +8,11 @@ import {
 } from "./response-adapter.js";
 
 import { enqueueLlmCall } from "./concurrency.js";
-import { QueryGuard } from "../runtime/query-guard.js";
+import { getActiveQueryGuard } from "../runtime/query-guard.js";
 import type { Hooks } from "../adaptive/hooks.js";
 import { recordModelCall } from "./observability.js";
 import { getEngineTunables } from "../config/config-tunables.js";
 
-
-const queryGuard = new QueryGuard();
 
 /**
  * Pi-style streaming hook event. Emitted by `streamStructuredJson` for
@@ -65,8 +63,13 @@ export async function streamStructuredJson<T>(input: {
    *  snapshot written into the `token_budget` trajectory event. */
   onUsage?: (usage: TokenUsage | undefined) => void;
 }): Promise<T> {
-  const callStart = Date.now();
+  let modelStart = 0;
   return enqueueLlmCall(async () => {
+    // Capture the start inside the queued task so latency measures only the
+    // model call, not the queue wait. Otherwise a saturated queue looks
+    // "slow", the governor ratchets concurrency to 1, and throughput latches.
+    modelStart = Date.now();
+    const queryGuard = getActiveQueryGuard();
     const gen = queryGuard.start();
     try {
       queryGuard.markRunning(gen);
@@ -75,7 +78,7 @@ export async function streamStructuredJson<T>(input: {
       queryGuard.finish(gen);
     }
   }, {
-    latencyFn: () => Date.now() - callStart,
+    latencyFn: () => (modelStart > 0 ? Date.now() - modelStart : 0),
   });
 }
 
@@ -338,8 +341,10 @@ export async function generateStructuredJson<T>(input: {
   *  snapshot written into the `token_budget` trajectory event. */
   onUsage?: (usage: TokenUsage | undefined) => void;
   }): Promise<T> {
-  const callStart = Date.now();
+  let modelStart = 0;
   return enqueueLlmCall(async () => {
+    modelStart = Date.now();
+    const queryGuard = getActiveQueryGuard();
     const gen = queryGuard.start();
     try {
       queryGuard.markRunning(gen);
@@ -348,7 +353,7 @@ export async function generateStructuredJson<T>(input: {
       queryGuard.finish(gen);
     }
   }, {
-    latencyFn: () => Date.now() - callStart,
+    latencyFn: () => (modelStart > 0 ? Date.now() - modelStart : 0),
   });
 }
 

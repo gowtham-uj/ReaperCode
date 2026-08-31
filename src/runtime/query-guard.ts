@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 /**
  * QueryGuard prevents re-entrant query execution in the LangGraph loop.
  * Pattern borrowed from cc-haha's QueryGuard.ts.
@@ -10,6 +12,18 @@
  */
 
 export type QueryGuardState = "idle" | "dispatching" | "running";
+
+const queryGuardStorage = new AsyncLocalStorage<QueryGuard>();
+
+/** Give one RuntimeEngine its own re-entrancy guard. */
+export function runWithQueryGuard<T>(fn: () => T): T {
+  return queryGuardStorage.run(new QueryGuard(), fn);
+}
+
+/** Use the run-scoped guard, or a fresh guard for standalone calls. */
+export function getActiveQueryGuard(): QueryGuard {
+  return queryGuardStorage.getStore() ?? new QueryGuard();
+}
 
 export class QueryGuard {
   private state: QueryGuardState = "idle";

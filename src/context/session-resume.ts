@@ -53,11 +53,14 @@ export function buildSessionResume(
 ): SessionResumeResult {
   const allSummaries = loadAllSummaries(workspaceRoot);
   const summariesAvailable = allSummaries.length;
-  // Most recent summary (filtered by sessionId if provided).
+  // Most recent summary (filtered by sessionId if provided). Sort by
+  // `createdAt` descending — array position in the index is NOT a
+  // reliable recency signal (rotation/archiving can reorder rows).
   const filtered = options.sessionId
     ? allSummaries.filter((s) => s.sessionId === options.sessionId)
     : allSummaries;
-  const summary = filtered.length > 0 ? filtered[filtered.length - 1]! : null;
+  const newest = [...filtered].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const summary = newest.length > 0 ? newest[0]! : null;
 
   return {
     reAnchor: summary ? buildReAnchorMessage(summary) : "",
@@ -69,16 +72,17 @@ export function buildSessionResume(
 
 function buildReAnchorMessage(summary: PersistentSummary): string {
   const ts = new Date().toISOString();
+  const file = summary.file ?? `.reaper/summaries/${summary.id}.md`;
   return [
     `[Reaper session re-anchor @ ${ts}]`,
     `Most recent persistent summary: ${summary.id} (created ${summary.createdAt})`,
     `Saved ${summary.savedChars} chars at that cut. ${summary.reattachedFiles} files re-attached.`,
     "",
-    "Summary preview (first 500 chars):",
+    "Summary preview:",
     "```",
-    summary.body.slice(0, 500),
+    summary.body.slice(0, 2000),
     "```",
-    "Use `file_view` on the .reaper/summaries/<id>.md to read the full summary.",
+    `Use \`file_view\` on ${file} to read the full summary.`,
   ].join("\n");
 }
 

@@ -1,8 +1,8 @@
 import type { ToolCall} from "../tools/types.js";
 
 // ── Permission modes ──
-// yolo: allow everything (default)
-// accept_edits: auto-allow safe reads/writes, ask for dangerous ops
+// yolo: allow everything
+// accept_edits: auto-allow safe reads/writes, ask for dangerous ops (default)
 // auto: LLM-based classification
 // strict: always ask for confirmation
 export type PermissionMode = "yolo" | "accept_edits" | "auto" | "strict";

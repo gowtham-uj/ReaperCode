@@ -20,7 +20,17 @@ export interface VerificationGroundedSignal {
 }
 
 export interface VerificationResult {
+  /** Every command exited 0 (process-level truth). */
   ok: boolean;
+  /**
+   * The run produced *grounded* evidence: every command exited 0 AND at
+   * least one of them was a real test/build/typecheck/lint/artifact
+   * check. `ok` alone is not proof — `echo done` and
+   * `node -e "process.exit(0)"` both exit 0 while proving nothing, so
+   * callers that need evidence (durable "verified" memory, completion
+   * claims) must read this instead of `ok`.
+   */
+  verified: boolean;
   command: string;
   liteVerified: boolean;
   groundedSignal: VerificationGroundedSignal;
@@ -300,6 +310,10 @@ export async function runVerificationCommand(
 
     return {
       ok: true,
+      // Exiting 0 is not evidence unless something real ran. A command
+      // set whose grounded signal is "none" (e.g. `echo ok`,
+      // `node -e "process.exit(0)"`) passes `ok` but proves nothing.
+      verified: groundedSignal.grounded,
       command: commands.map((item) => item.command).join(" && "),
       liteVerified: verification.lite === true,
       groundedSignal,
@@ -314,6 +328,7 @@ export async function runVerificationCommand(
     const message = error instanceof Error ? error.message : "Unknown verification failure";
     return {
       ok: false,
+      verified: false,
       command: verification.command,
       liteVerified: verification.lite === true,
       groundedSignal: selectGroundedSignal(normalizeVerificationCommands(verification).map((item) => item.command)),

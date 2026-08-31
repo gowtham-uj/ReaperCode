@@ -355,7 +355,7 @@ export const RuntimeTunablesConfigSchema = z
     mainAgentTransportRetryLimit: z.number().int().nonnegative().default(2),
     modelCallTimeoutMs: z.number().int().positive().default(120_000),
     modelRouterLlmDecisions: z.boolean().default(false),
-    permissionMode: z.enum(["yolo", "accept_edits", "auto", "strict"]).default("yolo"),
+    permissionMode: z.enum(["yolo", "accept_edits", "auto", "strict"]).default("accept_edits"),
     printReasoning: z.boolean().default(false),
     progressGuardV2: z.boolean().default(true),
     rescueMaxAttemptsPerDiagnostic: z.number().int().nonnegative().default(1),

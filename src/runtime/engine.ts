@@ -5,7 +5,7 @@ import path from "node:path";
 
 
 import { parseReaperConfig, type ReaperConfig } from "../config/model-config.js";
-import { applyConfigToTunables, getEngineTunables } from "../config/config-tunables.js";
+import { getEngineTunables, runWithConfigTunables } from "../config/config-tunables.js";
 import { ReaperConfigSearchPaths, loadReaperConfigFromWorkspace } from "../runtime/workspace-config.js";
 import { describeToolResultTarget,  renderStepText,  getToolResultCommand,  isBuildCommand,  isTestCommand,  normalizeVerificationCommand, 
   isVerificationLikeCommand,  hasInlineAssertionOrFailureExit, 
@@ -17,7 +17,7 @@ import {
   persistRunResult, logAssistantMessageTrace, logModelResponseTrace,
 } from "./runtime-state.js";
 import { clearRunState, getRunState } from "./run-state.js";
-import { isReaperDevMode, promoteDevModeFromConfig } from "./dev-mode.js";
+import { isReaperDevMode, runWithReaperDevMode } from "./dev-mode.js";
 import type { ContextEngineeringHooks } from "./context-engineering-wiring.js";
 import { renderToolResultForModel, summarizeToolResult } from "../context/history-compaction.js";
 import { executeToolCalls } from "../execution/scheduler.js";
@@ -46,13 +46,14 @@ import {
   stripQuotedShellText} from "./shell-parser.js";
 import { generateStructuredJson } from "../model/json-response.js";
 import type { ModelGateway, ModelRole, ResolvedModelProfile } from "../model/types.js";
-import { pushModelCallContext } from "../model/observability.js";
-import { setModelCallLogContext } from "../logging/model-call-log.js";
+import { runWithModelCallContext } from "../model/observability.js";
+import { runWithModelCallLogContext } from "../logging/model-call-log.js";
 import { appendFailureMemory, loadRecentFailureMemory } from "../recovery/failure-memory.js";
 import { commitVerifiedRunKnowledge, loadVerifiedLessons } from "../recovery/verified-memory.js";
 import { RecoverySession } from "../recovery/session.js";
 import {ToolExecutor} from "../tools/executor.js";
 import type { ShellRunner} from "../tools/executor.js";
+import type { ToolApprovalRequester } from "../tools/approval.js";
 import type {Hooks} from "../adaptive/hooks.js";
 import {
   extractFilePathsFromFailure, 
@@ -113,7 +114,9 @@ import { getReaperScratchpadPaths } from "../workspace/scratchpad.js";
 import { redactSecrets } from "../logging/redaction.js";
 import { createReaperRunContext, ensureReaperRunContext, writeLatestRunPointer, type ReaperRunContext } from "./run-manager.js";
 import { renderFingerprintForPrompt } from "./fingerprint.js";
-import { registerCleanup, runCleanupFunctions, setActiveRunDir, installCrashHandlers } from "./cleanup-registry.js";
+import { registerCleanup, runWithCleanupScope, installCrashHandlers } from "./cleanup-registry.js";
+import { runWithQueryGuard } from "./query-guard.js";
+import { emitRuntimeEvent, type RuntimeEventSink, type RuntimeTurnControl } from "./events.js";
 import { buildDerivedSecretEncodingFeedback } from "./derived-secret-encoding.js";
 import { buildSessionMetricsSummary, countVerificationAttempts, hasPassingVerifyAfterLastEdit } from "./session-metrics.js";
 import { collectWorkspaceDiff, runFreshContextDiffReview } from "../verify/diff-review.js";
@@ -178,6 +181,16 @@ export interface RuntimeEngineInput {
   middlewares?: Array<MiddlewareDefinition<unknown>>;
   shellRunner?: ShellRunner;
   hooks?: Hooks;
+  eventSink?: RuntimeEventSink;
+  turnControl?: RuntimeTurnControl;
+  approvalRequester?: ToolApprovalRequester;
+  /** Disable direct stdout/stderr model streaming for server-managed turns. */
+  writeHumanOutput?: boolean;
+  /** Governance role for the caller (main agent = "root"; sub-agents pass
+   *  their assigned role). Threaded to the executor's role-policy gate. */
+  callerRole?: string;
+  /** True when running inside a trusted sandbox (skips high-risk approval). */
+  trustedSandbox?: boolean;
 }
 
 export interface RuntimeEngineResult {
@@ -290,6 +303,8 @@ type GraphState = {
   readOnlyBatchSignatures: string[];
   needsReplan: boolean;
   done: boolean;
+  aborted?: boolean;
+  loopCapped?: boolean;
 };
 
 type ModelRouteName = keyof ReaperConfig["modelRouting"];
@@ -552,10 +567,6 @@ export class RuntimeEngine {
     // partial input (e.g. tests, REPL).
     const mergedConfig = mergeWorkspaceConfigSync(input.config, input.workspaceRoot) ?? {};
     this.config = parseReaperConfig(mergedConfig);
-    // Apply the config to the runtime-tunables cache so every module
-    // reads from a single source of truth (the config file). No env
-    // fallbacks — the engine rejects if the config is incomplete.
-    applyConfigToTunables(this.config);
     this.trajectoryLogger = new TrajectoryLogger(input.workspaceRoot, this.config.logging);
   }
 
@@ -566,6 +577,14 @@ export class RuntimeEngine {
   }
 
   async run(): Promise<RuntimeEngineResult> {
+    return runWithConfigTunables(this.config, () =>
+      runWithReaperDevMode(this.config.logging?.devMode, () =>
+        runWithQueryGuard(() => this.runScoped()),
+      ),
+    );
+  }
+
+  private async runScoped(): Promise<RuntimeEngineResult> {
     const startedAt = Date.now();
     // Provider-readiness preflight: fail fast on a missing API key
     // instead of letting the first provider call throw on turn 1 and
@@ -596,45 +615,65 @@ export class RuntimeEngine {
     await writeLatestRunPointer(this.input.workspaceRoot, runContext);
     clearSessionTasks(runContext.runId);
     clearDiscoveredTools(runContext.runId);
-    promoteDevModeFromConfig(this.config.logging?.devMode);
     this.trajectoryLogger = new TrajectoryLogger(this.input.workspaceRoot, { ...this.config.logging, runId: runContext.runId });
-    setActiveRunDir(runContext.runDir);
     installCrashHandlers();
-    // Cache-friendly system-prompt prefix for provider prompt caching. Set
-    // once per run so runtime model calls share the same cacheable prefix.
-    //
-    // WORKFLOW 2 INVARIANT: GenerateRequest.system must remain
-    // byte-identical across compaction and cockpit refresh. Tool
-    // inventory is dynamic — to keep system bytes truly stable we
-    // build the inventory once at run start and reuse the exact bytes
-    // on every model call. We pass an empty tools snapshot here so the
-    // inventory block is omitted entirely; the actual API tool[]
-    // schemas still ship on the wire via `turnRequest.tools` so the
-    // model has every capability, but the system-prompt prefix stays
-    // identical across turns.
+    // This prefix stays byte-identical for provider prompt caching. The
+    // dynamic tool schemas continue to travel in GenerateRequest.tools.
     const systemPromptPrefix = MAIN_AGENT_SYSTEM_PROMPT_TEXT;
-    // Ensure per-call JSON + readable .txt transcripts are written under
-    // `.reaper/runs/<runId>/model-calls/` for every generate/stream.
-    setModelCallLogContext({
-      workspaceRoot: this.input.workspaceRoot,
-      runId: runContext.runId,
-    });
-    const releaseModelCallContext = pushModelCallContext({
-      workspaceRoot: this.input.workspaceRoot,
-      runId: runContext.runId,
-      sessionId: runContext.sessionId,
-      traceId: runContext.traceId,
-      source: "runtime",
-      callId: runContext.runId,
-      promptPreview: String(initialRequest.payload?.prompt ?? "").slice(0, 500),
-      system: systemPromptPrefix,
-    });
-    try {
-      return await this.runInner({ startedAt, initialRequest, runContext, systemPromptPrefix });
-    } finally {
-      releaseModelCallContext();
-      setModelCallLogContext(undefined);
-    }
+    return runWithCleanupScope(runContext.runDir, () =>
+      runWithModelCallLogContext(
+        { workspaceRoot: this.input.workspaceRoot, runId: runContext.runId },
+        () => runWithModelCallContext(
+          {
+            workspaceRoot: this.input.workspaceRoot,
+            runId: runContext.runId,
+            sessionId: runContext.sessionId,
+            traceId: runContext.traceId,
+            source: "runtime",
+            callId: runContext.runId,
+            promptPreview: String(initialRequest.payload?.prompt ?? "").slice(0, 500),
+            system: systemPromptPrefix,
+          },
+          async () => {
+            await emitRuntimeEvent(this.input.eventSink, {
+              type: "turn.started",
+              runId: runContext.runId,
+              sessionId: runContext.sessionId,
+            });
+            try {
+              const result = await this.runInner({ startedAt, initialRequest, runContext, systemPromptPrefix });
+              await emitRuntimeEvent(this.input.eventSink, {
+                type: "turn.completed",
+                runId: runContext.runId,
+                sessionId: runContext.sessionId,
+                assistantMessage: result.assistantMessage,
+              });
+              return result;
+            } catch (error) {
+              if (this.input.abortSignal?.aborted) {
+                await emitRuntimeEvent(this.input.eventSink, {
+                  type: "turn.aborted",
+                  runId: runContext.runId,
+                  sessionId: runContext.sessionId,
+                  reason: String(this.input.abortSignal.reason ?? "aborted"),
+                });
+              } else {
+                const normalized = error instanceof Error ? error : new Error(String(error));
+                await emitRuntimeEvent(this.input.eventSink, {
+                  type: "turn.failed",
+                  runId: runContext.runId,
+                  sessionId: runContext.sessionId,
+                  error: { name: normalized.name, message: normalized.message },
+                });
+              }
+              throw error;
+            } finally {
+              this.input.turnControl?.close();
+            }
+          },
+        ),
+      ),
+    );
   }
 
   private async runInner(params: {
@@ -709,6 +748,11 @@ export class RuntimeEngine {
         logLevel: boot.state.logLevel,
         safetyProfile: boot.state.safetyProfile,
         permissionMode: resolveEffectivePermissionMode(getEngineTunables().permissionMode),
+        // Governance wiring (V4): the main agent runs as "root" (governed by
+        // classifier + hard-deny rules); sub-agents pass their assigned role
+        // through the ToolExecutorOptions so the role-policy engine applies.
+        ...(this.input.callerRole ? { callerRole: this.input.callerRole } : {}),
+        ...(this.input.trustedSandbox ? { trustedSandbox: this.input.trustedSandbox } : {}),
         ...(this.config?.security?.childEnvAllowlist ? { childEnvAllowlist: this.config.security.childEnvAllowlist } : {}),
         recoverySession,
         config: this.config,
@@ -717,6 +761,9 @@ export class RuntimeEngine {
         runDir: runContext.runDir,
         artifactsDir: runContext.artifactsDir,
         ...(this.input.shellRunner ? { shellRunner: this.input.shellRunner } : {}),
+        ...(this.input.eventSink ? { eventSink: this.input.eventSink } : {}),
+        ...(this.input.approvalRequester ? { approvalRequester: this.input.approvalRequester } : {}),
+        ...(this.input.abortSignal ? { abortSignal: this.input.abortSignal } : {}),
       });
 
       // Run-boundary metadata: resolve which provider + model the
@@ -1094,7 +1141,27 @@ export class RuntimeEngine {
 
         const softCap = getBoot().state.tokenBudget?.softCap ?? 270_000;
 
-        while (true) {
+        // Plan/todo working state for the live loop. The graph's
+        // queue_results/validate_tool_calls nodes only run on the
+        // non-autonomous (explicit_tools) path, so the autonomous live
+        // loop maintains plan/todo + advancement state itself (R1/R2):
+        // `update_plan`/`update_todo` merge here; `advance_step` is
+        // recorded as a progress signal and fed back as an advisory tool
+        // result so the model sees its control calls were honored.
+        let livePlanState = state.planState;
+        let liveTodoState = state.todoState;
+        let liveAdvancementEvidence: string[] = [];
+        let liveAborted = false;
+
+        // R3: hard bound on the live loop. The model owns the stop
+        // decision, but a model that keeps emitting tool_calls (or keeps
+        // hitting retry re-prompts) must not spin forever. Honoring the
+        // configured `langgraphRecursionLimit` gives operators a real cap.
+        const liveIterationLimit = getGraphRecursionLimit();
+        let liveIteration = 0;
+
+        while (liveIteration < liveIterationLimit) {
+          liveIteration += 1;
           const ctxCallStartedAt = Date.now();
 
           // ─── Context-engineering: BEFORE-MODEL-CALL (per-iteration) ───
@@ -1228,6 +1295,15 @@ export class RuntimeEngine {
             },
           });
         }
+        const steeringMessages = this.input.turnControl?.drain() ?? [];
+        for (const content of steeringMessages) {
+          liveConversation.push({ role: "user", content });
+          await appendSessionTreeMessage(this.trajectoryLogger, {
+            runId: getBoot().state.runId,
+            sessionId: getBoot().state.sessionId,
+            message: { role: "user", content },
+          });
+        }
 
           const turnRequest: GenerateRequest = {
             role: effectiveMainAgentRole,
@@ -1261,24 +1337,29 @@ export class RuntimeEngine {
             ctxHooks,
             softCap,
             getBoot().state.runId,
-            this.input.hooks
-              ? {
-                  onMessageDelta: async (text) => {
-                    await this.input.hooks!.emit({
-                      name: "AssistantMessageDelta",
-                      payload: { text, role: "assistant", done: false },
-                      blockable: false,
-                    });
-                  },
-                  onReasoningDelta: async (text) => {
-                    await this.input.hooks!.emit({
-                      name: "ReasoningDelta",
-                      payload: { text, done: false },
-                      blockable: false,
-                    });
-                  },
+            {
+              writeHumanOutput: this.input.writeHumanOutput !== false,
+              onMessageDelta: async (text) => {
+                await emitRuntimeEvent(this.input.eventSink, { type: "assistant.message.delta", text });
+                if (this.input.hooks) {
+                  await this.input.hooks.emit({
+                    name: "AssistantMessageDelta",
+                    payload: { text, role: "assistant", done: false },
+                    blockable: false,
+                  });
                 }
-              : undefined,
+              },
+              onReasoningDelta: async (text) => {
+                await emitRuntimeEvent(this.input.eventSink, { type: "assistant.reasoning.delta", text });
+                if (this.input.hooks) {
+                  await this.input.hooks.emit({
+                    name: "ReasoningDelta",
+                    payload: { text, done: false },
+                    blockable: false,
+                  });
+                }
+              },
+            },
           );
           // ─── Context-engineering: AFTER-MODEL-CALL ───────────────────────
           try {
@@ -1324,6 +1405,26 @@ export class RuntimeEngine {
           const visibleContent = inlineReasoning ? stripThinkingBlocks(rawTurnContent).trim() : rawTurnContent;
           (turn as { content?: string }).content = visibleContent;
           const turnReasoning = channelReasoning || inlineReasoning;
+          if (visibleContent) {
+            await emitRuntimeEvent(this.input.eventSink, {
+              type: "assistant.message.completed",
+              text: visibleContent,
+            });
+          }
+          if (turnReasoning) {
+            await emitRuntimeEvent(this.input.eventSink, {
+              type: "assistant.reasoning.completed",
+              text: turnReasoning,
+            });
+          }
+          const turnUsage = (turn as { usage?: { inputTokens?: number; outputTokens?: number } }).usage;
+          if (turnUsage && typeof turnUsage.inputTokens === "number" && typeof turnUsage.outputTokens === "number") {
+            await emitRuntimeEvent(this.input.eventSink, {
+              type: "token.usage",
+              inputTokens: turnUsage.inputTokens,
+              outputTokens: turnUsage.outputTokens,
+            });
+          }
           if (turnReasoning) {
             await this.trajectoryLogger
               .write({
@@ -1529,6 +1630,18 @@ export class RuntimeEngine {
               turn.finishReason === "length" ||
               turn.finishReason === "end_turn"
             ) {
+              const terminalSteering = this.input.turnControl?.drainOrClose();
+              if (terminalSteering && terminalSteering.messages.length > 0) {
+                for (const content of terminalSteering.messages) {
+                  liveConversation.push({ role: "user", content });
+                  await appendSessionTreeMessage(this.trajectoryLogger, {
+                    runId: getBoot().state.runId,
+                    sessionId: getBoot().state.sessionId,
+                    message: { role: "user", content },
+                  });
+                }
+                continue;
+              }
               break;
             }
             continue;
@@ -1547,28 +1660,76 @@ export class RuntimeEngine {
               },
             })),
           });
-          // 2. Execute tools in parallel via the scheduler (island
-          // partitioner). The scheduler returns one result per original
-          // call in the model's batch, in original order. If a tool
-          // call somehow misses a result, fall through to executing it
-          // directly so the model still gets the real tool output
-          // rather than a synthetic placeholder. We never invent a
-          // "not_executed_due_to_prior_failure" or any other synthetic
-          // tool result; the model always sees the real outcome of
-          // the tool it asked for.
+          // 2. Split control-plane calls out of the executable batch (R2).
+          // `advance_step` / `update_plan` / `update_todo` never reach the
+          // executor: `update_plan`/`update_todo` merge into plan/todo
+          // state here, and `advance_step` is recorded as an advancement
+          // signal. Each still receives an advisory tool result below so
+          // every model-emitted tool_call id gets exactly one matching
+          // tool message.
+          const liveSplit = splitControlToolCalls(tc);
+          const advisoryUpdate = applyAdvisoryToolCalls(
+            { planState: livePlanState, todoState: liveTodoState },
+            liveSplit.advisoryToolCalls ?? [],
+          );
+          livePlanState = advisoryUpdate.planState ?? livePlanState;
+          liveTodoState = advisoryUpdate.todoState ?? liveTodoState;
+          const advisoryResults = advisoryUpdate.toolResults ?? [];
+          let advanceResult: ToolResult | undefined;
+          if (liveSplit.advancementSignal) {
+            liveAdvancementEvidence = [
+              ...liveAdvancementEvidence,
+              ...(liveSplit.advancementSignal.args.evidence ?? []),
+              liveSplit.advancementSignal.args.summary,
+            ].filter(Boolean).slice(-20);
+            advanceResult = makeAdvisoryToolResult(liveSplit.advancementSignal, {
+              advanced: true,
+              summary: liveSplit.advancementSignal.args.summary,
+            });
+            await this.trajectoryLogger
+              .write({
+                event_id: randomUUID(),
+                run_id: getBoot().state.runId,
+                session_id: getBoot().state.sessionId,
+                trace_id: getBoot().state.runId,
+                timestamp: new Date().toISOString(),
+                log_schema_version: 1,
+                kind: "plan_step_advance",
+                level: getBoot().state.logLevel,
+                summary: liveSplit.advancementSignal.args.summary,
+                evidence: liveSplit.advancementSignal.args.evidence ?? [],
+              } as any)
+              .catch(() => undefined);
+          }
+
+          // Execute the remaining tools in parallel via the scheduler
+          // (island partitioner). The scheduler returns one result per
+          // executable call, in original order. If a tool call somehow
+          // misses a result, fall through to executing it directly so the
+          // model still gets the real tool output rather than a synthetic
+          // placeholder.
           const liveExecutor = executor!;
           const liveRecovery = getRecoverySession();
           const scheduled = await executeToolCalls(
-            tc,
+            liveSplit.executableToolCalls,
             liveExecutor,
             liveRecovery,
             this.input.abortSignal,
           );
           const currentBatchResults: ToolResult[] = [];
+          let executableIndex = 0;
           for (let i = 0; i < tc.length; i += 1) {
             const call = tc[i]!;
             const id = call.id;
-            let result = scheduled.results[i];
+            let result: ToolResult | undefined;
+            if (liveSplit.advisoryToolCalls?.some((adv) => adv.id === id)) {
+              result = advisoryResults.find((adv) => adv.toolCallId === id);
+            } else if (liveSplit.advancementSignal?.id === id) {
+              result = advanceResult;
+            } else {
+              result = scheduled.results[executableIndex];
+              executableIndex += 1;
+            }
             if (!result) {
               // Scheduler invariant: one result per model-emitted call.
               // If broken, don't invent a synthetic prior-failure result
@@ -1654,6 +1815,31 @@ export class RuntimeEngine {
             } as any);
           }
           if (scheduled.aborted) {
+            // R4: surface the abort instead of swallowing it. Mark the run
+            // aborted, reap background processes immediately (they would
+            // otherwise leak), and emit a cancellation event so callers
+            // don't classify this natural stop as "completed".
+            liveAborted = true;
+            try {
+              await liveExecutor.cleanupBackgroundProcesses("run_aborted");
+            } catch { /* best-effort */ }
+            liveEvents.push(makeEvent(getRequest(), "error", {
+              code: "run_aborted",
+              reason: String(this.input.abortSignal?.reason ?? "aborted"),
+            }));
+            await this.trajectoryLogger
+              .write({
+                event_id: randomUUID(),
+                run_id: getBoot().state.runId,
+                session_id: getBoot().state.sessionId,
+                trace_id: getBoot().state.runId,
+                timestamp: new Date().toISOString(),
+                log_schema_version: 1,
+                kind: "run_aborted",
+                level: getBoot().state.logLevel,
+                reason: String(this.input.abortSignal?.reason ?? "aborted"),
+              } as any)
+              .catch(() => undefined);
             break;
           }
           // Mid-run maintain (OMP maintainContextMidRun): cheap supersede
@@ -1668,6 +1854,37 @@ export class RuntimeEngine {
           } catch { /* best-effort */ }
           continue;
         }
+
+        // R3/R4: the loop exited either by model self-stop, abort, or the
+        // iteration cap. Surface the abort/cap as an error event and a
+        // runtime blocker so the run is not misclassified as a natural
+        // completed stop.
+        const loopCapped = !liveAborted && liveIteration >= liveIterationLimit;
+        if (loopCapped) {
+          liveEvents.push(makeEvent(getRequest(), "error", {
+            code: "iteration_limit",
+            iterations: liveIteration,
+            limit: liveIterationLimit,
+          }));
+        }
+        const loopStoppedByExternal = liveAborted || loopCapped;
+        const surfacedBlockers =
+          loopStoppedByExternal
+            ? [
+                ...state.runtimeBlockers,
+                ...(terminalRuntimeBlocker ? [terminalRuntimeBlocker] : []),
+                {
+                  source: "runtime" as const,
+                  code: liveAborted ? "run_aborted" : "iteration_limit",
+                  message: liveAborted
+                    ? "The run was aborted."
+                    : `The run reached the iteration cap of ${liveIterationLimit} model turns and was stopped.`,
+                },
+              ]
+            : terminalRuntimeBlocker
+              ? [...state.runtimeBlockers, terminalRuntimeBlocker]
+              : state.runtimeBlockers;
+
         // We have already executed everything; the engine's downstream
         // nodes should not re-execute. Pass empty plannedToolCalls.
         return {
@@ -1675,11 +1892,12 @@ export class RuntimeEngine {
           assistantMessage: lastAssistantMessage,
           events: [...state.events, ...liveEvents],
           feedback: state.feedback,
-          runtimeBlockers: terminalRuntimeBlocker
-            ? [...state.runtimeBlockers, terminalRuntimeBlocker]
-            : state.runtimeBlockers,
+          runtimeBlockers: surfacedBlockers,
           toolResults: [...(state.toolResults ?? []), ...liveToolResults],
-          iteration: state.iteration + 1,
+          ...(livePlanState !== state.planState ? { planState: livePlanState } : {}),
+          ...(liveTodoState !== state.todoState ? { todoState: liveTodoState } : {}),
+          ...(loopStoppedByExternal ? { aborted: liveAborted, loopCapped } : {}),
+          iteration: state.iteration + liveIteration,
         } satisfies Partial<GraphState>;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -2430,7 +2648,6 @@ export class RuntimeEngine {
       throw error;
     } finally {
       unregisterExecutorCleanup?.();
-      await runCleanupFunctions();
       await writeLatestRunPointer(this.input.workspaceRoot, runContext);
     }
   }
@@ -2566,7 +2783,7 @@ function applyAdvisoryToolCalls(
   return { planState, todoState, toolResults };
 }
 
-function makeAdvisoryToolResult(call: AdvisoryToolCall, output: unknown): ToolResult {
+function makeAdvisoryToolResult(call: { id: string; name: string; args: Record<string, unknown> }, output: unknown): ToolResult {
   return {
     toolCallId: call.id,
     name: call.name,
@@ -5220,10 +5437,14 @@ function getBoundaryPivotInstruction(toolResults: ToolResult[]): { feedback: str
 function getGraphRecursionLimit(): number {
   const raw = getEngineTunables().langgraphRecursionLimit;
   const parsed = Number(raw);
-  if (Number.isInteger(parsed) && parsed >= 100) {
-    return parsed;
+  // Honor any sane positive configured value (the config default is 50 —
+  // the old `>= 100` gate silently discarded it and returned a hard-coded
+  // 8000, so the tunable was dead). Clamp to [1, 100000] to avoid a
+  // misconfigured 0/negative/gigantic value unbounding the live loop.
+  if (Number.isFinite(parsed) && parsed >= 1) {
+    return Math.min(100_000, Math.max(1, Math.floor(parsed)));
   }
-  return 8000;
+  return 50;
 }
 
 

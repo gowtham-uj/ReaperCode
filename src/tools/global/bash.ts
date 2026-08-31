@@ -10,7 +10,6 @@ import { getReaperScratchpadPaths } from "../../workspace/scratchpad.js";
 import { PathPolicyError, normalizeWorkspacePath } from "../../policy/paths.js";
 import { getBashTunables } from "../../config/config-tunables.js";
 import { buildChildEnv, type ChildEnvBuildResult } from "../child-env.js";
-import { isReaperDevMode } from "../../runtime/dev-mode.js";
 import { writeHumanOutput } from "../../logging/stream-events.js";
 function numericRuntimeOverride(name: string, fallback: number): number {
   const value = Number(process.env[name]);
@@ -27,6 +26,19 @@ function getSizeWatchdogMaxBytes(): number {
   return numericRuntimeOverride("REAPER_MAX_SHELL_OUTPUT_BYTES", getBashTunables().maxOutputBytes);
 }
 const INTERACTIVE_PROMPT_RE = /\(\s*y\s*\/\s*n\s*\)|press\s+enter|password\s*:|continue\?|confirm\s*\?|type\s+\'yes\'|type\s+\"yes\"/i;
+
+function emitShellOutput(
+  callback: ShellOutputCallback | undefined,
+  stream: "stdout" | "stderr",
+  text: string,
+): void {
+  if (!callback || !text) return;
+  try {
+    void Promise.resolve(callback(stream, text)).catch(() => undefined);
+  } catch {
+    // Output observers are fail-open.
+  }
+}
 
 export interface ForegroundShellResult {
   stdout: string;
@@ -48,6 +60,7 @@ export interface BackgroundShellResult {
 }
 
 export type ShellCommandResult = ForegroundShellResult | BackgroundShellResult;
+export type ShellOutputCallback = (stream: "stdout" | "stderr", text: string) => void | Promise<void>;
 
 export function isBackgroundShellResult(value: ShellCommandResult): value is BackgroundShellResult {
   return "child" in value && (value as BackgroundShellResult).status === "running";
@@ -68,6 +81,7 @@ export async function executeBashTool(
     allowlist?: ReadonlyArray<string>;
     sourceEnv?: NodeJS.ProcessEnv;
   },
+  onOutput?: ShellOutputCallback,
 ): Promise<ShellCommandResult> {
   args = { ...args, cmd: normalizeWorkspaceShellAliases(args.cmd, workspaceRoot) };
   enforceShellWorkspaceBoundary(workspaceRoot, workingDirectory, args.cmd);
@@ -112,8 +126,14 @@ export async function executeBashTool(
   }
 
   const decision = evaluateCommandPolicy(args.cmd, safetyProfile, ruleContext);
-  // Never deny — Reaper always executes the command and returns real results.
-  // The decision is logged for audit but does not block execution.
+  // Hard-deny and local-deny outcomes are a REAL gate: the command must not
+  // run. `would_block` (built-in standard rules under allow_all) stays
+  // advisory and is only reflected on the result. This closes the direct-call
+  // gap where verification/inspection callers passed `allow_all` and still
+  // executed catastrophic commands.
+  if (decision.outcome === "deny") {
+    throw new Error(`Command blocked by policy [${decision.ruleId}]: ${decision.message}`);
+  }
 
   const timeoutMs = args.timeoutMs ?? defaultTimeoutMsForCommand(args.cmd);
   const idleTimeoutMs = args.idleTimeoutMs ?? defaultIdleTimeoutMsForCommand(args.cmd);
@@ -137,6 +157,8 @@ export async function executeBashTool(
     }
 
     const startup = await observeBackgroundStartup(child, logPath, args.cmd);
+    emitShellOutput(onOutput, "stdout", startup.stdout);
+    emitShellOutput(onOutput, "stderr", startup.stderr);
     if (startup.exited) {
       if (startup.exitCode === 0 && !startup.signal) {
         return {
@@ -238,6 +260,7 @@ exit 0
 
       child.stdout.on("data", (chunk) => {
         const str = String(chunk);
+        emitShellOutput(onOutput, "stdout", str);
         totalOutputBytes += Buffer.byteLength(str, "utf8");
         stdout = appendBoundedOutput(stdout, str, maxBufferedOutputChars);
         lastOutputAt = Date.now();
@@ -262,6 +285,7 @@ exit 0
       });
       child.stderr.on("data", (chunk) => {
         const str = String(chunk);
+        emitShellOutput(onOutput, "stderr", str);
         totalOutputBytes += Buffer.byteLength(str, "utf8");
         stderr = appendBoundedOutput(stderr, str, maxBufferedOutputChars);
         lastOutputAt = Date.now();
@@ -979,7 +1003,6 @@ export function resolveShellBinary(): string {
 }
 
 async function createProcessLog(runtime: { runId: string; artifactDir: string; toolCallId: string }, cmd: string, cwd: string): Promise<string> {
-  if (!isReaperDevMode()) return "";
   const processDir = path.join(runtime.artifactDir, "processes");
   await mkdir(processDir, { recursive: true });
   const logPath = path.join(processDir, `${runtime.toolCallId.replace(/[^a-zA-Z0-9_.-]/g, "_")}.log`);

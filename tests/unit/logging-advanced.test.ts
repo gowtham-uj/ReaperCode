@@ -6,6 +6,7 @@ import path from "node:path";
 import { JsonlStorage } from "../../src/logging/storage.js";
 import { redactSecrets } from "../../src/logging/redaction.js";
 import { logLangfuseEvent } from "../../src/logging/langfuse.js";
+import { runWithReaperDevMode } from "../../src/runtime/dev-mode.js";
 import { createTempWorkspace } from "../fixtures/workspace.js";
 
 test("redacts obvious secret-like strings", () => {
@@ -30,13 +31,15 @@ test("redaction preserves hashes and non-secret workspace identifiers", () => {
 test("local Langfuse mirrors redact model and tool secrets", async () => {
   const workspaceRoot = await createTempWorkspace();
   const fakeGithubToken = `ghp_${"E".repeat(36)}`;
-  await logLangfuseEvent({
-    workspaceRoot,
-    name: "reaper.test",
-    type: "event",
-    input: { prompt: `use ${fakeGithubToken}` },
-    output: `returned ${fakeGithubToken}`,
-    trace: { runId: "run-secret", sessionId: "session-secret" },
+  await runWithReaperDevMode(true, async () => {
+    await logLangfuseEvent({
+      workspaceRoot,
+      name: "reaper.test",
+      type: "event",
+      input: { prompt: `use ${fakeGithubToken}` },
+      output: `returned ${fakeGithubToken}`,
+      trace: { runId: "run-secret", sessionId: "session-secret" },
+    });
   });
   const persisted = await readFile(
     path.join(workspaceRoot, ".reaper", "logs", "run-secret", "langfuse-events.jsonl"),

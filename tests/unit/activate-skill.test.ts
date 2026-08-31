@@ -209,8 +209,8 @@ test("S1: happy path — registered skill with on-disk .md is returned", async (
 test("S1: happy path — registered skill with SKILL.md in a directory is returned", async () => {
   const ws = makeWorkspace();
   try {
-    mkdirSync(path.join(ws, ".opencode", "skills", "dirskill"), { recursive: true });
-    writeFileSync(path.join(ws, ".opencode", "skills", "dirskill", "SKILL.md"), "# from dir");
+    mkdirSync(path.join(ws, ".reaper", "skills", "dirskill"), { recursive: true });
+    writeFileSync(path.join(ws, ".reaper", "skills", "dirskill", "SKILL.md"), "# from dir");
     register(ws, { name: "dirskill" });
     const out = await activateSkillTool(ws, { name: "dirskill" });
     assert.match(out, /from dir/);

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdir, writeFile, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -28,21 +29,36 @@ type ModelCallLogPayload = {
   durationMs?: number;
 };
 
-let context: ModelCallLogContext | undefined;
+interface ModelCallLogContextStore {
+  context: ModelCallLogContext | undefined;
+}
+
+const modelCallLogStorage = new AsyncLocalStorage<ModelCallLogContextStore>();
+let legacyContext: ModelCallLogContext | undefined;
 const counters = new Map<string, number>();
 
+/** Run work with a model-call log destination isolated to this async call tree. */
+export function runWithModelCallLogContext<T>(next: ModelCallLogContext, fn: () => T): T {
+  return modelCallLogStorage.run({ context: next }, fn);
+}
+
 export function setModelCallLogContext(next: ModelCallLogContext | undefined): void {
-  context = next;
+  const store = modelCallLogStorage.getStore();
+  if (store) {
+    store.context = next;
+    return;
+  }
+  legacyContext = next;
 }
 
 export function currentModelCallLogContext(): ModelCallLogContext | undefined {
-  return context;
+  return modelCallLogStorage.getStore()?.context ?? legacyContext;
 }
 
 export async function logModelCall(payload: ModelCallLogPayload): Promise<void> {
   if (!isReaperDevMode()) return;
   const observed = getActiveModelCallContext();
-  const active = context ?? (observed ? { workspaceRoot: observed.workspaceRoot, runId: observed.runId } : undefined);
+  const active = currentModelCallLogContext() ?? (observed ? { workspaceRoot: observed.workspaceRoot, runId: observed.runId } : undefined);
   if (!active) return;
   const callId = payload.callId ?? nextCallId(active.runId, payload.kind);
   const dir = path.join(getReaperScratchpadPaths(active.workspaceRoot).logs, active.runId, "model-calls");

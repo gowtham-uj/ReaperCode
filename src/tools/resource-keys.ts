@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import type { ToolCall, ResourceKeys } from "./types.js";
 import { EMPTY_RESOURCE_KEYS } from "./types.js";
 import { classifyToolCall } from "../execution/planner.js";
@@ -14,12 +16,30 @@ function stringArg(args: Record<string, unknown>, ...names: string[]): string | 
   return undefined;
 }
 
-function fileKey(path: string | undefined): string[] {
-  return path ? [`file:${path}`] : [];
+/**
+ * Normalize a path into a collision key.
+ *
+ * These keys decide whether two calls may run concurrently, so two
+ * spellings of the same file MUST produce the same key. `./src/app.ts`,
+ * `src/app.ts`, and `src/sub/../app.ts` are one file — and on
+ * case-insensitive filesystems (macOS, Windows) so are `src/App.ts` and
+ * `src/app.ts`. Without folding, two writes to the same file land in the
+ * same island and race, last-write-wins.
+ *
+ * Case folding is unconditional rather than platform-gated: treating
+ * distinct files as colliding only costs a little parallelism, while
+ * missing a real collision corrupts file content.
+ */
+function normalizePathKey(target: string): string {
+  return path.normalize(target).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 
-function dirKey(path: string | undefined): string[] {
-  return path ? [`dir:${path}`] : [];
+function fileKey(target: string | undefined): string[] {
+  return target ? [`file:${normalizePathKey(target)}`] : [];
+}
+
+function dirKey(target: string | undefined): string[] {
+  return target ? [`dir:${normalizePathKey(target)}`] : [];
 }
 
 /**
@@ -46,9 +66,9 @@ export function declaredResourcesForToolCall(call: ToolCall): ResourceKeys {
       return { declared: true, keys: dirKey(stringArg(args, "path")) };
 
     case "grep_search": {
-      const path = stringArg(args, "path") ?? ".";
+      const target = stringArg(args, "path") ?? ".";
       const pattern = stringArg(args, "pattern") ?? "";
-      return { declared: true, keys: [`grep:${path}:${pattern}`] };
+      return { declared: true, keys: [`grep:${normalizePathKey(target)}:${pattern}`] };
     }
 
     case "git_status":

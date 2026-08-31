@@ -149,5 +149,5 @@ test("Phase 3: parsePatch parses a simple diff", () => {
   assert.equal(parsed[0]?.hunks[0]?.oldStart, 1);
   assert.equal(parsed[0]?.hunks[0]?.lines.filter((l) => l.type === "remove").length, 1);
   assert.equal(parsed[0]?.hunks[0]?.lines.filter((l) => l.type === "add").length, 1);
-  assert.equal(parsed[0]?.hunks[0]?.lines.filter((l) => l.type === "context").length, 3);
+  assert.equal(parsed[0]?.hunks[0]?.lines.filter((l) => l.type === "context").length, 2);
 });

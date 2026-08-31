@@ -270,7 +270,9 @@ export class NativeComputerController {
     if (this.server) {
       return { success: true, url: this.liveUrl, approvalUrl: this.approvalUrl, alreadyRunning: true };
     }
-    const host = typeof args.host === "string" ? args.host : DEFAULT_LIVE_HOST;
+    // The live-view supervisor streams the screen and exposes /kill — it
+    // must never bind to a non-loopback interface from a model-supplied host.
+    const host = DEFAULT_LIVE_HOST;
     const port = typeof args.port === "number" ? args.port : DEFAULT_LIVE_PORT;
     this.liveUrl = `http://${host}:${port}/live`;
     this.approvalUrl = `http://${host}:${port}/`;

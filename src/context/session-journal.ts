@@ -574,13 +574,31 @@ export function buildActiveBranchMessages(workspaceRoot: string, name: string): 
   for (const e of entries) {
     if (e.parentId) hasChild.add(e.parentId);
   }
-  // Prefer a message leaf so internal custom rows don't become the tip.
+  // The active tip is the newest message in the ancestry of the LAST
+  // written entry — NOT the deepest tree leaf. After a fork, tree-depth
+  // scanning can land on a sibling branch's leaf while the active work is
+  // the branch whose entries were appended most recently. Following the
+  // parent chain from the newest entry resolves the fork to the branch
+  // that actually received the latest writes.
   let leaf: SessionEntry | undefined;
-  for (let i = entries.length - 1; i >= 0; i -= 1) {
-    const candidate = entries[i]!;
-    if (candidate.type === "message" && !hasChild.has(candidate.id)) {
-      leaf = candidate;
+  let cursor: SessionEntry | undefined = entries[entries.length - 1];
+  while (cursor) {
+    if (cursor.type === "message") {
+      leaf = cursor;
       break;
+    }
+    cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
+  }
+  if (!leaf) {
+    // Newest-entry ancestry contained no message (e.g. journal ends at a
+    // compaction/savings row with no parent). Fall back to the last
+    // message leaf so internal custom rows don't become the tip.
+    for (let i = entries.length - 1; i >= 0; i -= 1) {
+      const candidate = entries[i]!;
+      if (candidate.type === "message" && !hasChild.has(candidate.id)) {
+        leaf = candidate;
+        break;
+      }
     }
   }
   if (!leaf) {
