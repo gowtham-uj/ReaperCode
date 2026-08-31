@@ -146,7 +146,14 @@ export class ManagedReaperThread implements ToolApprovalRequester {
     if (!this.activeTurn || this.activeTurn.turnId !== turnId) {
       return { accepted: false, reason: "closed" };
     }
-    return this.activeTurn.control.steer(message);
+    const result = this.activeTurn.control.steer(message);
+    if (result.accepted) {
+      this.eventBus.publish(
+        { type: "turn.user.message", threadId: this.threadId, turnId, text: message.trim() },
+        turnId,
+      );
+    }
+    return result;
   }
 
   interrupt(turnId?: string): boolean {

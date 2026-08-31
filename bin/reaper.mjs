@@ -257937,7 +257937,14 @@ var ManagedReaperThread = class {
     if (!this.activeTurn || this.activeTurn.turnId !== turnId) {
       return { accepted: false, reason: "closed" };
     }
-    return this.activeTurn.control.steer(message);
+    const result = this.activeTurn.control.steer(message);
+    if (result.accepted) {
+      this.eventBus.publish(
+        { type: "turn.user.message", threadId: this.threadId, turnId, text: message.trim() },
+        turnId
+      );
+    }
+    return result;
   }
   interrupt(turnId) {
     const active = this.activeTurn;
@@ -258373,13 +258380,14 @@ var SessionProjection = class {
       case "turn.user.message": {
         if (!turnId) return [];
         const mutable = this.ensureTurn(turnId);
+        const ordinal = [...mutable.items.keys()].filter((id) => id.startsWith(`${turnId}:user-message`)).length;
         const item = {
           type: "userMessage",
-          id: `${turnId}:user-message`,
+          id: ordinal === 0 ? `${turnId}:user-message` : `${turnId}:user-message-${ordinal}`,
           content: [{ type: "text", text: event.text }]
         };
         this.putItem(mutable, item);
-        return [];
+        return [this.itemStarted(base, item)];
       }
       case "turn.interrupt.requested":
         return [{ method: "turn/interruptRequested", params: base }];

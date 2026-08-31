@@ -1,0 +1,501 @@
+/*
+ * Design tokens.
+ *
+ * Derived from the plan's inspiration sources, not from the CLI — the
+ * app-server methodology exists so this surface can render what the terminal
+ * cannot: real diffs, exit codes, durations, structured status.
+ *
+ * What was taken, and why:
+ *
+ * - **A depth stack, not shadows** (bolt.diy). Four background levels do all
+ *   the layering work. Exactly one shadow exists in the whole app, on the
+ *   sticky approval bar, because that element genuinely floats above the
+ *   transcript and needs to read as such.
+ * - **Borders do the separating** (bolt.diy). Cards-everywhere turns a
+ *   transcript into visual noise; rules and indentation carry structure.
+ * - **Assistant text has no container** (OpenHands + bolt.diy independently).
+ *   The agent's prose is the page, not a message in a box. Only the user's
+ *   input gets a bubble, because it needs to read as an interjection.
+ * - **Chevron disclosure, borderless rows** (OpenHands). Separation comes from
+ *   vertical rhythm.
+ *
+ * Deliberately *not* taken: bolt.diy's 33rem chat column cap. That suits a
+ * chat app; this transcript carries diffs and command output, which need width.
+ *
+ * Termany is AGPL — its pane model was studied, no code or values copied.
+ */
+
+:root {
+  /* Depth stack. Each level sits visually above the previous one. */
+  --depth-0: #0b0d10; /* app canvas */
+  --depth-1: #111418; /* panel */
+  --depth-2: #171b21; /* raised: cards, composer */
+  --depth-3: #1e242c; /* overlay: sticky bar, menus */
+
+  --border: #232a33;
+  --border-strong: #313b47;
+
+  --text: #e8edf4;
+  --text-muted: #94a3b4;
+  --text-faint: #64717f;
+
+  --accent: #7c9cf5;
+  --accent-dim: rgba(124, 156, 245, 0.12);
+
+  --success: #46b978;
+  --danger: #e56a63;
+  --warning: #d99a3e;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  --step: 0.25rem;
+  --radius: 0.5rem;
+
+  /* The transcript's indentation unit. Tool calls sit one unit in from the
+     model message that caused them — the step tree's only structural signal. */
+  --indent: 1.25rem;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--depth-0);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Focus is never removed, only restyled. Keyboard operation is a requirement,
+   not a nicety, and this is the only thing that makes it visible. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+/* ---- Layout ---- */
+
+.app {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  height: 100%;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--step) * 3);
+  padding: 0 calc(var(--step) * 4);
+  height: 48px;
+  border-bottom: 1px solid var(--border);
+  background: var(--depth-1);
+}
+
+.app-title {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.app-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  min-height: 0;
+}
+
+@media (max-width: 900px) {
+  .app-body { grid-template-columns: minmax(0, 1fr); }
+  .workbench { display: none; }
+}
+
+.chat-pane {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  min-height: 0;
+  min-width: 0;
+  border-right: 1px solid var(--border);
+}
+
+.workbench {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 0;
+  min-width: 0;
+  background: var(--depth-1);
+}
+
+/* ---- Status ---- */
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
+.status-dot[data-status="open"] { background: var(--success); }
+.status-dot[data-status="connecting"] { background: var(--warning); }
+.status-dot[data-status="closed"] { background: var(--danger); }
+
+.status-label {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* ---- Transcript ---- */
+
+.transcript {
+  overflow-y: auto;
+  padding: calc(var(--step) * 4) calc(var(--step) * 5) calc(var(--step) * 10);
+  min-height: 0;
+}
+
+.turn { padding-block: calc(var(--step) * 2); }
+
+.turn + .turn { border-top: 1px solid var(--border); }
+
+/* A step is one model request plus the tools it called. Rules and spacing
+   carry the grouping — no card, no border box. */
+.step { padding-block: calc(var(--step) * 1.5); }
+
+.step-tools {
+  margin-left: var(--indent);
+  padding-left: calc(var(--step) * 3);
+  border-left: 1px solid var(--border);
+}
+
+/* User input is the only thing that gets a container: it needs to read as an
+   interjection into the agent's stream. */
+.user-message {
+  background: var(--accent-dim);
+  border-radius: var(--radius);
+  padding: calc(var(--step) * 2.5) calc(var(--step) * 3.5);
+  margin-block: calc(var(--step) * 2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* A queued message is a user message that has not landed yet. It shares the
+   user-message shape so it reads as the same kind of thing, and is set apart by
+   a dashed edge and reduced emphasis — not by color alone. */
+.queued-message {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  padding: calc(var(--step) * 2.5) calc(var(--step) * 3.5);
+  margin-block: calc(var(--step) * 2);
+}
+
+.queued-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+}
+
+.queued-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(var(--step) * 2);
+  margin-top: calc(var(--step) * 1.5);
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+/* The agent's prose is the page itself. */
+.agent-message {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin-block: calc(var(--step) * 2);
+}
+
+.reasoning {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.reasoning-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding-left: calc(var(--step) * 3);
+  border-left: 1px solid var(--border);
+  margin-top: var(--step);
+}
+
+/* ---- Tool rows ---- */
+
+.tool-row {
+  display: flex;
+  align-items: baseline;
+  gap: calc(var(--step) * 2);
+  padding-block: calc(var(--step) * 1.5);
+  min-width: 0;
+}
+
+.tool-label {
+  color: var(--text-muted);
+  flex: none;
+}
+
+.tool-detail {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.tool-meta {
+  margin-left: auto;
+  flex: none;
+  font-size: 12px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Status is never color alone — each state pairs the hue with a glyph, so it
+   survives color blindness and greyscale. */
+.tool-status[data-status="failed"] { color: var(--danger); }
+.tool-status[data-status="completed"] { color: var(--success); }
+.tool-status[data-status="inProgress"] { color: var(--text-faint); }
+
+.disclosure {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--step) * 2);
+  color: var(--text-muted);
+  padding-block: calc(var(--step) * 1.5);
+  width: 100%;
+  text-align: left;
+}
+
+.disclosure:hover { color: var(--text); }
+
+.chevron {
+  flex: none;
+  transition: transform 0.15s ease;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+.chevron[data-open="true"] { transform: rotate(90deg); }
+
+@media (prefers-reduced-motion: reduce) {
+  .chevron { transition: none; }
+}
+
+/* ---- Output and diffs ---- */
+
+.output {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  background: var(--depth-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: calc(var(--step) * 2.5) calc(var(--step) * 3);
+  max-height: 22rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
+}
+
+.diff {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--depth-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: auto;
+  max-height: 26rem;
+  margin-block: var(--step);
+}
+
+.diff-line { padding: 0 calc(var(--step) * 3); white-space: pre; }
+.diff-line[data-kind="add"] { background: rgba(70, 185, 120, 0.12); color: #9fe3bd; }
+.diff-line[data-kind="del"] { background: rgba(229, 106, 99, 0.12); color: #f2b0ac; }
+.diff-line[data-kind="meta"] { color: var(--text-faint); }
+
+.stat-add { color: var(--success); }
+.stat-del { color: var(--danger); }
+
+/* ---- Approvals ---- */
+
+.approval {
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--depth-2);
+  padding: calc(var(--step) * 3);
+  margin-block: calc(var(--step) * 2);
+}
+
+.approval-title {
+  font-weight: 600;
+  margin-bottom: var(--step);
+}
+
+.approval-actions {
+  display: flex;
+  gap: calc(var(--step) * 2);
+  margin-top: calc(var(--step) * 3);
+  flex-wrap: wrap;
+}
+
+.btn {
+  padding: calc(var(--step) * 1.5) calc(var(--step) * 3);
+  border-radius: calc(var(--radius) - 2px);
+  border: 1px solid var(--border-strong);
+  background: var(--depth-3);
+  font-size: 13px;
+}
+
+.btn:hover { border-color: var(--text-faint); }
+
+.btn[data-variant="primary"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0a0d12;
+  font-weight: 600;
+}
+
+.btn[data-variant="danger"] { color: var(--danger); }
+
+.btn[data-variant="ghost"] {
+  background: none;
+  border-color: transparent;
+  color: var(--text-muted);
+  padding-inline: calc(var(--step) * 1.5);
+}
+
+.btn[data-variant="ghost"]:hover { color: var(--text); border-color: var(--border-strong); }
+
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* The one shadow in the app. This bar genuinely floats over the transcript
+   when the approval it mirrors has scrolled out of view. */
+.sticky-approval {
+  position: sticky;
+  bottom: 0;
+  z-index: 10;
+  background: var(--depth-3);
+  border-top: 1px solid var(--accent);
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.35);
+  padding: calc(var(--step) * 3) calc(var(--step) * 4);
+  display: flex;
+  align-items: center;
+  gap: calc(var(--step) * 3);
+  flex-wrap: wrap;
+}
+
+/* ---- Composer ---- */
+
+.composer {
+  border-top: 1px solid var(--border);
+  background: var(--depth-1);
+  padding: calc(var(--step) * 3);
+  display: flex;
+  gap: calc(var(--step) * 2);
+  align-items: flex-end;
+}
+
+.composer textarea {
+  flex: 1;
+  resize: none;
+  background: var(--depth-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: calc(var(--step) * 2.5) calc(var(--step) * 3);
+  font: inherit;
+  min-height: 2.75rem;
+  max-height: 12rem;
+}
+
+.composer textarea:focus { border-color: var(--border-strong); }
+
+/* ---- Workbench ---- */
+
+.tabs {
+  display: flex;
+  gap: var(--step);
+  padding: 0 calc(var(--step) * 3);
+  border-bottom: 1px solid var(--border);
+  height: 40px;
+  align-items: stretch;
+}
+
+.tab {
+  padding-inline: calc(var(--step) * 3);
+  color: var(--text-muted);
+  font-size: 13px;
+  border-bottom: 2px solid transparent;
+}
+
+.tab[aria-selected="true"] {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.workbench-body {
+  overflow: auto;
+  min-height: 0;
+  padding: calc(var(--step) * 3);
+}
+
+.file-tree { font-size: 13px; }
+
+.tree-entry {
+  display: flex;
+  gap: calc(var(--step) * 2);
+  padding: calc(var(--step) * 0.75) calc(var(--step) * 2);
+  border-radius: 4px;
+  width: 100%;
+  text-align: left;
+  color: var(--text-muted);
+}
+
+.tree-entry:hover { background: var(--depth-2); color: var(--text); }
+.tree-entry[data-active="true"] { background: var(--accent-dim); color: var(--text); }
+
+.empty {
+  color: var(--text-faint);
+  font-size: 13px;
+  padding: calc(var(--step) * 4);
+  text-align: center;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--step);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* Screen-reader-only: gives live regions and icon buttons real names without
+   occupying layout. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

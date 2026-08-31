@@ -167,18 +167,31 @@ export class JsonRpcClient {
   }
 }
 
+/**
+ * Structural subset of the browser `WebSocket`.
+ *
+ * Declared rather than referencing the DOM lib so this module still compiles
+ * in a Node package that has no DOM types — the BFF imports the client from
+ * here and must not be forced to pull in `lib.dom`.
+ */
+export interface BrowserWebSocketLike {
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+  addEventListener(
+    type: "message" | "close",
+    listener: (event: { data?: unknown; code?: number; reason?: string }) => void,
+  ): void;
+}
+
 /** Browser `WebSocket` adapter. Also works with Node's global WebSocket. */
-export function browserTransport(socket: WebSocket): JsonRpcTransport {
+export function browserTransport(socket: BrowserWebSocketLike): JsonRpcTransport {
   return {
     send: (data) => socket.send(data),
     onMessage: (handler) => {
-      socket.addEventListener("message", (event) => handler(String((event as MessageEvent).data)));
+      socket.addEventListener("message", (event) => handler(String(event.data)));
     },
     onClose: (handler) => {
-      socket.addEventListener("close", (event) => {
-        const close = event as CloseEvent;
-        handler(close.code, close.reason);
-      });
+      socket.addEventListener("close", (event) => handler(event.code ?? 1006, event.reason ?? ""));
     },
     close: (code, reason) => socket.close(code, reason),
   };

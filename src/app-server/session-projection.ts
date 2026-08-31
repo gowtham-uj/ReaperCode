@@ -88,13 +88,19 @@ export class SessionProjection {
       case "turn.user.message": {
         if (!turnId) return [];
         const mutable = this.ensureTurn(turnId);
+        // A turn can carry more than one user message: the opening prompt plus
+        // any message steered in at a model-loop boundary. Ordinal-suffix the id
+        // so a queued follow-up appends instead of overwriting the prompt.
+        const ordinal = [...mutable.items.keys()].filter((id) => id.startsWith(`${turnId}:user-message`)).length;
         const item: AppThreadItem = {
           type: "userMessage",
-          id: `${turnId}:user-message`,
+          id: ordinal === 0 ? `${turnId}:user-message` : `${turnId}:user-message-${ordinal}`,
           content: [{ type: "text", text: event.text }],
         };
         this.putItem(mutable, item);
-        return [];
+        // Emitted so live clients render the user's own message as it lands,
+        // rather than only seeing it after a reload replays history.
+        return [this.itemStarted(base, item)];
       }
       case "turn.interrupt.requested":
         return [{ method: "turn/interruptRequested", params: base }];

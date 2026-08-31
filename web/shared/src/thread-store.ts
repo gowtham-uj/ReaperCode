@@ -327,8 +327,10 @@ export function deriveSteps(turn: AppTurn): AppStep[] {
 
   const isTool = (item: AppThreadItem): boolean =>
     item.type === "commandExecution" || item.type === "fileChange" || item.type === "dynamicToolCall";
+  // A steered user message lands at a model-loop boundary too — the next model
+  // request sees it — so it opens a step the same way an agent message does.
   const isModelTurn = (item: AppThreadItem): boolean =>
-    item.type === "agentMessage" || item.type === "reasoning";
+    item.type === "agentMessage" || item.type === "reasoning" || item.type === "userMessage";
 
   for (const item of turn.items) {
     if (isModelTurn(item) && sawTool && current.length > 0) {

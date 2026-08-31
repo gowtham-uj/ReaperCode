@@ -141,6 +141,59 @@ test("client reducer lands on the same items as the server projection", () => {
   assert.equal(clientTurn.status, "completed");
 });
 
+test("a message steered mid-turn appends instead of replacing the prompt", () => {
+  const projection = new SessionProjection();
+  let client = emptyThreads();
+  let sequence = 0;
+  const methods: string[] = [];
+
+  // The shape of a queued message landing: the turn is already running, the
+  // user types, and the app-server republishes `turn.user.message`.
+  const events: Array<{ event: ThreadEventRecord["event"]; turnId?: string }> = [
+    { event: withTs({ type: "thread.started", threadId: THREAD_ID }) },
+    { event: withTs({ type: "turn.user.message", threadId: THREAD_ID, turnId: TURN_ID, text: "First" }), turnId: TURN_ID },
+    { event: withTs({ type: "turn.started", runId: TURN_ID, sessionId: THREAD_ID }), turnId: TURN_ID },
+    { event: withTs({ type: "turn.user.message", threadId: THREAD_ID, turnId: TURN_ID, text: "Second" }), turnId: TURN_ID },
+    {
+      event: withTs({ type: "turn.completed", runId: TURN_ID, sessionId: THREAD_ID, assistantMessage: "ok" }),
+      turnId: TURN_ID,
+    },
+  ];
+
+  for (const step of events) {
+    sequence += 1;
+    for (const note of projection.project(
+      { sequence, timestamp: NOW, threadId: THREAD_ID, ...(step.turnId ? { turnId: step.turnId } : {}), event: step.event },
+      metadata,
+    )) {
+      methods.push(note.method);
+      client = applyNotification(client, note.method, note.params);
+    }
+  }
+
+  // The user must see their own message land live, not only on reload.
+  assert.ok(
+    methods.filter((method) => method === "item/started").length >= 2,
+    `both user messages must be notified live; got ${methods.join(", ")}`,
+  );
+
+  const turn = client[THREAD_ID]?.turns.find((entry) => entry.id === TURN_ID);
+  assert.ok(turn, "client never built the turn");
+  const texts = turn.items
+    .filter((item) => item.type === "userMessage")
+    .map((item) => (item.type === "userMessage" ? item.content[0]?.text : undefined));
+  assert.deepEqual(texts, ["First", "Second"], "the steered message overwrote the original prompt");
+
+  // A steered message opens a step, so it never gets folded into the tail of
+  // the preceding one where the user would not notice it landed.
+  const steps = deriveSteps(turn);
+  assert.ok(
+    steps.some((step) => step.items.some((item) =>
+      item.type === "userMessage" && item.content[0]?.text === "Second")),
+    "the steered message vanished from the step tree",
+  );
+});
+
 /** Re-runs the sequence and returns the item list from `turn/completed`. */
 function lastCompletedTurnItems(): Array<{ id: string; type: string }> {
   const projection = new SessionProjection();
