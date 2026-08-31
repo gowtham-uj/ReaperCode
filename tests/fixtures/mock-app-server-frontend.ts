@@ -1,5 +1,15 @@
 import WebSocket from "ws";
 
+import {
+  applyNotification,
+  emptyThreads,
+  replaceTurns,
+  seedThread,
+  type AppThread,
+  type AppTurn,
+  type ThreadsState,
+} from "../../web/shared/src/index.js";
+
 export type JsonRpcId = string | number;
 
 export interface JsonRpcMessage {
@@ -64,9 +74,14 @@ interface Waiter {
 /**
  * Codex-style app-server consumer: one WebSocket, JSON-RPC 2.0, and a local
  * Thread/Turn/Item store updated from live notifications.
+ *
+ * The reducer lives in `web/shared` and is shared with the web UI, so this
+ * fixture exercises the same fold the browser will run. The Map-shaped
+ * `FrontendThread` view below is projected from that state on read — tests
+ * assert against it, and `tests/unit/protocol-store-parity.test.ts` keeps the
+ * shared reducer in step with `SessionProjection`.
  */
 export class MockAppServerFrontend {
-  readonly threads = new Map<string, FrontendThread>();
   readonly notifications: JsonRpcMessage[] = [];
   readonly methods: string[] = [];
   readonly serverRequests: JsonRpcMessage[] = [];
@@ -76,6 +91,7 @@ export class MockAppServerFrontend {
   capabilities?: Record<string, unknown>;
   serverInfo?: Record<string, unknown>;
 
+  private state: ThreadsState = emptyThreads();
   private nextId = 1;
   private readonly pending = new Map<JsonRpcId, PendingRequest>();
   private readonly waiters: Waiter[] = [];
@@ -116,6 +132,13 @@ export class MockAppServerFrontend {
     return new MockAppServerFrontend(socket, options);
   }
 
+  /** Map-shaped view of the shared store, rebuilt on each access. */
+  get threads(): Map<string, FrontendThread> {
+    const view = new Map<string, FrontendThread>();
+    for (const thread of Object.values(this.state)) view.set(thread.id, toFrontendThread(thread));
+    return view;
+  }
+
   async initialize(clientInfo = { name: this.options.name ?? "mock-frontend", title: "Mock Reaper UI" }): Promise<JsonRpcMessage> {
     const response = await this.request("initialize", {
       protocolVersion: 1,
@@ -134,7 +157,7 @@ export class MockAppServerFrontend {
     const response = await this.request("thread/start", params);
     const thread = asRecord(response.result?.thread);
     if (thread && typeof thread.id === "string") {
-      this.seedThread(thread, asRecord(response.result));
+      this.state = seedThread(this.state, thread, asRecord(response.result));
     }
     return response;
   }
@@ -147,9 +170,11 @@ export class MockAppServerFrontend {
     const response = await this.request("thread/resume", params, timeoutMs);
     const thread = asRecord(response.result?.thread);
     if (thread && typeof thread.id === "string") {
-      this.seedThread(thread, asRecord(response.result));
+      this.state = seedThread(this.state, thread, asRecord(response.result));
       const turns = response.result?.initialTurnsPage;
-      if (Array.isArray(turns)) this.replaceTurns(thread.id, turns as Array<Record<string, unknown>>);
+      if (Array.isArray(turns)) {
+        this.state = replaceTurns(this.state, thread.id, turns as Array<Record<string, unknown>>);
+      }
     }
     return response;
   }
@@ -275,38 +300,32 @@ export class MockAppServerFrontend {
   snapshot(threadId: string): {
     thread: Omit<FrontendThread, "turns"> & { turns: Array<Omit<FrontendTurn, "items"> & { items: FrontendItem[] }> };
   } | undefined {
-    const thread = this.threads.get(threadId);
+    const thread = this.state[threadId];
     if (!thread) return undefined;
+    const view = toFrontendThread(thread);
     return {
       thread: {
-        ...thread,
-        turns: [...thread.turns.values()].map((turn) => ({
+        ...view,
+        turns: thread.turns.map((turn) => ({
           id: turn.id,
           status: turn.status,
           ...(turn.error ? { error: turn.error } : {}),
-          items: [...turn.items.values()],
+          items: turn.items.map((item) => item as unknown as FrontendItem),
         })),
       },
     };
   }
 
   itemTypes(threadId: string, turnId?: string): string[] {
-    const thread = this.threads.get(threadId);
-    if (!thread) return [];
-    const turns = turnId
-      ? [thread.turns.get(turnId)].filter((turn): turn is FrontendTurn => Boolean(turn))
-      : [...thread.turns.values()];
-    return turns.flatMap((turn) => [...turn.items.values()].map((item) => item.type));
+    return this.selectTurns(threadId, turnId).flatMap((turn) => turn.items.map((item) => item.type));
   }
 
   userTexts(threadId: string): string[] {
-    const thread = this.threads.get(threadId);
-    if (!thread) return [];
-    return [...thread.turns.values()].flatMap((turn) =>
-      [...turn.items.values()]
+    return this.selectTurns(threadId).flatMap((turn) =>
+      turn.items
         .filter((item) => item.type === "userMessage")
         .flatMap((item) => {
-          const content = item.content;
+          const content = (item as { content?: unknown }).content;
           if (!Array.isArray(content)) return [];
           return content.map((part) => String((part as { text?: string }).text ?? ""));
         }),
@@ -314,15 +333,10 @@ export class MockAppServerFrontend {
   }
 
   agentText(threadId: string, turnId?: string): string {
-    const thread = this.threads.get(threadId);
-    if (!thread) return "";
-    const turns = turnId
-      ? [thread.turns.get(turnId)].filter((turn): turn is FrontendTurn => Boolean(turn))
-      : [...thread.turns.values()];
-    return turns
-      .flatMap((turn) => [...turn.items.values()])
+    return this.selectTurns(threadId, turnId)
+      .flatMap((turn) => turn.items)
       .filter((item) => item.type === "agentMessage")
-      .map((item) => String(item.text ?? ""))
+      .map((item) => String((item as { text?: unknown }).text ?? ""))
       .join("");
   }
 
@@ -354,6 +368,12 @@ export class MockAppServerFrontend {
       clearTimeout(waiter.timer);
       waiter.reject(error);
     }
+  }
+
+  private selectTurns(threadId: string, turnId?: string): AppTurn[] {
+    const thread = this.state[threadId];
+    if (!thread) return [];
+    return turnId ? thread.turns.filter((turn) => turn.id === turnId) : thread.turns;
   }
 
   private onRaw(raw: string): void {
@@ -397,7 +417,7 @@ export class MockAppServerFrontend {
       this.notifications.push(message);
       this.methods.push(message.method);
       try {
-        this.applyNotification(message.method, message.params ?? {});
+        this.state = applyNotification(this.state, message.method, message.params ?? {});
       } catch {
         // Keep the raw protocol stream even if local session apply fails.
       }
@@ -427,178 +447,19 @@ export class MockAppServerFrontend {
     }
     this.respond(message.id, { decision: this.options.approvalDecision ?? "accept" });
   }
+}
 
-  private seedThread(thread: Record<string, unknown>, envelope?: Record<string, unknown>): FrontendThread {
-    const current = this.ensureThread(String(thread.id));
-    if (typeof thread.sessionId === "string") current.sessionId = thread.sessionId;
-    if (typeof thread.preview === "string") current.preview = thread.preview;
-    if (thread.ephemeral === false) current.ephemeral = false;
-    const cwd = thread.cwd ?? envelope?.cwd;
-    if (typeof cwd === "string") current.cwd = cwd;
-    const modelProvider = thread.modelProvider ?? envelope?.modelProvider;
-    if (typeof modelProvider === "string" || modelProvider === null) current.modelProvider = modelProvider;
-    const model = thread.model ?? envelope?.model;
-    if (typeof model === "string" || model === null) current.model = model;
-    if (typeof thread.createdAt === "string") current.createdAt = thread.createdAt;
-    if (typeof thread.updatedAt === "string") current.updatedAt = thread.updatedAt;
-    if (typeof thread.name === "string") current.name = thread.name;
-    if (thread.status !== undefined) current.status = thread.status;
-    if (envelope?.approvalPolicy !== undefined) current.approvalPolicy = String(envelope.approvalPolicy);
-    if (Array.isArray(thread.turns)) this.replaceTurns(current.id, thread.turns as Array<Record<string, unknown>>);
-    return current;
+function toFrontendThread(thread: AppThread): FrontendThread {
+  const turns = new Map<string, FrontendTurn>();
+  for (const turn of thread.turns) {
+    turns.set(turn.id, {
+      id: turn.id,
+      status: turn.status,
+      ...(turn.error ? { error: turn.error } : {}),
+      items: new Map(turn.items.map((item) => [item.id, item as unknown as FrontendItem])),
+    });
   }
-
-  private replaceTurns(threadId: string, turns: Array<Record<string, unknown>>): void {
-    const thread = this.ensureThread(threadId);
-    if (!(thread.turns instanceof Map)) thread.turns = new Map();
-    thread.turns.clear();
-    for (const turn of turns) this.putTurn(thread, turn);
-  }
-
-  private applyNotification(method: string, params: Record<string, unknown>): void {
-    const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
-    if (typeof params.sequence === "number" && threadId) {
-      const thread = this.ensureThread(threadId);
-      thread.latestSequence = Math.max(thread.latestSequence, params.sequence);
-    }
-
-    switch (method) {
-      case "initialized":
-        return;
-      case "thread/started": {
-        const thread = asRecord(params.thread);
-        if (thread && typeof thread.id === "string") this.seedThread(thread);
-        return;
-      }
-      case "thread/status/changed":
-        if (threadId) this.ensureThread(threadId).status = params.status;
-        return;
-      case "thread/name/updated":
-        if (threadId) this.ensureThread(threadId).name = String(params.threadName ?? "");
-        return;
-      case "thread/closed":
-        if (threadId) this.ensureThread(threadId).status = "notLoaded";
-        return;
-      case "thread/tokenUsage/updated":
-        if (threadId) this.ensureThread(threadId).tokenUsage = params.tokenUsage;
-        return;
-      case "turn/queued":
-      case "turn/interruptRequested":
-        if (threadId && typeof params.turnId === "string") this.ensureTurn(this.ensureThread(threadId), params.turnId);
-        return;
-      case "turn/started": {
-        if (!threadId) return;
-        const thread = this.ensureThread(threadId);
-        const turn = asRecord(params.turn) ?? { id: params.turnId, status: "inProgress", items: [] };
-        this.putTurn(thread, turn);
-        return;
-      }
-      case "turn/completed": {
-        if (!threadId) return;
-        const thread = this.ensureThread(threadId);
-        const turn = asRecord(params.turn);
-        if (turn) this.putTurn(thread, turn);
-        return;
-      }
-      case "item/started":
-      case "item/completed": {
-        if (!threadId || typeof params.turnId !== "string") return;
-        const item = asRecord(params.item);
-        if (!item || typeof item.id !== "string" || typeof item.type !== "string") return;
-        this.upsertItem(this.ensureThread(threadId), params.turnId, item as FrontendItem);
-        return;
-      }
-      case "item/agentMessage/delta":
-        this.appendItemText(threadId, params, "agentMessage", "text");
-        return;
-      case "item/reasoning/textDelta":
-        this.appendReasoning(threadId, params);
-        return;
-      case "item/commandExecution/outputDelta":
-        this.appendCommandOutput(threadId, params);
-        return;
-      default:
-        return;
-    }
-  }
-
-  private ensureThread(threadId: string): FrontendThread {
-    let thread = this.threads.get(threadId);
-    if (!thread) {
-      thread = { id: threadId, turns: new Map(), latestSequence: 0 };
-      this.threads.set(threadId, thread);
-    }
-    return thread;
-  }
-
-  private ensureTurn(thread: FrontendThread, turnId: string): FrontendTurn {
-    let turn = thread.turns.get(turnId);
-    if (!turn) {
-      turn = { id: turnId, status: "inProgress", items: new Map() };
-      thread.turns.set(turnId, turn);
-    }
-    return turn;
-  }
-
-  private putTurn(thread: FrontendThread, raw: Record<string, unknown>): FrontendTurn {
-    const id = String(raw.id ?? "");
-    const turn = this.ensureTurn(thread, id);
-    turn.status = String(raw.status ?? turn.status);
-    if (raw.error && typeof raw.error === "object") {
-      const error = raw.error as { message?: unknown; additionalDetails?: unknown };
-      turn.error = {
-        message: String(error.message ?? ""),
-        ...(typeof error.additionalDetails === "string" ? { additionalDetails: error.additionalDetails } : {}),
-      };
-    }
-    if (Array.isArray(raw.items)) {
-      turn.items.clear();
-      for (const item of raw.items) {
-        const record = asRecord(item);
-        if (!record || typeof record.id !== "string" || typeof record.type !== "string") continue;
-        turn.items.set(record.id, record as FrontendItem);
-      }
-    }
-    return turn;
-  }
-
-  private upsertItem(thread: FrontendThread, turnId: string, item: FrontendItem): void {
-    this.ensureTurn(thread, turnId).items.set(item.id, structuredClone(item));
-  }
-
-  private appendItemText(
-    threadId: string | undefined,
-    params: Record<string, unknown>,
-    type: string,
-    field: string,
-  ): void {
-    if (!threadId || typeof params.turnId !== "string") return;
-    const itemId = String(params.itemId ?? "");
-    const turn = this.ensureTurn(this.ensureThread(threadId), params.turnId);
-    const existing = turn.items.get(itemId) ?? { type, id: itemId, [field]: "" };
-    existing[field] = `${String(existing[field] ?? "")}${String(params.delta ?? "")}`;
-    turn.items.set(itemId, existing);
-  }
-
-  private appendReasoning(threadId: string | undefined, params: Record<string, unknown>): void {
-    if (!threadId || typeof params.turnId !== "string") return;
-    const itemId = String(params.itemId ?? "");
-    const turn = this.ensureTurn(this.ensureThread(threadId), params.turnId);
-    const existing = turn.items.get(itemId) ?? { type: "reasoning", id: itemId, summary: [], content: [] };
-    const content = Array.isArray(existing.content) ? existing.content : [];
-    content.push(String(params.delta ?? ""));
-    existing.content = content;
-    turn.items.set(itemId, existing);
-  }
-
-  private appendCommandOutput(threadId: string | undefined, params: Record<string, unknown>): void {
-    if (!threadId || typeof params.turnId !== "string") return;
-    const itemId = String(params.itemId ?? "");
-    const turn = this.ensureTurn(this.ensureThread(threadId), params.turnId);
-    const existing = turn.items.get(itemId) ?? { type: "commandExecution", id: itemId, command: "", status: "inProgress" };
-    existing.aggregatedOutput = `${String(existing.aggregatedOutput ?? "")}${String(params.delta ?? "")}`;
-    turn.items.set(itemId, existing);
-  }
+  return { ...thread, turns };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
