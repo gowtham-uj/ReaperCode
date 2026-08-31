@@ -296,7 +296,7 @@ test("a step mixing exploration with an edit stays expanded", () => {
   assert.equal(isExplorationStep({ id: "s3", items: [] }), false, "an empty step is not collapsible");
 });
 
-test("item summaries use the CLI's label vocabulary", () => {
+test("item summaries name a call by its identifying argument", () => {
   assert.deepEqual(
     summarizeItem({ type: "commandExecution", id: "c1", command: "npm test", status: "completed" }),
     { label: "Ran", detail: "npm test" },
@@ -341,6 +341,33 @@ test("an unrecognized tool still summarizes to something identifiable", () => {
 test("exploration step label pluralizes", () => {
   assert.equal(summarizeExplorationStep(1), "1 exploration action");
   assert.equal(summarizeExplorationStep(7), "7 exploration actions");
+});
+
+test("web/shared imports no UI framework", async () => {
+  // The app-server's protocol is frontend-agnostic and this package inherits
+  // that. It is consumed by this test, the mock fixture, and the BFF — none of
+  // which run a framework. A framework import here would pin every future
+  // client (web terminal, editor extension, TUI) to one choice, and drag that
+  // dependency into the app-server's own test suite.
+  const { readdir, readFile } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+
+  const dir = new URL("../../web/shared/src/", import.meta.url).pathname;
+  const files = (await readdir(dir)).filter((name) => name.endsWith(".ts"));
+  assert.ok(files.length > 0, "found no sources to check; the glob is wrong");
+
+  const banned = ["solid-js", "react", "vue", "svelte", "preact"];
+  for (const file of files) {
+    const source = await readFile(join(dir, file), "utf8");
+    for (const match of source.matchAll(/from\s+["']([^"']+)["']/g)) {
+      const specifier = match[1]!;
+      if (specifier.startsWith(".")) continue;
+      assert.ok(
+        !banned.some((pkg) => specifier === pkg || specifier.startsWith(`${pkg}/`)),
+        `web/shared/src/${file} imports "${specifier}" — this package must stay framework-agnostic`,
+      );
+    }
+  }
 });
 
 function toolItem(tool: string) {

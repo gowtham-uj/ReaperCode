@@ -5,11 +5,15 @@
  * notifications rather than raw RuntimeEvents. The server remains the source
  * of truth; this is a local replica so the UI can render without round-trips.
  *
+ * This module imports no UI framework, and must not. It is consumed by the test
+ * fixture, the BFF, and the browser app — the app-server's protocol is
+ * frontend-agnostic and this layer inherits that, so a second surface reuses
+ * the fold instead of reimplementing it and drifting from the server.
+ *
  * Every function here is pure and returns new objects along the mutated path
- * (structural sharing), so a `useSyncExternalStore` selector can use reference
- * equality to decide whether a leaf needs to re-render. Mutating in place would
- * make a token delta for one item look identical to every selector watching
- * every other item.
+ * (structural sharing). Reference equality is the contract: it lets a consumer
+ * decide whether a subtree changed without deep comparison. Mutating in place
+ * would make a token delta for one item indistinguishable from any other.
  */
 
 import type {

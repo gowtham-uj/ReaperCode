@@ -1,11 +1,17 @@
 /**
  * One-line labels for transcript items.
  *
- * The CLI already has a label vocabulary in `src/runtime/session-printer.ts`
- * (`summarizeToolCall`): a tool call reads as its name plus the one argument
- * that identifies it — a path, a command, a pattern. That is the product's
- * existing convention for naming the agent's work, and the web UI uses the
- * same words so a transcript reads the same in both places.
+ * A compact fallback label: a tool call named by the one argument that
+ * identifies it — a path, a command, a pattern. This is what a row shows when
+ * it is collapsed, dense, or has no richer representation.
+ *
+ * It is *not* the primary rendering. The protocol carries far more than a
+ * line of text — `fileChange.changes[]` has real diffs, `commandExecution` has
+ * `exitCode` and `durationMs`, every item has an `ItemStatus` — and a surface
+ * with room should render those directly rather than flatten them to a string.
+ *
+ * Framework-agnostic by design, like the rest of this package: a terminal
+ * client and the web app want the same words for the same call.
  *
  * Tool names are the real ones from `src/tools/registry.ts`. An unrecognized
  * tool falls back to its most identifying argument rather than rendering
