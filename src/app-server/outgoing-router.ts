@@ -45,11 +45,17 @@ export class AppServerOutgoingRouter {
     return this.send(connectionId, { jsonrpc: "2.0", method, params });
   }
 
+  /**
+   * `onSent` fires with the generated request id once the request is on the
+   * wire, so callers can correlate it before the response arrives — needed to
+   * notify the reviewer if the request is settled from elsewhere.
+   */
   request(
     connectionId: string,
     method: string,
     params: unknown,
     timeoutMs = 120_000,
+    onSent?: (requestId: JsonRpcId) => void,
   ): Promise<{ requestId: JsonRpcId; response: JsonRpcResponse }> {
     const connection = this.connections.get(connectionId);
     if (!connection) return Promise.reject(new Error("Approval reviewer is not connected"));
@@ -70,7 +76,9 @@ export class AppServerOutgoingRouter {
         clearTimeout(timer);
         this.pending.delete(id);
         reject(new Error("Could not send server request"));
+        return;
       }
+      onSent?.(id);
     });
   }
 

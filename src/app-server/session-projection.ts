@@ -46,8 +46,24 @@ interface MutableTurn {
   items: Map<string, AppThreadItem>;
 }
 
+/**
+ * Upper bound on the accumulated output held per command item. Matches the
+ * bash tool's own in-memory buffer cap. Without this a long build grows the
+ * projection unboundedly, and every connected client mirrors it.
+ */
+const MAX_AGGREGATED_OUTPUT_CHARS = 256 * 1024;
+const OUTPUT_TRUNCATION_MARKER = "[... earlier output truncated ...]\n";
+
+function capOutput(text: string): string {
+  if (text.length <= MAX_AGGREGATED_OUTPUT_CHARS) return text;
+  const tail = text.slice(-(MAX_AGGREGATED_OUTPUT_CHARS - OUTPUT_TRUNCATION_MARKER.length));
+  return `${OUTPUT_TRUNCATION_MARKER}${tail}`;
+}
+
 export class SessionProjection {
   private readonly turns = new Map<string, MutableTurn>();
+  private cumulativeInputTokens = 0;
+  private cumulativeOutputTokens = 0;
 
   project(record: ThreadEventRecord, metadata?: ThreadMetadata): ProjectedNotification[] {
     const threadId = record.threadId;
@@ -156,7 +172,7 @@ export class SessionProjection {
         if (!turnId) return [];
         const existing = this.ensureTurn(turnId).items.get(event.toolCallId);
         if (existing?.type === "commandExecution") {
-          existing.aggregatedOutput = `${existing.aggregatedOutput ?? ""}${event.text}`;
+          existing.aggregatedOutput = capOutput(`${existing.aggregatedOutput ?? ""}${event.text}`);
         }
         return [{
           method: "item/commandExecution/outputDelta",
@@ -199,18 +215,30 @@ export class SessionProjection {
         return turnId ? this.turnCompleted(base, turnId, "interrupted") : [];
       case "turn.failed":
         return turnId ? this.turnCompleted(base, turnId, "failed", event.error.message) : [];
-      case "token.usage":
+      case "token.usage": {
+        // `token.usage` carries per-call counts only, so the running total is
+        // accumulated here. A widened event would let this report the real
+        // TokenBudgetTracker totals (including cache reads/writes) and the
+        // model's context window; until then `modelContextWindow` stays null
+        // rather than guessing.
+        this.cumulativeInputTokens += event.inputTokens;
+        this.cumulativeOutputTokens += event.outputTokens;
         return [{
           method: "thread/tokenUsage/updated",
           params: {
             ...base,
             tokenUsage: {
-              total: { inputTokens: event.inputTokens, outputTokens: event.outputTokens, totalTokens: event.inputTokens + event.outputTokens },
+              total: {
+                inputTokens: this.cumulativeInputTokens,
+                outputTokens: this.cumulativeOutputTokens,
+                totalTokens: this.cumulativeInputTokens + this.cumulativeOutputTokens,
+              },
               last: { inputTokens: event.inputTokens, outputTokens: event.outputTokens, totalTokens: event.inputTokens + event.outputTokens },
               modelContextWindow: null,
             },
           },
         }];
+      }
       case "verification.started":
       case "verification.completed":
         return [{ method: "item/verification/updated", params: { ...base, verification: event } }];

@@ -69,6 +69,9 @@ export async function startAppServer(options: StartAppServerOptions): Promise<Ru
     onApprovalRequested: async (request) => {
       await processor?.handleApprovalRequest(request);
     },
+    onApprovalSettled: (request, decision) => {
+      processor?.handleApprovalSettled(request, decision);
+    },
   });
   processor = new AppServerMessageProcessor({
     workspaceRoot: options.workspaceRoot,

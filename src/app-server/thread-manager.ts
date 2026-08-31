@@ -22,6 +22,7 @@ export interface ReaperThreadManagerOptions {
   approvalTimeoutMs?: number;
   turnRunner?: ManagedTurnRunner;
   onApprovalRequested?: (request: ManagedApprovalRequest) => void | Promise<void>;
+  onApprovalSettled?: (request: ManagedApprovalRequest, decision: ToolApprovalDecision) => void;
 }
 
 export class ReaperThreadManager {
@@ -181,6 +182,9 @@ export class ReaperThreadManager {
         : {}),
       ...(this.options.onApprovalRequested
         ? { onApprovalRequested: this.options.onApprovalRequested }
+        : {}),
+      ...(this.options.onApprovalSettled
+        ? { onApprovalSettled: this.options.onApprovalSettled }
         : {}),
     });
   }

@@ -219,6 +219,42 @@ test("tool approval uses a server-initiated JSON-RPC request and resumes the tur
   }
 });
 
+test("approval timeout notifies the reviewer instead of leaving a stale prompt", async () => {
+  const workspaceRoot = await createTempWorkspace();
+  const runner: ManagedTurnRunner = async (input) => {
+    const decision = await input.approvalRequester.requestApproval({
+      approvalId: "timeout-approval",
+      runId: input.turnId,
+      sessionId: input.threadId,
+      toolCall: { id: "shell", name: "bash", args: { cmd: "printf slow" } },
+      workspaceRoot: input.workspaceRoot,
+      workingDirectory: input.workspaceRoot,
+      permissionMode: "strict",
+      reason: "test timeout",
+    }, input.abortSignal);
+    return engineResult(decision);
+  };
+  const server = await startAppServer({ workspaceRoot, turnRunner: runner, approvalTimeoutMs: 50 });
+  const client = await RpcClient.connect(server.ready.url);
+  try {
+    await client.request("initialize", { protocolVersion: 1 });
+    await client.request("thread/start", { threadId: "timeout-approval-thread", permissionMode: "strict" });
+    await client.request("turn/start", { threadId: "timeout-approval-thread", prompt: "run" });
+    const approval = await client.waitFor(
+      (message) => message.method === "item/commandExecution/requestApproval",
+    );
+
+    // Deliberately never respond. Before the fix the reviewer got nothing here
+    // and could not tell "still waiting" from "expired".
+    const resolved = await client.waitFor((message) => message.method === "serverRequest/resolved");
+    assert.equal(resolved.params.requestId, approval.id);
+    assert.equal(resolved.params.decision, "timeout");
+  } finally {
+    client.close();
+    await server.stop();
+  }
+});
+
 test("reviewer disconnect cancels a pending approval without aborting the server", async () => {
   const workspaceRoot = await createTempWorkspace();
   const runner: ManagedTurnRunner = async (input) => {

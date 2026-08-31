@@ -1,12 +1,19 @@
 /**
- * tools/job.ts — Phase 5: job facade over background work.
+ * tools/job.ts — job facade over background work.
  *
- * Unifies async bash (isBackground), read_background_output, signal_process,
- * and write_to_process into a single tool with list/poll/cancel operations.
- * Keeps existing process tools for backward compatibility.
+ * A single tool wrapping the read/signal/write operations that are otherwise
+ * spread across `read_background_output`, `signal_process`, and
+ * `write_to_process`. Jobs are identified by the OS pid of the spawned child,
+ * which is what `BackgroundProcessManager` keys on and what `bash` returns when
+ * it backgrounds a command.
+ *
+ * This tool does not spawn processes — only `bash` does. See the `start` action
+ * for the redirect.
  */
 
 import { z } from "zod";
+
+import type { BackgroundProcessManager } from "./background-process-manager.js";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -16,33 +23,27 @@ export const JobArgsSchema = z
   .object({
     action: z
       .enum(["start", "list", "poll", "cancel", "write"])
-      .describe("Action: start (background command), list (all jobs), poll (read output), cancel (send signal), write (to stdin)."),
-    command: z
-      .string()
-      .optional()
-      .describe("Shell command for 'start' action."),
+      .describe(
+        "Action: list (all jobs), poll (read output), cancel (send signal), write (to stdin). 'start' is not supported — use bash with run_in_background instead.",
+      ),
+    command: z.string().optional().describe("Unused. Present only so 'start' can report a useful error."),
     jobId: z
       .string()
       .optional()
-      .describe("Job ID for poll/cancel/write actions."),
+      .describe("Job ID for poll/cancel/write actions. This is the OS pid returned when bash backgrounds a command."),
     signal: z
       .enum(["SIGINT", "SIGTERM", "SIGKILL"])
       .optional()
       .describe("Signal for 'cancel' action (default SIGTERM)."),
-    input: z
-      .string()
-      .optional()
-      .describe("Text to write to stdin for 'write' action."),
-    description: z
-      .string()
-      .optional()
-      .describe("Description for the 'start' action."),
-    timeout: z
+    input: z.string().optional().describe("Text to write to stdin for 'write' action."),
+    lines: z
       .number()
       .int()
       .positive()
       .optional()
-      .describe("Timeout in seconds for the 'start' action."),
+      .describe("Number of trailing output lines to return for 'poll' (default 100)."),
+    description: z.string().optional().describe("Unused. Present only so 'start' can report a useful error."),
+    timeout: z.number().int().positive().optional().describe("Unused. Present only so 'start' can report a useful error."),
   })
   .strict();
 
@@ -52,96 +53,129 @@ export interface JobResult {
   action: string;
   jobId?: string;
   status?: string;
+  exitCode?: number | null;
+  logPath?: string;
   output?: string;
-  jobs?: Array<{ jobId: string; command: string; status: string; pid?: number }>;
+  jobs?: Array<{ jobId: string; command: string; status: string; exitCode: number | null; pid: number }>;
   error?: string;
+}
+
+const DEFAULT_POLL_LINES = 100;
+
+/**
+ * Job ids are pids rendered as strings. Reject anything else rather than
+ * letting `Number()` coerce it to NaN and silently miss in the process map.
+ */
+function parseJobId(jobId: string): number | undefined {
+  if (!/^\d+$/.test(jobId.trim())) return undefined;
+  const pid = Number(jobId.trim());
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
 }
 
 // ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
 
-/**
- * Execute a job action.
- *
- * This is a thin facade over the existing background process manager.
- * The actual process management is handled by the existing BackgroundProcessManager.
- */
 export async function executeJob(
   args: JobArgs,
-  options: { workspaceRoot: string; runId: string; processManager?: any },
+  options: { workspaceRoot: string; runId: string; processManager?: BackgroundProcessManager },
 ): Promise<JobResult> {
+  const manager = options.processManager;
+  if (!manager) {
+    return { action: args.action, error: "No process manager available" };
+  }
+
+  // Every action except `list` and `start` needs to resolve a live process.
+  let pid: number | undefined;
+  if (args.action === "poll" || args.action === "cancel" || args.action === "write") {
+    if (!args.jobId) {
+      return { action: args.action, error: `jobId is required for ${args.action} action` };
+    }
+    pid = parseJobId(args.jobId);
+    if (pid === undefined) {
+      return {
+        action: args.action,
+        jobId: args.jobId,
+        error: `Invalid jobId "${args.jobId}": expected a numeric process id.`,
+      };
+    }
+    if (!manager.has(pid)) {
+      return { action: args.action, jobId: args.jobId, error: `No background process found with PID ${pid}` };
+    }
+  }
+
   switch (args.action) {
     case "list": {
-      if (!options.processManager) {
-        return { action: "list", jobs: [], error: "No process manager available" };
-      }
-      const processes = options.processManager.getBackgroundProcesses?.() ?? [];
       return {
         action: "list",
-        jobs: processes.map((p: any) => ({
-          jobId: p.id ?? p.sessionId ?? "unknown",
-          command: p.command ?? p.cmd ?? "",
-          status: p.status ?? p.state ?? "unknown",
+        jobs: manager.snapshot().map((p) => ({
+          jobId: String(p.pid),
           pid: p.pid,
+          command: p.cmd,
+          status: p.status,
+          exitCode: p.exitCode,
         })),
       };
     }
 
     case "poll": {
-      if (!args.jobId) return { action: "poll", error: "jobId is required for poll action" };
-      if (!options.processManager) {
-        return { action: "poll", jobId: args.jobId, error: "No process manager available" };
-      }
-      const output = options.processManager.readBackgroundOutput?.(args.jobId) ?? "";
-      const status = options.processManager.getProcessStatus?.(args.jobId) ?? "unknown";
+      const entry = manager.get(pid!)!;
       return {
         action: "poll",
-        jobId: args.jobId,
-        status,
-        output: typeof output === "string" ? output.slice(-4000) : JSON.stringify(output).slice(-4000),
+        jobId: String(pid),
+        status: entry.child.exitCode === null ? "running" : "finished",
+        exitCode: entry.child.exitCode,
+        ...(entry.logPath ? { logPath: entry.logPath } : {}),
+        output: manager.recentOutput(pid!, args.lines ?? DEFAULT_POLL_LINES),
       };
     }
 
     case "cancel": {
-      if (!args.jobId) return { action: "cancel", error: "jobId is required for cancel action" };
-      if (!options.processManager) {
-        return { action: "cancel", jobId: args.jobId, error: "No process manager available" };
+      const entry = manager.get(pid!)!;
+      const signal = args.signal ?? "SIGTERM";
+      await manager.killTree(pid!, signal);
+      if (signal === "SIGTERM" || signal === "SIGKILL") {
+        await manager.waitForExit(entry.child, signal === "SIGTERM" ? 1500 : 500);
+        if (entry.child.exitCode !== null || signal === "SIGKILL") {
+          manager.delete(pid!);
+        }
       }
-      const sig = args.signal ?? "SIGTERM";
-      await options.processManager.signalProcess?.(args.jobId, sig);
-      return { action: "cancel", jobId: args.jobId, status: "cancelled" };
-    }
-
-    case "write": {
-      if (!args.jobId) return { action: "write", error: "jobId is required for write action" };
-      if (!args.input) return { action: "write", error: "input is required for write action" };
-      if (!options.processManager) {
-        return { action: "write", jobId: args.jobId, error: "No process manager available" };
-      }
-      await options.processManager.writeToProcess?.(args.jobId, args.input);
-      return { action: "write", jobId: args.jobId, status: "written" };
-    }
-
-    case "start": {
-      if (!args.command) return { action: "start", error: "command is required for start action" };
-      if (!options.processManager) {
-        return { action: "start", error: "No process manager available" };
-      }
-      const jobId = await options.processManager.startBackgroundProcess?.({
-        command: args.command,
-        description: args.description ?? "",
-        cwd: options.workspaceRoot,
-        timeout: args.timeout,
-      });
+      await manager.persistManifest().catch(() => undefined);
       return {
-        action: "start",
-        jobId: typeof jobId === "string" ? jobId : String(jobId ?? "unknown"),
-        status: "running",
+        action: "cancel",
+        jobId: String(pid),
+        status: entry.child.exitCode === null ? "signalled" : "finished",
+        exitCode: entry.child.exitCode,
       };
     }
 
-    default:
-      return { action: args.action, error: `Unknown action: ${args.action}` };
+    case "write": {
+      if (args.input === undefined) {
+        return { action: "write", jobId: String(pid), error: "input is required for write action" };
+      }
+      const entry = manager.get(pid!)!;
+      if (!entry.child.stdin || entry.child.stdin.destroyed) {
+        return {
+          action: "write",
+          jobId: String(pid),
+          error: `Process with PID ${pid} does not have an open stdin.`,
+        };
+      }
+      entry.child.stdin.write(args.input);
+      return { action: "write", jobId: String(pid), status: "written" };
+    }
+
+    case "start": {
+      return {
+        action: "start",
+        error:
+          "job cannot start processes. Use the bash tool with run_in_background: true — it returns a pid, which is the jobId for job's poll/cancel/write actions.",
+      };
+    }
+
+    default: {
+      const exhaustive: never = args.action;
+      return { action: String(exhaustive), error: `Unknown action: ${String(exhaustive)}` };
+    }
   }
 }

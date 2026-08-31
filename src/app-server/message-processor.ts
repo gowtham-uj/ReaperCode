@@ -10,6 +10,7 @@ import type { ThreadEventRecord } from "./event-bus.js";
 import type { ManagedApprovalRequest } from "./managed-thread.js";
 import { ManagedThreadError } from "./managed-thread.js";
 import { AppServerOutgoingRouter } from "./outgoing-router.js";
+import type { JsonRpcId } from "./protocol.js";
 import {
   APP_SERVER_PROTOCOL_VERSION,
   ApprovalResponseResultSchema,
@@ -50,6 +51,16 @@ export class AppServerMessageProcessor {
   private readonly turnOwners = new Map<string, string>();
   private readonly projections = new Map<string, SessionProjection>();
   private readonly projectionCache = new Map<string, Map<number, ProjectedNotification[]>>();
+  /**
+   * Approvals currently shown to a reviewer, keyed by approvalId. Lets the
+   * thread's internal timeout/abort paths tell that reviewer the prompt is
+   * moot — otherwise the banner stays up forever with no way to distinguish
+   * "still waiting" from "expired".
+   */
+  private readonly outstandingApprovals = new Map<
+    string,
+    { connectionId: string; requestId: JsonRpcId; threadId: string; turnId: string }
+  >();
 
   constructor(private readonly options: AppServerMessageProcessorOptions) {}
 
@@ -121,7 +132,17 @@ export class AppServerMessageProcessor {
         owner,
         approvalMethod(request),
         redactSecrets(approvalParams(request)),
+        undefined,
+        (requestId) => {
+          this.outstandingApprovals.set(request.approvalId, {
+            connectionId: owner,
+            requestId,
+            threadId: request.threadId,
+            turnId: request.turnId,
+          });
+        },
       );
+      this.outstandingApprovals.delete(request.approvalId);
       const parsed = pending.response.error
         ? "cancelled"
         : ApprovalResponseResultSchema.parse(pending.response.result).decision;
@@ -138,8 +159,27 @@ export class AppServerMessageProcessor {
       });
       await this.options.manager.resolveApproval(request.threadId, request.approvalId, decision);
     } catch {
+      this.outstandingApprovals.delete(request.approvalId);
       await this.options.manager.resolveApproval(request.threadId, request.approvalId, "cancelled").catch(() => undefined);
     }
+  }
+
+  /**
+   * Tell the reviewer that an approval it is still displaying has been settled
+   * internally — by the thread's own timeout, or by the turn aborting. Called
+   * for every settle path; the ones that came back from the reviewer itself
+   * have already been cleared from `outstandingApprovals` and are ignored here.
+   */
+  handleApprovalSettled(request: ManagedApprovalRequest, decision: ToolApprovalDecision): void {
+    const outstanding = this.outstandingApprovals.get(request.approvalId);
+    if (!outstanding) return;
+    this.outstandingApprovals.delete(request.approvalId);
+    this.sendNotification(outstanding.connectionId, "serverRequest/resolved", {
+      requestId: outstanding.requestId,
+      threadId: outstanding.threadId,
+      turnId: outstanding.turnId,
+      decision,
+    });
   }
 
   private async dispatch(

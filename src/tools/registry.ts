@@ -359,7 +359,7 @@ export const toolRegistry = {
   },
   job: {
     description:
-      "Unified facade over background processes. Actions: start (background command), list (all jobs), poll (read output), cancel (send signal), write (to stdin). Unifies read_background_output + signal_process + write_to_process.",
+      "Unified facade over background processes already started by bash (run_in_background: true). Actions: list (all jobs), poll (read output), cancel (send signal), write (to stdin). jobId is the pid bash returned. Unifies read_background_output + signal_process + write_to_process. Cannot start processes — use bash for that.",
     argsSchema: JobArgsSchema,
   },
   diagnostics: {

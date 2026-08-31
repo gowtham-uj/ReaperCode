@@ -40,6 +40,13 @@ export interface ManagedThreadOptions {
   maxSteeringMessages?: number;
   approvalTimeoutMs?: number;
   onApprovalRequested?: (request: ManagedApprovalRequest) => void | Promise<void>;
+  /**
+   * Fired whenever a pending approval settles, including from the internal
+   * timeout and abort paths that no client ever hears about otherwise.
+   * Without this a reviewer is left showing an approval prompt that the agent
+   * has already stopped waiting on.
+   */
+  onApprovalSettled?: (request: ManagedApprovalRequest, decision: ToolApprovalDecision) => void;
 }
 
 interface ActiveTurn {
@@ -216,6 +223,11 @@ export class ManagedReaperThread implements ToolApprovalRequester {
         if (pending.timer) clearTimeout(pending.timer);
         if (pending.signal && pending.abortListener) {
           pending.signal.removeEventListener("abort", pending.abortListener);
+        }
+        try {
+          this.options.onApprovalSettled?.(managedRequest, decision);
+        } catch {
+          // A misbehaving observer must not stop the agent from proceeding.
         }
         resolve(decision);
       };

@@ -232307,82 +232307,112 @@ async function executeEval(code, language = "javascript", timeoutSec = 10, optio
 init_define_REAPER_BUNDLED_SKILLS();
 init_zod();
 var JobArgsSchema = external_exports.object({
-  action: external_exports.enum(["start", "list", "poll", "cancel", "write"]).describe("Action: start (background command), list (all jobs), poll (read output), cancel (send signal), write (to stdin)."),
-  command: external_exports.string().optional().describe("Shell command for 'start' action."),
-  jobId: external_exports.string().optional().describe("Job ID for poll/cancel/write actions."),
+  action: external_exports.enum(["start", "list", "poll", "cancel", "write"]).describe(
+    "Action: list (all jobs), poll (read output), cancel (send signal), write (to stdin). 'start' is not supported \u2014 use bash with run_in_background instead."
+  ),
+  command: external_exports.string().optional().describe("Unused. Present only so 'start' can report a useful error."),
+  jobId: external_exports.string().optional().describe("Job ID for poll/cancel/write actions. This is the OS pid returned when bash backgrounds a command."),
   signal: external_exports.enum(["SIGINT", "SIGTERM", "SIGKILL"]).optional().describe("Signal for 'cancel' action (default SIGTERM)."),
   input: external_exports.string().optional().describe("Text to write to stdin for 'write' action."),
-  description: external_exports.string().optional().describe("Description for the 'start' action."),
-  timeout: external_exports.number().int().positive().optional().describe("Timeout in seconds for the 'start' action.")
+  lines: external_exports.number().int().positive().optional().describe("Number of trailing output lines to return for 'poll' (default 100)."),
+  description: external_exports.string().optional().describe("Unused. Present only so 'start' can report a useful error."),
+  timeout: external_exports.number().int().positive().optional().describe("Unused. Present only so 'start' can report a useful error.")
 }).strict();
+var DEFAULT_POLL_LINES = 100;
+function parseJobId(jobId) {
+  if (!/^\d+$/.test(jobId.trim())) return void 0;
+  const pid = Number(jobId.trim());
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : void 0;
+}
 async function executeJob(args, options) {
+  const manager = options.processManager;
+  if (!manager) {
+    return { action: args.action, error: "No process manager available" };
+  }
+  let pid;
+  if (args.action === "poll" || args.action === "cancel" || args.action === "write") {
+    if (!args.jobId) {
+      return { action: args.action, error: `jobId is required for ${args.action} action` };
+    }
+    pid = parseJobId(args.jobId);
+    if (pid === void 0) {
+      return {
+        action: args.action,
+        jobId: args.jobId,
+        error: `Invalid jobId "${args.jobId}": expected a numeric process id.`
+      };
+    }
+    if (!manager.has(pid)) {
+      return { action: args.action, jobId: args.jobId, error: `No background process found with PID ${pid}` };
+    }
+  }
   switch (args.action) {
     case "list": {
-      if (!options.processManager) {
-        return { action: "list", jobs: [], error: "No process manager available" };
-      }
-      const processes = options.processManager.getBackgroundProcesses?.() ?? [];
       return {
         action: "list",
-        jobs: processes.map((p) => ({
-          jobId: p.id ?? p.sessionId ?? "unknown",
-          command: p.command ?? p.cmd ?? "",
-          status: p.status ?? p.state ?? "unknown",
-          pid: p.pid
+        jobs: manager.snapshot().map((p) => ({
+          jobId: String(p.pid),
+          pid: p.pid,
+          command: p.cmd,
+          status: p.status,
+          exitCode: p.exitCode
         }))
       };
     }
     case "poll": {
-      if (!args.jobId) return { action: "poll", error: "jobId is required for poll action" };
-      if (!options.processManager) {
-        return { action: "poll", jobId: args.jobId, error: "No process manager available" };
-      }
-      const output = options.processManager.readBackgroundOutput?.(args.jobId) ?? "";
-      const status = options.processManager.getProcessStatus?.(args.jobId) ?? "unknown";
+      const entry = manager.get(pid);
       return {
         action: "poll",
-        jobId: args.jobId,
-        status,
-        output: typeof output === "string" ? output.slice(-4e3) : JSON.stringify(output).slice(-4e3)
+        jobId: String(pid),
+        status: entry.child.exitCode === null ? "running" : "finished",
+        exitCode: entry.child.exitCode,
+        ...entry.logPath ? { logPath: entry.logPath } : {},
+        output: manager.recentOutput(pid, args.lines ?? DEFAULT_POLL_LINES)
       };
     }
     case "cancel": {
-      if (!args.jobId) return { action: "cancel", error: "jobId is required for cancel action" };
-      if (!options.processManager) {
-        return { action: "cancel", jobId: args.jobId, error: "No process manager available" };
+      const entry = manager.get(pid);
+      const signal = args.signal ?? "SIGTERM";
+      await manager.killTree(pid, signal);
+      if (signal === "SIGTERM" || signal === "SIGKILL") {
+        await manager.waitForExit(entry.child, signal === "SIGTERM" ? 1500 : 500);
+        if (entry.child.exitCode !== null || signal === "SIGKILL") {
+          manager.delete(pid);
+        }
       }
-      const sig = args.signal ?? "SIGTERM";
-      await options.processManager.signalProcess?.(args.jobId, sig);
-      return { action: "cancel", jobId: args.jobId, status: "cancelled" };
-    }
-    case "write": {
-      if (!args.jobId) return { action: "write", error: "jobId is required for write action" };
-      if (!args.input) return { action: "write", error: "input is required for write action" };
-      if (!options.processManager) {
-        return { action: "write", jobId: args.jobId, error: "No process manager available" };
-      }
-      await options.processManager.writeToProcess?.(args.jobId, args.input);
-      return { action: "write", jobId: args.jobId, status: "written" };
-    }
-    case "start": {
-      if (!args.command) return { action: "start", error: "command is required for start action" };
-      if (!options.processManager) {
-        return { action: "start", error: "No process manager available" };
-      }
-      const jobId = await options.processManager.startBackgroundProcess?.({
-        command: args.command,
-        description: args.description ?? "",
-        cwd: options.workspaceRoot,
-        timeout: args.timeout
-      });
+      await manager.persistManifest().catch(() => void 0);
       return {
-        action: "start",
-        jobId: typeof jobId === "string" ? jobId : String(jobId ?? "unknown"),
-        status: "running"
+        action: "cancel",
+        jobId: String(pid),
+        status: entry.child.exitCode === null ? "signalled" : "finished",
+        exitCode: entry.child.exitCode
       };
     }
-    default:
-      return { action: args.action, error: `Unknown action: ${args.action}` };
+    case "write": {
+      if (args.input === void 0) {
+        return { action: "write", jobId: String(pid), error: "input is required for write action" };
+      }
+      const entry = manager.get(pid);
+      if (!entry.child.stdin || entry.child.stdin.destroyed) {
+        return {
+          action: "write",
+          jobId: String(pid),
+          error: `Process with PID ${pid} does not have an open stdin.`
+        };
+      }
+      entry.child.stdin.write(args.input);
+      return { action: "write", jobId: String(pid), status: "written" };
+    }
+    case "start": {
+      return {
+        action: "start",
+        error: "job cannot start processes. Use the bash tool with run_in_background: true \u2014 it returns a pid, which is the jobId for job's poll/cancel/write actions."
+      };
+    }
+    default: {
+      const exhaustive = args.action;
+      return { action: String(exhaustive), error: `Unknown action: ${String(exhaustive)}` };
+    }
   }
 }
 
@@ -237899,7 +237929,7 @@ var toolRegistry = {
     argsSchema: EvalArgsSchema
   },
   job: {
-    description: "Unified facade over background processes. Actions: start (background command), list (all jobs), poll (read output), cancel (send signal), write (to stdin). Unifies read_background_output + signal_process + write_to_process.",
+    description: "Unified facade over background processes already started by bash (run_in_background: true). Actions: list (all jobs), poll (read output), cancel (send signal), write (to stdin). jobId is the pid bash returned. Unifies read_background_output + signal_process + write_to_process. Cannot start processes \u2014 use bash for that.",
     argsSchema: JobArgsSchema
   },
   diagnostics: {
@@ -257976,6 +258006,10 @@ var ManagedReaperThread = class {
         if (pending2.signal && pending2.abortListener) {
           pending2.signal.removeEventListener("abort", pending2.abortListener);
         }
+        try {
+          this.options.onApprovalSettled?.(managedRequest, decision);
+        } catch {
+        }
         resolve3(decision);
       };
       const abortListener = () => settle("cancelled");
@@ -258306,8 +258340,17 @@ var appServerCapabilities = {
 
 // src/app-server/session-projection.ts
 init_define_REAPER_BUNDLED_SKILLS();
+var MAX_AGGREGATED_OUTPUT_CHARS = 256 * 1024;
+var OUTPUT_TRUNCATION_MARKER = "[... earlier output truncated ...]\n";
+function capOutput(text) {
+  if (text.length <= MAX_AGGREGATED_OUTPUT_CHARS) return text;
+  const tail2 = text.slice(-(MAX_AGGREGATED_OUTPUT_CHARS - OUTPUT_TRUNCATION_MARKER.length));
+  return `${OUTPUT_TRUNCATION_MARKER}${tail2}`;
+}
 var SessionProjection = class {
   turns = /* @__PURE__ */ new Map();
+  cumulativeInputTokens = 0;
+  cumulativeOutputTokens = 0;
   project(record, metadata) {
     const threadId = record.threadId;
     const turnId = record.turnId;
@@ -258406,7 +258449,7 @@ var SessionProjection = class {
         if (!turnId) return [];
         const existing = this.ensureTurn(turnId).items.get(event.toolCallId);
         if (existing?.type === "commandExecution") {
-          existing.aggregatedOutput = `${existing.aggregatedOutput ?? ""}${event.text}`;
+          existing.aggregatedOutput = capOutput(`${existing.aggregatedOutput ?? ""}${event.text}`);
         }
         return [{
           method: "item/commandExecution/outputDelta",
@@ -258449,18 +258492,25 @@ var SessionProjection = class {
         return turnId ? this.turnCompleted(base, turnId, "interrupted") : [];
       case "turn.failed":
         return turnId ? this.turnCompleted(base, turnId, "failed", event.error.message) : [];
-      case "token.usage":
+      case "token.usage": {
+        this.cumulativeInputTokens += event.inputTokens;
+        this.cumulativeOutputTokens += event.outputTokens;
         return [{
           method: "thread/tokenUsage/updated",
           params: {
             ...base,
             tokenUsage: {
-              total: { inputTokens: event.inputTokens, outputTokens: event.outputTokens, totalTokens: event.inputTokens + event.outputTokens },
+              total: {
+                inputTokens: this.cumulativeInputTokens,
+                outputTokens: this.cumulativeOutputTokens,
+                totalTokens: this.cumulativeInputTokens + this.cumulativeOutputTokens
+              },
               last: { inputTokens: event.inputTokens, outputTokens: event.outputTokens, totalTokens: event.inputTokens + event.outputTokens },
               modelContextWindow: null
             }
           }
         }];
+      }
       case "verification.started":
       case "verification.completed":
         return [{ method: "item/verification/updated", params: { ...base, verification: event } }];
@@ -258972,7 +259022,8 @@ var ReaperThreadManager = class {
       ...this.options.maxReplayEvents !== void 0 ? { maxReplayEvents: this.options.maxReplayEvents } : {},
       ...this.options.maxSteeringMessages !== void 0 ? { maxSteeringMessages: this.options.maxSteeringMessages } : {},
       ...this.options.approvalTimeoutMs !== void 0 ? { approvalTimeoutMs: this.options.approvalTimeoutMs } : {},
-      ...this.options.onApprovalRequested ? { onApprovalRequested: this.options.onApprovalRequested } : {}
+      ...this.options.onApprovalRequested ? { onApprovalRequested: this.options.onApprovalRequested } : {},
+      ...this.options.onApprovalSettled ? { onApprovalSettled: this.options.onApprovalSettled } : {}
     });
   }
   assertOpen() {
@@ -259061,6 +259112,13 @@ var AppServerMessageProcessor = class {
   turnOwners = /* @__PURE__ */ new Map();
   projections = /* @__PURE__ */ new Map();
   projectionCache = /* @__PURE__ */ new Map();
+  /**
+   * Approvals currently shown to a reviewer, keyed by approvalId. Lets the
+   * thread's internal timeout/abort paths tell that reviewer the prompt is
+   * moot — otherwise the banner stays up forever with no way to distinguish
+   * "still waiting" from "expired".
+   */
+  outstandingApprovals = /* @__PURE__ */ new Map();
   addConnection(connection) {
     this.states.set(connection.id, { initialized: false, optOutNotificationMethods: /* @__PURE__ */ new Set() });
     this.options.router.addConnection(connection);
@@ -259122,8 +259180,18 @@ var AppServerMessageProcessor = class {
       const pending = await this.options.router.request(
         owner,
         approvalMethod(request),
-        redactSecrets2(approvalParams(request))
+        redactSecrets2(approvalParams(request)),
+        void 0,
+        (requestId2) => {
+          this.outstandingApprovals.set(request.approvalId, {
+            connectionId: owner,
+            requestId: requestId2,
+            threadId: request.threadId,
+            turnId: request.turnId
+          });
+        }
       );
+      this.outstandingApprovals.delete(request.approvalId);
       const parsed = pending.response.error ? "cancelled" : ApprovalResponseResultSchema.parse(pending.response.result).decision;
       const decision = parsed === "accept" || parsed === "acceptForSession" || parsed === "approved" ? "approved" : parsed === "decline" || parsed === "denied" ? "denied" : "cancelled";
       this.sendNotification(owner, "serverRequest/resolved", {
@@ -259134,8 +259202,26 @@ var AppServerMessageProcessor = class {
       });
       await this.options.manager.resolveApproval(request.threadId, request.approvalId, decision);
     } catch {
+      this.outstandingApprovals.delete(request.approvalId);
       await this.options.manager.resolveApproval(request.threadId, request.approvalId, "cancelled").catch(() => void 0);
     }
+  }
+  /**
+   * Tell the reviewer that an approval it is still displaying has been settled
+   * internally — by the thread's own timeout, or by the turn aborting. Called
+   * for every settle path; the ones that came back from the reviewer itself
+   * have already been cleared from `outstandingApprovals` and are ignored here.
+   */
+  handleApprovalSettled(request, decision) {
+    const outstanding = this.outstandingApprovals.get(request.approvalId);
+    if (!outstanding) return;
+    this.outstandingApprovals.delete(request.approvalId);
+    this.sendNotification(outstanding.connectionId, "serverRequest/resolved", {
+      requestId: outstanding.requestId,
+      threadId: outstanding.threadId,
+      turnId: outstanding.turnId,
+      decision
+    });
   }
   async dispatch(connection, state, request) {
     switch (request.method) {
@@ -259473,7 +259559,12 @@ var AppServerOutgoingRouter = class {
   sendNotification(connectionId, method, params) {
     return this.send(connectionId, { jsonrpc: "2.0", method, params });
   }
-  request(connectionId, method, params, timeoutMs = 12e4) {
+  /**
+   * `onSent` fires with the generated request id once the request is on the
+   * wire, so callers can correlate it before the response arrives — needed to
+   * notify the reviewer if the request is settled from elsewhere.
+   */
+  request(connectionId, method, params, timeoutMs = 12e4, onSent) {
     const connection = this.connections.get(connectionId);
     if (!connection) return Promise.reject(new Error("Approval reviewer is not connected"));
     const id = `server-${randomUUID20()}`;
@@ -259493,7 +259584,9 @@ var AppServerOutgoingRouter = class {
         clearTimeout(timer);
         this.pending.delete(id);
         reject(new Error("Could not send server request"));
+        return;
       }
+      onSent?.(id);
     });
   }
   resolveResponse(connectionId, response) {
@@ -259550,6 +259643,9 @@ async function startAppServer(options) {
     ...options.turnRunner ? { turnRunner: options.turnRunner } : {},
     onApprovalRequested: async (request) => {
       await processor?.handleApprovalRequest(request);
+    },
+    onApprovalSettled: (request, decision) => {
+      processor?.handleApprovalSettled(request, decision);
     }
   });
   processor = new AppServerMessageProcessor({

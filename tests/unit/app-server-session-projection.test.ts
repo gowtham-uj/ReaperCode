@@ -145,6 +145,63 @@ test("session projection emits Codex thread, turn, and item notifications", () =
   assert.equal((interrupted[0]?.params.turn as { status: string }).status, "interrupted");
 });
 
+test("aggregated command output is capped so a long build cannot grow it unboundedly", () => {
+  const projection = new SessionProjection();
+  const emit = (event: ThreadEventRecord["event"]) =>
+    projection.project(record({ threadId: "fix-auth", turnId: "turn-1", event }), metadata);
+
+  emit(withTs({ type: "tool.started", toolCall: { id: "bash-1", name: "bash", args: { cmd: "build" } } }));
+
+  // 1MB of output, well past the 256KB cap.
+  const chunk = "x".repeat(64 * 1024);
+  for (let i = 0; i < 16; i++) {
+    emit(withTs({ type: "command.output.delta", toolCallId: "bash-1", stream: "stdout", text: chunk }));
+  }
+  // A final distinctive chunk so we can assert the *tail* is what survives.
+  emit(withTs({ type: "command.output.delta", toolCallId: "bash-1", stream: "stdout", text: "FINAL-LINE" }));
+
+  const completed = emit(withTs({
+    type: "turn.completed",
+    runId: "turn-1",
+    sessionId: "fix-auth",
+    assistantMessage: "done",
+  }));
+  const items = (completed[0]?.params.turn as { items: Array<{ type: string; aggregatedOutput?: string }> }).items;
+  const command = items.find((item) => item.type === "commandExecution");
+  const output = command?.aggregatedOutput ?? "";
+
+  assert.ok(output.length <= 256 * 1024, `expected output to be capped, got ${output.length} chars`);
+  assert.ok(output.endsWith("FINAL-LINE"), "the most recent output must be the part that is kept");
+  assert.match(output, /^\[\.\.\. earlier output truncated \.\.\.\]/);
+});
+
+test("token usage accumulates a real total instead of repeating the per-call numbers", () => {
+  const projection = new SessionProjection();
+  const emit = (inputTokens: number, outputTokens: number) =>
+    projection.project(record({
+      threadId: "fix-auth",
+      turnId: "turn-1",
+      event: withTs({ type: "token.usage", inputTokens, outputTokens }),
+    }), metadata);
+
+  const first = emit(100, 20);
+  const firstUsage = first[0]?.params.tokenUsage as {
+    total: { inputTokens: number; outputTokens: number; totalTokens: number };
+    last: { inputTokens: number; outputTokens: number; totalTokens: number };
+  };
+  assert.deepEqual(firstUsage.total, { inputTokens: 100, outputTokens: 20, totalTokens: 120 });
+  assert.deepEqual(firstUsage.last, { inputTokens: 100, outputTokens: 20, totalTokens: 120 });
+
+  const second = emit(50, 10);
+  const secondUsage = second[0]?.params.tokenUsage as {
+    total: { inputTokens: number; outputTokens: number; totalTokens: number };
+    last: { inputTokens: number; outputTokens: number; totalTokens: number };
+  };
+  // The regression: total used to be the same per-call numbers as last.
+  assert.deepEqual(secondUsage.total, { inputTokens: 150, outputTokens: 30, totalTokens: 180 });
+  assert.deepEqual(secondUsage.last, { inputTokens: 50, outputTokens: 10, totalTokens: 60 });
+});
+
 test("history projection turns named-session messages into Codex turns", () => {
   const turns = projectHistory([
     { role: "user", content: "first" },
