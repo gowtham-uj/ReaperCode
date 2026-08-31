@@ -341,10 +341,43 @@ export function deriveSteps(turn: AppTurn): AppStep[] {
   return steps;
 }
 
-/** Items an inspection-only step is made of — safe to collapse by default. */
+/**
+ * Read-only inspection tools, from `src/tools/registry.ts`. A step made only
+ * of these changed nothing, so it collapses by default — the transcript should
+ * spend its vertical space on edits, commands, and failures.
+ *
+ * Anything absent from this set is treated as consequential and stays visible.
+ * That is the safe direction to be wrong in: a new mutating tool renders
+ * prominently until someone classifies it, rather than hiding silently.
+ */
+const EXPLORATION_TOOLS: ReadonlySet<string> = new Set([
+  "file_view",
+  "file_scroll",
+  "file_find",
+  "view_file",
+  "skim_file",
+  "list_directory",
+  "grep_search",
+  "glob",
+  "git_status",
+  "git_diff",
+  "search_memory",
+  "search_tools",
+  "get_tool_output",
+  "read_background_output",
+  "inspect_environment",
+  "diagnostics",
+]);
+
+/** True when this item only inspected state and changed nothing. */
 export function isExplorationItem(item: AppThreadItem): boolean {
-  if (item.type === "dynamicToolCall") {
-    return ["read_file", "grep", "glob", "list_dir", "ls", "search"].includes(item.tool);
-  }
-  return false;
+  return item.type === "dynamicToolCall" && EXPLORATION_TOOLS.has(item.tool);
+}
+
+/**
+ * A step is collapsible when every item in it is exploration. One edit, one
+ * command, or one agent message is enough to keep the whole step expanded.
+ */
+export function isExplorationStep(step: AppStep): boolean {
+  return step.items.length > 0 && step.items.every(isExplorationItem);
 }

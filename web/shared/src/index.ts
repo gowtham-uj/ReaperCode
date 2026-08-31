@@ -23,6 +23,9 @@ export type {
 } from "./jsonrpc-client.js";
 export { browserTransport, JsonRpcClient, JsonRpcError } from "./jsonrpc-client.js";
 
+export type { ItemSummary } from "./summarize.js";
+export { summarizeExplorationStep, summarizeItem, summarizeToolArgs } from "./summarize.js";
+
 export type { ThreadsState } from "./thread-store.js";
 export {
   applyNotification,
@@ -30,6 +33,7 @@ export {
   emptyThreads,
   hydrateFromTurns,
   isExplorationItem,
+  isExplorationStep,
   mergeThreadMetadata,
   replaceTurns,
   seedThread,

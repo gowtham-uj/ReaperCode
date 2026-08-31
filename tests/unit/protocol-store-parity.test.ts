@@ -8,6 +8,11 @@ import {
   applyNotification,
   deriveSteps,
   emptyThreads,
+  isExplorationItem,
+  isExplorationStep,
+  summarizeExplorationStep,
+  summarizeItem,
+  summarizeToolArgs,
   type ThreadsState,
 } from "../../web/shared/src/index.js";
 
@@ -250,3 +255,94 @@ test("deriveSteps keeps a tool-free turn as a single step", () => {
   });
   assert.equal(steps.length, 1);
 });
+
+test("exploration tool names all exist in the real tool registry", async () => {
+  // The collapse rule keys off tool names. When I first wrote it I invented
+  // names ("read_file", "grep", "ls") that no longer exist — read_file was
+  // removed outright. This test fails if any classified name leaves the
+  // registry, rather than letting the UI silently stop collapsing.
+  const { toolRegistry } = await import("../../src/tools/registry.js");
+  const known = new Set(Object.keys(toolRegistry));
+
+  const classified = [
+    "file_view", "file_scroll", "file_find", "view_file", "skim_file",
+    "list_directory", "grep_search", "glob", "git_status", "git_diff",
+    "search_memory", "search_tools", "get_tool_output",
+    "read_background_output", "inspect_environment", "diagnostics",
+  ];
+  for (const tool of classified) {
+    assert.ok(known.has(tool), `"${tool}" is classified as exploration but is not a registered tool`);
+    assert.ok(isExplorationItem(toolItem(tool)), `"${tool}" should classify as exploration`);
+  }
+});
+
+test("mutating tools are never classified as collapsible exploration", () => {
+  // Wrong in the safe direction: an unclassified tool stays visible.
+  for (const tool of ["bash", "write_file", "file_edit", "delete_file", "apply_patch_edit", "some_new_tool"]) {
+    assert.equal(isExplorationItem(toolItem(tool)), false, `"${tool}" must not collapse`);
+  }
+});
+
+test("a step mixing exploration with an edit stays expanded", () => {
+  const explorationOnly = {
+    id: "s1",
+    items: [toolItem("file_view"), toolItem("grep_search")],
+  };
+  assert.equal(isExplorationStep(explorationOnly), true);
+
+  const mixed = { id: "s2", items: [toolItem("file_view"), toolItem("write_file")] };
+  assert.equal(isExplorationStep(mixed), false, "one write must keep the whole step visible");
+
+  assert.equal(isExplorationStep({ id: "s3", items: [] }), false, "an empty step is not collapsible");
+});
+
+test("item summaries use the CLI's label vocabulary", () => {
+  assert.deepEqual(
+    summarizeItem({ type: "commandExecution", id: "c1", command: "npm test", status: "completed" }),
+    { label: "Ran", detail: "npm test" },
+  );
+  assert.deepEqual(
+    summarizeItem({
+      type: "fileChange",
+      id: "f1",
+      changes: [{ path: "src/auth.ts", kind: "modify" }],
+      status: "completed",
+    }),
+    { label: "Edited", detail: "src/auth.ts" },
+  );
+  assert.deepEqual(
+    summarizeItem({
+      type: "dynamicToolCall",
+      id: "t1",
+      tool: "grep_search",
+      arguments: { pattern: "TODO", path: "src" },
+      status: "completed",
+    }),
+    { label: "grep_search", detail: "TODO in src" },
+  );
+});
+
+test("long commands truncate but stay identifiable", () => {
+  const long = `echo ${"x".repeat(200)}`;
+  const { detail } = summarizeItem({ type: "commandExecution", id: "c1", command: long, status: "completed" });
+  assert.ok(detail.length < 90, "must truncate");
+  assert.ok(detail.startsWith("echo xxx"), "must keep the identifying head of the command");
+  assert.ok(detail.endsWith("…"), "must signal that it was cut");
+});
+
+test("an unrecognized tool still summarizes to something identifiable", () => {
+  assert.equal(
+    summarizeToolArgs("a_tool_invented_next_year", { path: "src/new.ts", verbose: true }),
+    "src/new.ts",
+  );
+  assert.equal(summarizeToolArgs("opaque_tool", { flag: true }), "");
+});
+
+test("exploration step label pluralizes", () => {
+  assert.equal(summarizeExplorationStep(1), "1 exploration action");
+  assert.equal(summarizeExplorationStep(7), "7 exploration actions");
+});
+
+function toolItem(tool: string) {
+  return { type: "dynamicToolCall", id: `call-${tool}`, tool, arguments: {}, status: "completed" } as const;
+}
