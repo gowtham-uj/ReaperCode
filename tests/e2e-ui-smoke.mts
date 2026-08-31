@@ -168,9 +168,10 @@ async function main(): Promise<void> {
   const uiUrl = `http://127.0.0.1:${uiPort}/`;
   process.stdout.write(`UI at ${uiUrl}\n\n`);
 
-  // `chromium.launch()` prefers the headless-shell build; ask for the full
-  // browser so only one download is needed.
-  const browser = await chromium.launch({ channel: "chromium" });
+  // `chromium.launch()` prefers the headless-shell build. Allow an explicit
+  // binary so a full Chrome-for-Testing install works too.
+  const executablePath = process.env.CHROMIUM_PATH;
+  const browser = await chromium.launch(executablePath ? { executablePath } : {});
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
   const consoleErrors: string[] = [];
   page.on("console", (message: ConsoleMessage) => {
@@ -217,6 +218,10 @@ async function main(): Promise<void> {
       "the button switches to 'Queue' while the agent is working",
     );
     check(await composer.isEnabled(), "the composer stays enabled during a turn — typing is not blocked");
+    check(
+      await page.locator("header button", { hasText: "Interrupt" }).count() === 1,
+      "Interrupt is offered while a turn is running",
+    );
     check(
       (await composer.getAttribute("placeholder"))?.includes("after the current step") ?? false,
       "the placeholder explains that a message will be queued",
@@ -278,6 +283,13 @@ async function main(): Promise<void> {
     check(
       await until(async () => (await page.locator(".composer button").innerText()).trim() === "Send", "idle state"),
       "the button returns to 'Send' when the turn ends",
+    );
+    // Interrupt was gated on the thread rather than on a running turn, so it
+    // stayed on screen for the whole session — offering to stop nothing, and
+    // reading as "still working" after the agent had already answered.
+    check(
+      await page.locator("header button", { hasText: "Interrupt" }).count() === 0,
+      "Interrupt disappears once no turn is running",
     );
 
     process.stdout.write("\n6. Approvals\n");
@@ -345,6 +357,13 @@ async function main(): Promise<void> {
     await sleep(400);
     const overflows = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
     check(!overflows, "the layout does not overflow horizontally at 720px");
+    // The workbench is hidden on narrow screens, so the composer must sit
+    // within the viewport rather than being pushed below the fold by it.
+    const composerBox = await page.locator(".composer").boundingBox();
+    check(
+      composerBox !== null && composerBox.y + composerBox.height <= 901,
+      "the composer stays on screen at 720px instead of being pushed below the fold",
+    );
     await shot(page, "07-narrow");
     await page.setViewportSize({ width: 1400, height: 900 });
 

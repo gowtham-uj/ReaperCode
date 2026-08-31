@@ -78,10 +78,13 @@ export const runManagedTurn: ManagedTurnRunner = async (input) => {
 
 function withPermissionMode(config: unknown, permissionMode: PermissionMode): unknown {
   const record = asRecord(config) ?? {};
+  // `permissionMode` lives under `runtimeTunables`, not `runtime`
+  // (model-config.ts:358). `ReaperConfigSchema` is strict, so writing it to the
+  // wrong key made every app-server turn fail validation before it began.
   return {
     ...record,
-    runtime: {
-      ...(asRecord(record.runtime) ?? {}),
+    runtimeTunables: {
+      ...(asRecord(record.runtimeTunables) ?? {}),
       permissionMode,
     },
   };

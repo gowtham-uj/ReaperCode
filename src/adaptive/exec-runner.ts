@@ -284,13 +284,15 @@ export function buildConfig(opts: ExecRunnerOptions): unknown {
         executor: "default_model",
         summarizer: "default_model",
       },
-      runtime: {
-        voteAttempts: 1,
-        // `reaper exec` is the explicit single-prompt, non-interactive
-        // runner — it is intentionally yolo. Every other entrypoint
-        // defaults to accept_edits.
-        permissionMode: "yolo",
-      },
+      runtime: { voteAttempts: 1 },
+      // `permissionMode` belongs to `runtimeTunables`, not `runtime`
+      // (model-config.ts:358). `ReaperConfigSchema` is strict, so putting it
+      // under `runtime` made every config this builds fail to parse.
+      //
+      // `reaper exec` is the explicit single-prompt, non-interactive runner —
+      // it is intentionally yolo. Every other entrypoint defaults to
+      // accept_edits.
+      runtimeTunables: { permissionMode: "yolo" },
     };
   }
   // Inject the auth token into the standard env var name so the
@@ -322,10 +324,8 @@ export function buildConfig(opts: ExecRunnerOptions): unknown {
       executor: "default_model",
       summarizer: "default_model",
     },
-    runtime: {
-      voteAttempts: 1,
-      permissionMode: "yolo",
-    },
+    runtime: { voteAttempts: 1 },
+    runtimeTunables: { permissionMode: "yolo" },
   };
 }
 

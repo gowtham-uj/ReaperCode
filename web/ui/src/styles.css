@@ -118,11 +118,6 @@ button {
   min-height: 0;
 }
 
-@media (max-width: 900px) {
-  .app-body { grid-template-columns: minmax(0, 1fr); }
-  .workbench { display: none; }
-}
-
 .chat-pane {
   display: grid;
   grid-template-rows: 1fr auto;
@@ -137,6 +132,15 @@ button {
   min-height: 0;
   min-width: 0;
   background: var(--depth-1);
+}
+
+/* Narrow: one column, chat only. This must come *after* `.workbench` — equal
+   specificity means source order decides, and placing it earlier let the
+   later `display: grid` win, dropping the workbench below the composer. */
+@media (max-width: 900px) {
+  .app-body { grid-template-columns: minmax(0, 1fr); }
+  .workbench { display: none; }
+  .chat-pane { border-right: none; }
 }
 
 /* ---- Status ---- */
@@ -197,6 +201,12 @@ button {
   border-radius: var(--radius);
   padding: calc(var(--step) * 2.5) calc(var(--step) * 3.5);
   margin-block: calc(var(--step) * 2);
+}
+
+/* Handed over: the border firms up as the message moves from "I can still take
+   this back" toward the transcript. Shape, not colour alone, carries the state. */
+.queued-message[data-sent="true"] {
+  border-style: solid;
 }
 
 .queued-body {

@@ -220589,7 +220589,13 @@ function mapTools(tools) {
     return [{
       name: fn.name,
       ...typeof fn.description === "string" ? { description: fn.description } : {},
-      input_schema: fn.parameters ?? fn.input_schema ?? { type: "object", properties: {} }
+      // `inputSchema` is the shape `buildAgentToolDescriptor` produces, and it
+      // was missing here: every registry-derived tool reached Anthropic
+      // advertising `{properties: {}}`, so the model was told its tools take no
+      // arguments. It then emitted argument-less calls that failed
+      // `ToolCallSchema` with "args.path: Required", and — correctly, given what
+      // it had been shown — denied that its tools accepted a path at all.
+      input_schema: fn.parameters ?? fn.input_schema ?? fn.inputSchema ?? { type: "object", properties: {} }
     }];
   });
 }
@@ -242885,11 +242891,22 @@ function normalizeToolCall(input) {
   let normalizedName = inferredName;
   if (args && typeof args === "object") {
     const record = args;
-    const normalizedPath = typeof record.path === "string" ? record.path : typeof record.filePath === "string" ? record.filePath : typeof raw.toolPath === "string" ? raw.toolPath : typeof raw.path === "string" ? raw.path : typeof raw.filePath === "string" ? raw.filePath : void 0;
+    const normalizedPath = firstString(
+      record.path,
+      record.filePath,
+      record.file_path,
+      record.filename,
+      record.file_name,
+      record.file,
+      raw.toolPath,
+      raw.path,
+      raw.filePath,
+      raw.file_path
+    );
     const normalizedWorkspacePath = normalizeContainerWorkspacePath(normalizedPath);
     const normalizedOld = typeof record.oldString === "string" ? record.oldString : typeof record.old_str === "string" ? record.old_str : typeof record.old_string === "string" ? record.old_string : typeof record.oldContent === "string" ? record.oldContent : typeof raw.old_str === "string" ? raw.old_str : typeof raw.old_string === "string" ? raw.old_string : void 0;
     const normalizedNew = typeof record.newString === "string" ? record.newString : typeof record.new_str === "string" ? record.new_str : typeof record.new_string === "string" ? record.new_string : typeof record.newContent === "string" ? record.newContent : typeof raw.new_str === "string" ? raw.new_str : typeof raw.new_string === "string" ? raw.new_string : void 0;
-    const normalizedCmd = typeof record.cmd === "string" ? record.cmd : void 0;
+    const normalizedCmd = firstString(record.cmd, record.command, record.script, record.shell_command);
     const normalizedStepId = typeof record.stepId === "string" ? record.stepId : typeof record.step_id === "string" ? record.step_id : void 0;
     let name = normalizeToolName(rawName, args);
     normalizedName = name;
@@ -242939,12 +242956,14 @@ function normalizeToolCall(input) {
         };
         break;
       }
-      case "write_file":
+      case "write_file": {
+        const content = firstString(record.content, record.text, record.file_text, record.contents);
         args = {
           ...normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {},
-          ...typeof record.content === "string" ? { content: record.content } : {}
+          ...content !== void 0 ? { content } : {}
         };
         break;
+      }
       case "delete_file":
         args = {
           ...normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}
@@ -242961,15 +242980,16 @@ function normalizeToolCall(input) {
         };
         break;
       }
-      case "file_view":
+      case "file_view": {
+        const startLine = firstNumber(record.start_line, record.startLine);
+        const window = firstNumber(record.window, record.limit, record.numLines, record.num_lines);
         args = {
           ...normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {},
-          ...typeof record.start_line === "number" ? { start_line: record.start_line } : {},
-          ...typeof record.startLine === "number" ? { start_line: record.startLine } : {},
-          ...typeof record.window === "number" ? { window: record.window } : {},
-          ...typeof record.startLine === "number" ? { window: record.startLine } : {}
+          ...startLine !== void 0 ? { start_line: startLine } : {},
+          ...window !== void 0 ? { window } : {}
         };
         break;
+      }
       case "file_scroll":
         args = {
           ...normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {},
@@ -243195,6 +243215,18 @@ function normalizeToolCall(input) {
     name: normalizedName,
     args
   };
+}
+function firstString(...values) {
+  for (const value of values) {
+    if (typeof value === "string") return value;
+  }
+  return void 0;
+}
+function firstNumber(...values) {
+  for (const value of values) {
+    if (typeof value === "number") return value;
+  }
+  return void 0;
 }
 function normalizeContainerWorkspacePath(value) {
   if (!value) return void 0;
@@ -246677,10 +246709,19 @@ async function emitRuntimeEvent(sink, event) {
   }
 }
 var RuntimeTurnControl = class {
-  constructor(maxQueuedMessages = 32) {
+  /**
+   * @param onDrain Called with the messages the engine has just taken, at the
+   *   moment it takes them. Steering is accepted immediately but not *delivered*
+   *   until the next model request, so an observer that reports acceptance as
+   *   delivery tells the user their message is in the conversation while the
+   *   agent has not yet seen it. This hook is the delivery moment.
+   */
+  constructor(maxQueuedMessages = 32, onDrain) {
     this.maxQueuedMessages = maxQueuedMessages;
+    this.onDrain = onDrain;
   }
   maxQueuedMessages;
+  onDrain;
   queue = [];
   accepting = true;
   steer(message) {
@@ -246694,7 +246735,9 @@ var RuntimeTurnControl = class {
     return { accepted: true };
   }
   drain() {
-    return this.queue.splice(0, this.queue.length);
+    const messages = this.take();
+    if (messages.length > 0) this.onDrain?.(messages);
+    return messages;
   }
   /** Drain accepted messages; close the steering window when none remain. */
   drainOrClose() {
@@ -246703,9 +246746,17 @@ var RuntimeTurnControl = class {
     this.accepting = false;
     return { messages: [], closed: true };
   }
+  /**
+   * Close the window, discarding anything still queued. The discarded messages
+   * were accepted but never delivered to a model, so this deliberately does NOT
+   * fire `onDrain` — a delivery callback would claim the model saw them.
+   */
   close() {
     this.accepting = false;
-    return this.drain();
+    return this.take();
+  }
+  take() {
+    return this.queue.splice(0, this.queue.length);
   }
   get isOpen() {
     return this.accepting;
@@ -253962,9 +254013,9 @@ ${latestVerificationBlocker.message}`;
             const detail = droppedRaw.map(
               (d) => `- ${d.name ?? "unknown"} (${d.id ?? "?"}): ${d.error ?? "invalid args"}`
             ).join("\n");
-            const feedback = `Your previous tool_calls were rejected by the runtime schema and were NOT executed:
+            const feedback = `[runtime notice] You emitted the tool_calls below, but they failed runtime schema validation and were NOT executed. They were also stripped from the assistant message you can see above, so your transcript looks as if you made no call \u2014 that is expected, not a fabrication:
 ${detail}
-Fix the arguments (or tool name) and emit valid tool_calls. Do not claim those tools already ran.`;
+Re-emit them with corrected arguments (or a corrected tool name). Do not claim those tools already ran.`;
             liveConversation.push({
               role: "assistant",
               content: turn.content ?? "",
@@ -257308,13 +257359,15 @@ function buildConfig(opts) {
         executor: "default_model",
         summarizer: "default_model"
       },
-      runtime: {
-        voteAttempts: 1,
-        // `reaper exec` is the explicit single-prompt, non-interactive
-        // runner — it is intentionally yolo. Every other entrypoint
-        // defaults to accept_edits.
-        permissionMode: "yolo"
-      }
+      runtime: { voteAttempts: 1 },
+      // `permissionMode` belongs to `runtimeTunables`, not `runtime`
+      // (model-config.ts:358). `ReaperConfigSchema` is strict, so putting it
+      // under `runtime` made every config this builds fail to parse.
+      //
+      // `reaper exec` is the explicit single-prompt, non-interactive runner —
+      // it is intentionally yolo. Every other entrypoint defaults to
+      // accept_edits.
+      runtimeTunables: { permissionMode: "yolo" }
     };
   }
   process.env.ANTHROPIC_API_KEY = authToken;
@@ -257340,10 +257393,8 @@ function buildConfig(opts) {
       executor: "default_model",
       summarizer: "default_model"
     },
-    runtime: {
-      voteAttempts: 1,
-      permissionMode: "yolo"
-    }
+    runtime: { voteAttempts: 1 },
+    runtimeTunables: { permissionMode: "yolo" }
   };
 }
 function buildConfigForProvider(args) {
@@ -257906,7 +257957,17 @@ var ManagedReaperThread = class {
     const turnId = input.turnId ?? `turn-${randomUUID17()}`;
     const startedAt = (/* @__PURE__ */ new Date()).toISOString();
     const abortController = new AbortController();
-    const control = new RuntimeTurnControl(this.options.maxSteeringMessages ?? 32);
+    const control = new RuntimeTurnControl(
+      this.options.maxSteeringMessages ?? 32,
+      (messages) => {
+        for (const message of messages) {
+          this.eventBus.publish(
+            { type: "turn.user.message", threadId: this.threadId, turnId, text: message },
+            turnId
+          );
+        }
+      }
+    );
     let resolveCompletion;
     let rejectCompletion;
     const completion = new Promise((resolve3, reject) => {
@@ -257937,14 +257998,7 @@ var ManagedReaperThread = class {
     if (!this.activeTurn || this.activeTurn.turnId !== turnId) {
       return { accepted: false, reason: "closed" };
     }
-    const result = this.activeTurn.control.steer(message);
-    if (result.accepted) {
-      this.eventBus.publish(
-        { type: "turn.user.message", threadId: this.threadId, turnId, text: message.trim() },
-        turnId
-      );
-    }
-    return result;
+    return this.activeTurn.control.steer(message);
   }
   interrupt(turnId) {
     const active = this.activeTurn;
@@ -258347,6 +258401,9 @@ var appServerCapabilities = {
 
 // src/app-server/session-projection.ts
 init_define_REAPER_BUNDLED_SKILLS();
+function stepItemId(turnId, kind, step) {
+  return step === 0 ? `${turnId}:${kind}` : `${turnId}:${kind}-${step}`;
+}
 var MAX_AGGREGATED_OUTPUT_CHARS = 256 * 1024;
 var OUTPUT_TRUNCATION_MARKER = "[... earlier output truncated ...]\n";
 function capOutput(text) {
@@ -258380,6 +258437,7 @@ var SessionProjection = class {
       case "turn.user.message": {
         if (!turnId) return [];
         const mutable = this.ensureTurn(turnId);
+        this.beginProseStep(mutable);
         const ordinal = [...mutable.items.keys()].filter((id) => id.startsWith(`${turnId}:user-message`)).length;
         const item = {
           type: "userMessage",
@@ -258387,7 +258445,7 @@ var SessionProjection = class {
           content: [{ type: "text", text: event.text }]
         };
         this.putItem(mutable, item);
-        return [this.itemStarted(base, item)];
+        return ordinal === 0 ? [] : [this.itemStarted(base, item)];
       }
       case "turn.interrupt.requested":
         return [{ method: "turn/interruptRequested", params: base }];
@@ -258407,10 +258465,12 @@ var SessionProjection = class {
       case "assistant.message.delta": {
         if (!turnId) return [];
         const mutable = this.ensureTurn(turnId);
-        const itemId = `${turnId}:agent-message`;
+        this.beginProseStep(mutable);
+        const itemId = stepItemId(turnId, "agent-message", mutable.step);
         const existing = mutable.items.get(itemId);
         const item = existing?.type === "agentMessage" ? existing : { type: "agentMessage", id: itemId, text: "", phase: "final_answer" };
         const started = existing ? [] : [this.itemStarted(base, item)];
+        mutable.stepProseOpen = true;
         item.text += event.text;
         this.putItem(mutable, item);
         return [...started, { method: "item/agentMessage/delta", params: { ...base, itemId, delta: event.text } }];
@@ -258418,17 +258478,20 @@ var SessionProjection = class {
       case "assistant.message.completed": {
         if (!turnId) return [];
         const mutable = this.ensureTurn(turnId);
-        const itemId = `${turnId}:agent-message`;
+        this.beginProseStep(mutable);
+        const itemId = stepItemId(turnId, "agent-message", mutable.step);
         const existing = mutable.items.get(itemId);
         const item = existing?.type === "agentMessage" ? existing : { type: "agentMessage", id: itemId, text: "", phase: "final_answer" };
         if (event.text) item.text = event.text;
+        mutable.stepProseOpen = false;
         this.putItem(mutable, item);
         return [this.itemCompleted(base, item)];
       }
       case "assistant.reasoning.delta": {
         if (!turnId) return [];
         const mutable = this.ensureTurn(turnId);
-        const itemId = `${turnId}:reasoning`;
+        this.beginProseStep(mutable);
+        const itemId = stepItemId(turnId, "reasoning", mutable.step);
         const existing = mutable.items.get(itemId);
         const item = existing?.type === "reasoning" ? existing : { type: "reasoning", id: itemId, summary: [], content: [] };
         const started = existing ? [] : [this.itemStarted(base, item)];
@@ -258439,7 +258502,8 @@ var SessionProjection = class {
       case "assistant.reasoning.completed": {
         if (!turnId) return [];
         const mutable = this.ensureTurn(turnId);
-        const itemId = `${turnId}:reasoning`;
+        this.beginProseStep(mutable);
+        const itemId = stepItemId(turnId, "reasoning", mutable.step);
         const existing = mutable.items.get(itemId);
         const item = existing?.type === "reasoning" ? existing : { type: "reasoning", id: itemId, summary: [], content: [] };
         if (event.text) item.content = [event.text];
@@ -258449,6 +258513,7 @@ var SessionProjection = class {
       case "tool.started": {
         if (!turnId) return [];
         const mutable = this.ensureTurn(turnId);
+        mutable.stepHasTool = true;
         const item = toolItem(event.toolCall, "inProgress");
         this.putItem(mutable, item);
         return [this.itemStarted(base, item)];
@@ -258553,7 +258618,12 @@ var SessionProjection = class {
     for (const turn of prepend) {
       this.turns.set(turn.id, {
         turn,
-        items: new Map(turn.items.map((item) => [item.id, item]))
+        items: new Map(turn.items.map((item) => [item.id, item])),
+        // Hydrated turns are finished history; nothing further projects into
+        // them, so the step counter only has to be well-formed.
+        step: 0,
+        stepHasTool: false,
+        stepProseOpen: false
       });
     }
     for (const [id, entry] of liveEntries) this.turns.set(id, entry);
@@ -258564,10 +258634,27 @@ var SessionProjection = class {
   ensureTurn(turnId) {
     let mutable = this.turns.get(turnId);
     if (!mutable) {
-      mutable = { turn: { id: turnId, status: "inProgress", items: [] }, items: /* @__PURE__ */ new Map() };
+      mutable = {
+        turn: { id: turnId, status: "inProgress", items: [] },
+        items: /* @__PURE__ */ new Map(),
+        step: 0,
+        stepHasTool: false,
+        stepProseOpen: false
+      };
       this.turns.set(turnId, mutable);
     }
     return mutable;
+  }
+  /**
+   * Called before any agent prose is projected. If a tool has run since the
+   * last prose, the model has been round-tripped, so this opens the next step
+   * and the prose gets a fresh id that sorts after those tool calls.
+   */
+  beginProseStep(mutable) {
+    if (!mutable.stepHasTool) return;
+    if (mutable.stepProseOpen) return;
+    mutable.step += 1;
+    mutable.stepHasTool = false;
   }
   putItem(mutable, item) {
     mutable.items.set(item.id, item);
@@ -258764,8 +258851,8 @@ function withPermissionMode(config, permissionMode) {
   const record = asRecord5(config) ?? {};
   return {
     ...record,
-    runtime: {
-      ...asRecord5(record.runtime) ?? {},
+    runtimeTunables: {
+      ...asRecord5(record.runtimeTunables) ?? {},
       permissionMode
     }
   };

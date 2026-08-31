@@ -1488,9 +1488,15 @@ export class RuntimeEngine {
                   `- ${d.name ?? "unknown"} (${d.id ?? "?"}): ${d.error ?? "invalid args"}`,
               )
               .join("\n");
+            // The rejected calls were stripped from the assistant message above,
+            // so from the model's point of view its own transcript shows no tool
+            // call at all. Saying "your previous tool_calls" without that context
+            // reads as a claim about something it can see it did not do, and the
+            // model pushes back instead of repairing. Name the discrepancy.
             const feedback =
-              `Your previous tool_calls were rejected by the runtime schema and were NOT executed:\n${detail}\n` +
-              `Fix the arguments (or tool name) and emit valid tool_calls. Do not claim those tools already ran.`;
+              `[runtime notice] You emitted the tool_calls below, but they failed runtime schema validation and were NOT executed. ` +
+              `They were also stripped from the assistant message you can see above, so your transcript looks as if you made no call — that is expected, not a fabrication:\n${detail}\n` +
+              `Re-emit them with corrected arguments (or a corrected tool name). Do not claim those tools already ran.`;
             liveConversation.push({
               role: "assistant",
               content: turn.content ?? "",

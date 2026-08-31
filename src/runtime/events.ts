@@ -54,7 +54,17 @@ export class RuntimeTurnControl {
   private readonly queue: string[] = [];
   private accepting = true;
 
-  constructor(private readonly maxQueuedMessages = 32) {}
+  /**
+   * @param onDrain Called with the messages the engine has just taken, at the
+   *   moment it takes them. Steering is accepted immediately but not *delivered*
+   *   until the next model request, so an observer that reports acceptance as
+   *   delivery tells the user their message is in the conversation while the
+   *   agent has not yet seen it. This hook is the delivery moment.
+   */
+  constructor(
+    private readonly maxQueuedMessages = 32,
+    private readonly onDrain?: (messages: string[]) => void,
+  ) {}
 
   steer(message: string): SteeringResult {
     const normalized = message.trim();
@@ -68,7 +78,9 @@ export class RuntimeTurnControl {
   }
 
   drain(): string[] {
-    return this.queue.splice(0, this.queue.length);
+    const messages = this.take();
+    if (messages.length > 0) this.onDrain?.(messages);
+    return messages;
   }
 
   /** Drain accepted messages; close the steering window when none remain. */
@@ -79,9 +91,18 @@ export class RuntimeTurnControl {
     return { messages: [], closed: true };
   }
 
+  /**
+   * Close the window, discarding anything still queued. The discarded messages
+   * were accepted but never delivered to a model, so this deliberately does NOT
+   * fire `onDrain` — a delivery callback would claim the model saw them.
+   */
   close(): string[] {
     this.accepting = false;
-    return this.drain();
+    return this.take();
+  }
+
+  private take(): string[] {
+    return this.queue.splice(0, this.queue.length);
   }
 
   get isOpen(): boolean {

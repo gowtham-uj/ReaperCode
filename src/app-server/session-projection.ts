@@ -44,6 +44,31 @@ export interface ProjectedNotification {
 interface MutableTurn {
   turn: AppTurn;
   items: Map<string, AppThreadItem>;
+  /**
+   * Which model request the turn is currently on. A turn is a sequence of
+   * steps — one model request plus the tools it calls — and each step gets its
+   * own message and reasoning items. Without this, every step reused one id, so
+   * a second step *overwrote* the first's prose and rendered at the first's
+   * position, above the tool calls that actually preceded it.
+   */
+  step: number;
+  /** Whether the current step has run a tool, i.e. whether prose opens a new one. */
+  stepHasTool: boolean;
+  /**
+   * Whether the current step's prose is still streaming. A runner may emit
+   * deltas for one continuous message either side of a tool call — that is one
+   * model response, not two steps. Advancing on the tool alone would split it
+   * into two bubbles with the tool wedged between them.
+   */
+  stepProseOpen: boolean;
+}
+
+/**
+ * Step 0 keeps the unsuffixed id so single-step turns — the overwhelming
+ * majority — project exactly the ids they always have.
+ */
+function stepItemId(turnId: string, kind: string, step: number): string {
+  return step === 0 ? `${turnId}:${kind}` : `${turnId}:${kind}-${step}`;
 }
 
 /**
@@ -91,6 +116,9 @@ export class SessionProjection {
         // A turn can carry more than one user message: the opening prompt plus
         // any message steered in at a model-loop boundary. Ordinal-suffix the id
         // so a queued follow-up appends instead of overwriting the prompt.
+        // A steered message is delivered at a model-loop boundary, so like agent
+        // prose it opens the next step and sorts after the tool calls it follows.
+        this.beginProseStep(mutable);
         const ordinal = [...mutable.items.keys()].filter((id) => id.startsWith(`${turnId}:user-message`)).length;
         const item: AppThreadItem = {
           type: "userMessage",
@@ -98,9 +126,12 @@ export class SessionProjection {
           content: [{ type: "text", text: event.text }],
         };
         this.putItem(mutable, item);
-        // Emitted so live clients render the user's own message as it lands,
-        // rather than only seeing it after a reload replays history.
-        return [this.itemStarted(base, item)];
+        // The opening prompt is ordinal 0, and `turn.started` below already
+        // replays every item buffered before the turn began — notifying it here
+        // too would render it twice. Only a message steered in afterwards needs
+        // its own notification; without one it would sit invisible until the
+        // next reload.
+        return ordinal === 0 ? [] : [this.itemStarted(base, item)];
       }
       case "turn.interrupt.requested":
         return [{ method: "turn/interruptRequested", params: base }];
@@ -120,12 +151,14 @@ export class SessionProjection {
       case "assistant.message.delta": {
         if (!turnId) return [];
         const mutable = this.ensureTurn(turnId);
-        const itemId = `${turnId}:agent-message`;
+        this.beginProseStep(mutable);
+        const itemId = stepItemId(turnId, "agent-message", mutable.step);
         const existing = mutable.items.get(itemId);
         const item: Extract<AppThreadItem, { type: "agentMessage" }> = existing?.type === "agentMessage"
           ? existing
           : { type: "agentMessage", id: itemId, text: "", phase: "final_answer" };
         const started = existing ? [] : [this.itemStarted(base, item)];
+        mutable.stepProseOpen = true;
         item.text += event.text;
         this.putItem(mutable, item);
         return [...started, { method: "item/agentMessage/delta", params: { ...base, itemId, delta: event.text } }];
@@ -133,19 +166,23 @@ export class SessionProjection {
       case "assistant.message.completed": {
         if (!turnId) return [];
         const mutable = this.ensureTurn(turnId);
-        const itemId = `${turnId}:agent-message`;
+        this.beginProseStep(mutable);
+        const itemId = stepItemId(turnId, "agent-message", mutable.step);
         const existing = mutable.items.get(itemId);
         const item: Extract<AppThreadItem, { type: "agentMessage" }> = existing?.type === "agentMessage"
           ? existing
           : { type: "agentMessage", id: itemId, text: "", phase: "final_answer" };
         if (event.text) item.text = event.text;
+        // The message is closed, so the next tool call genuinely ends this step.
+        mutable.stepProseOpen = false;
         this.putItem(mutable, item);
         return [this.itemCompleted(base, item)];
       }
       case "assistant.reasoning.delta": {
         if (!turnId) return [];
         const mutable = this.ensureTurn(turnId);
-        const itemId = `${turnId}:reasoning`;
+        this.beginProseStep(mutable);
+        const itemId = stepItemId(turnId, "reasoning", mutable.step);
         const existing = mutable.items.get(itemId);
         const item: Extract<AppThreadItem, { type: "reasoning" }> = existing?.type === "reasoning"
           ? existing
@@ -158,7 +195,8 @@ export class SessionProjection {
       case "assistant.reasoning.completed": {
         if (!turnId) return [];
         const mutable = this.ensureTurn(turnId);
-        const itemId = `${turnId}:reasoning`;
+        this.beginProseStep(mutable);
+        const itemId = stepItemId(turnId, "reasoning", mutable.step);
         const existing = mutable.items.get(itemId);
         const item: Extract<AppThreadItem, { type: "reasoning" }> = existing?.type === "reasoning"
           ? existing
@@ -170,6 +208,10 @@ export class SessionProjection {
       case "tool.started": {
         if (!turnId) return [];
         const mutable = this.ensureTurn(turnId);
+        // A tool call closes the current step: whatever the model says next
+        // came from a new model request and belongs after this call, not
+        // merged into the prose that preceded it.
+        mutable.stepHasTool = true;
         const item = toolItem(event.toolCall, "inProgress");
         this.putItem(mutable, item);
         return [this.itemStarted(base, item)];
@@ -283,6 +325,11 @@ export class SessionProjection {
       this.turns.set(turn.id, {
         turn,
         items: new Map(turn.items.map((item) => [item.id, item])),
+        // Hydrated turns are finished history; nothing further projects into
+        // them, so the step counter only has to be well-formed.
+        step: 0,
+        stepHasTool: false,
+        stepProseOpen: false,
       });
     }
     for (const [id, entry] of liveEntries) this.turns.set(id, entry);
@@ -295,10 +342,31 @@ export class SessionProjection {
   private ensureTurn(turnId: string): MutableTurn {
     let mutable = this.turns.get(turnId);
     if (!mutable) {
-      mutable = { turn: { id: turnId, status: "inProgress", items: [] }, items: new Map() };
+      mutable = {
+        turn: { id: turnId, status: "inProgress", items: [] },
+        items: new Map(),
+        step: 0,
+        stepHasTool: false,
+        stepProseOpen: false,
+      };
       this.turns.set(turnId, mutable);
     }
     return mutable;
+  }
+
+  /**
+   * Called before any agent prose is projected. If a tool has run since the
+   * last prose, the model has been round-tripped, so this opens the next step
+   * and the prose gets a fresh id that sorts after those tool calls.
+   */
+  private beginProseStep(mutable: MutableTurn): void {
+    if (!mutable.stepHasTool) return;
+    // A message still mid-stream keeps its step even across a tool call: the
+    // runner is emitting one model response in pieces, and splitting it would
+    // render one sentence as two bubbles either side of the tool.
+    if (mutable.stepProseOpen) return;
+    mutable.step += 1;
+    mutable.stepHasTool = false;
   }
 
   private putItem(mutable: MutableTurn, item: AppThreadItem): void {

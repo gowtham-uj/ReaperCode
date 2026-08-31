@@ -53,18 +53,23 @@ export function normalizeToolCall(input: unknown): unknown {
     const record = args as Record<string, unknown>;
 
     // Normalize common arg aliases
-    const normalizedPath =
-      typeof record.path === "string"
-        ? record.path
-        : typeof record.filePath === "string"
-          ? record.filePath
-          : typeof raw.toolPath === "string"
-            ? raw.toolPath
-            : typeof raw.path === "string"
-              ? raw.path
-              : typeof raw.filePath === "string"
-                ? raw.filePath
-                : undefined;
+    // Every per-tool branch below rebuilds `args` from scratch, keeping only the
+    // keys it names. So an alias missing from this list is not merely
+    // un-normalized — it is *erased*, and the call is then dropped for a missing
+    // required arg. `file_path` in particular is what several providers emit,
+    // and its absence here is what produced `args.path: Required` drops.
+    const normalizedPath = firstString(
+      record.path,
+      record.filePath,
+      record.file_path,
+      record.filename,
+      record.file_name,
+      record.file,
+      raw.toolPath,
+      raw.path,
+      raw.filePath,
+      raw.file_path,
+    );
     const normalizedWorkspacePath = normalizeContainerWorkspacePath(normalizedPath);
 
     const normalizedOld =
@@ -97,7 +102,7 @@ export function normalizeToolCall(input: unknown): unknown {
                   ? raw.new_string
                   : undefined;
 
-    const normalizedCmd = typeof record.cmd === "string" ? record.cmd : undefined;
+    const normalizedCmd = firstString(record.cmd, record.command, record.script, record.shell_command);
 
     const normalizedStepId =
       typeof record.stepId === "string"
@@ -158,12 +163,14 @@ export function normalizeToolCall(input: unknown): unknown {
         };
         break;
       }
-      case "write_file":
+      case "write_file": {
+        const content = firstString(record.content, record.text, record.file_text, record.contents);
         args = {
           ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
-          ...(typeof record.content === "string" ? { content: record.content } : {}),
+          ...(content !== undefined ? { content } : {}),
         };
         break;
+      }
       case "delete_file":
         args = {
           ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
@@ -190,15 +197,19 @@ export function normalizeToolCall(input: unknown): unknown {
         };
         break;
       }
-      case "file_view":
+      case "file_view": {
+        // `startLine` is the camelCase alias of `start_line` only. It was also
+        // being copied into `window`, so `{startLine: 400}` asked for a
+        // 400-line window — and anything over 500 failed the schema outright.
+        const startLine = firstNumber(record.start_line, record.startLine);
+        const window = firstNumber(record.window, record.limit, record.numLines, record.num_lines);
         args = {
           ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
-          ...(typeof record.start_line === "number" ? { start_line: record.start_line } : {}),
-          ...(typeof record.startLine === "number" ? { start_line: record.startLine } : {}),
-          ...(typeof record.window === "number" ? { window: record.window } : {}),
-          ...(typeof record.startLine === "number" ? { window: record.startLine } : {}),
+          ...(startLine !== undefined ? { start_line: startLine } : {}),
+          ...(window !== undefined ? { window } : {}),
         };
         break;
+      }
       case "file_scroll":
         args = {
           ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
@@ -428,6 +439,21 @@ export function normalizeToolCall(input: unknown): unknown {
     name: normalizedName,
     args,
   };
+}
+
+/** First argument that is a string, so alias lists read as a flat sequence. */
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string") return value;
+  }
+  return undefined;
+}
+
+function firstNumber(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    if (typeof value === "number") return value;
+  }
+  return undefined;
 }
 
 function normalizeContainerWorkspacePath(value: string | undefined): string | undefined {

@@ -99,15 +99,24 @@ export function App(): JSX.Element {
    * semantics users expect: keep typing, and your message lands at the next
    * natural seam instead of interrupting.
    *
-   * An entry stays here only until the server accepts it. Once accepted, the
-   * server echoes it back as a `userMessage` item and the transcript owns it —
-   * this list is never a second copy of the conversation.
+   * An entry stays here until the message actually appears in the transcript,
+   * not merely until the server accepts it. `turn/steer` resolves the instant
+   * the message is enqueued, but the agent does not pick it up until the next
+   * model request — dropping the card at accept-time would leave the message
+   * invisible in between, which reads as "my message vanished".
+   *
+   * `sent` marks an entry the server has taken. It stays on screen but can no
+   * longer be cancelled, because the server already owns it.
    */
-  const [queued, setQueued] = createSignal<Array<{ id: string; text: string }>>([]);
+  const [queued, setQueued] = createSignal<Array<{ id: string; text: string; sent: boolean }>>([]);
   let queueSeq = 0;
 
   const dropQueued = (id: string): void => {
     setQueued((entries) => entries.filter((entry) => entry.id !== id));
+  };
+
+  const markSent = (id: string): void => {
+    setQueued((entries) => entries.map((entry) => entry.id === id ? { ...entry, sent: true } : entry));
   };
 
   /** Hand one queued message to the server, as a steer or as a fresh turn. */
@@ -149,7 +158,7 @@ export function App(): JSX.Element {
     flushing.active = true;
     try {
       for (;;) {
-        const next = queued()[0];
+        const next = queued().find((entry) => !entry.sent);
         if (!next) return;
         let delivered = false;
         try {
@@ -159,7 +168,9 @@ export function App(): JSX.Element {
           return;
         }
         if (!delivered) return;
-        dropQueued(next.id);
+        // Held, not dropped: the transcript reconciler below clears it once the
+        // agent actually picks the message up.
+        markSent(next.id);
       }
     } finally {
       flushing.active = false;
@@ -172,7 +183,29 @@ export function App(): JSX.Element {
     void activeTurn()?.id;
     void activeTurn()?.status;
     void queued().length;
-    if (queued().length > 0) void flush();
+    if (queued().some((entry) => !entry.sent)) void flush();
+  });
+
+  /**
+   * Retire a held card once its text shows up as a `userMessage` in the
+   * transcript — the moment the agent has actually taken the message. Matching
+   * on text means a duplicate send retires one card per transcript item, which
+   * is what the user sees anyway.
+   */
+  createEffect(() => {
+    const held = queued().filter((entry) => entry.sent);
+    if (held.length === 0) return;
+    const pending = new Set<string>();
+    for (const turn of turns()) {
+      for (const item of turn.items) {
+        if (item.type !== "userMessage") continue;
+        for (const part of item.content) {
+          if (part.type === "text") pending.add(part.text.trim());
+        }
+      }
+    }
+    const landed = held.filter((entry) => pending.has(entry.text.trim())).map((entry) => entry.id);
+    if (landed.length > 0) setQueued((entries) => entries.filter((entry) => !landed.includes(entry.id)));
   });
 
   const send = (): void => {
@@ -181,7 +214,7 @@ export function App(): JSX.Element {
     setError(undefined);
     setDraft("");
     queueSeq += 1;
-    setQueued((entries) => [...entries, { id: `q-${queueSeq}`, text }]);
+    setQueued((entries) => [...entries, { id: `q-${queueSeq}`, text, sent: false }]);
     void flush();
   };
 
@@ -203,7 +236,11 @@ export function App(): JSX.Element {
         <span class="status-label">
           {status() === "open" ? "connected" : status() === "connecting" ? "connecting…" : "disconnected"}
         </span>
-        <Show when={threadId()}>
+        {/* Gated on a running turn, not on the thread: a thread exists for the
+            whole session, so gating on it left Interrupt offered permanently —
+            a control that stops nothing, and that reads as "still working"
+            after the agent has finished. */}
+        <Show when={activeTurn()}>
           <span class="status-label" style={{ "margin-left": "auto" }}>
             <button class="btn" onClick={interrupt}>Interrupt</button>
           </span>
@@ -230,18 +267,27 @@ export function App(): JSX.Element {
                 conversation rather than as a separate holding tank. */}
             <For each={queued()}>
               {(entry) => (
-                <div class="queued-message">
+                <div class="queued-message" data-sent={entry.sent ? "true" : undefined}>
                   <div class="queued-body">{entry.text}</div>
                   <div class="queued-meta">
-                    <span>Queued — sends after the current step</span>
-                    <button
-                      class="btn"
-                      data-variant="ghost"
-                      aria-label={`Cancel queued message: ${entry.text}`}
-                      onClick={() => dropQueued(entry.id)}
-                    >
-                      Cancel
-                    </button>
+                    <span>
+                      {entry.sent
+                        ? "Handed to the agent — sends after the current step"
+                        : "Queued — sends after the current step"}
+                    </span>
+                    {/* Cancelling stops being honest once the server has the
+                        message: it would clear the card while the agent still
+                        delivers it. So the button only exists before that. */}
+                    <Show when={!entry.sent}>
+                      <button
+                        class="btn"
+                        data-variant="ghost"
+                        aria-label={`Cancel queued message: ${entry.text}`}
+                        onClick={() => dropQueued(entry.id)}
+                      >
+                        Cancel
+                      </button>
+                    </Show>
                   </div>
                 </div>
               )}

@@ -325,15 +325,23 @@ test("a message typed mid-turn queues and lands at the next model-loop boundary"
     const steer = await tab.call("turn/steer", { threadId, turnId, message: "also do the second thing" });
     assert.equal(steer.result.accepted, true, "a message typed mid-turn must be accepted, not refused");
 
-    // It is echoed back immediately so the transcript shows it as sent, rather
-    // than the user staring at a composer that swallowed their text.
+    // Acceptance is not delivery: while the first step is still blocked, the
+    // message must NOT appear in the transcript yet — otherwise the UI would
+    // claim the agent has it when it is only queued.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const beforeRelease = tab.state[threadId]?.turns.some((t) =>
+      t.items.some((item) => item.type === "userMessage" && item.content[0]?.text === "also do the second thing")) ?? false;
+    assert.equal(beforeRelease, false, "the steered message must not appear in the transcript before it is drained");
+
+    releaseFirstStep();
+
+    // Once the engine drains at the loop boundary, the message lands in the
+    // transcript — the delivery moment the UI waits for.
     await tab.waitFor(
       () => tab.state[threadId]?.turns.some((t) =>
         t.items.some((item) => item.type === "userMessage" && item.content[0]?.text === "also do the second thing")) ?? false,
-      "the steered message to appear in the transcript",
+      "the steered message to appear in the transcript once the engine drains",
     );
-
-    releaseFirstStep();
     await tab.waitFor(() => tab.notifications.some((n) => n.method === "turn/completed"), "turn/completed");
 
     assert.deepEqual(

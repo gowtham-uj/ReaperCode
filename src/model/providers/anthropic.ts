@@ -192,7 +192,13 @@ function mapTools(tools: unknown[]): unknown[] {
     return [{
       name: fn.name,
       ...(typeof fn.description === "string" ? { description: fn.description } : {}),
-      input_schema: fn.parameters ?? fn.input_schema ?? { type: "object", properties: {} },
+      // `inputSchema` is the shape `buildAgentToolDescriptor` produces, and it
+      // was missing here: every registry-derived tool reached Anthropic
+      // advertising `{properties: {}}`, so the model was told its tools take no
+      // arguments. It then emitted argument-less calls that failed
+      // `ToolCallSchema` with "args.path: Required", and — correctly, given what
+      // it had been shown — denied that its tools accepted a path at all.
+      input_schema: fn.parameters ?? fn.input_schema ?? fn.inputSchema ?? { type: "object", properties: {} },
     }];
   });
 }

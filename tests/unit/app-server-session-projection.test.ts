@@ -71,6 +71,11 @@ test("session projection emits Codex thread, turn, and item notifications", () =
   assert.equal(deltas[1]?.params.delta, "hello");
 
   emit(withTs({ type: "assistant.reasoning.delta", text: "checking" }));
+  // The engine completes the assistant message for a model step *before* it
+  // runs that step's tool calls (engine.ts:1410 vs the scheduler at 1713), so
+  // this is the real order. Completing it after the tool would be a second
+  // step, and would correctly project a second agentMessage.
+  emit(withTs({ type: "assistant.message.completed", text: "hello" }));
   emit(withTs({ type: "tool.started", toolCall: { id: "bash-1", name: "bash", args: { cmd: "printf hi" } } }));
   emit(withTs({ type: "command.output.delta", toolCallId: "bash-1", stream: "stdout", text: "hi" }));
   emit(withTs({
@@ -78,7 +83,6 @@ test("session projection emits Codex thread, turn, and item notifications", () =
     toolCall: { id: "bash-1", name: "bash", args: { cmd: "printf hi" } },
     result: { name: "bash", toolCallId: "bash-1", ok: true, durationMs: 1, output: { stdout: "hi", exitCode: 0 } },
   }));
-  emit(withTs({ type: "assistant.message.completed", text: "hello" }));
   const completed = emit(withTs({
     type: "turn.completed",
     runId: "turn-1",
@@ -143,6 +147,39 @@ test("session projection emits Codex thread, turn, and item notifications", () =
   }), metadata);
   assert.equal(interrupted[0]?.method, "turn/completed");
   assert.equal((interrupted[0]?.params.turn as { status: string }).status, "interrupted");
+});
+
+test("a second model step appends its message after the tool calls, instead of overwriting the first", () => {
+  const projection = new SessionProjection();
+  const turnId = "turn-multi";
+  const emit = (event: ThreadEventRecord["event"]) =>
+    projection.project(record({ threadId: "fix-auth", turnId, event }), metadata);
+
+  emit(withTs({ type: "turn.started", runId: turnId, sessionId: "fix-auth" }));
+  emit(withTs({ type: "assistant.message.completed", text: "Reading the auth module" }));
+  emit(withTs({ type: "tool.started", toolCall: { id: "view-1", name: "view_file", args: { path: "auth.ts", startLine: 1, endLine: 40 } } }));
+  emit(withTs({
+    type: "tool.completed",
+    toolCall: { id: "view-1", name: "view_file", args: { path: "auth.ts", startLine: 1, endLine: 40 } },
+    result: { name: "view_file", toolCallId: "view-1", ok: true, durationMs: 1, output: "contents" },
+  }));
+  // Second model request: this is a new step, not a correction of the first.
+  emit(withTs({ type: "assistant.message.completed", text: "Auth uses a refresh token" }));
+  const completed = emit(withTs({
+    type: "turn.completed",
+    runId: turnId,
+    sessionId: "fix-auth",
+    assistantMessage: "Auth uses a refresh token",
+  }));
+
+  const items = (completed[0]?.params.turn as { items: Array<{ type: string; text?: string }> }).items;
+  assert.deepEqual(
+    items.map((item) => item.type),
+    ["agentMessage", "dynamicToolCall", "agentMessage"],
+    "the second step's message must append after the tool call, not replace the first",
+  );
+  assert.equal(items[0]?.text, "Reading the auth module", "the first step's message must survive");
+  assert.equal(items[2]?.text, "Auth uses a refresh token");
 });
 
 test("aggregated command output is capped so a long build cannot grow it unboundedly", () => {

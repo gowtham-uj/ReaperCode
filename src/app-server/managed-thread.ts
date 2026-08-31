@@ -113,7 +113,20 @@ export class ManagedReaperThread implements ToolApprovalRequester {
     const turnId = input.turnId ?? `turn-${randomUUID()}`;
     const startedAt = new Date().toISOString();
     const abortController = new AbortController();
-    const control = new RuntimeTurnControl(this.options.maxSteeringMessages ?? 32);
+    // Publish `turn.user.message` when the engine actually drains a steered
+    // message — the moment the model sees it — rather than when the client
+    // steers. Steering accepted early would otherwise claim delivery early.
+    const control = new RuntimeTurnControl(
+      this.options.maxSteeringMessages ?? 32,
+      (messages) => {
+        for (const message of messages) {
+          this.eventBus.publish(
+            { type: "turn.user.message", threadId: this.threadId, turnId, text: message },
+            turnId,
+          );
+        }
+      },
+    );
     let resolveCompletion!: (summary: ManagedTurnSummary) => void;
     let rejectCompletion!: (error: unknown) => void;
     const completion = new Promise<ManagedTurnSummary>((resolve, reject) => {
@@ -146,14 +159,10 @@ export class ManagedReaperThread implements ToolApprovalRequester {
     if (!this.activeTurn || this.activeTurn.turnId !== turnId) {
       return { accepted: false, reason: "closed" };
     }
-    const result = this.activeTurn.control.steer(message);
-    if (result.accepted) {
-      this.eventBus.publish(
-        { type: "turn.user.message", threadId: this.threadId, turnId, text: message.trim() },
-        turnId,
-      );
-    }
-    return result;
+    // The `turn.user.message` event is published from the control's drain hook,
+    // not here: acceptance only means "queued", and showing the message in the
+    // transcript at that point claims the agent has it when it does not.
+    return this.activeTurn.control.steer(message);
   }
 
   interrupt(turnId?: string): boolean {
