@@ -162,6 +162,40 @@ function extractProfileCapabilities(config: unknown): ProfileModelCapabilities {
   return caps;
 }
 
+/**
+ * The model to use when the caller named a provider but no model.
+ *
+ * Every provider except anthropic used to fall through to
+ * `claude-sonnet-4-6`, so `--provider deepseek` sent Anthropic's model name to
+ * DeepSeek's API, which answered `HTTP 400 — the supported API model names are
+ * deepseek-flash, deepseek-v4-pro, but you passed claude-sonnet-4-6`. The
+ * provider was honoured and the model was not, and the mismatch surfaced as a
+ * provider error rather than as a bad default here.
+ *
+ * A complete union, so adding a provider without a model for it is a type
+ * error rather than a silent fallback to somebody else's model.
+ */
+function defaultModelFor(provider: ExecProvider): string {
+  switch (provider) {
+    case "anthropic": return "claude-sonnet-4-6";
+    case "minimax": return "MiniMax-M3";
+    case "nuralwatt":
+    case "nuralwatt2": return "kimi-k2.7-code";
+    // DeepSeek's current flash model, which is what `exec` wants: a
+    // single-prompt runner has nothing to gain from a reasoning model's
+    // latency. `deepseek-v4-pro` remains selectable with `--model`.
+    case "deepseek": return "deepseek-flash";
+    // No default is asserted for `openai`: the account's available models are
+    // not knowable from here, and `gpt-4o-mini` may not exist on a given key.
+    // Naming it is the caller's job, and the error from the provider says so.
+    case "openai": return process.env.OPENAI_MODEL ?? "gpt-4o-mini";
+    default: {
+      const exhaustive: never = provider;
+      return exhaustive;
+    }
+  }
+}
+
 function pickAuthToken(provider: ExecProvider): string | undefined {
   if (provider === "minimax") {
     return process.env.MINIMAX_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN ?? process.env.ANTHROPIC_API_KEY;
@@ -219,7 +253,7 @@ export function buildConfig(opts: ExecRunnerOptions): unknown {
         : "exec requires ANTHROPIC_AUTH_TOKEN (or ANTHROPIC_API_KEY) in the environment",
     );
   }
-  const model = opts.model ?? process.env.ANTHROPIC_MODEL ?? (provider === "minimax" ? "MiniMax-M3" : (provider === "nuralwatt" || provider === "nuralwatt2") ? "kimi-k2.7-code" : "claude-sonnet-4-6");
+  const model = opts.model ?? process.env.ANTHROPIC_MODEL ?? defaultModelFor(provider);
   const maxTokens = opts.maxTokens ?? 4096;
   if (provider === "openai" || provider === "minimax" || provider === "deepseek" || provider === "nuralwatt" || provider === "nuralwatt2") {
     // OpenAI-compatible: the LiteLLM gateway client reads from

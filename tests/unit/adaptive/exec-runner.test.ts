@@ -99,6 +99,60 @@ test("buildConfig: uses --model override; default falls back to env or claude-so
   );
 });
 
+test("buildConfig: the default model follows the provider, not anthropic's", () => {
+  /*
+   * Every provider except anthropic fell through to `claude-sonnet-4-6`.
+   * `--provider deepseek` therefore sent Anthropic's model name to DeepSeek,
+   * which answered:
+   *
+   *   HTTP 400 — the supported API model names are deepseek-flash,
+   *   deepseek-v4-pro, but you passed claude-sonnet-4-6
+   *
+   * The provider was honoured and the model was not, and the mismatch showed
+   * up as a provider error rather than as a wrong default on this side. Each
+   * case below is one provider, with no `--model`, asserting the pairing.
+   */
+  const cases: Array<[string, Record<string, string>, string]> = [
+    ["deepseek", { DEEPSEEK_API_KEY: "tok" }, "deepseek-flash"],
+    ["minimax", { MINIMAX_API_KEY: "tok" }, "MiniMax-M3"],
+    ["nuralwatt", { NURALWATT_API_KEY: "tok" }, "kimi-k2.7-code"],
+    ["anthropic", { ANTHROPIC_AUTH_TOKEN: "tok" }, "claude-sonnet-4-6"],
+  ];
+  for (const [provider, env, expected] of cases) {
+    withEnv({ ...env, ANTHROPIC_MODEL: undefined, ANTHROPIC_BASE_URL: "https://x" }, () => {
+      const cfg = buildConfig({ workspaceRoot: "/tmp", prompt: "hi", provider: provider as never }) as {
+        models: { default_model: { model: string } };
+      };
+      assert.equal(cfg.models.default_model.model, expected, `--provider ${provider} should default to ${expected}`);
+    });
+  }
+});
+
+test("an unknown --provider is refused by name rather than aliased to anthropic", async () => {
+  /*
+   * `isExecProvider(raw) ? raw : undefined` turned an unrecognised name into
+   * `undefined`, and `buildConfig` defaults `undefined` to anthropic. So
+   * `--provider cerebras` — removed from this build — ran the prompt against
+   * Anthropic, and a typo did the same. What the user saw was a 502 about a
+   * model nobody had asked for, which reads as a provider outage.
+   *
+   * The refusal has to happen before any credential is read, or the message
+   * gets replaced by "requires ANTHROPIC_AUTH_TOKEN" — which is the same
+   * silent-aliasing bug wearing a different error. No token is set here on
+   * purpose.
+   */
+  const cli = new ReaperCLI({ workspaceRoot: "/home/coder", userHome: "/home/coder" });
+  await withEnv({ ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_API_KEY: undefined, DEEPSEEK_API_KEY: undefined }, async () => {
+    for (const name of ["cerebras", "openai-codex", "nope"]) {
+      const r = await cli.run(["exec", "run", "--provider", name, "--prompt", "hi"]);
+      assert.equal(r.exitCode, 2, `--provider ${name} should exit 2, got ${r.exitCode}: ${r.stderr}`);
+      assert.match(r.stderr, new RegExp(`unknown provider "${name}"`));
+      assert.match(r.stderr, /supported: /, "the refusal should list what is accepted");
+      assert.doesNotMatch(r.stderr, /AUTH_TOKEN/, "the refusal must not be about a missing credential");
+    }
+  });
+});
+
 test("buildConfig: routes every role to default_model without removed guard knobs", () => {
   withEnv({ ANTHROPIC_AUTH_TOKEN: "tok", ANTHROPIC_BASE_URL: "https://x" }, () => {
     const cfg = buildConfig({ workspaceRoot: "/tmp", prompt: "hi" }) as {

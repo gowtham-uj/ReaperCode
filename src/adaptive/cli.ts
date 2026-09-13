@@ -650,8 +650,29 @@ export class ReaperCLI {
     const wantStreamEvents = flags["stream-events"] === "true" || flags["stream-events"] === "1";
     if (wantStreamEvents) process.env.REAPER_STREAM_EVENTS = "1";
     const providerRaw = flags["provider"];
+    const EXEC_PROVIDERS = ["openai", "anthropic", "minimax", "deepseek", "nuralwatt", "nuralwatt2"] as const;
     const isExecProvider = (value: string | undefined): value is NonNullable<ExecRunnerOptions["provider"]> =>
-      value === "openai" || value === "anthropic" || value === "minimax" || value === "deepseek" || value === "nuralwatt" || value === "nuralwatt2";
+      value !== undefined && (EXEC_PROVIDERS as readonly string[]).includes(value);
+    /*
+     * A provider name that is not one of these is an error, not a fallback.
+     *
+     * This read `isExecProvider(providerRaw) ? providerRaw : undefined`, and an
+     * unrecognised name then fell through to `buildConfig`'s default, which is
+     * anthropic. So `--provider cerebras` — a provider this build deliberately
+     * removed — ran the prompt against Anthropic instead, and the only sign was
+     * a 502 about a model nobody had asked for. A typo had the same result.
+     *
+     * Naming the value in the refusal is the whole fix: "unknown provider" plus
+     * the list answers the question the user is actually asking, which is which
+     * names this build accepts.
+     */
+    if (providerRaw !== undefined && !isExecProvider(providerRaw)) {
+      return {
+        exitCode: 2,
+        stdout: "",
+        stderr: `unknown provider "${providerRaw}"\n  supported: ${EXEC_PROVIDERS.join(", ")}\n`,
+      };
+    }
     let provider: ExecRunnerOptions["provider"] | undefined = isExecProvider(providerRaw) ? providerRaw : undefined;
     let selectedModel = model;
     if (this.opts.userHome === undefined) {
