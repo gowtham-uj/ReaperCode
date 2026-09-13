@@ -3,12 +3,14 @@ import path from "node:path";
 import { getReaperLogDir, getReaperScratchpadPaths } from "../workspace/scratchpad.js";
 
 /**
- * Resolve the directory that holds one session/run's logs.
- * When `id` is omitted, returns the shared `.reaper/logs` root (legacy/global).
+ * Resolve the directory that holds one session/run's state.
+ * When `id` is omitted, returns the shared `.reaper/sessions` root.
+ * With an id, `getReaperLogDir` also reads the legacy `.reaper/logs/<id>`
+ * location when an existing workspace has not moved yet.
  */
 export function resolveLogRoot(workspaceRoot: string, id?: string): string {
   if (id) return getReaperLogDir(workspaceRoot, id);
-  return getReaperScratchpadPaths(workspaceRoot).logs;
+  return getReaperScratchpadPaths(workspaceRoot).sessions;
 }
 
 export function sessionJsonlPath(workspaceRoot: string, id: string): string {

@@ -1,4 +1,5 @@
 import type { ToolApprovalDecision } from "../tools/approval.js";
+import type { PermissionMode } from "../policy/classifier.js";
 import type { ThreadEventSubscriber, ThreadReplay } from "./event-bus.js";
 import {
   ManagedReaperThread,
@@ -117,9 +118,67 @@ export class ReaperThreadManager {
     return thread.resolveApproval(approvalId, decision);
   }
 
+  async setThreadModel(
+    threadId: string,
+    provider: string,
+    model: string,
+  ): Promise<{ metadata: ThreadMetadata; turnInFlight: boolean }> {
+    const thread = await this.resumeThread(threadId);
+    const outcome = await thread.setModel(provider, model);
+    return { metadata: thread.metadata, turnInFlight: outcome.turnInFlight };
+  }
+
+  async setThreadPermissionMode(
+    threadId: string,
+    permissionMode: PermissionMode,
+  ): Promise<{ metadata: ThreadMetadata; turnInFlight: boolean }> {
+    const thread = await this.resumeThread(threadId);
+    const outcome = await thread.setPermissionMode(permissionMode);
+    return { metadata: thread.metadata, turnInFlight: outcome.turnInFlight };
+  }
+
+  async setThreadReasoningEffort(
+    threadId: string,
+    reasoningEffort: "low" | "medium" | "high",
+  ): Promise<{ metadata: ThreadMetadata; turnInFlight: boolean }> {
+    const thread = await this.resumeThread(threadId);
+    const outcome = await thread.setReasoningEffort(reasoningEffort);
+    return { metadata: thread.metadata, turnInFlight: outcome.turnInFlight };
+  }
+
+  async setThreadSystemPrompt(
+    threadId: string,
+    systemPrompt: string | undefined,
+  ): Promise<{ metadata: ThreadMetadata; turnInFlight: boolean }> {
+    const thread = await this.resumeThread(threadId);
+    const outcome = await thread.setSystemPrompt(systemPrompt);
+    return { metadata: thread.metadata, turnInFlight: outcome.turnInFlight };
+  }
+
+  async setThreadDisabledTools(
+    threadId: string,
+    disabledTools: string[],
+  ): Promise<{ metadata: ThreadMetadata; turnInFlight: boolean }> {
+    const thread = await this.resumeThread(threadId);
+    const outcome = await thread.setDisabledTools(disabledTools);
+    return { metadata: thread.metadata, turnInFlight: outcome.turnInFlight };
+  }
+
   async setThreadName(threadId: string, name: string): Promise<ThreadMetadata> {
     const thread = await this.resumeThread(threadId);
     await thread.setName(name);
+    return thread.metadata;
+  }
+
+  /**
+   * Move an unused thread to a different workspace directory.
+   *
+   * Rejects threads that have run a turn — see `ManagedReaperThread.
+   * setWorkspaceRoot` for why that is a refusal rather than a migration.
+   */
+  async setThreadWorkspace(threadId: string, workspaceRoot: string): Promise<ThreadMetadata> {
+    const thread = await this.resumeThread(threadId);
+    await thread.setWorkspaceRoot(workspaceRoot);
     return thread.metadata;
   }
 

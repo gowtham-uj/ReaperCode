@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
+import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
-import solid from "vite-plugin-solid";
 
 const BFF_TARGET = process.env.REAPER_BFF_URL ?? "http://127.0.0.1:4180";
 
@@ -8,7 +8,7 @@ export default defineConfig({
   // Anchored to this file, not the cwd, so `vite --config web/ui/vite.config.ts`
   // works when run from the repo root.
   root: fileURLToPath(new URL(".", import.meta.url)),
-  plugins: [solid()],
+  plugins: [react()],
   resolve: {
     alias: {
       "@reaper/web-shared": fileURLToPath(new URL("../shared/src/index.ts", import.meta.url)),

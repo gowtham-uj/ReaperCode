@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
+import { mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
 import path from "node:path";
 import { ZodError } from "zod";
 
 import type { JsonRpcRequest, JsonRpcResponse } from "../connection/json-rpc.js";
 import { redactSecrets } from "../logging/redaction.js";
 import type { ToolApprovalDecision } from "../tools/approval.js";
-import type { AppServerConnection } from "./connection.js";
+import type { AppServerClientConnection } from "./connection.js";
 import type { ThreadEventRecord } from "./event-bus.js";
 import type { ManagedApprovalRequest } from "./managed-thread.js";
 import { ManagedThreadError } from "./managed-thread.js";
@@ -18,20 +20,65 @@ import {
   ThreadIdParamsSchema,
   ThreadItemsListParamsSchema,
   ThreadListParamsSchema,
+  ThreadModelSetParamsSchema,
+  ThreadEffortSetParamsSchema,
+  ThreadConfigSetParamsSchema,
+  ToolsListParamsSchema,
   ThreadNameSetParamsSchema,
+  ThreadWorkspaceSetParamsSchema,
   ThreadReadParamsSchema,
   ThreadResumeParamsSchema,
   ThreadStartParamsSchema,
   ThreadTurnsListParamsSchema,
   ThreadUnsubscribeParamsSchema,
+  ProviderCredentialRemoveParamsSchema,
+  ProviderCredentialSetParamsSchema,
+  ProviderListParamsSchema,
+  ProviderModelsListParamsSchema,
+  ProviderCatalogStatusParamsSchema,
+  ProviderCatalogRefreshParamsSchema,
+  ProviderAuthCheckParamsSchema,
+  ProviderAuthMethodsParamsSchema,
+  ProviderAuthApiSetParamsSchema,
+  ProviderAuthOAuthStartParamsSchema,
+  ProviderAuthOAuthCompleteParamsSchema,
+  ProviderAuthOAuthStatusParamsSchema,
+  ProviderRemoveParamsSchema,
+  MemoryContradictionsParamsSchema,
+  MemoryHealthParamsSchema,
+  MemoryListParamsSchema,
+  MemorySearchParamsSchema,
+  PolicyRulesReadParamsSchema,
+  PolicyRulesWriteParamsSchema,
+  SettingsReadParamsSchema,
+  SettingsWriteParamsSchema,
+  ThreadPermissionSetParamsSchema,
   TurnInterruptParamsSchema,
   TurnStartParamsSchema,
   TurnSteerParamsSchema,
+  WorkspaceExtensionsListParamsSchema,
+  WorkspaceSkillsListParamsSchema,
   appServerCapabilities,
   extractTextInput,
   parseAppServerMessage,
 } from "./protocol.js";
-import { projectHistory, projectThread, SessionProjection, type ProjectedNotification } from "./session-projection.js";
+import { readFilePolicy, writeFilePolicy } from "./file-policy.js";
+import { readSettings, writeSettings } from "./settings-surface.js";
+import { listAgentTools } from "./tool-inventory.js";
+import { listWorkspaceExtensions, listWorkspaceSkills } from "./workspace-inventory.js";
+import { ProviderCredentialStore } from "../config/provider-credentials.js";
+import { PersistentMemoryStore } from "../adaptive/persistent-memory-store.js";
+import type { MemoryRecord } from "../adaptive/types.js";
+import { findProviderDescriptor } from "../model/provider/catalog.js";
+import { resolveDefaultSelection } from "../model/provider/default-selection.js";
+import { ProviderIntegrationRegistry } from "../model/provider/integration-registry.js";
+import {
+  isReplayStable,
+  projectHistory,
+  projectThread,
+  SessionProjection,
+  type ProjectedNotification,
+} from "./session-projection.js";
 import { ReaperThreadManager, ThreadManagerError } from "./thread-manager.js";
 
 interface ConnectionState {
@@ -44,6 +91,23 @@ export interface AppServerMessageProcessorOptions {
   manager: ReaperThreadManager;
   router: AppServerOutgoingRouter;
   maxConcurrentTurns: number;
+  /**
+   * Where configured provider API keys live. Injectable so tests get a
+   * temporary home instead of writing to the developer's real `~/.reaper`.
+   */
+  credentials?: ProviderCredentialStore;
+  /** Injectable provider/auth registry. Defaults to the deliberately supported
+   * production integrations plus the user-global credential store. */
+  providers?: ProviderIntegrationRegistry;
+  /** User home for universal Settings. Injectable so tests never touch the real home. */
+  settingsHome?: string;
+  /**
+   * Where memory records are read from. Defaults to
+   * `<workspaceRoot>/.reaper/memory` (+ `~/.reaper/memory` for user/machine
+   * scope). Tests pass a store rooted at a temp dir so a run never reads a
+   * developer's real memory.
+   */
+  memoryStore?: PersistentMemoryStore;
 }
 
 export class AppServerMessageProcessor {
@@ -62,14 +126,45 @@ export class AppServerMessageProcessor {
     { connectionId: string; requestId: JsonRpcId; threadId: string; turnId: string }
   >();
 
+  /**
+   * Lazy so a server that never touches credentials never reads (or creates)
+   * `~/.reaper/providers.json`.
+   */
+  private credentialStore: ProviderCredentialStore | undefined;
+  private providerRegistry: ProviderIntegrationRegistry | undefined;
+
+  /**
+   * Lazy so a server that never opens the memory browser never reads (or
+   * creates) `.reaper/memory/*`. All four `memory/*` RPCs read through this
+   * store — nothing here tails the JSONL files directly.
+   */
+  private memStore: PersistentMemoryStore | undefined;
+
   constructor(private readonly options: AppServerMessageProcessorOptions) {}
 
-  addConnection(connection: AppServerConnection): void {
+  private get credentials(): ProviderCredentialStore {
+    this.credentialStore ??= this.options.credentials ?? new ProviderCredentialStore();
+    return this.credentialStore;
+  }
+
+  private get providers(): ProviderIntegrationRegistry {
+    this.providerRegistry ??= this.options.providers
+      ?? new ProviderIntegrationRegistry(undefined, this.credentials);
+    return this.providerRegistry;
+  }
+
+  private get memory(): PersistentMemoryStore {
+    this.memStore ??= this.options.memoryStore
+      ?? new PersistentMemoryStore({ workspaceRoot: this.options.workspaceRoot });
+    return this.memStore;
+  }
+
+  addConnection(connection: AppServerClientConnection): void {
     this.states.set(connection.id, { initialized: false, optOutNotificationMethods: new Set() });
     this.options.router.addConnection(connection);
   }
 
-  removeConnection(connection: AppServerConnection): void {
+  removeConnection(connection: AppServerClientConnection): void {
     this.states.delete(connection.id);
     this.options.router.removeConnection(connection.id);
     for (const [key, owner] of this.turnOwners) {
@@ -77,7 +172,7 @@ export class AppServerMessageProcessor {
     }
   }
 
-  async process(connection: AppServerConnection, raw: unknown): Promise<void> {
+  async process(connection: AppServerClientConnection, raw: unknown): Promise<void> {
     let message;
     try {
       message = parseAppServerMessage(raw);
@@ -183,7 +278,7 @@ export class AppServerMessageProcessor {
   }
 
   private async dispatch(
-    connection: AppServerConnection,
+    connection: AppServerClientConnection,
     state: ConnectionState,
     request: JsonRpcRequest,
   ): Promise<unknown> {
@@ -206,12 +301,24 @@ export class AppServerMessageProcessor {
       case "thread/start": {
         const params = ThreadStartParamsSchema.parse(request.params ?? {});
         const provider = params.modelProvider ?? params.provider;
+        const userSettings = readSettings(this.options.workspaceRoot, this.options.settingsHome ? { home: this.options.settingsHome } : {});
+        // The id is minted here rather than inside `createMetadata` because a
+        // thread's own workspace directory is named after it, so the name has
+        // to exist before the directory can.
+        const threadId = params.threadId ?? randomUUID();
+        const explicitRoot = params.cwd ?? params.workspaceRoot;
+        const workspaceRoot = explicitRoot
+          ? path.resolve(explicitRoot)
+          : params.newWorkspace
+            ? await createThreadWorkspace(threadId)
+            : path.resolve(this.options.workspaceRoot);
         const thread = await this.options.manager.startThread({
-          ...(params.threadId ? { threadId: params.threadId } : {}),
-          workspaceRoot: path.resolve(params.cwd ?? params.workspaceRoot ?? this.options.workspaceRoot),
+          threadId,
+          workspaceRoot,
           ...(provider ? { provider } : {}),
           ...(params.model ? { model: params.model } : {}),
-          permissionMode: params.approvalPolicy ?? params.permissionMode,
+          ...(params.reasoningEffort ? { reasoningEffort: params.reasoningEffort } : {}),
+          permissionMode: params.approvalPolicy ?? params.permissionMode ?? userSettings.permissionMode,
           ...(params.title ? { title: params.title } : {}),
         });
         let replay;
@@ -220,6 +327,7 @@ export class AppServerMessageProcessor {
           thread: projectThread(thread.metadata, []),
           model: thread.metadata.model ?? null,
           modelProvider: thread.metadata.provider ?? null,
+          reasoningEffort: thread.metadata.reasoningEffort ?? "medium",
           cwd: thread.metadata.workspaceRoot,
           approvalPolicy: thread.metadata.permissionMode,
           ...(replay ? { replay } : {}),
@@ -233,13 +341,16 @@ export class AppServerMessageProcessor {
           replay = await this.subscribeConnection(connection, params.threadId, params.afterSequence);
         }
         const turns = await this.snapshotTurns(params.threadId);
+        const planTodo = await this.snapshotPlanTodo(params.threadId);
         return {
           thread: projectThread(thread.metadata, turns),
           model: thread.metadata.model ?? null,
           modelProvider: thread.metadata.provider ?? null,
+          reasoningEffort: thread.metadata.reasoningEffort ?? "medium",
           cwd: thread.metadata.workspaceRoot,
           approvalPolicy: thread.metadata.permissionMode,
           initialTurnsPage: turns,
+          ...planTodo,
           ...(replay ? { replay } : {}),
         };
       }
@@ -258,7 +369,8 @@ export class AppServerMessageProcessor {
         const params = ThreadReadParamsSchema.parse(request.params);
         const read = await this.options.manager.readThread(params.threadId);
         const turns = params.includeTurns ? await this.snapshotTurns(params.threadId) : undefined;
-        return { thread: projectThread(read.metadata, turns) };
+        const planTodo = await this.snapshotPlanTodo(params.threadId);
+        return { thread: projectThread(read.metadata, turns), ...planTodo };
       }
       case "thread/turns/list": {
         const params = ThreadTurnsListParamsSchema.parse(request.params);
@@ -266,7 +378,8 @@ export class AppServerMessageProcessor {
         if (params.sortDirection === "desc") turns = [...turns].reverse();
         if (params.itemsView === "notLoaded") turns = turns.map((turn) => ({ ...turn, items: [] }));
         const page = paginate(turns, params.cursor, params.limit);
-        return { data: page.data, nextCursor: page.nextCursor, backwardsCursor: null };
+        const planTodo = await this.snapshotPlanTodo(params.threadId);
+        return { data: page.data, nextCursor: page.nextCursor, backwardsCursor: null, ...planTodo };
       }
       case "thread/items/list": {
         const params = ThreadItemsListParamsSchema.parse(request.params);
@@ -286,6 +399,327 @@ export class AppServerMessageProcessor {
           threadName: metadata.title,
         });
         return {};
+      }
+      case "thread/workspace/set": {
+        const params = ThreadWorkspaceSetParamsSchema.parse(request.params);
+        const metadata = await this.options.manager.setThreadWorkspace(
+          params.threadId,
+          params.workspaceRoot,
+        );
+        const thread = projectThread(metadata);
+        /*
+         * No notification: `thread/started` is the only message that carries a
+         * thread's `cwd`, and it is emitted once per thread. A second client
+         * viewing this thread learns about the move when it re-reads the
+         * thread, which is also the only time the new path matters — before a
+         * turn, the cwd is shown but nothing has been written there yet.
+         */
+        return { thread, workspaceRoot: thread.cwd };
+      }
+      case "thread/model/set": {
+        const params = ThreadModelSetParamsSchema.parse(request.params);
+        const outcome = await this.options.manager.setThreadModel(
+          params.threadId,
+          params.provider,
+          params.model,
+        );
+        // Notify as well as reply. The result answers the caller, but the
+        // notification carries a `threadId`, which is what lets a multiplexer
+        // (the BFF) fan it out to every *other* tab on this thread — each of
+        // which is still showing the old model in its picker with no other way
+        // to learn it changed.
+        this.sendNotification(connection.id, "thread/model/updated", {
+          threadId: params.threadId,
+          provider: outcome.metadata.provider ?? null,
+          model: outcome.metadata.model ?? null,
+        });
+        return {
+          thread: projectThread(outcome.metadata),
+          model: outcome.metadata.model ?? null,
+          modelProvider: outcome.metadata.provider ?? null,
+          // Honest about when it bites: a turn already running resolved its
+          // profile before this call and keeps it to the end.
+          appliesTo: outcome.turnInFlight ? "nextTurn" : "nextRequest",
+          turnInFlight: outcome.turnInFlight,
+        };
+      }
+      case "thread/effort/set": {
+        const params = ThreadEffortSetParamsSchema.parse(request.params);
+        const current = await this.options.manager.readThread(params.threadId);
+        const provider = current.metadata.provider;
+        const model = current.metadata.model;
+        if (!provider || !model || !supportsReasoningEffort(provider, model)) {
+          throw rpcFailure(-32602, "The selected model does not expose a reasoning-effort control");
+        }
+        const outcome = await this.options.manager.setThreadReasoningEffort(
+          params.threadId,
+          params.reasoningEffort,
+        );
+        this.sendNotification(connection.id, "thread/effort/updated", {
+          threadId: params.threadId,
+          reasoningEffort: outcome.metadata.reasoningEffort ?? "medium",
+        });
+        return {
+          thread: projectThread(outcome.metadata),
+          reasoningEffort: outcome.metadata.reasoningEffort ?? "medium",
+          appliesTo: outcome.turnInFlight ? "nextTurn" : "nextRequest",
+          turnInFlight: outcome.turnInFlight,
+        };
+      }
+      case "thread/config/set": {
+        const params = ThreadConfigSetParamsSchema.parse(request.params);
+        /*
+         * `null` clears, omission leaves alone. The schema cannot express that
+         * on its own — `systemPrompt?: string | null` gives three states where
+         * the manager takes two — so the translation happens here, and the
+         * manager's `undefined` means "drop the key".
+         */
+        let promptInFlight = false;
+        if (params.systemPrompt !== undefined) {
+          const outcome = await this.options.manager.setThreadSystemPrompt(
+            params.threadId,
+            params.systemPrompt === null ? undefined : params.systemPrompt,
+          );
+          promptInFlight = outcome.turnInFlight;
+        }
+        let toolsInFlight = false;
+        if (params.disabledTools !== undefined) {
+          const outcome = await this.options.manager.setThreadDisabledTools(
+            params.threadId,
+            params.disabledTools,
+          );
+          toolsInFlight = outcome.turnInFlight;
+        }
+        const read = await this.options.manager.readThread(params.threadId);
+        const thread = projectThread(read.metadata);
+        /*
+         * Both fields are clearable, so a payload that simply omitted one
+         * could not be told apart from "this call did not touch it". The
+         * notification therefore states both, using `null` and `[]` as the
+         * cleared forms — which is also what `thread/model/updated` does with
+         * `provider: null` for an unset model.
+         */
+        this.sendNotification(connection.id, "thread/config/updated", {
+          threadId: params.threadId,
+          systemPrompt: thread.systemPrompt ?? null,
+          disabledTools: thread.disabledTools ?? [],
+        });
+        return {
+          thread,
+          systemPrompt: thread.systemPrompt ?? null,
+          disabledTools: thread.disabledTools ?? [],
+          appliesTo: promptInFlight || toolsInFlight ? "nextTurn" : "nextRequest",
+          turnInFlight: promptInFlight || toolsInFlight,
+        };
+      }
+      case "thread/permission/set": {
+        const params = ThreadPermissionSetParamsSchema.parse(request.params);
+        const outcome = await this.options.manager.setThreadPermissionMode(params.threadId, params.permissionMode);
+        this.sendNotification(connection.id, "thread/permission/updated", {
+          threadId: params.threadId,
+          permissionMode: outcome.metadata.permissionMode,
+        });
+        return {
+          thread: projectThread(outcome.metadata),
+          permissionMode: outcome.metadata.permissionMode,
+          appliesTo: outcome.turnInFlight ? "nextTurn" : "nextRequest",
+          turnInFlight: outcome.turnInFlight,
+        };
+      }
+      case "tools/list": {
+        ToolsListParamsSchema.parse(request.params ?? {});
+        return { data: listAgentTools() };
+      }
+      case "workspace/skills/list": {
+        const params = WorkspaceSkillsListParamsSchema.parse(request.params ?? {});
+        const result = listWorkspaceSkills(this.options.workspaceRoot);
+        const data = params.filter
+          ? result.data.filter((entry) =>
+              entry.name.includes(params.filter!) || entry.description.toLowerCase().includes(params.filter!.toLowerCase()))
+          : result.data;
+        return { data, errors: result.errors };
+      }
+      case "workspace/extensions/list": {
+        const params = WorkspaceExtensionsListParamsSchema.parse(request.params ?? {});
+        const result = listWorkspaceExtensions(this.options.workspaceRoot);
+        const data = params.filter
+          ? result.data.filter((entry) =>
+              entry.id.includes(params.filter!) || entry.description.toLowerCase().includes(params.filter!.toLowerCase()))
+          : result.data;
+        return { data, errors: result.errors };
+      }
+      case "settings/read": {
+        SettingsReadParamsSchema.parse(request.params ?? {});
+        return readSettings(this.options.workspaceRoot, this.options.settingsHome ? { home: this.options.settingsHome } : {});
+      }
+      case "settings/write": {
+        const params = SettingsWriteParamsSchema.parse(request.params);
+        const result = writeSettings(
+          this.options.workspaceRoot,
+          params,
+          this.options.settingsHome ? { home: this.options.settingsHome } : {},
+        );
+        // Permission is a user-wide setting in the browser. Keep every existing
+        // thread in sync so switching conversations cannot silently restore an
+        // older per-thread mode; new threads read this same default above.
+        if (params.permissionMode !== undefined) {
+          const threads = await this.options.manager.listThreads();
+          await Promise.all(threads.map(async (thread) => {
+            const outcome = await this.options.manager.setThreadPermissionMode(
+              thread.threadId,
+              params.permissionMode!,
+            );
+            this.sendNotification(connection.id, "thread/permission/updated", {
+              threadId: thread.threadId,
+              permissionMode: outcome.metadata.permissionMode,
+            });
+          }));
+        }
+        return result;
+      }
+      case "policy/rules/read": {
+        PolicyRulesReadParamsSchema.parse(request.params ?? {});
+        return await readFilePolicy(this.options.workspaceRoot);
+      }
+      case "policy/rules/write": {
+        const params = PolicyRulesWriteParamsSchema.parse(request.params);
+        return await writeFilePolicy(this.options.workspaceRoot, params.rules);
+      }
+      case "provider/list": {
+        ProviderListParamsSchema.parse(request.params ?? {});
+        /*
+         * `defaultSelection` is what a turn will actually run on when neither
+         * the thread nor Settings names a model — the same value the turn path
+         * resolves, computed here so the composer can show it. Without it the
+         * picker read "Choose model" while a turn was quietly running on the
+         * user's configured provider, which is the UI claiming nothing is
+         * selected when something is.
+         *
+         * It is derived from the credential store, so it carries a provider id
+         * and a catalog model id and no part of any credential.
+         */
+        return {
+          providers: this.providers.list(),
+          defaultSelection: resolveDefaultSelection(this.credentials) ?? null,
+        };
+      }
+      case "provider/models/list": {
+        const params = ProviderModelsListParamsSchema.parse(request.params);
+        return this.providers.listModels(params);
+      }
+      case "provider/catalog/status": {
+        ProviderCatalogStatusParamsSchema.parse(request.params ?? {});
+        return this.providers.catalogStatus();
+      }
+      case "provider/catalog/refresh": {
+        const params = ProviderCatalogRefreshParamsSchema.parse(request.params ?? {});
+        return await this.providers.refreshCatalog(params.force);
+      }
+      case "provider/auth/methods": {
+        const params = ProviderAuthMethodsParamsSchema.parse(request.params);
+        return { methods: this.providers.methods(params.providerId) };
+      }
+      case "provider/auth/api/set": {
+        const params = ProviderAuthApiSetParamsSchema.parse(request.params);
+        const provider = await this.providers.connectApi({
+          providerId: params.providerId,
+          methodId: params.methodId,
+          key: params.apiKey,
+          ...(params.baseUrl ? { baseUrl: params.baseUrl } : {}),
+          ...(params.inputs ? { inputs: params.inputs } : {}),
+        });
+        // Verify the key the user just entered rather than reporting success
+        // for anything that merely persisted. The credential is still stored
+        // on a failed check so the user can correct it without re-typing.
+        const health = await this.providers.checkHealth(params.providerId);
+        return { provider, health };
+      }
+      case "provider/auth/check": {
+        const params = ProviderAuthCheckParamsSchema.parse(request.params);
+        return { health: await this.providers.checkHealth(params.providerId) };
+      }
+      case "provider/auth/oauth/start": {
+        const params = ProviderAuthOAuthStartParamsSchema.parse(request.params);
+        const attempt = await this.providers.beginOAuth({
+          providerId: params.providerId,
+          methodId: params.methodId,
+          ...(params.inputs ? { inputs: params.inputs } : {}),
+        });
+        return { attempt };
+      }
+      case "provider/auth/oauth/complete": {
+        const params = ProviderAuthOAuthCompleteParamsSchema.parse(request.params);
+        return await this.providers.completeOAuth({
+          attemptId: params.attemptId,
+          ...(params.code ? { code: params.code } : {}),
+        });
+      }
+      case "provider/auth/oauth/status": {
+        const params = ProviderAuthOAuthStatusParamsSchema.parse(request.params);
+        return await this.providers.oauthStatus(params.attemptId);
+      }
+      case "provider/remove": {
+        const params = ProviderRemoveParamsSchema.parse(request.params);
+        return this.providers.remove(params.providerId);
+      }
+      case "model/catalog": {
+        // Compatibility alias. Models are intentionally loaded through the
+        // bounded provider/models/list method rather than embedded here.
+        return { providers: this.providers.list() };
+      }
+      case "provider/credentials/list": {
+        return { credentials: this.credentials.list() };
+      }
+      case "provider/credentials/set": {
+        const params = ProviderCredentialSetParamsSchema.parse(request.params);
+        const descriptor = findProviderDescriptor(params.providerId);
+        const method = this.providers.methods(params.providerId).find((candidate) => candidate.type === "api");
+        if (!descriptor || !method) {
+          throw rpcFailure(-32602, `Unsupported provider \"${params.providerId}\"`);
+        }
+        const provider = await this.providers.connectApi({
+          providerId: params.providerId,
+          methodId: method.id,
+          key: params.apiKey,
+          ...(params.baseUrl ? { baseUrl: params.baseUrl } : {}),
+        });
+        const credential = this.credentials.list().find((entry) => entry.providerId === params.providerId);
+        return { credential, provider };
+      }
+      case "provider/credentials/remove": {
+        const params = ProviderCredentialRemoveParamsSchema.parse(request.params);
+        const outcome = this.providers.remove(params.providerId);
+        return { removed: outcome.removed, credentials: this.credentials.list() };
+      }
+      case "memory/list": {
+        const params = MemoryListParamsSchema.parse(request.params ?? {});
+        const merged = params.scopes.flatMap((scope) => this.memory.list(scope));
+        merged.sort((a, b) => params.sortDirection === "asc"
+          ? a.updatedAt.localeCompare(b.updatedAt)
+          : b.updatedAt.localeCompare(a.updatedAt));
+        const page = paginate(merged.map(toWireRecord), params.cursor, params.limit);
+        return { data: page.data, nextCursor: page.nextCursor };
+      }
+      case "memory/search": {
+        const params = MemorySearchParamsSchema.parse(request.params);
+        const results = this.memory.search(params.query, params.scopes);
+        const page = paginate(results.map(toWireRecord), params.cursor, params.limit);
+        return { data: page.data, nextCursor: page.nextCursor, query: params.query };
+      }
+      case "memory/health": {
+        MemoryHealthParamsSchema.parse(request.params ?? {});
+        return { ...this.memory.healthCheck(), loadErrors: this.memory.getLoadErrors() };
+      }
+      case "memory/contradictions": {
+        MemoryContradictionsParamsSchema.parse(request.params ?? {});
+        const pairs = this.memory.detectContradictions();
+        return {
+          data: pairs.map((pair) => ({
+            a: toWireRecord(pair.a),
+            b: toWireRecord(pair.b),
+            reason: pair.reason,
+          })),
+        };
       }
       case "thread/unsubscribe": {
         const params = ThreadUnsubscribeParamsSchema.parse(request.params);
@@ -357,8 +791,21 @@ export class AppServerMessageProcessor {
     return projection.snapshotTurns();
   }
 
+  /** Plan + todo checklists, or undefined when the agent has produced none. */
+  private async snapshotPlanTodo(threadId: string): Promise<{ plan?: unknown; todo?: unknown }> {
+    const projection = this.projections.get(threadId);
+    if (!projection) return {};
+    return {
+      ...(projection.snapshotPlan() !== undefined ? { plan: projection.snapshotPlan() } : {}),
+      ...(projection.snapshotTodo() !== undefined ? { todo: projection.snapshotTodo() } : {}),
+      ...(projection.snapshotVerification() !== undefined
+        ? { verification: projection.snapshotVerification() }
+        : {}),
+    };
+  }
+
   private async subscribeConnection(
-    connection: AppServerConnection,
+    connection: AppServerClientConnection,
     threadId: string,
     afterSequence: number,
   ): Promise<{ earliestSequence: number; latestSequence: number; truncated: boolean }> {
@@ -410,11 +857,20 @@ export class AppServerMessageProcessor {
         this.projections.set(record.threadId, projection);
       }
       notifications = projection.project(record, this.options.manager.peekThread(record.threadId)?.metadata);
-      threadCache.set(record.sequence, notifications);
-      while (threadCache.size > 2_000) {
-        const oldest = threadCache.keys().next().value as number | undefined;
-        if (oldest === undefined) break;
-        threadCache.delete(oldest);
+      /*
+       * `thread.started` is the one projection that reads live thread metadata
+       * rather than only the record, so it is the one projection whose value
+       * changes after the event was recorded. Caching it would freeze a replay
+       * at creation-time settings — a thread configured mid-conversation would
+       * come back to a reconnecting client with the configuration stripped.
+       */
+      if (isReplayStable(notifications)) {
+        threadCache.set(record.sequence, notifications);
+        while (threadCache.size > 2_000) {
+          const oldest = threadCache.keys().next().value as number | undefined;
+          if (oldest === undefined) break;
+          threadCache.delete(oldest);
+        }
       }
     }
     for (const notification of notifications) {
@@ -468,18 +924,78 @@ function approvalMethod(request: ManagedApprovalRequest): string {
   if (["write_file", "edit_file", "file_edit", "apply_patch"].includes(request.toolCall.name)) {
     return "item/fileChange/requestApproval";
   }
-  if (request.toolCall.name === "request_human_approval") return "item/tool/requestUserInput";
   return "item/tool/requestApproval";
 }
 
+/**
+ * Create the workspace directory a self-contained thread owns.
+ *
+ * Under the user's home, not the server's workspace: a thread nested inside
+ * the agent's own checkout would appear in that checkout's git status and file
+ * tree, which is exactly the confusion this separation exists to remove.
+ *
+ * The id has already been validated as a thread id (`ThreadIdSchema`, or a
+ * freshly minted UUID), so it cannot contain a separator or `..` — but it is
+ * re-checked here because this is the function that turns it into a path.
+ */
+async function createThreadWorkspace(threadId: string): Promise<string> {
+  if (!/^[a-zA-Z0-9_.-]{1,128}$/.test(threadId) || threadId === "." || threadId === "..") {
+    throw rpcFailure(-32602, `Invalid thread id: ${threadId}`);
+  }
+  const root = path.join(homedir(), ".reaper", "workspaces", threadId);
+  await mkdir(root, { recursive: true, mode: 0o700 });
+
+  /*
+   * The Diff tab reads a repo in *this* thread's directory, and without one
+   * `git` walks up to the nearest ancestor repository — so a workspace placed
+   * under an existing checkout would answer with that repository's diff, the
+   * same "showing files that aren't yours" confusion this separation exists to
+   * remove.
+   *
+   * Deliberately NOT satisfied by running `git init` here, which is what this
+   * used to do. Initializing the directory pre-empts the most normal thing a
+   * user does with an empty thread folder — `git clone <url> .` — because git
+   * refuses to clone into a directory that already holds a repository
+   * ("destination path '.' already exists and is not an empty directory").
+   * The thread then cannot hold a real project no matter what the user asks
+   * for, and the failure looks like the clone's fault rather than ours.
+   *
+   * So the repo is created lazily instead, by `gitDiff`/`gitStatus` at the
+   * moment something asks for a diff — by which point an empty directory that
+   * is still empty is unambiguous evidence that no clone is coming, and a
+   * directory holding a cloned repo is left alone because it already answers
+   * the question. Best-effort throughout: a thread whose workspace has no repo
+   * still works for everything except the Diff tab.
+   */
+  return root;
+}
+
 function turnKey(threadId: string, turnId: string): string {
-  return `${threadId} ${turnId}`;
+  return `${threadId}\u0000${turnId}`;
 }
 
 function extractId(value: unknown): string | number | undefined {
   if (!value || typeof value !== "object") return undefined;
   const id = (value as { id?: unknown }).id;
   return typeof id === "string" || typeof id === "number" ? id : undefined;
+}
+
+/**
+ * Defense in depth on top of the store's own redaction: `remember`/`update`
+ * already scrub `content` for `sensitive: true` records, but `evidence` is not
+ * scrubbed by the store. Strip it here so a sensitive record's evidence excerpt
+ * never leaves the process, without re-deciding what "sensitive" means — that
+ * decision stays entirely in PersistentMemoryStore.
+ */
+function toWireRecord(record: MemoryRecord): MemoryRecord {
+  if (!record.sensitive) return record;
+  return { ...record, evidence: [] };
+}
+
+function supportsReasoningEffort(provider: string, model: string): boolean {
+  if (provider !== "openai" && provider !== "openai-codex") return false;
+  const normalized = model.toLowerCase().replace(/^openai\//, "");
+  return /^o\d/.test(normalized) || /^gpt-(?:5|[6-9])/.test(normalized);
 }
 
 function rpcFailure(code: number, message: string, data?: unknown): Error & { code: number; data?: unknown } {

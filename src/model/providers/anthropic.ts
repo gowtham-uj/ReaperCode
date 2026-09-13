@@ -10,6 +10,7 @@ import type {
 import type { ProviderModelClient } from "../gateway.js";
 import { anthropicAuthHeaderForProvider, resolveThinkingMode } from "../provider-quirks.js";
 import { AnthropicMessagesResponseSchema } from "./response.js";
+import { resolveApiKey } from "../credentials.js";
 
 export interface AnthropicClientOptions {
   fetchImpl?: typeof fetch;
@@ -134,17 +135,12 @@ export class AnthropicClient implements ProviderModelClient {
   }
 
   private buildHeaders(profile: ResolvedModelProfile): Record<string, string> {
-    const apiKeyEnv = profile.apiKeyEnv ?? "ANTHROPIC_API_KEY";
-    const apiKey = process.env[apiKeyEnv];
-    if (!apiKey) {
-      throw new Error(`Environment variable '${apiKeyEnv}' is required for Anthropic provider`);
-    }
-
+    const apiKey = resolveApiKey(profile, "ANTHROPIC_API_KEY");
     const authHeader = anthropicAuthHeaderForProvider(profile);
 
     return {
       "content-type": "application/json",
-      [authHeader]: apiKey.trim(),
+      [authHeader]: apiKey,
       "anthropic-version": process.env.ANTHROPIC_VERSION ?? "2023-06-01",
     };
   }

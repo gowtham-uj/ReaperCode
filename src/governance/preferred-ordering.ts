@@ -2,9 +2,8 @@
  * Preferred tool ordering rules.
  *
  * The model sometimes issues tool calls in a poor order: editing a
- * file it never read, taking a screenshot before knowing the screen
- * size, calling computer_control when a browser_control would do,
- * etc. The engine doesn't *block* these (the order can be valid
+ * file it never read, or reaching for a shell when a dedicated tool
+ * exists. The engine doesn't *block* these (the order can be valid
  * for some tasks), but it can surface *advisories* that the model
  * can use to self-correct.
  *
@@ -16,8 +15,8 @@
  * trajectory.
  *
  * The rules in this file are sequenced as: discover → read → plan
- * → write → run → verify → complete. Cross-tool preferences
- * (browser over computer) are encoded explicitly.
+ * → write → run → verify → complete, with metadata-driven
+ * preferences layered on top.
  */
 
 import type { ToolMetadata } from "./tool-metadata.js";
@@ -73,7 +72,7 @@ const RULES: Record<string, Predicate[]> = {
       if (history.length === 0) {
         return { severity: "info", ruleId: "ordering.write_first_no_history", message: "Writing a file before any read; consider inspecting the target path first." };
       }
-      const lastRead = findLast(history, (t) => t === "file_view" || t === "file_scroll" || t === "view_file" || t === "grep_search" || t === "skim_file" || t === "list_directory" || t === "inspect_environment");
+      const lastRead = findLast(history, (t) => t === "file_view" || t === "grep_search" || t === "skim_file" || t === "list_directory" || t === "inspect_environment");
       if (lastRead === null) {
         return { severity: "warn", ruleId: "ordering.write_without_read", message: "write_file called without any prior read/list/grep in this run. Verify the target path before overwriting." };
       }
@@ -83,7 +82,7 @@ const RULES: Record<string, Predicate[]> = {
 
   edit_file: [
     (history) => {
-      const lastRead = findLast(history, (t) => t === "file_view" || t === "file_scroll" || t === "view_file" || t === "grep_search" || t === "skim_file");
+      const lastRead = findLast(history, (t) => t === "file_view" || t === "grep_search" || t === "skim_file");
       if (lastRead === null) {
         return { severity: "warn", ruleId: "ordering.edit_without_read", message: "edit_file called without a prior read of the target file. Read the file first to confirm context." };
       }
@@ -95,7 +94,7 @@ const RULES: Record<string, Predicate[]> = {
 
   delete_file: [
     (history) => {
-      const lastRead = findLast(history, (t) => t === "file_view" || t === "file_scroll" || t === "view_file" || t === "list_directory");
+      const lastRead = findLast(history, (t) => t === "file_view" || t === "list_directory");
       if (lastRead === null) {
         return { severity: "warn", ruleId: "ordering.delete_without_read", message: "delete_file called without a prior read or listing." };
       }
@@ -106,7 +105,7 @@ const RULES: Record<string, Predicate[]> = {
   // ---- Shell: warn if a shell command is issued before inspecting the environment ----
   bash: [
     (history) => {
-      const lastInspect = findLast(history, (t) => t === "inspect_environment" || t === "list_directory" || t === "file_view" || t === "view_file");
+      const lastInspect = findLast(history, (t) => t === "inspect_environment" || t === "list_directory" || t === "file_view");
       if (lastInspect === null && history.length > 0) {
         return { severity: "info", ruleId: "ordering.shell_no_inspect", message: "Running a shell command without a prior inspect_environment / list_directory. Consider inspecting first." };
       }
@@ -116,56 +115,6 @@ const RULES: Record<string, Predicate[]> = {
 
   // ---- Test runners: prefer running after a write ----
   // (Handled per-tool: classifyCommandRisk already covers 'test runner' as medium.)
-
-  // ---- Browser / computer preference ----
-  browser_control: [
-    (history) => {
-      const lastComputer = findLast(history, (t) => t === "computer_control" || t === "mouse_move" || t === "mouse_click" || t === "keyboard_type" || t === "keyboard_press");
-      if (lastComputer !== null) {
-        return { severity: "warn", ruleId: "ordering.computer_preferred_over_browser", message: "browser_control is being called after computer_control. Prefer browser_control (DOM-level) for web tasks; use computer_control only when DOM refs are unavailable." };
-      }
-      return null;
-    },
-  ],
-
-  computer_control: [
-    (history) => {
-      const lastBrowser = findLast(history, (t) => t === "browser_control");
-      if (lastBrowser === null) {
-        return { severity: "info", ruleId: "ordering.browser_preferred_over_computer", message: "computer_control targets the host desktop. Prefer browser_control when the task is web-based — it has DOM refs and is more reliable." };
-      }
-      return null;
-    },
-  ],
-
-  // ---- Screenshots: prefer before mouse actions ----
-  mouse_move: [
-    (history) => {
-      const lastScreen = findLast(history, (t) => t === "screenshot" || t === "get_screen_size");
-      if (lastScreen === null) {
-        return { severity: "info", ruleId: "ordering.mouse_no_screenshot", message: "mouse_move without a recent screenshot or get_screen_size. Capture the screen first to confirm coordinates." };
-      }
-      return null;
-    },
-  ],
-  mouse_click: [
-    (history) => {
-      const lastScreen = findLast(history, (t) => t === "screenshot" || t === "get_screen_size");
-      if (lastScreen === null) {
-        return { severity: "info", ruleId: "ordering.click_no_screenshot", message: "mouse_click without a recent screenshot or get_screen_size. Capture the screen first." };
-      }
-      return null;
-    },
-  ],
-  keyboard_type: [
-    (history) => {
-      const lastScreen = findLast(history, (t) => t === "screenshot");
-      if (lastScreen === null) {
-        return { severity: "info", ruleId: "ordering.type_no_screenshot", message: "keyboard_type without a recent screenshot. Confirm focus first." };
-      }
-      return null;
-    },
-  ],
 
 };
 

@@ -82,6 +82,16 @@ export interface ConfiguredModelGatewayOptions {
    * success or failure metadata.
    */
   lifecycleBus?: ExtensionLifecycleEventBus;
+  /**
+   * Supplies the API key for a provider from configured credentials instead of
+   * the environment. Called once per profile resolution — including for
+   * fallback profiles, which may belong to a different provider than the
+   * primary and so need their own lookup rather than the primary's key.
+   *
+   * Returning `undefined` leaves the profile as-is, so the client falls back to
+   * `process.env[apiKeyEnv]` exactly as it always has.
+   */
+  credentialFor?: (providerId: string) => { apiKey?: string; baseUrl?: string } | undefined;
 }
 
 export class ConfiguredModelGateway implements ModelGateway {
@@ -100,7 +110,24 @@ export class ConfiguredModelGateway implements ModelGateway {
   }
 
   async resolveRole(role: ModelRole): Promise<ResolvedModelProfile> {
-    return resolveModelRole(this.config, role);
+    return this.resolveProfile(role);
+  }
+
+  /**
+   * Every profile resolution in this class goes through here so that a
+   * configured credential is attached in exactly one place. Missing it on any
+   * path — a fallback, a streaming retry — would mean that path silently
+   * reverts to reading the process environment.
+   */
+  private resolveProfile(role: ModelRole): ResolvedModelProfile {
+    const profile = resolveModelRole(this.config, role);
+    const credential = this.options.credentialFor?.(profile.provider);
+    if (!credential) return profile;
+    return {
+      ...profile,
+      ...(credential.apiKey ? { apiKey: credential.apiKey } : {}),
+      ...(credential.baseUrl ? { apiBase: credential.baseUrl } : {}),
+    };
   }
 
   /**
@@ -228,20 +255,32 @@ export class ConfiguredModelGateway implements ModelGateway {
 
     const primary = this.client.stream(request, primaryProfile);
     let firstEvent: StreamEvent | undefined;
-    const tail: StreamEvent[] = [];
+    let primaryError: unknown;
     try {
       for await (const event of primary) {
-        if (firstEvent === undefined) {
-          firstEvent = event;
-          yield event;
-        } else {
-          // Buffer the rest so we can replay it on the fallback path if
-          // the primary fails later in the stream.
-          tail.push(event);
-        }
+        /*
+         * Yielded the moment it arrives. This used to keep every event after
+         * the first in a `tail` array and replay it once the stream finished,
+         * on the reasoning that a mid-stream fallback could then take over
+         * cleanly.
+         *
+         * It could not, and the cost was the whole feature. The fallback below
+         * only runs when `firstEvent === undefined` — once one event has
+         * reached the consumer, a later failure rethrows rather than retrying,
+         * because the consumer is already mid-stream. So the tail was never
+         * replayed on any path, and holding it meant the browser received the
+         * first chunk immediately and every other chunk in a single burst at
+         * the end: measured, one 21-character frame instead of eleven across
+         * two seconds. Streaming was dead in the web UI and this loop is where
+         * it died.
+         *
+         * Buffering only buys something before the first event, and that case
+         * is already handled — `firstEvent` is still tracked for exactly that
+         * decision.
+         */
+        if (firstEvent === undefined) firstEvent = event;
+        yield event;
       }
-      // Stream finished cleanly — replay the tail.
-      for (const event of tail) yield event;
       return;
     } catch (error) {
       // DEBUG: log the actual streaming error so the failure is visible
@@ -259,18 +298,34 @@ export class ConfiguredModelGateway implements ModelGateway {
       if (firstEvent !== undefined) {
         throw error;
       }
+      primaryError = error;
     }
 
+    /*
+     * Replace the error rather than discard it, and keep the cause attached.
+     *
+     * What the provider actually said is written to stderr two screens up, so
+     * the information exists — it just never reached the turn. Everything
+     * downstream classifies by reading the error's message: the runtime's
+     * transport retry only notices `HTTP <status>`, and the turn status is
+     * decided from the blocker that produces. A replacement message naming
+     * only the profile loses both, so a provider outage arrives as an
+     * unrecognisable generic failure instead of a retryable transport error.
+     */
     const fallbackName = primaryProfile.fallbackProfile;
     if (!fallbackName) {
       throw new Error(
-        `Primary streaming provider '${primaryProfile.provider}' failed and no fallback profile is configured.`,
+        `Primary streaming provider '${primaryProfile.provider}' failed and no fallback profile is configured. `
+        + `Cause: ${primaryError instanceof Error ? primaryError.message : String(primaryError)}`,
+        { cause: primaryError },
       );
     }
-    const fallbackProfile = resolveModelRole(this.config, fallbackName);
+    const fallbackProfile = this.resolveProfile(fallbackName);
     if (fallbackProfile.profileName === primaryProfile.profileName) {
       throw new Error(
-        `Primary streaming provider '${primaryProfile.provider}' failed and fallback profile '${fallbackName}' could not be resolved.`,
+        `Primary streaming provider '${primaryProfile.provider}' failed and fallback profile '${fallbackName}' could not be resolved. `
+        + `Cause: ${primaryError instanceof Error ? primaryError.message : String(primaryError)}`,
+        { cause: primaryError },
       );
     }
     await this.emitRoute({
@@ -497,7 +552,7 @@ export class ConfiguredModelGateway implements ModelGateway {
       }
 
       seen.add(profile.profileName);
-      const fallback = resolveModelRole(this.config, profile.fallbackProfile);
+      const fallback = this.resolveProfile(profile.fallbackProfile);
       // Preflight the fallback BEFORE recursing. A misconfigured fallback
       // (missing model, bad API key) should fail fast on the preflight
       // hook rather than 404 inside the request — that was the cause of

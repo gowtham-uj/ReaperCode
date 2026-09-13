@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { mkdir } from "node:fs/promises";
+import path from "node:path";
 
 import { RuntimeTurnControl, type RuntimeEvent } from "../runtime/events.js";
+import { isStoppedShortBlocker } from "../runtime/engine.js";
+import type { PermissionMode } from "../policy/classifier.js";
 import type { ToolApprovalDecision, ToolApprovalRequest, ToolApprovalRequester } from "../tools/approval.js";
 import { ThreadEventBus, type ThreadEventSubscriber, type ThreadReplay } from "./event-bus.js";
 import type { ManagedTurnRunner, ManagedTurnRunnerInput } from "./managed-turn-runner.js";
@@ -185,6 +189,103 @@ export class ManagedReaperThread implements ToolApprovalRequester {
     await this.persist();
   }
 
+  /**
+   * Point this thread at a different directory.
+   *
+   * Refused once a turn has run, because the workspace is not just a setting —
+   * it is half of the transcript's address (`<workspaceRoot>/.reaper/sessions/
+   * <sessionName>/session.jsonl`) and the root every sandboxed tool call
+   * resolves against. Moving a thread with history would strand its journal at
+   * the old path and make every file the conversation refers to unreachable,
+   * so the honest answer is to refuse rather than to half-move it.
+   *
+   * An unused thread has neither problem: there is no journal yet and no file
+   * the user has seen, so this is the same operation as having chosen the
+   * directory at creation time.
+   */
+  async setWorkspaceRoot(workspaceRoot: string): Promise<void> {
+    const normalized = workspaceRoot.trim();
+    if (!normalized) throw new ManagedThreadError("invalid_prompt", "A workspace directory is required");
+    if (this.metadataValue.lastTurn) {
+      throw new ManagedThreadError(
+        "turn_in_progress",
+        "This thread already has conversation history. Its workspace cannot change — start a new thread for a different directory.",
+      );
+    }
+    const resolved = path.resolve(normalized);
+    if (resolved === this.metadataValue.workspaceRoot) return;
+    await mkdir(resolved, { recursive: true });
+    this.metadataValue = { ...this.metadataValue, workspaceRoot: resolved };
+    await this.persist();
+  }
+
+  /**
+   * Point this thread at a different provider/model.
+   *
+   * Returns whether a turn was running, because that determines when the change
+   * bites. `executeTurn` snapshots `provider`/`model` off the metadata when it
+   * builds the turn's config, so a running turn keeps the model it started
+   * with and the next one picks this up. Mutating a live turn's model instead
+   * would splice two models' output into a single transcript with no record of
+   * the boundary.
+   */
+  async setModel(provider: string, model: string): Promise<{ turnInFlight: boolean }> {
+    const normalizedProvider = provider.trim();
+    const normalizedModel = model.trim();
+    if (!normalizedProvider || !normalizedModel) {
+      throw new ManagedThreadError("invalid_prompt", "provider and model are required");
+    }
+    this.metadataValue = { ...this.metadataValue, provider: normalizedProvider, model: normalizedModel };
+    await this.persist();
+    return { turnInFlight: this.activeTurn !== undefined };
+  }
+
+  /**
+   * Change this thread's permission mode. Same appliesTo semantics as
+   * `setModel`: a turn already running snapshots the mode when it builds its
+   * runner config, so this bites at the next turn.
+   */
+  async setPermissionMode(permissionMode: PermissionMode): Promise<{ turnInFlight: boolean }> {
+    this.metadataValue = { ...this.metadataValue, permissionMode };
+    await this.persist();
+    return { turnInFlight: this.activeTurn !== undefined };
+  }
+
+  /** Change the real provider reasoning knob used by the next model request. */
+  async setReasoningEffort(reasoningEffort: "low" | "medium" | "high"): Promise<{ turnInFlight: boolean }> {
+    this.metadataValue = { ...this.metadataValue, reasoningEffort };
+    await this.persist();
+    return { turnInFlight: this.activeTurn !== undefined };
+  }
+
+  /**
+   * Replace this thread's extra instructions. Passing `undefined` clears them,
+   * which is a different state from an empty string only in how it is stored.
+   *
+   * `exactOptionalPropertyTypes` is on, so an explicit `undefined` cannot be
+   * assigned over an optional property — the key has to be dropped instead.
+   */
+  async setSystemPrompt(systemPrompt: string | undefined): Promise<{ turnInFlight: boolean }> {
+    const trimmed = systemPrompt?.trim();
+    const { systemPrompt: _cleared, ...rest } = this.metadataValue;
+    this.metadataValue = trimmed ? { ...rest, systemPrompt: trimmed } : rest;
+    await this.persist();
+    return { turnInFlight: this.activeTurn !== undefined };
+  }
+
+  /**
+   * Set which tools this thread may not call. Sorted and de-duplicated so the
+   * saved value is stable — otherwise re-saving the same set would rewrite the
+   * metadata file and bump `updatedAt`, which reorders the sidebar.
+   */
+  async setDisabledTools(disabledTools: string[]): Promise<{ turnInFlight: boolean }> {
+    const unique = [...new Set(disabledTools.map((name) => name.trim()).filter(Boolean))].sort();
+    const { disabledTools: _cleared, ...rest } = this.metadataValue;
+    this.metadataValue = unique.length > 0 ? { ...rest, disabledTools: unique } : rest;
+    await this.persist();
+    return { turnInFlight: this.activeTurn !== undefined };
+  }
+
   async close(): Promise<void> {
     if (this.metadataValue.status === "closed") return;
     const active = this.activeTurn;
@@ -297,6 +398,11 @@ export class ManagedReaperThread implements ToolApprovalRequester {
       prompt,
       ...(this.metadataValue.provider ? { provider: this.metadataValue.provider } : {}),
       ...(this.metadataValue.model ? { model: this.metadataValue.model } : {}),
+      ...(this.metadataValue.reasoningEffort ? { reasoningEffort: this.metadataValue.reasoningEffort } : {}),
+      ...(this.metadataValue.systemPrompt ? { systemPrompt: this.metadataValue.systemPrompt } : {}),
+      ...(this.metadataValue.disabledTools?.length
+        ? { disabledTools: this.metadataValue.disabledTools }
+        : {}),
       permissionMode: this.metadataValue.permissionMode,
       abortSignal: active.abortController.signal,
       eventSink: (event: RuntimeEvent) => {
@@ -308,9 +414,35 @@ export class ManagedReaperThread implements ToolApprovalRequester {
 
     try {
       const result = await this.options.runTurn(runnerInput);
-      const status = active.abortController.signal.aborted ? "aborted" : "completed";
+      if (active.abortController.signal.aborted) {
+        return await this.finishTurn(active, { status: "aborted", assistantMessage: "" });
+      }
+      /*
+       * A turn that stopped short is a failed turn, not a completed one.
+       *
+       * The engine has always recorded why a run stopped early in
+       * `runtimeBlockers`, but the result boundary dropped the field and this
+       * call site hardcoded "completed", so a run the engine knew had failed
+       * closed as a success carrying an empty assistant message. In the
+       * transcript that is a user message with no reply and no error — the
+       * worst of the available outcomes, because there is nothing to act on.
+       *
+       * Which blockers count is the engine's call, not this file's — it owns
+       * both the set of failure codes and the reasons they are failures. Asking
+       * it means a code added there cannot be honoured in one place and ignored
+       * in another, which is exactly how the empty-response fix arrived here
+       * only after a second look.
+       */
+      const terminal = (result.runtimeBlockers ?? []).find(isStoppedShortBlocker);
+      if (terminal) {
+        return await this.finishTurn(active, {
+          status: "failed",
+          assistantMessage: result.assistantMessage ?? "",
+          error: { name: terminal.code, message: terminal.message },
+        });
+      }
       return await this.finishTurn(active, {
-        status,
+        status: "completed",
         assistantMessage: result.assistantMessage ?? "",
       });
     } catch (error) {

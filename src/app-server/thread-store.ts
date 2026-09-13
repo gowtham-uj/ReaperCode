@@ -13,6 +13,7 @@ export const TurnStatusSchema = z.enum(["running", "completed", "aborted", "fail
 export type ManagedTurnStatus = z.infer<typeof TurnStatusSchema>;
 
 const PermissionModeSchema = z.enum(["yolo", "accept_edits", "auto", "strict"]);
+const ReasoningEffortSchema = z.enum(["low", "medium", "high"]);
 
 export const ThreadMetadataSchema = z.object({
   version: z.literal(1),
@@ -21,8 +22,25 @@ export const ThreadMetadataSchema = z.object({
   workspaceRoot: z.string().min(1),
   provider: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
+  reasoningEffort: ReasoningEffortSchema.optional(),
   permissionMode: PermissionModeSchema,
   title: z.string().max(500).optional(),
+  /**
+   * Per-thread instructions appended after the built-in agent prompt.
+   *
+   * Appended rather than substituted: the built-in prompt is the contract the
+   * harness, tool schemas, and verification loop are written against, and a
+   * free-text field that could replace it would let a thread silently opt out
+   * of every safety and stopping rule. Bounded because it ships on every model
+   * request for the life of the thread.
+   */
+  systemPrompt: z.string().max(20_000).optional(),
+  /**
+   * Tool names this thread's agent must not call. Absent means "all of them",
+   * which is distinct from an empty array only in intent, so both are stored
+   * as-is and read through the same helper.
+   */
+  disabledTools: z.array(z.string().min(1).max(128)).max(200).optional(),
   status: ThreadStatusSchema,
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
@@ -47,6 +65,7 @@ export interface CreateThreadMetadataInput {
   workspaceRoot: string;
   provider?: string;
   model?: string;
+  reasoningEffort?: "low" | "medium" | "high";
   permissionMode?: PermissionMode;
   title?: string;
 }
@@ -65,10 +84,25 @@ export class ThreadStore {
     this.threadsDirectory = path.join(path.resolve(dataRoot), ".reaper", "app-server", "threads");
   }
 
+  /**
+   * One thread is one session journal.
+   *
+   * A chat thread in the UI, a `ThreadMetadata` record, and exactly one
+   * `<workspaceRoot>/.reaper/sessions/<sessionName>/session.jsonl` are the same
+   * thing viewed from three layers. `sessionNameFor` is the only mapping, so a
+   * caller can go from a thread id to its journal without guessing, and two
+   * threads can never be handed the same file — which would interleave two
+   * conversations into one transcript and corrupt both on resume.
+   */
+  static sessionNameFor(threadId: string): string {
+    if (!isValidSessionName(threadId)) throw new Error(`Invalid thread ID: ${threadId}`);
+    return `app-${threadId}`;
+  }
+
   createMetadata(input: CreateThreadMetadataInput): ThreadMetadata {
     const threadId = input.threadId ?? randomUUID();
-    const sessionName = input.sessionName ?? `app-${threadId}`;
     if (!isValidSessionName(threadId)) throw new Error(`Invalid thread ID: ${threadId}`);
+    const sessionName = input.sessionName ?? ThreadStore.sessionNameFor(threadId);
     if (!isValidSessionName(sessionName)) throw new Error(`Invalid session name: ${sessionName}`);
 
     const now = new Date().toISOString();
@@ -79,6 +113,7 @@ export class ThreadStore {
       workspaceRoot: path.resolve(input.workspaceRoot),
       ...(input.provider ? { provider: input.provider } : {}),
       ...(input.model ? { model: input.model } : {}),
+      ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
       permissionMode: input.permissionMode ?? "accept_edits",
       ...(input.title ? { title: input.title } : {}),
       status: "idle",

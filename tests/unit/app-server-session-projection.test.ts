@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { SessionProjection, projectHistory, projectThread } from "../../src/app-server/session-projection.js";
+import { isReplayStable, SessionProjection, projectHistory, projectThread } from "../../src/app-server/session-projection.js";
 import type { ThreadEventRecord } from "../../src/app-server/event-bus.js";
 import type { ThreadMetadata } from "../../src/app-server/thread-store.js";
 
@@ -157,11 +157,11 @@ test("a second model step appends its message after the tool calls, instead of o
 
   emit(withTs({ type: "turn.started", runId: turnId, sessionId: "fix-auth" }));
   emit(withTs({ type: "assistant.message.completed", text: "Reading the auth module" }));
-  emit(withTs({ type: "tool.started", toolCall: { id: "view-1", name: "view_file", args: { path: "auth.ts", startLine: 1, endLine: 40 } } }));
+  emit(withTs({ type: "tool.started", toolCall: { id: "view-1", name: "file_view", args: { path: "auth.ts", start_line: 1, window: 40 } } }));
   emit(withTs({
     type: "tool.completed",
-    toolCall: { id: "view-1", name: "view_file", args: { path: "auth.ts", startLine: 1, endLine: 40 } },
-    result: { name: "view_file", toolCallId: "view-1", ok: true, durationMs: 1, output: "contents" },
+    toolCall: { id: "view-1", name: "file_view", args: { path: "auth.ts", start_line: 1, window: 40 } },
+    result: { name: "file_view", toolCallId: "view-1", ok: true, durationMs: 1, output: "contents" },
   }));
   // Second model request: this is a new step, not a correction of the first.
   emit(withTs({ type: "assistant.message.completed", text: "Auth uses a refresh token" }));
@@ -239,6 +239,62 @@ test("token usage accumulates a real total instead of repeating the per-call num
   assert.deepEqual(secondUsage.last, { inputTokens: 50, outputTokens: 10, totalTokens: 60 });
 });
 
+test("token usage forwards the model window and Reaper soft cap", () => {
+  const projection = new SessionProjection();
+  const notes = projection.project(record({
+    threadId: "fix-auth",
+    turnId: "turn-1",
+    event: withTs({ type: "token.usage", inputTokens: 10, outputTokens: 5, modelContextWindow: 200_000, contextSoftCap: 270_000 }),
+  }), metadata);
+  const usage = notes[0]?.params.tokenUsage as {
+    modelContextWindow: number | null;
+    contextSoftCap?: number;
+  };
+  assert.equal(usage.modelContextWindow, 200_000);
+  assert.equal(usage.contextSoftCap, 270_000);
+});
+
+test("token usage without window metadata leaves modelContextWindow null", () => {
+  const projection = new SessionProjection();
+  const notes = projection.project(record({
+    threadId: "fix-auth",
+    turnId: "turn-1",
+    event: withTs({ type: "token.usage", inputTokens: 10, outputTokens: 5 }),
+  }), metadata);
+  const usage = notes[0]?.params.tokenUsage as { modelContextWindow: number | null; contextSoftCap?: number };
+  assert.equal(usage.modelContextWindow, null);
+  assert.equal(usage.contextSoftCap, undefined);
+});
+
+test("verification.completed forwards the verdict and retains it for late joiners", () => {
+  const projection = new SessionProjection();
+  const emit = (event: ThreadEventRecord["event"]) =>
+    projection.project(record({ threadId: "fix-auth", turnId: "turn-1", event }), metadata);
+
+  emit(withTs({ type: "verification.started", command: "node --test" }));
+  const completed = emit(withTs({
+    type: "verification.completed",
+    ok: true,
+    command: "node --test",
+    verified: true,
+    groundedSignal: { kind: "test", command: "node --test", grounded: true },
+    failureClasses: [],
+    attemptCount: 2,
+  }));
+
+  assert.equal(completed[0]?.method, "item/verification/updated");
+  const verification = (completed[0]?.params.verification as { verified: boolean; attemptCount: number });
+  assert.equal(verification.verified, true);
+  assert.equal(verification.attemptCount, 2);
+
+  // The started event carries no verdict and must not be retained.
+  const snapshot = projection.snapshotVerification();
+  assert.deepEqual(snapshot, {
+    ...(completed[0]?.params.verification as Record<string, unknown>),
+    timestamp: NOW,
+  });
+});
+
 test("history projection turns named-session messages into Codex turns", () => {
   const turns = projectHistory([
     { role: "user", content: "first" },
@@ -277,4 +333,135 @@ test("hydrate prepends journal history without duplicating a live matching turn"
   assert.equal(turns[1]?.id, "live-turn");
   projection.hydrate(history);
   assert.equal(projection.snapshotTurns().length, 2);
+});
+
+test("projectThread never surfaces a failed turn's error text as the thread preview", () => {
+  const failed = projectThread({
+    ...metadata,
+    title: undefined,
+    status: "error",
+    lastTurn: {
+      turnId: "turn-1",
+      status: "failed",
+      startedAt: NOW,
+      completedAt: NOW,
+      assistantMessage: "Error: provider transport failed after 3 retries",
+      error: { name: "Error", message: "provider transport failed" },
+    },
+  } as ThreadMetadata);
+  assert.equal(failed.preview, "");
+  assert.equal(failed.name, undefined);
+});
+
+test("projectThread prefers an explicit title over the last assistant message", () => {
+  const titled = projectThread({
+    ...metadata,
+    lastTurn: {
+      turnId: "turn-1",
+      status: "completed",
+      startedAt: NOW,
+      completedAt: NOW,
+      assistantMessage: "some long assistant reply",
+    },
+  } as ThreadMetadata);
+  assert.equal(titled.preview, "Fix auth");
+  assert.equal(titled.name, "Fix auth");
+});
+
+/**
+ * A replayed `thread.started` is how a reconnecting client relearns what a
+ * thread is set to, so it must project the thread's *current* metadata rather
+ * than whatever it looked like when the event was first recorded.
+ *
+ * This is also why the message processor must not memoize this one
+ * projection: `isReplayStable` is the predicate that keeps the cache honest,
+ * and if it ever returned true here, a thread configured mid-conversation
+ * would come back to a reloading client with its settings stripped.
+ */
+test("thread.started projects current metadata, not the creation-time snapshot", () => {
+  const projection = new SessionProjection();
+  const started = record({ threadId: "fix-auth", event: withTs({ type: "thread.started", threadId: "fix-auth" }) });
+
+  const before = projection.project(started, metadata);
+  assert.equal((before[0]?.params.thread as { systemPrompt?: string }).systemPrompt, undefined);
+
+  const configured: ThreadMetadata = {
+    ...metadata,
+    systemPrompt: "Always write commit messages in the imperative mood.",
+    disabledTools: ["bash"],
+    updatedAt: "2026-08-27T01:00:00.000Z",
+  };
+  const after = projection.project(started, configured);
+  const thread = after[0]?.params.thread as { systemPrompt?: string; disabledTools?: string[] };
+  assert.equal(thread.systemPrompt, "Always write commit messages in the imperative mood.");
+  assert.deepEqual(thread.disabledTools, ["bash"]);
+});
+
+test("isReplayStable rejects cached projections that embed live metadata", () => {
+  const projection = new SessionProjection();
+  const started = projection.project(
+    record({ threadId: "fix-auth", event: withTs({ type: "thread.started", threadId: "fix-auth" }) }),
+    metadata,
+  );
+  assert.equal(isReplayStable(started), false, "thread/started must never be memoized");
+
+  const delta = projection.project(
+    record({ threadId: "fix-auth", event: withTs({ type: "assistant.message.delta", text: "hi" }) }),
+    metadata,
+  );
+  assert.equal(isReplayStable(delta), true, "record-only projections are safe to memoize");
+});
+
+/**
+ * Code Mode streams on the same `command.output.delta` channel a shell command
+ * uses — from the model's side it is the same thing: output produced *by* the
+ * call, as it happens. It must not, however, be *projected* as a command
+ * execution. The item is a tool call, and inventing a `commandExecution` for it
+ * would produce a duplicate row that is thrown away the moment the real report
+ * lands, since completing the call replaces that item wholesale.
+ */
+test("Code Mode output streams on its own notification instead of inventing a command item", () => {
+  const projection = new SessionProjection();
+  const emit = (event: ThreadEventRecord["event"]) =>
+    projection.project(record({ threadId: "fix-auth", turnId: "turn-1", event }), metadata);
+
+  emit(withTs({ type: "tool.started", toolCall: { id: "eval-1", name: "eval", args: { code: "1 + 1" } } }));
+  const delta = emit(withTs({ type: "command.output.delta", toolCallId: "eval-1", stream: "stdout", text: "hello\n" }));
+
+  assert.equal(delta[0]?.method, "turn/codeMode/delta");
+  assert.equal(delta[0]?.params.itemId, "eval-1");
+
+  const completed = emit(withTs({ type: "turn.completed", runId: "turn-1", sessionId: "fix-auth", assistantMessage: "done" }));
+  const items = (completed[0]?.params.turn as { items: Array<{ type: string; tool?: string; liveOutput?: Array<{ text: string }> }> }).items;
+  assert.equal(items.length, 1, "the stream must not add a second item");
+  assert.equal(items[0]?.type, "dynamicToolCall");
+  assert.equal(items[0]?.tool, "eval");
+  // The late joiner needs the stream, which the bare delta notifications cannot
+  // give it: a client that connects mid-script has missed them all.
+  assert.equal(items[0]?.liveOutput?.[0]?.text, "hello\n");
+});
+
+test("a delta with no line break appends to the line it belongs to", () => {
+  const projection = new SessionProjection();
+  const emit = (event: ThreadEventRecord["event"]) =>
+    projection.project(record({ threadId: "fix-auth", turnId: "turn-1", event }), metadata);
+
+  emit(withTs({ type: "tool.started", toolCall: { id: "eval-1", name: "eval", args: { code: "1 + 1" } } }));
+  emit(withTs({ type: "command.output.delta", toolCallId: "eval-1", stream: "stdout", text: "par" }));
+  emit(withTs({ type: "command.output.delta", toolCallId: "eval-1", stream: "stdout", text: "tial" }));
+  emit(withTs({ type: "command.output.delta", toolCallId: "eval-1", stream: "stdout", text: "\nnext" }));
+
+  const finished = emit(withTs({ type: "turn.completed", runId: "turn-1", sessionId: "fix-auth", assistantMessage: "done" }));
+  const items = (finished[0]?.params.turn as { items: Array<{ liveOutput?: Array<{ text: string }> }> }).items;
+  const lines = items[0]?.liveOutput ?? [];
+  assert.deepEqual(lines.map((line) => line.text), ["partial\nnext"]);
+});
+
+test("a delta for a call that does not exist is ignored, not invented", () => {
+  const projection = new SessionProjection();
+  const emit = (event: ThreadEventRecord["event"]) =>
+    projection.project(record({ threadId: "fix-auth", turnId: "turn-1", event }), metadata);
+
+  const notes = emit(withTs({ type: "command.output.delta", toolCallId: "ghost", stream: "stdout", text: "x" }));
+  assert.deepEqual(notes, [], "an unknown toolCallId must not create an item out of nothing");
 });

@@ -344,18 +344,46 @@ export function buildConfigForProvider(args: {
   workspaceRoot: string;
   providerId: string;
   modelId?: string;
+  reasoningEffort?: "low" | "medium" | "high";
 }): unknown {
   const descriptor = findProviderDescriptor(args.providerId);
   if (!descriptor) {
     throw new Error(`unknown provider "${args.providerId}"`);
   }
   const modelId = args.modelId ?? descriptor.defaultModel;
-  return buildConfig({
-    workspaceRoot: args.workspaceRoot,
-    prompt: "",
-    model: modelId,
-    provider: args.providerId as "openai" | "anthropic" | "deepseek" | "minimax" | "nuralwatt" | "nuralwatt2",
-  });
+
+  // Every provider is described entirely by its catalog descriptor. The
+  // multiplexer still dispatches ids like `anthropic` and `deepseek` to their
+  // dedicated clients, so nothing is lost by resolving the profile from data.
+  const capabilities: ProfileModelCapabilities = {
+    ...DEFAULT_CAPABILITIES,
+    ...descriptor.capabilities,
+  };
+  return {
+    models: {
+      default_model: {
+        provider: descriptor.id,
+        model: modelId,
+        ...(descriptor.baseUrl ? { apiBase: descriptor.baseUrl } : {}),
+        ...(descriptor.envVar ? { apiKeyEnv: descriptor.envVar } : {}),
+        timeoutMs: 600_000,
+        maxRetries: 2,
+        capabilities,
+        defaultParams: {
+          maxTokens: 4096,
+          temperature: 0,
+          ...(args.reasoningEffort ? { reasoningEffort: args.reasoningEffort } : {}),
+        },
+      },
+    },
+    modelRouting: {
+      planner: "default_model",
+      executor: "default_model",
+      summarizer: "default_model",
+    },
+    runtime: { voteAttempts: 1 },
+    runtimeTunables: { permissionMode: "yolo" },
+  };
 }
 
 
@@ -562,12 +590,17 @@ export async function runExec(opts: ExecRunnerOptions): Promise<ExecRunnerResult
 
 /**
  * Pull the run/session id off the engine's session path
- * (`.../logs/<id>/session.jsonl`).
+ * (`.../sessions/<id>/session.jsonl`).
+ *
+ * Both roots are checked. `sessions` is where current builds write; `logs` is
+ * the pre-rename location, and a resumed thread still journals there, so a
+ * path in either shape has to yield the id rather than falling through to the
+ * generic `basename` guess.
  */
 function deriveRunIdFromTrajectoryPath(p: string): string {
   if (!p) return "exec";
   const parts = p.split(path.sep);
-  const idx = parts.lastIndexOf("logs");
+  const idx = Math.max(parts.lastIndexOf("sessions"), parts.lastIndexOf("logs"));
   if (idx >= 0 && idx + 1 < parts.length) return parts[idx + 1] ?? "exec";
   return path.basename(path.dirname(p)) || "exec";
 }

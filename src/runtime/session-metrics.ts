@@ -1,6 +1,6 @@
 import type { ToolResult } from "../tools/types.js";
 
-export const sessionStopReasons = ["solved", "no_progress_stop", "gate_exhausted", "harness_timeout", "infra_failed", "error"] as const;
+export const sessionStopReasons = ["solved", "completed_unverified", "no_progress_stop", "gate_exhausted", "harness_timeout", "infra_failed", "error"] as const;
 export type SessionStopReason = (typeof sessionStopReasons)[number];
 
 export interface SessionMetricsSummary {
@@ -136,7 +136,7 @@ export function normalizeArgs(toolName: string, args: unknown): string {
   if (toolName === "bash") {
     return stableJson({ cmd: normalizeVolatileText(typeof record.cmd === "string" ? record.cmd : "") });
   }
-  if (toolName === "file_view" || toolName === "view_file") {
+  if (toolName === "file_view") {
     return stableJson({ path: normalizeVolatileText(typeof record.path === "string" ? record.path : "") });
   }
   return stableJson(normalizeValue(record));
@@ -153,8 +153,11 @@ function inferStopReason(input: {
 }): SessionStopReason {
   if (input.stopReasonOverride) return input.stopReasonOverride;
   if (input.taskCompleted && input.verifiedCompletion) return "solved";
-  // Natural stop without verified success is not "solved".
-  if (input.taskCompleted && !input.verifiedCompletion) return "error";
+  // A natural stop with no verification evidence is not "solved", but it is
+  // also not a failure: reporting "error" made every turn that ran no test
+  // command — a plain question, a read-only answer — look like a crash, and
+  // contradicted the "completed" outcome recorded alongside it.
+  if (input.taskCompleted && !input.verifiedCompletion) return "completed_unverified";
   if (input.noProgressTrips > 0 || input.stuckTripped) return "no_progress_stop";
   if (input.gateExhausted || input.completionGateAttempts > 0) return "gate_exhausted";
   return "error";

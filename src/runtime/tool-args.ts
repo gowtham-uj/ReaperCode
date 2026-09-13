@@ -11,7 +11,7 @@
  *
  * Exposing it as a separate module lets the engine's parser stay
  * concise AND lets the test suite call the same functions the
- * parser calls, so a "view_file drift" regression is caught here,
+ * parser calls, so a "file_view drift" regression is caught here,
  * not in a coupled engine test.
  *
  * This module intentionally lives under `src/runtime/` (not

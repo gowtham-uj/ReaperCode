@@ -29,6 +29,22 @@ export const BashOutputSchema = z.object({
   interrupted: z.boolean(),
   persisted_output_path: z.string().optional(),
   persisted_output_size: z.number().optional(),
+  /**
+   * The complete command output, on disk.
+   *
+   * Distinct from `persisted_output_path`, and the distinction is load-bearing.
+   * The bash tool keeps only a bounded buffer in memory (256KB) because holding
+   * a 100MB `cat` in a string would be worse than useless, so what gets written
+   * to the artifact file is that buffer, not everything the command produced.
+   * The *complete* output is streamed to the run's process log as it arrives.
+   *
+   * Measured on a 42MB `cat`: the artifact held 262,112 bytes (0.62%) while the
+   * process log held all 42,734,826. A notice pointing at the artifact and
+   * calling it the full output was simply false, and a model that trusted it
+   * would analyse 0.6% of a log and report conclusions about the rest.
+   */
+  full_output_path: z.string().optional(),
+  full_output_size: z.number().optional(),
   background_task_id: z.string().optional(),
   /** True when the inline preview includes the head of the full output. */
   head_available: z.boolean().optional(),

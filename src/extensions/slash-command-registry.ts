@@ -105,6 +105,44 @@ export class ConsoleHost implements SlashHost {
 
 export class SlashCommandRegistry {
   private readonly commands = new Map<string, SlashCommand>();
+  /**
+   * Skill names that may be typed as `/<name>`.
+   *
+   * A skill is not a slash command and is deliberately not registered as one:
+   * skills come and go with the workspace, and minting a command object per
+   * skill would put them in `/help`, in `complete()`, and in every extension's
+   * namespace. But `/codemode` is what a person will type, so the registry
+   * answers for them — by handing the line back to the caller, which is the
+   * layer that knows how to load a body.
+   *
+   * Returns the skill name rather than running anything: this class has no
+   * filesystem and no workspace, and giving it either would make the one
+   * registry that must stay host-agnostic the one that reads disk.
+   */
+  private skillNames: () => readonly string[] = () => [];
+
+  /** Install the skill-name source consulted by `resolveSkillInvocation`. */
+  setSkillNames(source: () => readonly string[]): void {
+    this.skillNames = source;
+  }
+
+  /**
+   * The skill named by a `/<name>` line, when there is no command by that name.
+   *
+   * Returning a name is not the same as handling the line: `handle` still
+   * refuses, because a skill invocation carries an argument (the rest of the
+   * person's message) that only the caller can act on. This exists so a caller
+   * can tell "unknown command" apart from "a skill I should load".
+   */
+  resolveSkillInvocation(line: string): { name: string; args: string[] } | null {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("/")) return null;
+    const tokens = trimmed.slice(1).split(/\s+/);
+    const name = tokens.shift() ?? "";
+    if (!name || this.commands.has(name.toLowerCase())) return null;
+    const known = this.skillNames().find((candidate) => candidate.toLowerCase() === name.toLowerCase());
+    return known ? { name: known, args: tokens } : null;
+  }
 
   register(cmd: SlashCommand): () => void {
     const key = cmd.name.toLowerCase();

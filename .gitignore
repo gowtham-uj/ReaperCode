@@ -65,6 +65,8 @@ scratchpad/
 *.webp
 *.pdf
 *.docx
+# ...except the screenshots the README embeds, which are part of the repo
+!docs/screenshots/*.png
 
 # Local reference checkouts (never push)
 source_codes/
@@ -88,12 +90,33 @@ AGENTS.md
 Reaper Implementation Research.md
 workspace/
 
-# Ignore all docs except docs/dev/
+# Ignore all docs except docs/dev/ and the README's screenshots
 docs/*
 !docs/dev/
+!docs/screenshots/
 
 # Ignored agent skills
 .agent/skills/
 
 # Temporary smoke tests
 scripts/*.mts
+
+# Local scratch that must never be committed.
+#
+# `focus_sources/` is 1.5GB of extracted source trees used for reading, not for
+# building; `.pw-browsers/` and `.e2e/` are Playwright downloads and drive
+# artifacts; the rest are generated reports, stray downloads, and one captured
+# process log. All of it appeared in the working tree during local work and none
+# of it belongs in the repository.
+focus_sources/
+profile-readme/
+.pw-browsers/
+.e2e/
+audit-report.html
+developer-improvement-pack-*.zip
+bg-1
+HQFiLt-aQAAhvAh.jfif
+
+# Generated analysis traces from local harness runs.
+tool-discovery-trace.json
+*-trace.json

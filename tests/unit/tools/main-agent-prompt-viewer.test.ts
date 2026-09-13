@@ -9,8 +9,11 @@ test("system prompt renders Preferred Edit Path with canonical tools", async () 
   const prompt = buildMainAgentSystemPrompt({});
   assert.match(prompt, /Preferred edit path/i);
   assert.match(prompt, /1\. file_view/);
-  assert.match(prompt, /file_scroll/);
   assert.match(prompt, /file_find/);
+  // The prompt names only tools that exist. `file_scroll` was folded into
+  // `file_view`, and a prompt that still teaches it would send the model after
+  // a name it can only reach through the alias map.
+  assert.doesNotMatch(prompt, /file_scroll/);
   assert.match(prompt, /2\. file_edit/);
   assert.match(prompt, /3\. write_file/);
   assert.match(prompt, /4\. bash/);

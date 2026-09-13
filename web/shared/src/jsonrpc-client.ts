@@ -5,8 +5,8 @@
  * agent's tool call until answered, so this is a peer, not just a caller: it
  * has to dispatch inbound requests as well as correlate its own responses.
  *
- * Transports are supplied by the caller — Node `ws` for the BFF and the test
- * fixture, browser `WebSocket` for the UI — so this file imports nothing
+ * Transports are supplied by the caller — Node `ws` for the test fixture,
+ * browser `WebSocket` for the UI — so this file imports nothing
  * environment-specific.
  */
 
@@ -171,8 +171,8 @@ export class JsonRpcClient {
  * Structural subset of the browser `WebSocket`.
  *
  * Declared rather than referencing the DOM lib so this module still compiles
- * in a Node package that has no DOM types — the BFF imports the client from
- * here and must not be forced to pull in `lib.dom`.
+ * in a Node package that has no DOM types — the app-server's gateway imports
+ * the client from here and must not be forced to pull in `lib.dom`.
  */
 export interface BrowserWebSocketLike {
   send(data: string): void;

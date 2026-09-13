@@ -42,7 +42,7 @@ test("local Langfuse mirrors redact model and tool secrets", async () => {
     });
   });
   const persisted = await readFile(
-    path.join(workspaceRoot, ".reaper", "logs", "run-secret", "langfuse-events.jsonl"),
+    path.join(workspaceRoot, ".reaper", "sessions", "run-secret", "langfuse-events.jsonl"),
     "utf8",
   );
   assert.doesNotMatch(persisted, new RegExp(fakeGithubToken));

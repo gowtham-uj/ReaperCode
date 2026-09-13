@@ -186,13 +186,8 @@ const READ_ONLY_GIT_SUBCOMMANDS = new Set([
 ]);
 
 export function classifyToolCall(call: ToolCall): ExecutionKind {
-  if (call.name === "get_tool_output") {
-    return "read";
-  }
   if (
-    call.name === "view_file" ||
     call.name === "file_view" ||
-    call.name === "file_scroll" ||
     call.name === "file_find" ||
     call.name === "list_directory" ||
     call.name === "grep_search" ||
@@ -227,6 +222,30 @@ export function classifyToolCall(call: ToolCall): ExecutionKind {
     return "shell_barrier";
   }
 
+  /*
+   * `eval` is always a barrier, and "always" is the point: unlike `bash` there
+   * is no command string to grade, so there is no version of a script that can
+   * be certified read-only. A script is opaque to this function the same way a
+   * shell command is, but with no allowlist to appeal to — `isReadOnlyShellCommand`
+   * has nothing to inspect.
+   *
+   * What made this load-bearing rather than merely tidy is the write-ahead log.
+   * Writes are staged and only reach disk at a barrier flush, so `[write_file,
+   * eval]` in one model turn used to hand the script a workspace where the file
+   * it just asked Reaper to write does not exist yet — and a script reading it
+   * with `fs` or `child_process`, which is exactly what Code Mode is for, sees
+   * the stale version rather than an error. Classifying the container as a
+   * barrier makes the scheduler flush before the script starts, which is what a
+   * `bash` call has always got.
+   *
+   * Falling through to `read` was also why traces showed `eval` as a read in
+   * `tool_calls_categorized`, and why its calls counted toward the read
+   * concurrency cap. Both are cosmetic next to the stale-read above; neither is
+   * correct.
+   */
+  if (call.name === "eval") {
+    return "shell_barrier";
+  }
 
   return "read";
 }

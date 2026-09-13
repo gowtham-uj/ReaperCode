@@ -3,6 +3,9 @@
  * Covers fire conditions and effects for the OMP-aligned layers.
  */
 import test from "node:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import assert from "node:assert/strict";
 import {
   applyConfigToTunables,
@@ -11,6 +14,7 @@ import {
 } from "../../src/config/config-tunables.js";
 import { buildStarterConfig } from "../../src/config/starter-config.js";
 import { createContextEngineeringHooks } from "../../src/runtime/context-engineering-wiring.js";
+import type { ContextEventPayload } from "../../src/runtime/context-engineering-wiring.js";
 import { clearRunState, getRunState } from "../../src/runtime/run-state.js";
 
 function loadFreshConfig() {
@@ -657,4 +661,410 @@ test("#21 promote: modelPromotionTargetRole = null disables auto-pick", async ()
   // (instead of restricting to one specific role). So an event is
   // expected. Verify the wiring accepts the null setting without errors.
   assert.ok(true, "wiring handles modelPromotionTargetRole=null without errors");
+});
+
+/**
+ * Every technique must report what it did.
+ *
+ * The runtime used to describe compaction to the UI with a single event that
+ * carried no technique and, for most passes, no numbers: a `compaction.updated`
+ * with a phase and sometimes a character count. It was also never emitted by
+ * the engine at all, so nothing reached a transcript. These tests pin the
+ * contract now that the wiring reports per technique, because a technique that
+ * silently shrinks a conversation is one a user cannot audit — and the whole
+ * point of showing this is that "the agent forgot" and "the agent dropped 40
+ * stale reads" must not look the same.
+ */
+test("shake reports savings with the technique that produced them", async () => {
+  loadFreshConfig();
+  const events: ContextEventPayload[] = [];
+  const ctx = createContextEngineeringHooks({ onContextEvent: (event) => { events.push(event); } });
+  const messages: any[] = [];
+  for (let i = 0; i < 50; i += 1) {
+    messages.push({
+      role: "assistant",
+      content: "Use the bash tool now.",
+      tool_calls: [{ id: `t-${i}`, type: "function", function: { name: "bash", arguments: "{}" } }],
+    });
+    messages.push({ role: "tool", tool_call_id: `t-${i}`, content: "x".repeat(3_000) });
+  }
+  await ctx.onBeforeModelCall({
+    workspaceRoot: "/tmp/ws",
+    runId: "r-events-shake",
+    sessionId: "s1",
+    traceId: "t1",
+    messages,
+    softCap: 1_000,
+    trajectoryLogger: makeTrajectoryLogger(),
+  });
+
+  const shake = events.find((event) => event.technique === "shake");
+  assert.ok(shake, `expected a shake report, got ${events.map((e) => e.technique).join(",")}`);
+  assert.equal(shake.phase, "completed");
+  assert.ok((shake.savedChars ?? 0) > 0, "a shake that freed nothing should not report at all");
+  // The count, not the action: the label says "Shook out stale results", so
+  // repeating "shaken out" in the detail said one thing twice.
+  assert.match(shake.detail ?? "", /^\d+ results?$/);
+});
+
+test("full summary reports its technique, both phases, and the message delta", async () => {
+  loadFreshConfig();
+  const runId = "r-events-summary";
+  clearRunState(runId);
+  const events: ContextEventPayload[] = [];
+  const ctx = createContextEngineeringHooks({
+    // Long enough to clear the "summary too short" retry gate, which rejects
+    // anything under ~20 characters as a likely formatting failure.
+    infer: async () => "<summary>Condensed the conversation into a short summary of the verified progress so far.</summary>",
+    onContextEvent: (event) => { events.push(event); },
+  });
+  await ctx.onBeforeModelCall({
+    workspaceRoot: "/tmp/ws",
+    runId,
+    sessionId: "s1",
+    traceId: "t1",
+    messages: [
+      { role: "system", content: "stable system prompt" },
+      { role: "user", content: "current task" },
+      // Clearly over the cap rather than exactly at it: a fixture that sits on
+      // the threshold passes or fails depending on what ran before it.
+      { role: "assistant", content: "x".repeat(2_000_000) },
+    ],
+    softCap: 270_000,
+    trajectoryLogger: makeTrajectoryLogger(),
+  });
+
+  const started = events.find((event) => event.phase === "started");
+  const completed = events.find((event) => event.phase === "completed" && event.technique === "full_summary");
+  assert.ok(started, "a model-call compaction must announce itself before it runs, or the UI shows nothing for seconds");
+  assert.equal(started.technique, "full_summary");
+  assert.ok(completed, "and must report its result");
+  assert.ok((completed.savedChars ?? 0) > 0);
+  assert.equal(completed.messagesBefore, 3);
+  /*
+   * The message count can *rise* even though the conversation shrank: the
+   * post-compact rebuild re-attaches a checkpoint and the summary itself as
+   * separate messages, so 3 large messages can become 6 small ones. Character
+   * count is the honest measure of what was reclaimed, which is why the row
+   * leads with it and the message delta is secondary detail.
+   */
+  assert.ok((completed.messagesAfter ?? 0) > 0);
+  assert.equal(completed.softCap, 270_000);
+});
+
+test("a summarizer that would grow the conversation reports a failure, not a saving", async () => {
+  loadFreshConfig();
+  const runId = "r-events-summary-bigger";
+  clearRunState(runId);
+  const events: ContextEventPayload[] = [];
+  const ctx = createContextEngineeringHooks({
+    // A summary longer than the conversation it replaces. The wiring keeps the
+    // original and cools down; reporting that as a successful compaction would
+    // tell the user context was reclaimed when none was.
+    // Roughly 3M characters against a 2M-character conversation: a summary that
+    // genuinely costs more than it saves, which the wiring must refuse.
+    infer: async () => `<summary>${"verbose summary text that is long enough to clear the retry gate ".repeat(60_000)}</summary>`,
+    onContextEvent: (event) => { events.push(event); },
+  });
+  await ctx.onBeforeModelCall({
+    workspaceRoot: "/tmp/ws",
+    runId,
+    sessionId: "s1",
+    traceId: "t1",
+    messages: [
+      { role: "system", content: "stable system prompt" },
+      { role: "user", content: "current task" },
+      { role: "assistant", content: "x".repeat(2_000_000) },
+    ],
+    softCap: 270_000,
+    trajectoryLogger: makeTrajectoryLogger(),
+  });
+
+  const failed = events.find((event) => event.phase === "failed");
+  assert.ok(failed, "an oversized summary is a failed compaction");
+  /*
+   * Two guards reject a bloated summary and either one firing is correct: the
+   * summarizer itself caps its output (`summary exceeded N character cap`), and
+   * the caller refuses a replacement that saves less than a minimum ratio. The
+   * assertion is that the user is told why, not which of the two spoke — the
+   * exact string is an implementation detail, and pinning it would make this
+   * test fail the next time a threshold moves.
+   */
+  assert.ok((failed.reason ?? "").length > 0, "a failure must say why, or the row reads as a hang");
+  assert.match(failed.reason ?? "", /summary (exceeded|saved)/);
+  assert.equal(events.some((event) => event.phase === "completed"), false, "and must not also report success");
+});
+
+test("a technique that does nothing reports nothing", async () => {
+  loadFreshConfig();
+  const events: ContextEventPayload[] = [];
+  const ctx = createContextEngineeringHooks({ onContextEvent: (event) => { events.push(event); } });
+  // A short conversation, far under the cap: every pass should decline.
+  await ctx.onBeforeModelCall({
+    workspaceRoot: "/tmp/ws",
+    runId: "r-events-quiet",
+    sessionId: "s1",
+    traceId: "t1",
+    messages: [
+      { role: "system", content: "system" },
+      { role: "user", content: "hi" },
+    ],
+    softCap: 270_000,
+    trajectoryLogger: makeTrajectoryLogger(),
+  });
+  assert.deepEqual(events, [], "a small conversation must produce no context-management chatter");
+});
+
+test("an observer that throws cannot fail the compaction it describes", async () => {
+  loadFreshConfig();
+  const ctx = createContextEngineeringHooks({
+    onContextEvent: () => { throw new Error("observer exploded"); },
+  });
+  const messages: any[] = [];
+  for (let i = 0; i < 50; i += 1) {
+    messages.push({
+      role: "assistant",
+      content: "Use the bash tool now.",
+      tool_calls: [{ id: `t-${i}`, type: "function", function: { name: "bash", arguments: "{}" } }],
+    });
+    messages.push({ role: "tool", tool_call_id: `t-${i}`, content: "x".repeat(3_000) });
+  }
+  const result = await ctx.onBeforeModelCall({
+    workspaceRoot: "/tmp/ws",
+    runId: "r-events-throwing",
+    sessionId: "s1",
+    traceId: "t1",
+    messages,
+    softCap: 1_000,
+    trajectoryLogger: makeTrajectoryLogger(),
+  });
+  assert.ok(result.shaken > 0, "the shake must still have happened");
+});
+
+/**
+ * A technique must change what the model sees *next*, not just report that it
+ * ran.
+ *
+ * The hooks return the working set and the engine adopts it, so a compaction
+ * that only mutated a local array would leave the transcript claiming savings
+ * the model never got. These tests drive the same hook twice with the second
+ * call seeded from the first call's output — which is what the engine does
+ * across loop iterations — and assert the second call starts smaller and
+ * re-prunes nothing.
+ */
+test("a prune persists into the next model call rather than being redone each time", async () => {
+  loadFreshConfig();
+  const events: ContextEventPayload[] = [];
+  const ctx = createContextEngineeringHooks({ onContextEvent: (event) => { events.push(event); } });
+  const seed = [0, 1].map((i) => [
+    { role: "assistant", content: "", tool_calls: [{ id: `p-${i}`, type: "function", function: { name: "bash", arguments: "{}" } }] },
+    { role: "tool", tool_call_id: `p-${i}`, content: "p".repeat(40_000) },
+  ]).flat() as any[];
+  const first = await ctx.onBeforeModelCall({
+    workspaceRoot: "/tmp/ws", runId: "r-persist", sessionId: "s1", traceId: "t1",
+    messages: seed, softCap: 1_000, trajectoryLogger: makeTrajectoryLogger(),
+  });
+  assert.ok(first.savedChars > 0, "the first call must reclaim something for this test to mean anything");
+  const afterFirst = JSON.stringify(first.messages).length;
+
+  // Second call, seeded with the first call's own output — the loop's next
+  // iteration. Anything already reclaimed must stay reclaimed.
+  const second = await ctx.onBeforeModelCall({
+    workspaceRoot: "/tmp/ws", runId: "r-persist", sessionId: "s1", traceId: "t1",
+    messages: first.messages, softCap: 1_000, trajectoryLogger: makeTrajectoryLogger(),
+  });
+  assert.equal(
+    JSON.stringify(second.messages).length,
+    afterFirst,
+    "a conversation that was already compacted must not shrink again on the next call",
+  );
+});
+
+test("the working set handed back is what the model would see, not a copy", async () => {
+  loadFreshConfig();
+  const ctx = createContextEngineeringHooks();
+  const messages: any[] = [];
+  for (let i = 0; i < 40; i += 1) {
+    messages.push({
+      role: "assistant",
+      content: "",
+      tool_calls: [{ id: `t-${i}`, type: "function", function: { name: "bash", arguments: "{}" } }],
+    });
+    // Sized to clear the pruning floor: the pass has a minimum-savings
+    // threshold (`shakeMinSavingsChars`), so a fixture of small outputs would
+    // correctly decline to fire and prove nothing.
+    messages.push({ role: "tool", tool_call_id: `t-${i}`, content: `RESULT-${i} ` + "q".repeat(20_000) });
+  }
+  const result = await ctx.onBeforeModelCall({
+    workspaceRoot: "/tmp/ws", runId: "r-return", sessionId: "s1", traceId: "t1",
+    messages, softCap: 2_000, trajectoryLogger: makeTrajectoryLogger(),
+  });
+  // The returned array is what the engine hands to the provider on this turn:
+  // every entry must still be a well-formed message, and the bulk must be gone.
+  for (const message of result.messages as any[]) {
+    assert.equal(typeof message.role, "string", "every message the model sees must keep its role");
+    assert.equal(typeof message.content, "string", "and its content");
+  }
+  /*
+   * Measured against a fresh copy, not the input array.
+   *
+   * The wiring hands back the same array it was given, compacted in place, so
+   * `messages` here already reflects the result — `JSON.stringify(messages)`
+   * and `JSON.stringify(result.messages)` are the same string. That is not a
+   * defect (the engine replaces its conversation from the returned value and
+   * never reads the old one), but it does mean a test that compares the two
+   * proves nothing. The expectation is a fixed budget instead.
+   */
+  const after = JSON.stringify(result.messages).length;
+  assert.ok(after < 40 * 21_000 / 10, `expected a large reduction from ~840k, got ${after}`);
+
+  /*
+   * The newest tool result survives intact, and that is not an oversight.
+   *
+   * These passes protect a recent window (`shakeProtectWindowChars`, 64k by
+   * default) so the result the model is about to reason about is never the one
+   * that gets thrown away. A test asserting the *largest* message shrinks would
+   * fail here and be wrong: measured, the newest 20k result is preserved while
+   * thirty-nine older ones are shaken to nothing.
+   */
+  const newest = (result.messages as any[]).find((m) => typeof m.content === "string" && m.content.startsWith("RESULT-39"));
+  assert.ok(newest, "the most recent tool result must survive the pass");
+});
+
+test("handoff compaction reports under its own technique, not as a plain summary", async () => {
+  const cfg = loadFreshConfig();
+  // handoff is off by default; this test is about the label, so turn it on.
+  cfg.contextManagement = { ...(cfg.contextManagement ?? {}), handoffEnabled: true };
+  applyConfigToTunables(cfg);
+  const runId = "r-handoff-label";
+  clearRunState(runId);
+  const events: ContextEventPayload[] = [];
+  const ctx = createContextEngineeringHooks({
+    infer: async () => "<summary>Condensed the session into the four required sections with enough text to clear the gate.</summary>",
+    onContextEvent: (event) => { events.push(event); },
+  });
+  const result = await ctx.onBeforeModelCall({
+    workspaceRoot: "/tmp/ws", runId, sessionId: "s1", traceId: "t1",
+    messages: [
+      { role: "system", content: "stable system prompt" },
+      { role: "user", content: "current task" },
+      { role: "assistant", content: "x".repeat(4_000_000) },
+    ],
+    softCap: 270_000,
+    trajectoryLogger: makeTrajectoryLogger(),
+  });
+  assert.equal(result.fullSummarized, true);
+  const techniques = new Set(events.map((event) => event.technique));
+  assert.equal(
+    techniques.has("handoff_summary"),
+    true,
+    `a handoff must not be reported as a plain summary; saw ${[...techniques].join(",")}`,
+  );
+});
+
+/**
+ * A compaction pass must never leave a tool message whose `content` is not a
+ * string.
+ *
+ * `compactToolHistory` renders some tool families into a *record* — the shape
+ * the tool-result renderer wants — and the wiring assigned that record straight
+ * into `content`, which the provider expects to be text. Spreading a string
+ * into an object does not throw, it succeeds: `{..."RESULT"}` is
+ * `{"0":"R","1":"E",…}`. Measured on a 60-result tool loop, a 15-character tool
+ * message became a 229KB JSON object with one key per character, and the
+ * "compacted" conversation came out 53% *larger* than the original — the exact
+ * opposite of the pass's purpose.
+ *
+ * `microcompact` had the same defect for repeated shell commands, where it
+ * spread `r.output` (a string, on the conversation path) into an object to
+ * overwrite `stdout` and `stderr`.
+ */
+test("no compaction pass leaves a non-string tool content", async () => {
+  loadFreshConfig();
+  const ctx = createContextEngineeringHooks();
+  const messages: any[] = [];
+  for (let i = 0; i < 60; i += 1) {
+    // The same command every time, which is what triggers microcompact's
+    // repeated-shell-output strategy as well as the tool-history compactor.
+    messages.push({
+      role: "assistant",
+      content: "Running a command.",
+      tool_calls: [{ id: `t-${i}`, type: "function", function: { name: "bash", arguments: "{}" } }],
+    });
+    messages.push({ role: "tool", tool_call_id: `t-${i}`, content: `RESULT-${i} ` + "x".repeat(20_000) });
+  }
+  const charsBefore = JSON.stringify(messages).length;
+  const result = await ctx.onBeforeModelCall({
+    workspaceRoot: "/tmp/ws",
+    runId: "r-shape",
+    sessionId: "s1",
+    traceId: "t1",
+    messages,
+    softCap: 270_000,
+    trajectoryLogger: makeTrajectoryLogger(),
+  });
+
+  for (const message of result.messages as any[]) {
+    assert.equal(
+      typeof message.content,
+      "string",
+      `a ${message.role} message came back with ${Array.isArray(message.content) ? "array" : typeof message.content} content`,
+    );
+  }
+  const charsAfter = JSON.stringify(result.messages).length;
+  assert.ok(
+    charsAfter < charsBefore,
+    `compaction grew the conversation: ${charsBefore} -> ${charsAfter} characters`,
+  );
+  // The specific signature of the spread bug: a content object whose keys are
+  // consecutive integer strings.
+  assert.doesNotMatch(
+    JSON.stringify(result.messages),
+    /"content":\{"0":/,
+    "a tool result was turned into a character-indexed object",
+  );
+});
+
+/**
+ * The savings journal must be append-only and must record every technique that
+ * reclaimed something.
+ *
+ * `recordCompactionSavings` existed with no caller anywhere in the tree: the
+ * file it writes was never created by a real run, so a session's context
+ * history was unreadable after the fact even though the machinery to keep it
+ * was present. These tests pin the writer to the events, and pin the two
+ * filters that keep the file meaningful — only completed work, and only work
+ * that actually freed something.
+ */
+test("completed operations are appended to the savings journal, in order", async () => {
+  loadFreshConfig();
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "reaper-savings-"));
+  try {
+    const { recordCompactionSavings, readSavingsJournal } = await import("../../src/context/session-journal.js");
+    await recordCompactionSavings(workspaceRoot, { ts: 1, session: "s", kind: "shake", savedChars: 100 });
+    await recordCompactionSavings(workspaceRoot, { ts: 2, session: "s", kind: "full_summary", savedChars: 900, detail: "rewrote the middle" });
+    await recordCompactionSavings(workspaceRoot, { ts: 3, session: "other", kind: "tool_history", savedChars: 50 });
+
+    const rows = readSavingsJournal(workspaceRoot);
+    assert.equal(rows.length, 3, "every appended line must be readable back");
+    assert.deepEqual(
+      rows.map((row) => row.kind),
+      ["shake", "full_summary", "tool_history"],
+      "the journal is chronological: appended order is read order",
+    );
+
+    // The filters a reader uses, which the session-scoped view depends on.
+    assert.equal(readSavingsJournal(workspaceRoot, { session: "s" }).length, 2);
+    assert.equal(readSavingsJournal(workspaceRoot, { sinceMs: 2 }).length, 2);
+
+    // Append-only: writing more never rewrites what is there.
+    await recordCompactionSavings(workspaceRoot, { ts: 4, session: "s", kind: "bash_head_tail", savedChars: 10 });
+    assert.deepEqual(
+      readSavingsJournal(workspaceRoot).map((row) => row.ts),
+      [1, 2, 3, 4],
+      "an earlier line must never be modified or removed",
+    );
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
 });

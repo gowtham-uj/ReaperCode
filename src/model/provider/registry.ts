@@ -38,22 +38,22 @@ import type {
  */
 const LEGACY_ENV_FALLBACKS: Record<string, string[]> = {
   ANTHROPIC_API_KEY: ["ANTHROPIC_AUTH_TOKEN"],
-  OPENAI_API_KEY: ["ANTHROPIC_AUTH_TOKEN"],
-  MINIMAX_API_KEY: ["ANTHROPIC_AUTH_TOKEN"],
 };
 
 /**
  * Read the API key for a provider, respecting legacy fallbacks.
  * Returns `undefined` when no key is available.
  */
-function readApiKey(envVar: string): string | undefined {
-  const direct = process.env[envVar];
-  if (direct && direct.trim().length > 0) return direct;
-  const fallbacks = LEGACY_ENV_FALLBACKS[envVar];
-  if (fallbacks) {
-    for (const alias of fallbacks) {
-      const v = process.env[alias];
-      if (v && v.trim().length > 0) return v;
+function readApiKey(envVars: string | string[]): string | undefined {
+  for (const envVar of Array.isArray(envVars) ? envVars : [envVars]) {
+    const direct = process.env[envVar];
+    if (direct && direct.trim().length > 0) return direct;
+    const fallbacks = LEGACY_ENV_FALLBACKS[envVar];
+    if (fallbacks) {
+      for (const alias of fallbacks) {
+        const value = process.env[alias];
+        if (value && value.trim().length > 0) return value;
+      }
     }
   }
   return undefined;
@@ -67,11 +67,11 @@ function readApiKey(envVar: string): string | undefined {
 export function resolveProvider(
   descriptor: ProviderDescriptor,
 ): ResolvedProvider {
-  const apiKey = readApiKey(descriptor.envVar);
+  const envVars = descriptor.envVars ?? (descriptor.envVar ? [descriptor.envVar] : []);
+  const apiKey = readApiKey(envVars);
   if (!apiKey) {
     throw new Error(
-      `provider "${descriptor.id}" requires ${descriptor.envVar} ` +
-        `(or ANTHROPIC_AUTH_TOKEN) in the environment`,
+      `provider "${descriptor.id}" requires one of ${envVars.join(", ") || "its configured credentials"}`,
     );
   }
   return { descriptor, apiKey };
@@ -173,7 +173,7 @@ export function resolveModelFromCatalog(args: {
  */
 export function autoDetectProvider(): ProviderDescriptor | undefined {
   for (const descriptor of PROVIDER_CATALOG) {
-    if (readApiKey(descriptor.envVar)) return descriptor;
+    if (readApiKey(descriptor.envVars ?? descriptor.envVar)) return descriptor;
   }
   return undefined;
 }

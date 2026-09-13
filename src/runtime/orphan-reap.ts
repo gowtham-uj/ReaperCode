@@ -108,7 +108,7 @@ export async function reapOrphansFromPreviousRun(
       return { status: "no-previous-run", durationMs: Date.now() - startedAt };
     }
     parseError = error instanceof Error ? error.message : String(error);
-    log(`latest-run.json at ${pointerPath} is unreadable: ${parseError}; falling back to mtime scan of .reaper/logs/*/processes.json`);
+    log(`latest-run.json at ${pointerPath} is unreadable: ${parseError}; falling back to mtime scan of .reaper/sessions/*/processes.json and the legacy .reaper/logs/* path`);
   }
   if (parseError) {
     return await fallbackReapFromRunsDir(scratchpadRoot, currentRunId, log, startedAt, parseError);
@@ -126,7 +126,9 @@ export async function reapOrphansFromPreviousRun(
   }
 
   const manifestPath = path.join(previousRunDir, "processes.json");
-  const currentRunDir = path.join(scratchpadRoot, "logs", currentRunId);
+  // New runs log the reap under `.reaper/sessions`; the manifest pointer above
+  // may still point at the legacy `logs/` directory, which remains readable.
+  const currentRunDir = path.join(scratchpadRoot, "sessions", currentRunId);
   const result = await BackgroundProcessManager.reapOrphansFromManifest(manifestPath, {
     logDir: currentRunDir,
   });
@@ -154,10 +156,11 @@ export async function reapOrphansFromPreviousRun(
 }
 
 /**
- * Fallback when latest-run.json is missing or unreadable: scan the
- * .reaper/logs directory for processes.json manifests by mtime and
- * reap the most recent previous run. This keeps orphan-reap working
- * when the pointer file is corrupt or was hand-edited.
+ * Fallback when latest-run.json is missing or unreadable.
+ *
+ * New runs live under `.reaper/sessions`; older builds wrote `.reaper/logs`.
+ * Scan both by mtime and reap the newest manifest, so changing the directory's
+ * name does not turn a corrupt pointer into a process leak for an old thread.
  */
 async function fallbackReapFromRunsDir(
   scratchpadRoot: string,
@@ -167,36 +170,45 @@ async function fallbackReapFromRunsDir(
   pointerError: string,
 ): Promise<OrphanReapOutcome> {
   const { readdirSync, statSync } = await import("node:fs");
-  const runsRoot = path.join(scratchpadRoot, "logs");
-  let entries: { runId: string; runDir: string; mtimeMs: number }[] = [];
-  try {
-    const names = readdirSync(runsRoot);
-    for (const name of names) {
-      if (name === currentRunId) continue;
-      const manifestPath = path.join(runsRoot, name, "processes.json");
-      let mtimeMs = 0;
-      try {
-        mtimeMs = statSync(manifestPath).mtimeMs;
-      } catch {
-        continue;
+  const roots = [path.join(scratchpadRoot, "sessions"), path.join(scratchpadRoot, "logs")];
+  const entries: { runId: string; runDir: string; mtimeMs: number }[] = [];
+  let readableRoot = false;
+
+  for (const runsRoot of roots) {
+    try {
+      const names = readdirSync(runsRoot);
+      readableRoot = true;
+      for (const name of names) {
+        if (name === currentRunId) continue;
+        const manifestPath = path.join(runsRoot, name, "processes.json");
+        try {
+          entries.push({
+            runId: name,
+            runDir: path.join(runsRoot, name),
+            mtimeMs: statSync(manifestPath).mtimeMs,
+          });
+        } catch {
+          // This run never started a background process. Nothing to reap.
+        }
       }
-      entries.push({ runId: name, runDir: path.join(runsRoot, name), mtimeMs });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        log(`runs-dir scan failed for ${runsRoot}: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
-  } catch (error) {
-    log(`runs-dir scan failed: ${error instanceof Error ? error.message : String(error)}`);
-    return { status: "no-previous-run", reason: pointerError, durationMs: Date.now() - startedAt };
   }
-  if (entries.length === 0) {
+
+  if (!readableRoot || entries.length === 0) {
     return { status: "no-previous-run", reason: pointerError, durationMs: Date.now() - startedAt };
   }
   entries.sort((a, b) => b.mtimeMs - a.mtimeMs);
   const mostRecent = entries[0]!;
   const manifestPath = path.join(mostRecent.runDir, "processes.json");
-  const currentRunDir = path.join(runsRoot, currentRunId);
+  const currentRunDir = path.join(scratchpadRoot, "sessions", currentRunId);
   const result = await BackgroundProcessManager.reapOrphansFromManifest(manifestPath, {
     logDir: currentRunDir,
   });
-  log(`reaped ${result.reaped} orphan process(es) via runs-dir fallback from ${mostRecent.runId}`);
+  log(`reaped ${result.reaped} orphan process(es) via sessions-dir fallback from ${mostRecent.runId}`);
   return {
     status: result.reaped + result.skipped + result.missing === 0 ? "manifest-missing" : "reaped",
     reason: pointerError,

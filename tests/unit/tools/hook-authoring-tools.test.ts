@@ -18,7 +18,7 @@ import {
   handleUpdateHook,
   handleApproveHook,
   handleUninstallHook,
-  handleReloadHooks,
+  handleHookManager,
   type HookToolDeps,
 } from "../../../src/tools/write/hook-tools.js";
 
@@ -279,16 +279,87 @@ test("uninstall_hook removes from disk + HookRunner", async () => {
   }
 });
 
-test("reload_hooks re-walks the disk", async () => {
+test("hook_manager re-walks the disk before every action", async () => {
+  // `reload_hooks` existed for exactly this case: a hook file that appeared
+  // after boot. The manager now walks the install dirs itself. The first
+  // lifecycle writes but knows nothing; the second is constructed over the same
+  // roots and can only learn about the hook by discovering it.
   const ctx = setup();
   try {
-    await handleCreateHook(
+    // Constructed first, so its constructor-time walk happens while the hooks
+    // dir is still empty. It can therefore only learn about the hook below if
+    // the manager re-walks.
+    const cold = new HookLifecycle({ runner: ctx.runner, workspaceRoot: ctx.workspaceRoot, userHome: ctx.userHome });
+    const first = new HookLifecycle({ runner: new HookRunner(), workspaceRoot: ctx.workspaceRoot, userHome: ctx.userHome });
+    const created = await handleCreateHook(
       { id: "reloadable", event: "PreToolUse", description: "x", source: VALID_OBSERVE_SOURCE, enforce: false, scope: "project" },
+      { lifecycle: first },
+    );
+    assert.equal(created.ok, true);
+    assert.equal(cold.get("reloadable"), null, "the cold lifecycle must be empty for this test to prove anything");
+
+    const listed = await handleHookManager({ action: "list" }, { lifecycle: cold });
+    const ids = (listed as { hooks: Array<{ id: string }> }).hooks.map((h) => h.id);
+    assert.deepEqual(ids, ["reloadable"]);
+  } finally {
+    ctx.cleanup();
+  }
+});
+
+test("hook_manager dispatches every action, and refuses an unnamed one", async () => {
+  const ctx = setup();
+  try {
+    const created = await handleHookManager(
+      { action: "create", id: "managed-hook", event: "PreToolUse", description: "x", source: VALID_OBSERVE_SOURCE, enforce: false, scope: "project" },
       ctx.deps,
     );
-    const r = handleReloadHooks({}, ctx.deps);
-    assert.equal(r.ok, true);
-    assert.ok(r.loaded >= 1);
+    assert.equal((created as { ok: boolean }).ok, true);
+
+    const listed = await handleHookManager({ action: "list", scope: "project" }, ctx.deps);
+    assert.deepEqual((listed as { hooks: Array<{ id: string }> }).hooks.map((h) => h.id), ["managed-hook"]);
+
+    const updated = await handleHookManager(
+      { action: "update", id: "managed-hook", source: VALID_BLOCK_SOURCE },
+      ctx.deps,
+    );
+    assert.equal((updated as { ok: boolean }).ok, true);
+
+    // No approval requester is wired into this harness, and without one the
+    // lifecycle fails closed for any hook that could block — so `approve` here
+    // is only reachable because `enforce` is false throughout.
+    const approved = await handleHookManager({ action: "approve", id: "managed-hook" }, ctx.deps);
+    assert.equal((approved as { ok: boolean }).ok, true);
+
+    // Uninstalling a hook that is no longer a draft is gated, and the gate
+    // fails closed without a requester.
+    const gated = await handleHookManager({ action: "uninstall", id: "managed-hook" }, ctx.deps);
+    assert.equal((gated as { ok: boolean }).ok, false);
+    assert.match(String((gated as { error?: string }).error), /requires approval/);
+
+    // The requester is a lifecycle option, not a tool dep, so the approval path
+    // needs a lifecycle constructed with one. The manager's own discover() is
+    // what lets this second lifecycle see a hook it never created.
+    const approving = new HookLifecycle({
+      runner: ctx.runner,
+      workspaceRoot: ctx.workspaceRoot,
+      userHome: ctx.userHome,
+      approvalRequester: async () => true,
+    });
+    const hookFile = join(ctx.workspaceRoot, ".reaper", "hooks", "managed-hook.json");
+    assert.ok(existsSync(hookFile), "the approved hook should have been persisted");
+    const uninstalled = await handleHookManager({ action: "uninstall", id: "managed-hook" }, { lifecycle: approving });
+    assert.equal((uninstalled as { ok: boolean }).ok, true);
+    assert.equal(existsSync(hookFile), false, "uninstall must remove the hook file from disk");
+
+    // `scope` is shared between `create` and `list`, and its manager-level enum
+    // is wider because `list` alone accepts "all". A `create` that asks for it
+    // must be refused by the strict re-parse, not silently scoped somewhere.
+    const mismatched = await handleHookManager(
+      { action: "create", id: "all-scoped", event: "PreToolUse", description: "x", source: VALID_OBSERVE_SOURCE, enforce: false, scope: "all" } as never,
+      ctx.deps,
+    );
+    assert.equal((mismatched as { ok: boolean }).ok, false);
+    assert.match(String((mismatched as { error?: string }).error), /scope/);
   } finally {
     ctx.cleanup();
   }

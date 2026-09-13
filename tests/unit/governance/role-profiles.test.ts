@@ -57,7 +57,7 @@ test("reviewer cannot edit (write_file / edit_file / file_edit)", () => {
 });
 
 test("reviewer can read and run shell (read-only inspection)", () => {
-  for (const tool of ["file_view", "view_file", "grep_search", "list_directory", "bash"]) {
+  for (const tool of ["file_view", "grep_search", "list_directory", "bash"]) {
     assert.equal(roleAllowsTool("reviewer", tool), true);
   }
 });

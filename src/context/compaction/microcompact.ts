@@ -35,7 +35,7 @@ export function microcompact(input: MicrocompactInput): MicrocompactOutput {
   const seenOutputs = new Map<string, number>();
   for (let i = 0; i < results.length; i++) {
     const r = results[i]!;
-    if (!r.ok || !["file_view", "file_scroll", "view_file", "list_directory", "grep_search", "skim_file"].includes(r.name)) continue;
+    if (!r.ok || !["file_view", "list_directory", "grep_search", "skim_file"].includes(r.name)) continue;
     const key = outputKey(r);
     const prevIndex = seenOutputs.get(key);
     if (prevIndex !== undefined && prevIndex < i) {
@@ -55,7 +55,7 @@ export function microcompact(input: MicrocompactInput): MicrocompactOutput {
   const perItemBudget = Math.max(2000, Math.floor(targetOutputChars / Math.max(1, results.filter((r) => r.ok).length)));
   for (let i = 0; i < results.length; i++) {
     const r = results[i]!;
-    if (!r.ok || (r.name !== "file_view" && r.name !== "view_file")) continue;
+    if (!r.ok || (r.name !== "file_view")) continue;
     const chars = estimateChars(r);
     if (chars > perItemBudget) {
       const originalChars = chars;
@@ -72,10 +72,24 @@ export function microcompact(input: MicrocompactInput): MicrocompactOutput {
     const key = shellOutputKey(r);
     if (seenShellOutputs.has(key)) {
       const originalChars = estimateChars(r);
-      results[i] = {
-        ...r,
-        output: { ...(r.output as object), stdout: "[same as earlier]", stderr: "[same as earlier]" },
-      };
+      /*
+       * Only a structured `output` can have its `stdout`/`stderr` replaced.
+       *
+       * `r.output` is frequently a plain string — that is what the engine holds
+       * for a tool message pulled back out of the conversation — and spreading a
+       * string into an object does not fail, it *succeeds*: `{..."ab"}` is
+       * `{"0":"a","1":"b"}`. A 20k-character shell result became a 229KB object
+       * with one key per character, so the "compaction" made the conversation
+       * larger and handed the provider a JSON blob where it expected text. A
+       * string is replaced wholesale instead, which is the same claim ("this
+       * output was seen before") in a form the model can actually read.
+       */
+      results[i] = typeof r.output === "string"
+        ? { ...r, output: "[same as earlier]" }
+        : {
+            ...r,
+            output: { ...(r.output as Record<string, unknown>), stdout: "[same as earlier]", stderr: "[same as earlier]" },
+          };
       reducedChars += originalChars - estimateChars(results[i]!);
     } else {
       seenShellOutputs.add(key);

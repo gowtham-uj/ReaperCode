@@ -13,7 +13,7 @@
  * whenToUse: When to use
  * disableAutoInvocation: false
  * arguments: [a, b]
- * allowedTools: [view_file, run_tests]
+ * allowedTools: [file_view, run_tests]
  * validation: { commands: [{id, command, cwd?}] }
  * memoryPolicy: { mayReadProjectMemory: true, mayWriteProjectMemory: true, mayReadUserMemory: false, mayWriteUserMemory: false }
  * version: 1

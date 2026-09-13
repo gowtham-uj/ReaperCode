@@ -2,6 +2,8 @@ import { readdir, readFile, stat, writeFile, rm, mkdir, cp, symlink } from "node
 import path from "node:path";
 
 import { normalizeWorkspacePath, relativeWorkspacePath } from "../policy/paths.js";
+import { collectGrepMatches, compileGrepPattern } from "../tools/read/grep-search.js";
+import { assertDeletableTarget } from "../tools/write/delete-file.js";
 import { replaceExactString, replaceLineRange } from "../tools/write/replace-in-file.js";
 import { findOwningRoot } from "../workspace/roots.js";
 
@@ -59,6 +61,16 @@ export class WriteAheadLog {
     return normalizeWorkspacePath(this.primaryRoot, targetPath);
   }
 
+  /**
+   * The workspace root a path will live under, whether the caller named it
+   * absolutely or relative to the primary root. (`resolvePath` above answers a
+   * different question — for a relative path it returns the absolute path, not
+   * a root — so it cannot be reused here without lying about which is which.)
+   */
+  private rootFor(targetPath: string): string {
+    return path.isAbsolute(targetPath) ? findOwningRoot(this.workspaceRoots, targetPath) : this.primaryRoot;
+  }
+
   private getAbsolutePath(targetPath: string): string {
     if (path.isAbsolute(targetPath)) {
       const root = this.resolvePath(targetPath);
@@ -76,6 +88,16 @@ export class WriteAheadLog {
 
   async stageDelete(targetPath: string): Promise<void> {
     const absolutePath = this.getAbsolutePath(targetPath);
+
+    // The WAL is what actually runs `rm(…, { recursive: true })` at flush time,
+    // so the WAL has to own the guard. The executor refuses a directory before
+    // it stages one — but that is a caller in a different file, and guarding
+    // one route while the writable one lives elsewhere is the exact arrangement
+    // that kept `grep_search`'s bug alive in this same recovery twin after the
+    // direct copy would have been fixed. Verified before this line existed:
+    // `stageDelete("src")` + `flush()` removed `src/a.ts` and `src/nested/b.ts`.
+    await assertDeletableTarget(this.rootFor(targetPath), absolutePath, targetPath);
+
     const existing = this.entries.get(absolutePath);
     const baseContent = existing?.baseContent ?? (await this.readDiskOrNull(absolutePath));
     this.entries.set(absolutePath, { path: absolutePath, baseContent, stagedContent: null });
@@ -156,31 +178,64 @@ export class WriteAheadLog {
 
   async grepSearch(args: { pattern: string; path?: string; include?: string }): Promise<{ root: string; matches: Array<{ path: string; line: number; text: string }> }> {
     const searchRoot = args.path ? this.getAbsolutePath(args.path) : this.primaryRoot;
-    const regex = new RegExp(args.pattern, "gm");
-    const includeMatcher = args.include ? globToRegExp(args.include) : undefined;
-    const files = await this.walk(searchRoot);
-    const matches: Array<{ path: string; line: number; text: string }> = [];
 
+    // `path` may name a single file, which `walk` below cannot see: it starts
+    // with `readdir(dir).catch(() => [])`, so a file path read as a directory
+    // yielded an empty list and the call returned `ok: true` with zero
+    // matches — the same answer a genuine miss gives. A model searching one
+    // file was told "nothing found" for a file full of matches.
+    const targets = await this.grepTargets(searchRoot);
+    const includeMatcher = args.include ? globToRegExp(args.include) : undefined;
     const owningRoot = this.resolvePath(searchRoot);
 
-    for (const filePath of files) {
-      const rel = relativeWorkspacePath(owningRoot, filePath);
-      if (includeMatcher && !includeMatcher.test(rel)) {
-        continue;
-      }
+    const searchable = includeMatcher
+      ? targets.filter((filePath) => includeMatcher.test(relativeWorkspacePath(owningRoot, filePath)))
+      : targets;
 
-      const content = await this.readText(filePath); // Absolute
-      const lines = content.split(/\r?\n/);
-      for (let index = 0; index < lines.length; index += 1) {
-        const line = lines[index]!;
-        regex.lastIndex = 0;
-        if (regex.test(line)) {
-          matches.push({ path: filePath, line: index + 1, text: line });
-        }
-      }
-    }
+    const matches = await collectGrepMatches(searchable, compileGrepPattern(args.pattern), (filePath) =>
+      // `readText` overlays staged content on disk content, which is what keeps
+      // a grep inside a recovery session consistent with the edits it has made.
+      this.readText(filePath),
+    );
 
     return { root: searchRoot, matches };
+  }
+
+  /**
+   * The files a `grepSearch` should read: either the single file `path` named,
+   * or everything under the directory it named.
+   *
+   * The file case has to consult the staged entries as well as the disk,
+   * because a file created during the session exists only in the WAL. Missing
+   * that would make grep blind to the model's own new files while a recovery
+   * session is open — the same class of confidently-empty answer this method
+   * exists to prevent.
+   */
+  private async grepTargets(searchRoot: string): Promise<string[]> {
+    const staged = this.entries.get(searchRoot);
+    if (staged) {
+      // Staged for deletion: the file is gone as far as this session is
+      // concerned, so there is nothing to match. Falling through to disk would
+      // grep the pre-deletion content, which is the version the model is
+      // actively editing away from.
+      if (staged.stagedContent === null) return [];
+      return [searchRoot];
+    }
+
+    const info = await stat(searchRoot).catch(() => undefined);
+    if (info?.isFile()) return [searchRoot];
+
+    const targets = await this.walk(searchRoot);
+
+    // A path that is neither on disk nor staged matched nothing because it does
+    // not exist — not because it was searched and came up empty. `walk` starts
+    // with `readdir(dir).catch(() => [])`, so without this check the two are
+    // the same answer, and the model cannot tell a typo from a miss.
+    if (targets.length === 0 && !info) {
+      throw Object.assign(new Error(`No such file or directory: '${searchRoot}'.`), { code: "not_found" });
+    }
+
+    return targets;
   }
 
   async flush(): Promise<{ written: number; deleted: number }> {

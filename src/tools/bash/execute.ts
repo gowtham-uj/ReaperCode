@@ -73,6 +73,27 @@ function toBashOutput(result: ForegroundShellResult): BashOutput {
   };
 }
 
+/**
+ * Name the file that holds everything the command produced.
+ *
+ * The tool's in-memory buffer is bounded, so the artifact written after the
+ * fact is a slice of the output and not the whole of it. The complete stream is
+ * in the process log, which bash writes to as the command runs. Handing the
+ * model the complete path is the difference between an analysis of the log and
+ * an analysis of the last 256KB of it.
+ */
+function withFullOutputPointer(
+  output: BashOutput,
+  result: ForegroundShellResult & { fullOutputPath?: string; fullOutputSize?: number },
+): BashOutput {
+  if (!result.fullOutputPath) return output;
+  return {
+    ...output,
+    full_output_path: result.fullOutputPath,
+    ...(result.fullOutputSize !== undefined ? { full_output_size: result.fullOutputSize } : {}),
+  };
+}
+
 function backgroundToBashOutput(result: BackgroundShellResult, runtime: { toolCallId: string }): BashExecutionResult {
   const taskId = result.logPath ?? `bg-${runtime.toolCallId}`;
   return {
@@ -137,6 +158,29 @@ export async function executeBashCommand(
 
   let output = toBashOutput(raw);
 
+  /*
+   * The process log is the complete output, and it is about to be forgotten.
+   *
+   * `toBashOutput` maps the shell's `logPath` — the file bash appended every
+   * chunk to as the command ran — onto `persisted_output_path`. The block below
+   * then overwrites that field with a *second*, bounded file written from the
+   * in-memory buffer, because the buffer is capped and cannot hold a large
+   * command's output.
+   *
+   * So the only pointer to the complete output was being replaced by a pointer
+   * to a small slice of it, and the notice handed to the model called that
+   * slice "full output". Measured on `cat` of a 42MB log: the artifact held
+   * 262,112 bytes, the process log held all 42,734,826, and
+   * `persisted_output_path` was `undefined` in the result — so a caller could
+   * not even reach the 0.62% it claimed to have.
+   *
+   * The complete path and its true size are captured here, before the
+   * overwrite, and travel to the model as `full_output_path` /
+   * `full_output_size`.
+   */
+  const fullOutputPath = output.persisted_output_path;
+  const fullOutputSize = raw.persistedOutputSize;
+
   const totalChars = (output.stdout?.length ?? 0) + (output.stderr?.length ?? 0);
   if (totalChars > BASH_INPUT_DEFAULTS.PERSIST_THRESHOLD_CHARS) {
     const persisted = await persistBashOutput(output.stdout, output.stderr, ctx.workspaceRoot);
@@ -150,6 +194,12 @@ export async function executeBashCommand(
       tail_available: persisted.tailAvailable,
     } as BashOutput;
   }
+
+  output = withFullOutputPointer(output, {
+    ...raw,
+    ...(fullOutputPath ? { fullOutputPath } : {}),
+    ...(fullOutputSize !== undefined ? { fullOutputSize } : {}),
+  });
 
   if (partialAccumulator) {
     partialAccumulator.append(`${output.stdout ?? ""}${output.stderr ? `\n${output.stderr}` : ""}`);

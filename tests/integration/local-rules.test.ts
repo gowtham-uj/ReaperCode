@@ -40,6 +40,6 @@ test("rules.local.md loading is audited with hash provenance", async () => {
   });
 
   await executor.execute({ id: "1", name: "bash", args: { cmd: "node -e \"console.log('ok')\"", timeout: 60} });
-  const audit = await readFile(path.join(workspaceRoot, ".reaper", "logs", "reaper-audit.jsonl"), "utf8");
+  const audit = await readFile(path.join(workspaceRoot, ".reaper", "sessions", "reaper-audit.jsonl"), "utf8");
   assert.match(audit, /rules.local.md/);
 });

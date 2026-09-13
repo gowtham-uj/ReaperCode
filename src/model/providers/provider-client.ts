@@ -12,8 +12,11 @@ import { CerebrasClient } from "./cerebras.js";
 import { DeepSeekClient } from "./deepseek.js";
 import { LiteLLMProviderClient, type LiteLLMGatewayOptions } from "./litellm-gateway.js";
 import { CodexResponsesClient } from "./codex-responses.js";
+import { AiSdkProviderClient, type AiSdkClientOptions } from "./ai-sdk-client.js";
+import { getModelsDevCatalog } from "../provider/models-dev-catalog.js";
 import {
   bindProvidersToFamily,
+  listRegisteredProviders,
   registerFamily,
   resolveProviderClient,
 } from "../provider-registry.js";
@@ -23,6 +26,9 @@ export interface ProviderClientOptions extends LiteLLMGatewayOptions {
   cerebras?: CerebrasClient;
   anthropic?: AnthropicClient;
   openAiCompatible?: LiteLLMProviderClient;
+  aiSdk?: AiSdkProviderClient;
+  /** Per-provider auth metadata resolver handed to the AI SDK transport. */
+  aiSdkOptions?: AiSdkClientOptions;
 }
 
 /**
@@ -46,6 +52,7 @@ export class ProviderMultiplexerClient implements ProviderModelClient {
   private readonly anthropic: AnthropicClient;
   private readonly openAiCompatible: LiteLLMProviderClient;
   private readonly codexResponses: CodexResponsesClient;
+  private readonly aiSdk: AiSdkProviderClient;
 
   constructor(options: ProviderClientOptions = {}) {
     this.deepseek = options.deepseek ?? new DeepSeekClient();
@@ -53,6 +60,7 @@ export class ProviderMultiplexerClient implements ProviderModelClient {
     this.anthropic = options.anthropic ?? new AnthropicClient();
     this.openAiCompatible = options.openAiCompatible ?? new LiteLLMProviderClient(options);
     this.codexResponses = new CodexResponsesClient();
+    this.aiSdk = options.aiSdk ?? new AiSdkProviderClient(options.aiSdkOptions ?? {});
 
     // Phase T3.15: register built-in families and provider-name
     // bindings. Re-registration is safe (it replaces the prior
@@ -96,6 +104,19 @@ export class ProviderMultiplexerClient implements ProviderModelClient {
     // broad openai-chat binding so it overrides the default.
     bindProvidersToFamily(["anthropic"], "anthropic-messages");
     registerFamily("anthropic-messages", () => this.anthropic);
+
+    // Every remaining catalog provider goes through the AI SDK transport.
+    // The legacy bindings above stay in place as overrides so existing
+    // configs keep the wire behavior they were tested against; catalog
+    // providers that no legacy client claims now resolve instead of
+    // falling through to the OpenAI-compatible default.
+    registerFamily("ai-sdk", () => this.aiSdk);
+    const claimed = new Set(listRegisteredProviders());
+    const catalogProviders = getModelsDevCatalog()
+      .providers()
+      .map((provider) => provider.id)
+      .filter((id) => !claimed.has(id));
+    bindProvidersToFamily(catalogProviders, "ai-sdk");
   }
 
   generate(request: GenerateRequest, profile: ResolvedModelProfile): Promise<GenerateResult> {
@@ -117,6 +138,7 @@ export class ProviderMultiplexerClient implements ProviderModelClient {
       this.anthropic,
       this.openAiCompatible,
       this.codexResponses,
+      this.aiSdk,
     ];
     await Promise.all([...new Set(clients)].map((client) => client.dispose?.()));
   }

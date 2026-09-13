@@ -153,7 +153,9 @@ The `executeTool` method has a switch on `call.name`. You need:
 
 - Either an entry in the normal switch (uses `toolRegistry[call.name]`).
 - Or, for special tools (viewer, MCP), an early bypass — see the `file_view`,
-  `file_scroll`, `file_find`, `file_edit` block for the pattern.
+  `file_find`, `file_edit` block for the pattern. (`file_scroll` is quoted
+  nowhere in the executor; it is an alias that `normalizeToolCall` rewrites to
+  `file_view` before dispatch, so only the three live names appear there.)
 
 If your tool needs pre-execution mutation checkpointing (see `src/runtime/checkpoints.ts`),
 make sure `batchNeedsMutationCheckpoint` recognizes the name — it uses `isMutatingTool`.

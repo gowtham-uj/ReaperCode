@@ -9,7 +9,7 @@
  * - structured output (typed JSON-schema responses)
  * - streaming
  *
- * A Codex/Claude/OpenCode-style agent picks the right strategy per
+ * An agent loop picks the right strategy per
  * model so the prompt format matches what the model can actually
  * parse. This module is the routing decision for that.
  *

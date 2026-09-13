@@ -18,7 +18,7 @@ import {
   handleEnableExtension,
   handleTrustExtension,
   handleUninstallExtension,
-  handleReloadExtensions,
+  handleExtensionManager,
   type ExtensionToolDeps,
   type ExtensionApprovalRequester,
 } from "../../../src/tools/write/extension-tools.js";
@@ -323,10 +323,15 @@ test("uninstall_extension removes from registry + disk", async () => {
   }
 });
 
-test("reload_extensions returns count", async () => {
+test("extension_manager re-walks the disk before every action", async () => {
+  // `reload_extensions` existed for exactly this case: an extension folder that
+  // appeared after boot. The manager now walks the install dirs itself, so a
+  // registry that has never discovered must still see what is on disk. A second
+  // registry over the same roots stands in for that — it is constructed empty,
+  // and only `discover()` can populate it.
   const ctx = setup();
   try {
-    await handleCreateExtension(
+    const created = await handleCreateExtension(
       {
         id: "reload-me",
         version: "1.0.0",
@@ -339,9 +344,80 @@ test("reload_extensions returns count", async () => {
       },
       ctx.deps,
     );
-    const r = handleReloadExtensions({}, ctx.deps);
-    assert.equal(r.ok, true);
-    assert.ok(r.loaded >= 1);
+    assert.equal(created.ok, true);
+
+    const cold = new ExtensionRegistry({
+      workspaceRoot: ctx.workspaceRoot,
+      userHome: ctx.userHome,
+      builtinRoot: join(ctx.tmp, "builtin"),
+    });
+    assert.equal(cold.get("reload-me"), null, "the cold registry must be empty for this test to prove anything");
+
+    const deps: ExtensionToolDeps = {
+      lifecycle: new ExtensionLifecycle(cold),
+      registry: cold,
+      workspaceRoot: ctx.workspaceRoot,
+      userHome: ctx.userHome,
+    };
+    const trusted = await handleExtensionManager({ action: "trust", id: "reload-me" }, deps);
+    assert.equal((trusted as { ok: boolean }).ok, true);
+    assert.equal(cold.get("reload-me")?.trust, "user-trusted");
+  } finally {
+    ctx.cleanup();
+  }
+});
+
+test("extension_manager dispatches every action, and refuses an unnamed one", async () => {
+  const ctx = setup();
+  try {
+    const created = await handleExtensionManager(
+      {
+        action: "create",
+        id: "managed-tool",
+        version: "1.0.0",
+        description: "x",
+        main: "main.js",
+        engines_reaper: "^1.0.0",
+        permissions: [],
+        source: MINIMAL_SOURCE,
+        scope: "project",
+      },
+      ctx.deps,
+    );
+    assert.equal((created as { ok: boolean }).ok, true);
+
+    // The manager forwards to the same lifecycle call the standalone tool used,
+    // so a manifest with no validation commands is still reported as a failure
+    // rather than a silent pass.
+    const validated = await handleExtensionManager({ action: "validate", id: "managed-tool" }, ctx.deps);
+    assert.equal((validated as { ok: boolean }).ok, false);
+    assert.match(String((validated as { error?: string }).error), /no validation commands/i);
+
+    const trusted = await handleExtensionManager({ action: "trust", id: "managed-tool", note: "reviewed" }, ctx.deps);
+    assert.equal((trusted as { ok: boolean }).ok, true);
+    assert.equal(ctx.deps.registry.get("managed-tool")?.trust, "user-trusted");
+
+    const uninstalled = await handleExtensionManager({ action: "uninstall", id: "managed-tool" }, ctx.deps);
+    assert.equal((uninstalled as { ok: boolean }).ok, true);
+    assert.equal(ctx.deps.registry.get("managed-tool"), null);
+
+    // `note` is a manager field that only `trust` reads, so a `create` carrying
+    // one is ignored rather than refused.
+    const noteCarrying = await handleExtensionManager(
+      { action: "create", id: "note-carrying", version: "1.0.0", description: "x", main: "main.js", engines_reaper: "^1.0.0", permissions: [], source: MINIMAL_SOURCE, scope: "project", note: "stray" } as never,
+      ctx.deps,
+    );
+    assert.equal((noteCarrying as { ok: boolean }).ok, true);
+
+    // The strict re-parse still has to bite on a key no create field owns —
+    // otherwise projecting out `action` would have quietly made the operation
+    // schemas permissive.
+    const misspelled = await handleExtensionManager(
+      { action: "create", id: "misspelled", version: "1.0.0", description: "x", main: "main.js", engines_reaper: "^1.0.0", permissions: [], source: MINIMAL_SOURCE, scope: "project", descripton: "x" } as never,
+      ctx.deps,
+    );
+    assert.equal((misspelled as { ok: boolean }).ok, false);
+    assert.match(String((misspelled as { error?: string }).error), /descripton/);
   } finally {
     ctx.cleanup();
   }

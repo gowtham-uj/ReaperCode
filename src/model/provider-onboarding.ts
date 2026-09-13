@@ -131,9 +131,9 @@ export function clearOnboarding(): void {
   }
   // Wipe every catalog-known provider env var so a re-run starts
   // from a clean slate. Backed by PROVIDER_CATALOG.
-  for (const p of PROVIDER_CATALOG) {
-    if (process.env[p.envVar]) {
-      delete process.env[p.envVar];
+  for (const provider of PROVIDER_CATALOG) {
+    for (const envVar of provider.envVars ?? [provider.envVar]) {
+      if (process.env[envVar]) delete process.env[envVar];
     }
   }
 }
@@ -146,8 +146,10 @@ export function clearOnboarding(): void {
 export function resolveProviderKey(provider: SupportedProviderId): string | undefined {
   const def = PROVIDER_CATALOG.find((p) => p.id === provider);
   if (!def) return undefined;
-  const envVal = process.env[def.envVar];
-  if (envVal && envVal.trim().length > 0) return envVal;
+  for (const envVar of def.envVars ?? [def.envVar]) {
+    const envVal = process.env[envVar];
+    if (envVal && envVal.trim().length > 0) return envVal;
+  }
   const saved = loadOnboarding();
   if (saved && saved.provider === provider) return saved.apiKey;
   return undefined;
@@ -158,9 +160,11 @@ export function resolveProviderKey(provider: SupportedProviderId): string | unde
  * one supported provider.
  */
 export function hasAnyAuth(): boolean {
-  for (const p of PROVIDER_CATALOG) {
-    const v = process.env[p.envVar];
-    if (v && v.trim().length > 0) return true;
+  for (const provider of PROVIDER_CATALOG) {
+    for (const envVar of provider.envVars ?? [provider.envVar]) {
+      const value = process.env[envVar];
+      if (value && value.trim().length > 0) return true;
+    }
   }
   const saved = loadOnboarding();
   return saved !== null && saved.apiKey.length > 0;

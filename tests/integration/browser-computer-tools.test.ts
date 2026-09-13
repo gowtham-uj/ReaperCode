@@ -102,37 +102,3 @@ test("browser_control navigates, types, clicks, and captures a screenshot", asyn
     await executor.cleanupBackgroundProcesses("test_cleanup");
   }
 });
-
-test("computer_control can click by viewport coordinate", async (t) => {
-  if (await skipIfBrowserUnavailable(t)) return;
-  const workspaceRoot = await createTempWorkspace();
-  const executor = await createExecutor(workspaceRoot);
-
-  try {
-    const html = `
-      <html>
-        <body>
-          <button style="position:absolute;left:20px;top:20px;width:120px;height:60px" onclick="document.querySelector('#out').textContent = 'coordinate clicked'">Hit</button>
-          <p id="out"></p>
-        </body>
-      </html>
-    `;
-
-    await executor.execute({
-      id: "browser-nav",
-      name: "browser_control",
-      args: { action: "navigate", url: `data:text/html,${encodeURIComponent(html)}`, width: 400, height: 300 },
-    });
-
-    const click = await executor.execute({
-      id: "computer-click",
-      name: "computer_control",
-      args: { action: "click", x: 80, y: 50, humanize: true },
-    });
-
-    assert.equal(click.ok, true);
-    assert.match(String((click.output as { text: string }).text), /coordinate clicked/);
-  } finally {
-    await executor.cleanupBackgroundProcesses("test_cleanup");
-  }
-});

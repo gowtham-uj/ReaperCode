@@ -4,9 +4,8 @@
  * stable: `ok` carries the boolean, `error` is a structured object with a
  * human-readable message, and tool-specific fields live alongside.
  *
- * Inspired by Codex / Claude Code / Hermes / OpenCode: tool results should be
- * uniform so the model can pattern-match on `ok: false` and read `error.code`
- * to recover from mistakes.
+ * Tool results are uniform so the model can pattern-match on `ok: false` and
+ * read `error.code` to recover from mistakes.
  */
 export type ToolErrorCode =
   | "not_found"

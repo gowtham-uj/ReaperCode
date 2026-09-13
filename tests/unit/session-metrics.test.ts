@@ -40,7 +40,10 @@ test("buildSessionMetricsSummary reports error for low-confidence clarification 
   assert.equal(summary.stop_reason, "error");
 });
 
-test("natural stop without explicit verification is not solved", () => {
+test("natural stop without explicit verification is neither solved nor an error", () => {
+  // Reporting "error" here made a turn that simply ran no test command — a
+  // question, a read-only answer — indistinguishable from a crashed run, and
+  // contradicted the "completed" outcome logged beside it.
   const summary = buildSessionMetricsSummary({
     toolResults: [],
     completionGateAttempts: 0,
@@ -48,7 +51,7 @@ test("natural stop without explicit verification is not solved", () => {
     verifiedCompletion: false,
   });
   assert.equal(summary.verified_completion, false);
-  assert.equal(summary.stop_reason, "error");
+  assert.equal(summary.stop_reason, "completed_unverified");
 });
 
 test("verified completion reports solved only when verification is true", () => {

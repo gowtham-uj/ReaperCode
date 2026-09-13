@@ -3,12 +3,17 @@ import type { AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
 import { WebSocketServer } from "ws";
 
+import { ProviderCredentialStore } from "../config/provider-credentials.js";
+import { ProviderIntegrationRegistry } from "../model/provider/integration-registry.js";
+import { PersistentMemoryStore } from "../adaptive/persistent-memory-store.js";
 import { assertSafeListener, authorizeUpgrade } from "./auth.js";
-import { AppServerConnection } from "./connection.js";
+import { AppServerConnection, DEFAULT_MAX_MESSAGE_BYTES } from "./connection.js";
 import { AppServerMessageProcessor } from "./message-processor.js";
 import { AppServerOutgoingRouter } from "./outgoing-router.js";
 import type { ManagedTurnRunner } from "./managed-turn-runner.js";
 import { ReaperThreadManager } from "./thread-manager.js";
+import { BrowserHub, VirtualAppServerConnection } from "./web/hub.js";
+import { startBrowserGateway, type RunningBrowserGateway } from "./web/gateway.js";
 
 export interface StartAppServerOptions {
   workspaceRoot: string;
@@ -26,6 +31,30 @@ export interface StartAppServerOptions {
   heartbeatIntervalMs?: number;
   /** Test and embedding hook. CLI callers use the real RuntimeEngine runner. */
   turnRunner?: ManagedTurnRunner;
+  /**
+   * Where configured provider keys are read from. Defaults to the real
+   * `~/.reaper/providers.json`; tests pass a store rooted at a temp home so a
+   * test run can never read — or overwrite — a developer's actual keys.
+   */
+  credentials?: ProviderCredentialStore;
+  /** Test/embedding hook for provider definitions and authentication flows. */
+  providers?: ProviderIntegrationRegistry;
+  /** User home for universal Settings; tests should point this at a temp home. */
+  settingsHome?: string;
+  /**
+   * Where memory records are read from. Defaults to
+   * `<workspaceRoot>/.reaper/memory` (+ `~/.reaper/memory` for user/machine
+   * scope). Tests pass a store rooted at a temp dir so a run never reads a
+   * developer's real memory.
+   */
+  memoryStore?: PersistentMemoryStore;
+  /**
+   * Mount the browser-facing gateway (WebSocket for tabs, REST, preview and
+   * proxy) as a second listener of this same process. Loopback by
+   * default. When omitted there is no browser surface — the raw protocol
+   * listener is unchanged and remains the only one.
+   */
+  web?: { host?: string; port?: number };
 }
 
 export interface AppServerReadyRecord {
@@ -39,6 +68,8 @@ export interface AppServerReadyRecord {
 export interface RunningAppServer {
   ready: AppServerReadyRecord;
   manager: ReaperThreadManager;
+  /** Present when the `web` option was requested and the gateway is mounted. */
+  web?: RunningBrowserGateway;
   stop(): Promise<void>;
 }
 
@@ -78,12 +109,16 @@ export async function startAppServer(options: StartAppServerOptions): Promise<Ru
     manager,
     router,
     maxConcurrentTurns,
+    ...(options.credentials ? { credentials: options.credentials } : {}),
+    ...(options.providers ? { providers: options.providers } : {}),
+    ...(options.settingsHome ? { settingsHome: options.settingsHome } : {}),
+    ...(options.memoryStore ? { memoryStore: options.memoryStore } : {}),
   });
 
   const httpServer = createHttpServer();
   const wss = new WebSocketServer({
     noServer: true,
-    maxPayload: Math.max((options.maxMessageBytes ?? 1024 * 1024) * 2, 64 * 1024),
+    maxPayload: Math.max((options.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES) * 2, 64 * 1024),
     perMessageDeflate: false,
   });
   httpServer.on("upgrade", (request, socket, head) => {
@@ -134,6 +169,45 @@ export async function startAppServer(options: StartAppServerOptions): Promise<Ru
     pid: process.pid,
   };
 
+  // The browser gateway shares this process but is a separate listener. It
+  // presents one virtual connection to the processor, so every tab is
+  // multiplexed in-process — no network hop, no second source of truth.
+  let browser: RunningBrowserGateway | undefined;
+  if (options.web) {
+    const hub = new BrowserHub((value) => {
+      // `processor` is definitely assigned: the gateway is mounted after the
+      // processor is constructed above.
+      void processor.process(virtualConnection, value).catch(() => undefined);
+    });
+    const virtualConnection = new VirtualAppServerConnection(hub);
+    processor.addConnection(virtualConnection);
+    router.addConnection(virtualConnection);
+    // Initialize the virtual connection once on behalf of the whole browser
+    // surface; individual tabs never run the handshake themselves.
+    hub.capabilities = await hub.call<Record<string, unknown>>("initialize", {
+      protocolVersion: 1,
+      clientInfo: { name: "reaper-web-gateway", version: "0.1.0" },
+      capabilities: { experimentalApi: false, optOutNotificationMethods: [] },
+    });
+    browser = await startBrowserGateway({
+      host: options.web.host ?? "127.0.0.1",
+      port: options.web.port ?? 0,
+      workspaceRoot: options.workspaceRoot,
+      hub,
+      // A thread's own workspace root, read from its persisted metadata. This
+      // is what scopes the files/diff panes to the conversation rather than to
+      // whatever directory the app-server happened to start in.
+      resolveThreadRoot: async (threadId) => {
+        try {
+          const thread = await manager.getThread(threadId);
+          return thread.metadata.workspaceRoot;
+        } catch {
+          return undefined;
+        }
+      },
+    });
+  }
+
   const heartbeat = setInterval(() => {
     for (const connection of router.listConnections()) connection.heartbeat();
   }, options.heartbeatIntervalMs ?? 30_000);
@@ -143,6 +217,7 @@ export async function startAppServer(options: StartAppServerOptions): Promise<Ru
   return {
     ready,
     manager,
+    ...(browser ? { web: browser } : {}),
     async stop(): Promise<void> {
       if (stopped) return;
       stopped = true;
@@ -152,6 +227,7 @@ export async function startAppServer(options: StartAppServerOptions): Promise<Ru
       await Promise.all([
         closeWebSocketServer(wss),
         closeHttpServer(httpServer),
+        ...(browser ? [browser.close()] : []),
       ]);
     },
   };

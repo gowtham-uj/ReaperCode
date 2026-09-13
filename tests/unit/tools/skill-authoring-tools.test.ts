@@ -19,7 +19,7 @@ import {
   handleTestSkill,
   handleApproveSkill,
   handleUninstallSkill,
-  handleReloadSkills,
+  handleSkillManager,
   type SkillToolDeps,
   type SkillApprovalRequester,
 } from "../../../src/tools/write/skill-tools.js";
@@ -252,13 +252,59 @@ test("uninstall_skill removes skill from registry", async () => {
   }
 });
 
-test("reload_skills returns count of records", async () => {
+test("creating a skill needs no reload step to be visible", async () => {
+  // `reload_skills` used to exist and returned a count of records it had not
+  // re-read. Skill state is fully in memory and every mutation registers into
+  // the registry directly, so the tool could not have changed anything — the
+  // assertion that matters is that the registry is already current.
   const ctx = setup();
   try {
-    await handleCreateSkill(BASE_CREATE, ctx.deps);
-    const r = handleReloadSkills({}, ctx.deps);
-    assert.equal(r.ok, true);
-    assert.ok(r.loaded >= 1);
+    const created = await handleCreateSkill(BASE_CREATE, ctx.deps);
+    assert.equal(created.ok, true);
+    // The registry's records are keyed by `manifest.name`, not a bare `name` —
+    // reading `r.name` here would compare against `undefined` and pass for a
+    // registry that had never heard of the skill.
+    const listed = ctx.deps.registry.list({ includeUntrusted: true });
+    assert.ok(listed.some((r) => r.manifest.name === BASE_CREATE.name));
+  } finally {
+    ctx.cleanup();
+  }
+});
+
+test("skill_manager dispatches every action, and refuses an unknown one", async () => {
+  const ctx = setup();
+  try {
+    const created = await handleSkillManager({ action: "create", ...BASE_CREATE }, ctx.deps);
+    assert.equal((created as { ok: boolean }).ok, true);
+
+    const tested = await handleSkillManager({ action: "test", name: BASE_CREATE.name }, ctx.deps);
+    assert.equal((tested as { ok: boolean }).ok, true);
+
+    const approved = await handleSkillManager({ action: "approve", name: BASE_CREATE.name }, ctx.deps);
+    assert.equal((approved as { trust?: string }).trust, "user-trusted");
+
+    const uninstalled = await handleSkillManager({ action: "uninstall", name: BASE_CREATE.name, scope: "project" }, ctx.deps);
+    assert.equal((uninstalled as { ok: boolean }).ok, true);
+    assert.equal(ctx.deps.registry.get(BASE_CREATE.name), null);
+
+    // `test` names a skill; omitting it is a wiring mistake, not a skill typo,
+    // so it throws rather than returning `{ok: false}`.
+    await assert.rejects(
+      () => handleSkillManager({ action: "test" }, ctx.deps),
+      /requires "name"/,
+    );
+  } finally {
+    ctx.cleanup();
+  }
+});
+
+test("skill_manager create rejects an incomplete definition instead of writing a partial skill", async () => {
+  const ctx = setup();
+  try {
+    const r = await handleSkillManager({ action: "create", name: "half-baked" }, ctx.deps);
+    assert.equal((r as { ok: boolean }).ok, false);
+    assert.match((r as { error: string }).error, /create requires the full skill definition/);
+    assert.equal(ctx.deps.registry.get("half-baked"), null);
   } finally {
     ctx.cleanup();
   }

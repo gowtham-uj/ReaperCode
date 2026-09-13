@@ -25,13 +25,11 @@ import {
 const TOOL_FAMILY: Record<string, ToolFamily> = {
   // Viewer / file ops
   file_view: "file",
-  file_scroll: "file",
   file_find: "file",
   file_edit: "edit",
   write_file: "edit",
   edit_file: "edit",
   delete_file: "edit",
-  view_file: "file",
   list_directory: "file",
   grep_search: "search",
   skim_file: "file",
@@ -41,10 +39,6 @@ const TOOL_FAMILY: Record<string, ToolFamily> = {
   bash: "shell",
 
   // Background processes
-  read_background_output: "job",
-  signal_process: "job",
-  write_to_process: "job",
-  get_tool_output: "job",
 
   // Web
   web_fetch: "web",
@@ -79,22 +73,8 @@ const TOOL_FAMILY: Record<string, ToolFamily> = {
   uninstall_hook: "diagnostic",
   reload_hooks: "diagnostic",
 
-  // Browser / computer control
+  // Browser control
   browser_control: "exec",
-  computer_control: "exec",
-  mouse_move: "exec",
-  mouse_click: "exec",
-  mouse_scroll: "exec",
-  keyboard_type: "exec",
-  keyboard_press: "exec",
-  screenshot: "exec",
-  get_screen_size: "exec",
-  get_mouse_position: "exec",
-  wait: "exec",
-  start_live_view: "exec",
-  stop_live_view: "exec",
-  request_human_approval: "exec",
-  is_human_intervening: "exec",
 
 
 };
@@ -103,11 +83,9 @@ const TOOL_FAMILY: Record<string, ToolFamily> = {
 const TOOL_CAPABILITY: Record<string, CapabilityTier> = {
   // Read-only tools
   file_view: "read",
-  file_scroll: "read",
   file_find: "read",
   list_directory: "read",
   grep_search: "read",
-  view_file: "read",
   skim_file: "read",
   inspect_environment: "read",
   git_status: "read",
@@ -115,11 +93,6 @@ const TOOL_CAPABILITY: Record<string, CapabilityTier> = {
   search_tools: "read",
   web_fetch: "read",
   web_search: "read",
-  get_tool_output: "read",
-  read_background_output: "read",
-  is_human_intervening: "read",
-  get_screen_size: "read",
-  get_mouse_position: "read",
   list_hooks: "read",
 
   // Write tools
@@ -130,20 +103,7 @@ const TOOL_CAPABILITY: Record<string, CapabilityTier> = {
 
   // Exec tools
   bash: "exec",
-  signal_process: "exec",
-  write_to_process: "exec",
   browser_control: "exec",
-  computer_control: "exec",
-  mouse_move: "exec",
-  mouse_click: "exec",
-  mouse_scroll: "exec",
-  keyboard_type: "exec",
-  keyboard_press: "exec",
-  screenshot: "exec",
-  wait: "exec",
-  start_live_view: "exec",
-  stop_live_view: "exec",
-  request_human_approval: "exec",
   create_checkpoint: "write",
   restore_checkpoint: "write",
   activate_skill: "exec",
@@ -170,11 +130,9 @@ const TOOL_CAPABILITY: Record<string, CapabilityTier> = {
 const TOOL_CONCURRENCY: Record<string, ToolConcurrency> = {
   // Read-only tools are safe to parallelize (shared)
   file_view: "shared",
-  file_scroll: "shared",
   file_find: "shared",
   list_directory: "shared",
   grep_search: "shared",
-  view_file: "shared",
   skim_file: "shared",
   inspect_environment: "shared",
   git_status: "shared",
@@ -182,11 +140,6 @@ const TOOL_CONCURRENCY: Record<string, ToolConcurrency> = {
   search_tools: "shared",
   web_fetch: "shared",
   web_search: "shared",
-  get_tool_output: "shared",
-  read_background_output: "shared",
-  is_human_intervening: "shared",
-  get_screen_size: "shared",
-  get_mouse_position: "shared",
   list_hooks: "shared",
 
   // Write tools are exclusive within the same path
@@ -197,20 +150,7 @@ const TOOL_CONCURRENCY: Record<string, ToolConcurrency> = {
 
   // Exec / shell tools are exclusive
   bash: "exclusive",
-  signal_process: "exclusive",
-  write_to_process: "exclusive",
   browser_control: "exclusive",
-  computer_control: "exclusive",
-  mouse_move: "exclusive",
-  mouse_click: "exclusive",
-  mouse_scroll: "exclusive",
-  keyboard_type: "exclusive",
-  keyboard_press: "exclusive",
-  screenshot: "shared",
-  wait: "shared",
-  start_live_view: "exclusive",
-  stop_live_view: "exclusive",
-  request_human_approval: "exclusive",
   create_checkpoint: "exclusive",
   restore_checkpoint: "exclusive",
   activate_skill: "exclusive",
@@ -237,7 +177,6 @@ const TOOL_CONCURRENCY: Record<string, ToolConcurrency> = {
 const TOOL_CONTEXT_COST: Record<string, ContextCost> = {
   // Core tools (always in context)
   file_view: "low",
-  file_scroll: "low",
   file_find: "low",
   file_edit: "low",
   write_file: "low",
@@ -251,33 +190,14 @@ const TOOL_CONTEXT_COST: Record<string, ContextCost> = {
   // On-demand tools
   web_fetch: "low",
   web_search: "low",
-  read_background_output: "low",
-  signal_process: "low",
-  write_to_process: "low",
-  get_tool_output: "low",
   create_checkpoint: "low",
   restore_checkpoint: "low",
   git_status: "low",
   git_diff: "low",
   activate_skill: "low",
-  view_file: "low",
   skim_file: "low",
   inspect_environment: "low",
   browser_control: "high",
-  computer_control: "high",
-  screenshot: "low",
-  wait: "low",
-  start_live_view: "medium",
-  stop_live_view: "low",
-  request_human_approval: "low",
-  is_human_intervening: "low",
-  get_screen_size: "low",
-  get_mouse_position: "low",
-  mouse_move: "medium",
-  mouse_click: "medium",
-  mouse_scroll: "medium",
-  keyboard_type: "medium",
-  keyboard_press: "medium",
   create_skill: "high",
   test_skill: "medium",
   approve_skill: "medium",
@@ -301,7 +221,6 @@ const TOOL_CONTEXT_COST: Record<string, ContextCost> = {
 /** Per-tool aliases for BM25 discovery. */
 const TOOL_ALIASES: Record<string, readonly string[]> = {
   file_view: ["read", "view", "cat", "head", "open_file"],
-  file_scroll: ["scroll", "move_viewport", "page_down", "page_up"],
   file_find: ["find_in_file", "search_in_file", "goto"],
   file_edit: ["edit_lines", "line_edit", "replace_lines"],
   write_file: ["create_file", "write", "save_file"],
@@ -313,10 +232,6 @@ const TOOL_ALIASES: Record<string, readonly string[]> = {
   search_tools: ["find_tool", "discover_tools", "tool_search"],
   web_fetch: ["fetch_url", "get_url", "curl"],
   web_search: ["search_web", "google"],
-  read_background_output: ["read_bg", "get_background"],
-  signal_process: ["kill", "send_signal"],
-  write_to_process: ["send_input", "write_stdin"],
-  get_tool_output: ["get_artifact", "read_artifact"],
   create_checkpoint: ["snapshot", "save_state"],
   restore_checkpoint: ["rollback", "restore_state"],
   git_status: ["git_st"],
@@ -327,7 +242,6 @@ const TOOL_ALIASES: Record<string, readonly string[]> = {
 /** Per-tool example queries for BM25 indexing. */
 const TOOL_EXAMPLES: Record<string, readonly string[]> = {
   file_view: ["view file lines", "read file content", "open and inspect a file"],
-  file_scroll: ["scroll down in file", "go to end of file"],
   file_find: ["find text in file", "goto line in file"],
   file_edit: ["edit lines 10-20", "replace a range of lines"],
   write_file: ["create a new file", "write file content", "overwrite a file"],
@@ -339,10 +253,6 @@ const TOOL_EXAMPLES: Record<string, readonly string[]> = {
   search_tools: ["find a tool", "discover available tools"],
   web_fetch: ["fetch a url", "read a web page"],
   web_search: ["search the web", "google something"],
-  read_background_output: ["read background process output"],
-  signal_process: ["kill a process", "send signal to process"],
-  write_to_process: ["write to process stdin"],
-  get_tool_output: ["read stored artifact"],
   create_checkpoint: ["create a checkpoint"],
   restore_checkpoint: ["restore a checkpoint"],
   git_status: ["check git status"],

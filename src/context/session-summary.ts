@@ -26,7 +26,7 @@
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { getReaperScratchpadPaths } from "../workspace/scratchpad.js";
+import { getReaperLogDir } from "../workspace/scratchpad.js";
 
 export interface SessionSummarySection {
   /** A short bullet point the agent will see; one string per line. */
@@ -127,9 +127,10 @@ export interface SessionSummaryPath {
 }
 
 function summaryPath(input: SessionSummaryPath): string {
-  const paths = getReaperScratchpadPaths(input.workspaceRoot);
   const runId = input.runId ?? "default";
-  return path.join(paths.logs, runId, "session-summary.json");
+  // `getReaperLogDir` reads a legacy `.reaper/logs/<id>` when that is where an
+  // existing thread lives, and otherwise returns `.reaper/sessions/<id>`.
+  return path.join(getReaperLogDir(input.workspaceRoot, runId), "session-summary.json");
 }
 
 export async function saveSessionSummary(
@@ -196,7 +197,7 @@ export function summarizeSessionForCompaction(input: {
     "create_checkpoint",
     "restore_checkpoint",
   ]);
-  const fileReadTools = new Set(["file_view", "file_scroll", "file_find", "view_file", "skim_file", "grep_search", "list_directory"]);
+  const fileReadTools = new Set(["file_view", "file_find", "skim_file", "grep_search", "list_directory"]);
   const seen = new Set<string>();
   const filesTouched: string[] = [];
   for (let i = input.toolResults.length - 1; i >= 0; i -= 1) {

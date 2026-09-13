@@ -85,14 +85,24 @@ test("maps DeepInfra-style Qwen ID to CrazyRouter Qwen slug", () => {
   assert.equal(resolveProviderModelName(profile), "qwen3.6-plus");
 });
 
-test("routes unknown providers through LiteLLM by default", () => {
+test("routes explicit LiteLLM providers through the local proxy", () => {
   const profile = {
     ...baseProfile,
-    provider: "custom-litellm-provider",
+    provider: "litellm-custom",
     model: "example-model",
   };
 
   assert.equal(resolveProviderBaseUrl(profile), "http://127.0.0.1:4000");
-  assert.equal(resolveProviderModelName(profile), "custom-litellm-provider/example-model");
+  assert.equal(resolveProviderModelName(profile), "litellm-custom/example-model");
   assert.equal(resolveProviderDefaults(profile).pathStyle, "openai");
+});
+
+test("resolves unlisted providers from the catalog", () => {
+  const profile = { ...baseProfile, provider: "fireworks-ai", model: "example-model" };
+  assert.equal(resolveProviderBaseUrl(profile), "https://api.fireworks.ai/inference/v1/");
+});
+
+test("rejects unknown providers instead of falling back to a local proxy", () => {
+  const profile = { ...baseProfile, provider: "not-a-real-provider", model: "example-model" };
+  assert.throws(() => resolveProviderBaseUrl(profile), /no API base URL/);
 });

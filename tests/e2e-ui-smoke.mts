@@ -13,15 +13,18 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { chromium, type ConsoleMessage, type Page } from "playwright";
 import { createServer as createViteServer } from "vite";
 
 import type { ManagedTurnRunner } from "../src/app-server/managed-turn-runner.js";
 import { startAppServer } from "../src/app-server/server.js";
 import type { RuntimeEngineResult } from "../src/runtime/engine.js";
-import { startBff } from "../web/bff/src/server.js";
+import { ToolExecutor } from "../src/tools/executor.js";
+import type { ToolCall } from "../src/tools/types.js";
 
 const SHOTS = "/tmp/ui-smoke";
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const failures: string[] = [];
 
 function check(condition: boolean, description: string): void {
@@ -65,20 +68,82 @@ const approvalTurnSeen = gate();
 let steeredMessages: string[] = [];
 
 /**
+ * Runs a real Code Mode call against the real executor.
+ *
+ * The other turns here are scripted, and deliberately so — they need to pause
+ * mid-flight so the drive can type into a running turn. Code Mode is the one
+ * place where scripting would defeat the purpose: the whole question is whether
+ * a *script* the model wrote comes back through the worker, the bridge, and the
+ * executor, and a hand-written payload would be a picture of that rather than
+ * the thing itself.
+ *
+ * So this really executes. It is the same `ToolExecutor` the app-server would
+ * build, on the same workspace, running the same `eval` arm — and what reaches
+ * the browser is whatever that actually produced, including the tool ledger and
+ * the live narration.
+ */
+async function runRealEval(workspaceRoot: string, code: string, toolCallId: string) {
+  const executor = new ToolExecutor({
+    workspaceRoot,
+    runId: "e2e-ui-smoke",
+    sessionId: "e2e-ui-smoke",
+    traceId: "e2e-ui-smoke",
+    logLevel: "info",
+    safetyProfile: { mode: "permissive", policy: "default" },
+  } as never);
+  try {
+    return await executor.execute({ id: toolCallId, name: "eval", args: { code } } as unknown as ToolCall);
+  } finally {
+    await executor.cleanupBackgroundProcesses("e2e-ui-smoke");
+  }
+}
+
+/**
  * Turn 1: a slow tool call, then a model-loop boundary that drains steering.
  * Turn 2: a blocking approval.
+ * Turn 3: a real Code Mode run.
  */
 let turnIndex = 0;
 const runner: ManagedTurnRunner = async (input) => {
   turnIndex += 1;
   await input.eventSink({ type: "turn.started", runId: input.turnId, sessionId: input.threadId, timestamp: ts() });
 
+  if (turnIndex === 3) {
+    const code = [
+      "const files = await tools.list_directory({ path: '.' });",
+      "const hits = await tools.grep({ pattern: 'export', path: '.' });",
+      "console.log('scanned', files.entries.length, 'entries');",
+      "({ entries: files.entries.length, matches: hits.matches.length });",
+    ].join("\n");
+    const toolCall = { id: "eval-1", name: "eval" as const, args: { code } };
+    await input.eventSink({ type: "tool.started", toolCall, timestamp: ts() });
+    const result = await runRealEval(input.workspaceRoot, code, toolCall.id);
+    await input.eventSink({
+      type: "tool.completed",
+      toolCall,
+      result: {
+        toolCallId: toolCall.id,
+        name: toolCall.name,
+        ok: result.ok,
+        durationMs: result.durationMs,
+        output: result.output,
+        ...(result.error ? { error: result.error } : {}),
+      },
+      timestamp: ts(),
+    });
+
+    const reply = `Code Mode finished: ${JSON.stringify((result.output as { status?: string })?.status)}`;
+    await input.eventSink({ type: "assistant.message.completed", text: reply, timestamp: ts() });
+    await input.eventSink({ type: "turn.completed", runId: input.turnId, sessionId: input.threadId, assistantMessage: reply, timestamp: ts() });
+    return engineResult(reply);
+  }
+
   if (turnIndex === 1) {
     await input.eventSink({ type: "assistant.message.delta", text: "Reading the auth module", timestamp: ts() });
     await input.eventSink({ type: "assistant.message.completed", text: "Reading the auth module", timestamp: ts() });
     const toolCall = {
       id: "read-1",
-      name: "view_file" as const,
+      name: "file_view" as const,
       args: { path: "auth.ts", startLine: 1, endLine: 40 },
     };
     await input.eventSink({ type: "tool.started", toolCall, timestamp: ts() });
@@ -133,7 +198,7 @@ async function shot(page: Page, name: string): Promise<void> {
 
 /** What the user can actually read on screen, for the report. */
 async function visibleTranscript(page: Page): Promise<string> {
-  return (await page.locator(".transcript").innerText()).trim();
+  return (await page.locator(".conversation-scroll").innerText()).trim();
 }
 
 async function main(): Promise<void> {
@@ -146,22 +211,23 @@ async function main(): Promise<void> {
     listen: "ws://127.0.0.1:0",
     turnRunner: runner,
     approvalTimeoutMs: 120_000,
+    web: { host: "127.0.0.1", port: 0 },
   });
-  const bff = await startBff({ appServerUrl: appServer.ready.url, host: "127.0.0.1", port: 0, workspaceRoot: workspace });
+  const gatewayUrl = appServer.web!.url;
 
-  // A dedicated Vite server pointed at this harness's BFF, so the smoke test
-  // never depends on whatever is already running on 4180.
-  process.env.REAPER_BFF_URL = bff.url;
+  // A dedicated Vite server pointed at this harness's gateway, so the smoke
+  // test never depends on whatever is already running on 4180.
+  process.env.REAPER_BFF_URL = gatewayUrl;
   // A fixed port distinct from the dev server's 5273, so running this smoke
   // test never collides with a dev server the user already has open.
   const uiPort = Number(process.env.UI_SMOKE_PORT ?? 5274);
   const vite = await createViteServer({
-    configFile: path.join(process.cwd(), "web/ui/vite.config.ts"),
+    configFile: path.join(REPO_ROOT, "web/ui/vite.config.ts"),
     server: {
       host: "127.0.0.1",
       port: uiPort,
       strictPort: true,
-      proxy: { "/ws": { target: bff.url, ws: true }, "/api": { target: bff.url } },
+      proxy: { "/ws": { target: gatewayUrl, ws: true }, "/api": { target: gatewayUrl } },
     },
   });
   await vite.listen();
@@ -183,22 +249,22 @@ async function main(): Promise<void> {
     process.stdout.write("1. First paint\n");
     await page.goto(uiUrl, { waitUntil: "domcontentloaded" });
     const connected = await until(
-      async () => (await page.locator(".status-label").first().innerText()) === "connected",
+      async () => (await page.locator(".sidebar-connection span[aria-live]").first().innerText()) === "connected",
       "the connection to come up",
     );
     check(connected, "the UI connects to the agent on load");
     check(
-      (await visibleTranscript(page)).includes("Ask the agent to do something"),
-      "an empty transcript tells the user what to do",
+      (await visibleTranscript(page)).includes("What should Reaper work on?"),
+      "an empty conversation tells the user what to do",
     );
     await shot(page, "01-first-paint");
 
     process.stdout.write("\n2. Sending the first message\n");
-    const composer = page.locator(".composer textarea");
+    const composer = page.locator(".dsh-inputbar-input");
     await composer.fill("Look at how auth works");
     check(
-      (await page.locator(".composer button").innerText()).trim() === "Send",
-      "the button reads 'Send' when the agent is idle",
+      await page.getByRole("button", { name: "Send message" }).count() === 1,
+      "the send control is labelled when the agent is idle",
     );
     await composer.press("Enter");
 
@@ -214,16 +280,16 @@ async function main(): Promise<void> {
     process.stdout.write("\n3. Typing during a tool call\n");
     await toolCallGate.wait;
     check(
-      await until(async () => (await page.locator(".composer button").innerText()).trim() === "Queue", "the Queue label"),
-      "the button switches to 'Queue' while the agent is working",
+      await until(async () => await page.getByRole("button", { name: "Queue message" }).count() === 1, "the Queue label"),
+      "the send control switches to a labelled queue action while the agent is working",
     );
     check(await composer.isEnabled(), "the composer stays enabled during a turn — typing is not blocked");
     check(
-      await page.locator("header button", { hasText: "Interrupt" }).count() === 1,
-      "Interrupt is offered while a turn is running",
+      await page.locator("header button", { hasText: "Stop" }).count() === 1,
+      "Stop is offered while a turn is running",
     );
     check(
-      (await composer.getAttribute("placeholder"))?.includes("after the current step") ?? false,
+      (await composer.getAttribute("placeholder"))?.includes("next step") ?? false,
       "the placeholder explains that a message will be queued",
     );
     await shot(page, "02-mid-turn");
@@ -235,7 +301,7 @@ async function main(): Promise<void> {
       "a message typed mid-turn shows as queued rather than vanishing",
     );
     check(
-      (await page.locator(".queued-meta").innerText()).includes("sends after the current step"),
+      (await page.locator(".queued-message footer").innerText()).includes("next step"),
       "the queued message says when it will be sent",
     );
     check(await composer.inputValue() === "", "the composer clears after queueing");
@@ -248,7 +314,7 @@ async function main(): Promise<void> {
       await until(async () => (await page.locator(".queued-message").count()) === 2, "two queued cards"),
       "more than one message can be queued",
     );
-    const queuedTexts = await page.locator(".queued-body").allInnerTexts();
+    const queuedTexts = await page.locator(".queued-message > div").allInnerTexts();
     check(
       queuedTexts[0]?.includes("Also check the session module") === true
       && queuedTexts[1]?.includes("And the token refresh path") === true,
@@ -281,15 +347,15 @@ async function main(): Promise<void> {
 
     process.stdout.write("\n5. Cancelling a queued message\n");
     check(
-      await until(async () => (await page.locator(".composer button").innerText()).trim() === "Send", "idle state"),
-      "the button returns to 'Send' when the turn ends",
+      await until(async () => await page.getByRole("button", { name: "Send message" }).count() === 1, "idle state"),
+      "the control returns to Send when the turn ends",
     );
     // Interrupt was gated on the thread rather than on a running turn, so it
     // stayed on screen for the whole session — offering to stop nothing, and
     // reading as "still working" after the agent had already answered.
     check(
-      await page.locator("header button", { hasText: "Interrupt" }).count() === 0,
-      "Interrupt disappears once no turn is running",
+      await page.locator("header button", { hasText: "Stop" }).count() === 0,
+      "Stop disappears once no turn is running",
     );
 
     process.stdout.write("\n6. Approvals\n");
@@ -297,10 +363,10 @@ async function main(): Promise<void> {
     await composer.press("Enter");
     await approvalTurnSeen.wait;
     check(
-      await until(async () => (await page.locator(".approval").count()) === 1, "the approval card"),
+      await until(async () => (await page.locator(".approval-card").count()) === 1, "the approval card"),
       "a blocking approval renders inline in the transcript",
     );
-    const approvalText = await page.locator(".approval").innerText();
+    const approvalText = await page.locator(".approval-card").innerText();
     check(approvalText.includes("rm -rf build"), "the approval shows the exact command being approved");
     check(
       approvalText.includes("This deletes the build directory"),
@@ -327,20 +393,20 @@ async function main(): Promise<void> {
       "answering the approval unblocks the agent",
     );
     check(
-      await until(async () => (await page.locator(".approval").count()) === 0, "the card to clear"),
+      await until(async () => (await page.locator(".approval-card").count()) === 0, "the card to clear"),
       "the approval card clears once answered",
     );
     await shot(page, "06-after-approval");
 
     process.stdout.write("\n7. Edge cases\n");
     check(
-      await composer.isEnabled() && (await page.locator(".composer button").isDisabled()),
+      await composer.isEnabled() && (await page.locator(".dsh-inputbar-primary").isDisabled()),
       "an empty composer disables Send but leaves the field usable",
     );
 
     // Whitespace-only input must not create an empty message.
     await composer.fill("   ");
-    check(await page.locator(".composer button").isDisabled(), "whitespace-only input cannot be sent");
+    check(await page.locator(".dsh-inputbar-primary").isDisabled(), "whitespace-only input cannot be sent");
     await composer.fill("");
 
     // Shift+Enter is a newline, not a send.
@@ -352,14 +418,81 @@ async function main(): Promise<void> {
     check(await page.locator(".user-message").count() === before, "Shift+Enter did not send the message");
     await composer.fill("");
 
-    process.stdout.write("\n8. Narrow viewport\n");
+    process.stdout.write("\n8. Code Mode\n");
+    /*
+     * The turn above is a real eval — the worker thread, the bridge, and the
+     * executor all ran — so everything below is asserting on what the feature
+     * actually produced rather than on a fixture that describes it.
+     */
+    await until(async () => await page.getByRole("button", { name: "Send message" }).count() === 1, "idle state");
+    await composer.fill("Sweep the repo for exports");
+    await composer.press("Enter");
+    check(
+      await until(async () => (await page.locator(".code-mode").count()) === 1, "the Code Mode row", 30_000),
+      "an eval call renders as a Code Mode block, not as an opaque tool row",
+    );
+
+    const codeBlock = page.locator(".code-mode");
+    check(
+      (await codeBlock.locator(".tool-label").innerText()) === "Code Mode",
+      "the block labels itself as Code Mode",
+    );
+    // The summary must say what happened, not just that something did.
+    const summary = await codeBlock.locator(".tool-detail").innerText();
+    check(
+      /tool call/i.test(summary),
+      `the collapsed row counts the inner calls (saw "${summary}")`,
+    );
+
+    await codeBlock.locator(".disclosure").first().click();
+    check(
+      await until(async () => (await codeBlock.locator(".code-mode-source").count()) === 1, "the source pane"),
+      "expanding the block shows the JavaScript the model wrote",
+    );
+    const shownCode = await codeBlock.locator(".code-block").innerText();
+    check(
+      shownCode.includes("tools.list_directory") && shownCode.includes("tools.grep"),
+      "the source shown is the model's own script",
+    );
+
+    const ledgerNames = await codeBlock.locator(".code-mode-call-name").allInnerTexts();
+    check(
+      ledgerNames.length > 0 && ledgerNames.every((name) => !["read", "grep", "ls", "write", "edit"].includes(name)),
+      `the tool ledger names real tools, not aliases (saw ${JSON.stringify(ledgerNames)})`,
+    );
+
+    /*
+     * The intermediate data rule, asserted rather than described. The whole
+     * reason to reach for eval is that forty file bodies stay inside the
+     * script; if the ledger rendered outputs, the UI would be rebuilding the
+     * cost the model just avoided.
+     */
+    const ledgerText = await codeBlock.locator(".code-mode-calls").innerText();
+    check(
+      !ledgerText.includes("auth.ts") && !ledgerText.includes("export function"),
+      "the tool ledger shows names and timings, never the outputs",
+    );
+
+    check(
+      (await codeBlock.locator(".code-mode-result").count()) === 1,
+      "the value the script returned is shown",
+    );
+    await shot(page, "08-code-mode");
+
+    // The transcript itself, not the block, has to survive a re-render.
+    check(
+      (await visibleTranscript(page)).includes("Code Mode finished"),
+      "the turn after an eval continues normally",
+    );
+
+    process.stdout.write("\n9. Narrow viewport\n");
     await page.setViewportSize({ width: 720, height: 900 });
     await sleep(400);
     const overflows = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
     check(!overflows, "the layout does not overflow horizontally at 720px");
     // The workbench is hidden on narrow screens, so the composer must sit
     // within the viewport rather than being pushed below the fold by it.
-    const composerBox = await page.locator(".composer").boundingBox();
+    const composerBox = await page.locator(".dsh-inputbar-card").boundingBox();
     check(
       composerBox !== null && composerBox.y + composerBox.height <= 901,
       "the composer stays on screen at 720px instead of being pushed below the fold",
@@ -367,7 +500,7 @@ async function main(): Promise<void> {
     await shot(page, "07-narrow");
     await page.setViewportSize({ width: 1400, height: 900 });
 
-    process.stdout.write("\n9. Console health\n");
+    process.stdout.write("\n10. Console health\n");
     check(consoleErrors.length === 0, `no console errors (saw ${consoleErrors.length})`);
     for (const error of consoleErrors.slice(0, 5)) process.stdout.write(`      ${error}\n`);
 
@@ -376,7 +509,6 @@ async function main(): Promise<void> {
   } finally {
     await browser.close();
     await vite.close();
-    await bff.close();
     await appServer.stop();
   }
 

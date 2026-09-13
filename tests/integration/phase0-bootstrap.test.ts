@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { bootPhase0Runtime } from "../../src/runtime/bootstrap.js";
 import { createValidConfig, createValidRequestEnvelope } from "../fixtures/phase0.js";
+import { assertZodIssue } from "../fixtures/zod-issues.js";
 
 test("boots Phase 0 runtime with one default model", () => {
   const result = bootPhase0Runtime({
@@ -69,14 +70,14 @@ test("fails fast on invalid request envelopes during boot", () => {
   const request = createValidRequestEnvelope();
   request.timestamp = "bad";
 
-  assert.throws(
+  assertZodIssue(
     () =>
       bootPhase0Runtime({
         config: createValidConfig(),
         transport: "http_sse",
         requestEnvelope: request,
       }),
-    /Invalid datetime/,
+    { code: "invalid_format", path: "timestamp", format: "datetime" },
   );
 });
 
@@ -84,13 +85,13 @@ test("fails fast on invalid model config during boot", () => {
   const config = createValidConfig();
   config.models.default_model.provider = "";
 
-  assert.throws(
+  assertZodIssue(
     () =>
       bootPhase0Runtime({
         config,
         transport: "stdio",
         requestEnvelope: createValidRequestEnvelope(),
       }),
-    /String must contain at least 1 character/,
+    { code: "too_small", path: "models.default_model.provider" },
   );
 });

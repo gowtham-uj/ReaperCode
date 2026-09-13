@@ -1,511 +1,1563 @@
 /*
- * Design tokens.
- *
- * Derived from the plan's inspiration sources, not from the CLI — the
- * app-server methodology exists so this surface can render what the terminal
- * cannot: real diffs, exit codes, durations, structured status.
- *
- * What was taken, and why:
- *
- * - **A depth stack, not shadows** (bolt.diy). Four background levels do all
- *   the layering work. Exactly one shadow exists in the whole app, on the
- *   sticky approval bar, because that element genuinely floats above the
- *   transcript and needs to read as such.
- * - **Borders do the separating** (bolt.diy). Cards-everywhere turns a
- *   transcript into visual noise; rules and indentation carry structure.
- * - **Assistant text has no container** (OpenHands + bolt.diy independently).
- *   The agent's prose is the page, not a message in a box. Only the user's
- *   input gets a bubble, because it needs to read as an interjection.
- * - **Chevron disclosure, borderless rows** (OpenHands). Separation comes from
- *   vertical rhythm.
- *
- * Deliberately *not* taken: bolt.diy's 33rem chat column cap. That suits a
- * chat app; this transcript carries diffs and command output, which need width.
- *
- * Termany is AGPL — its pane model was studied, no code or values copied.
+ * Reaper's application CSS is adapted from the MIT-licensed DeepSeek Harness
+ * React UI. The unmodified source base is vendored in web/ui/upstream/
+ * deepseek-harness; its license and adaptation notice live in src/deepseek/.
+ * Reaper keeps the DeepSeek token sheets, shell geometry, sidebar motion,
+ * centered chat axis, composer capsule, approval card, menus, and settings
+ * material while binding them to Reaper's app-server protocol and surfaces.
  */
-
-:root {
-  /* Depth stack. Each level sits visually above the previous one. */
-  --depth-0: #0b0d10; /* app canvas */
-  --depth-1: #111418; /* panel */
-  --depth-2: #171b21; /* raised: cards, composer */
-  --depth-3: #1e242c; /* overlay: sticky bar, menus */
-
-  --border: #232a33;
-  --border-strong: #313b47;
-
-  --text: #e8edf4;
-  --text-muted: #94a3b4;
-  --text-faint: #64717f;
-
-  --accent: #7c9cf5;
-  --accent-dim: rgba(124, 156, 245, 0.12);
-
-  --success: #46b978;
-  --danger: #e56a63;
-  --warning: #d99a3e;
-
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-
-  --step: 0.25rem;
-  --radius: 0.5rem;
-
-  /* The transcript's indentation unit. Tool calls sit one unit in from the
-     model message that caused them — the step tree's only structural signal. */
-  --indent: 1.25rem;
-}
+@import "./deepseek/theme/base.css";
+@import "./deepseek/theme/corner-shape.css";
+@import "./deepseek/theme/design-platform.css";
+@import "./deepseek/theme/scrollbar.css";
+@import "./deepseek/theme/gradient-shadow-text.css";
 
 * { box-sizing: border-box; }
-
-html, body, #root {
-  height: 100%;
-  margin: 0;
-}
-
+html, body, #root { height: 100%; margin: 0; }
 body {
-  background: var(--depth-0);
-  color: var(--text);
-  font-family: var(--font-sans);
+  min-width: 320px;
+  overflow: hidden;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-base);
+  font-family: var(--dsw-font-family);
   font-size: 14px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
 }
-
-/* Focus is never removed, only restyled. Keyboard operation is a requirement,
-   not a nicety, and this is the only thing that makes it visible. */
-:focus-visible {
-  outline: 2px solid var(--accent);
+button, input, select, textarea { font: inherit; }
+button { color: inherit; }
+button, a, select, label, input, textarea { -webkit-tap-highlight-color: transparent; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
   outline-offset: 2px;
-  border-radius: 3px;
+}
+code, pre, [data-diff], [data-read], [data-terminal] { font-family: var(--ds-font-family-code); text-autospace: no-autospace; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+/* DeepSeek AppFrame-derived three-column shell. */
+.app-frame {
+  position: relative;
+  display: grid;
+  grid-template-rows: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--dsw-alias-bg-base);
+  transition: grid-template-columns var(--ds-transition-duration-slow) var(--ds-ease-in-out);
+}
+.sidebar-column { min-width: 0; overflow: hidden; background: var(--dsw-specific-sidebar-fill); border-right: .5px solid var(--dsw-alias-border-l3); }
+.conversation-root { min-width: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--dsw-alias-bg-base); --dsh-chat-content-width: clamp(680px, 64%, 920px); --dsh-composer-card-max-width: calc(var(--dsh-chat-content-width) + 32px); --dsh-composer-side-clearance: 16px; --dsh-composer-text-max-height: 336px; }
+.details-column { min-width: 0; overflow: hidden; border-left: .5px solid var(--dsw-alias-border-l3); background: var(--dsw-alias-bg-layer-1); }
+.app-frame[data-details-collapsed] .details-column { border-left: 0; }
+.details-resize-handle { position: absolute; top: 0; bottom: 0; z-index: 30; width: 8px; cursor: col-resize; touch-action: none; }
+.details-resize-handle::after { content: ""; position: absolute; top: 50%; left: 50%; width: 12px; height: 32px; opacity: 0; transform: translate(-50%,-50%); border: .5px solid var(--dsw-alias-border-l2-darkmode-thin); border-radius: 10px; background: var(--dsw-alias-button-floating-fill); transition: opacity .2s ease; }
+.details-resize-handle:hover::after, .details-resize-handle:active::after { opacity: 1; }
+
+/* DeepSeek SidebarRoot-derived sidebar. */
+.sidebar-root { display: flex; flex-direction: column; height: 100%; padding: 6px 12px; color: var(--dsw-alias-label-primary); background: var(--dsw-specific-sidebar-fill); }
+.sidebar-root[data-collapsed] { padding: 18px 10px 8px; align-items: center; }
+.sidebar-logo-row { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 8px; height: 60px; padding: 8px 0 8px 4px; margin-bottom: 8px; overflow: hidden; }
+.sidebar-root[data-collapsed] .sidebar-logo-row { height: 36px; width: 36px; padding: 0; margin-bottom: 12px; }
+.brand-button { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; height: 24px; padding: 0; overflow: hidden; border: 0; background: transparent; font-size: 18px; font-weight: 600; line-height: 24px; letter-spacing: .04em; cursor: pointer; }
+.reaper-mark { flex: none; display: inline-grid; place-items: center; color: var(--dsw-alias-state-business-primary); }
+/* Icons inside text buttons need explicit centring; they are not glyphs and do
+ * not sit on the text baseline. */
+.new-thread-button svg, .dsh-workspace-chip svg, .sidebar-settings svg { flex: none; }
+.sidebar-icon-button, .icon-button { display: inline-grid; place-items: center; flex: none; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; corner-shape: round; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; }
+.sidebar-icon-button:hover:not(:disabled), .icon-button:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.sidebar-icon-button:active:not(:disabled), .icon-button:active:not(:disabled) { background: var(--dsw-alias-interactive-bg-active); }
+.sidebar-icon-button:disabled, .icon-button:disabled { opacity: .4; cursor: default; }
+/* A toggle that looks identical pressed and unpressed communicates nothing. */
+.icon-button[aria-pressed="true"] { background: var(--dsw-specific-sidebar-nav-item-active-accent); color: var(--dsw-alias-state-business-primary); }
+.refresh-icon[data-spinning] { animation: refresh-spin 900ms linear infinite; }
+@keyframes refresh-spin { to { transform: rotate(360deg); } }
+.sidebar-root[data-collapsed] .sidebar-toggle { width: 36px; height: 36px; color: var(--dsw-alias-label-primary); }
+.sidebar-threads { display: flex; flex: 1; min-height: 0; flex-direction: column; }
+.sidebar-section-head { display: flex; align-items: center; justify-content: space-between; padding: 0 7px 5px; color: var(--dsw-alias-label-tertiary); font-size: 12px; font-weight: 500; }
+.thread-list-scroll { flex: 1; min-height: 0; margin: 0 -12px 0 -8px; padding: 0 8px; overflow-y: auto; scrollbar-gutter: stable; }
+.thread-list { display: flex; flex-direction: column; gap: 2px; list-style: none; margin: 0; padding: 0; }
+.thread-entry { display: flex; flex-direction: column; gap: 1px; width: 100%; min-width: 0; padding: 8px 10px; border: 0; border-radius: 10px; background: transparent; text-align: left; cursor: pointer; }
+.thread-entry:hover { background: var(--dsw-specific-sidebar-nav-item-hover); }
+.thread-entry:active { background: var(--dsw-alias-interactive-bg-active); }
+/* The active thread is marked by fill alone; a rail makes it survive a
+ * squint, and is the only cue for anyone who cannot separate those two
+ * near-identical greys. */
+.thread-entry[data-active] { position: relative; background: var(--dsw-specific-sidebar-nav-item-active); }
+.thread-entry[data-active]::before { content: ""; position: absolute; top: 9px; bottom: 9px; left: 0; width: 2px; border-radius: 0 2px 2px 0; background: var(--dsw-alias-state-business-primary); }
+.thread-entry-name { overflow: hidden; font-size: 13px; font-weight: 500; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
+.thread-entry-path { display: flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; color: var(--dsw-alias-label-caption); font-size: 11px; line-height: 16px; white-space: nowrap; }
+.thread-entry-project { overflow: hidden; text-overflow: ellipsis; }
+.thread-entry-path > span:last-child { flex: none; }
+.sidebar-empty { padding: 12px; color: var(--dsw-alias-label-caption); font-size: 12px; text-align: center; }
+.new-thread-button { order: -1; display: flex; flex: none; align-items: center; justify-content: center; gap: 6px; height: 38px; margin: 0 2px 8px; padding: 8px 16px; overflow: hidden; border: .5px solid var(--dsw-alias-border-l3); border-radius: 12px; background: var(--dsw-alias-button-elevated-fill); color: var(--dsw-alias-label-primary); font-size: 14px; font-weight: 500; line-height: 22px; cursor: pointer; }
+.new-thread-button:hover { background: var(--dsw-alias-button-floating-hover); }
+.new-thread-button:active:not(:disabled) { background: var(--dsw-alias-interactive-bg-active); }
+.new-thread-button:disabled { opacity: .5; cursor: default; }
+.thread-create { order: -1; display: grid; gap: 10px; margin: 0 2px 12px; padding: 12px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 14px; background: var(--dsw-specific-input-major); box-shadow: var(--dsw-elevation-panel); }
+.thread-rail { display: flex; flex: 1; flex-direction: column; align-items: flex-start; gap: 8px; }
+.rail-new-thread { width: 36px; height: 36px; margin-bottom: 4px; color: var(--dsw-alias-label-primary); }
+.thread-rail-entry { display: grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 10px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 12px; font-weight: 600; cursor: pointer; }
+.thread-rail-entry:hover { background: var(--dsw-specific-sidebar-nav-item-hover); }
+.thread-rail-entry[data-active] { background: var(--dsw-specific-sidebar-nav-item-active-accent); color: var(--dsw-alias-state-business-primary); }
+.sidebar-footer { flex: none; display: flex; flex-direction: column; gap: 4px; padding-top: 8px; }
+.sidebar-settings { display: flex; align-items: center; gap: 10px; width: 100%; height: 38px; padding: 0 10px; border: 0; border-radius: 10px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; }
+.sidebar-settings:hover { background: var(--dsw-specific-sidebar-nav-item-hover); color: var(--dsw-alias-label-primary); }
+.sidebar-root[data-collapsed] .sidebar-settings { justify-content: center; width: 36px; height: 36px; padding: 0; border-radius: 50%; }
+.sidebar-connection { display: flex; align-items: center; gap: 7px; padding: 6px 10px; color: var(--dsw-alias-label-caption); font-size: 11px; }
+.sidebar-connection button { margin-left: auto; padding: 0; border: 0; background: transparent; color: var(--dsw-alias-state-business-primary); cursor: pointer; }
+.connection-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dsw-alias-state-error-primary); }
+.connection-dot[data-status="open"] { background: var(--dsw-alias-state-success-primary); }
+.connection-dot[data-status="connecting"], .connection-dot[data-status="reconnecting"] { background: var(--dsw-alias-state-warn-primary); }
+
+/* Conversation header and centered chat flow. */
+.conversation-header { position: relative; z-index: 10; display: flex; flex: none; align-items: center; min-height: 56px; padding: 12px 28px 0 20px; border-bottom: .5px solid var(--dsw-alias-border-l3); background: var(--dsw-alias-bg-base); }
+.conversation-header-hidden { display: none; }
+.conversation-title-cluster { display: flex; align-items: center; min-width: 0; gap: 5px; }
+.workspace-crumb { overflow: hidden; max-width: 180px; padding: 4px 7px; color: var(--dsw-alias-label-tertiary); text-overflow: ellipsis; white-space: nowrap; }
+.crumb-separator { color: var(--dsw-alias-label-caption); }
+.conversation-title { overflow: hidden; max-width: 340px; padding: 4px 7px; font-size: 14px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-header-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; min-width: 0; }
+.conversation-body { display: flex; flex: 1; min-height: 0; }
+.conversation-scroll { flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
+.chat-column { display: flex; flex-direction: column; width: 100%; max-width: var(--dsh-chat-content-width); min-height: 100%; margin: 0 auto; padding: 24px 16px 170px; }
+.recovery-banner { margin: 0; padding: 7px 18px; border-bottom: .5px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-state-warn-tertiary); color: var(--dsw-alias-state-warn-label); font-size: 12px; }
+.chat-error { margin: 8px 0; padding: 9px 12px; border-radius: 9px; background: var(--dsw-alias-interactive-bg-hover-danger); color: var(--dsw-alias-state-error-primary); font-size: 13px; }
+.turn { padding: 4px 0; }
+.turn + .turn { margin-top: 18px; padding-top: 22px; border-top: .5px solid var(--dsw-alias-border-l2); }
+.step { padding: 5px 0; }
+.step-tools { margin: 4px 0 0 11px; padding-left: 14px; border-left: .5px solid var(--dsw-alias-border-l3); }
+/* These two were carried in the markup but never given a rule, so neither had
+ * any spacing contribution of its own — the continuation line and the group of
+ * tool rows below a collapsed summary relied entirely on the UA's defaults. */
+.exploration-step { padding-bottom: 0; }
+.tool-block { display: flex; flex-direction: column; }
+.tool-block + .tool-block { margin-top: 1px; }
+.user-message { align-self: flex-end; width: fit-content; max-width: 86%; margin: 9px 0 12px auto; padding: 10px 14px; border-radius: 18px 18px 5px 18px; background: var(--dsw-specific-bubble); white-space: pre-wrap; overflow-wrap: anywhere; }
+/*
+ * The agent's prose, now markdown rather than pre-wrapped text.
+ *
+ * `white-space: pre-wrap` is gone and that is load-bearing: it existed to
+ * preserve newlines in raw text, and with real block elements underneath it
+ * collapses every paragraph gap and indents every line the parser produced.
+ * The `pre-wrap` that is still wanted lives on `.md-paragraph`.
+ */
+.agent-message { margin: 7px 0; color: var(--dsw-alias-label-primary); font-size: var(--dsh-content-font-size, 14px); line-height: calc(24px + var(--dsh-content-font-delta, 0px)); overflow-wrap: anywhere; }
+
+/* Markdown, as the transcript renders it. */
+.markdown > *:first-child { margin-top: 0; }
+.markdown > *:last-child { margin-bottom: 0; }
+.md-paragraph { margin: 0 0 10px; white-space: pre-wrap; }
+.md-heading { margin: 18px 0 7px; color: var(--dsw-alias-label-primary); font-size: 15px; font-weight: 600; line-height: 1.35; }
+.md-heading + .md-paragraph, .md-heading + .md-list { margin-top: 0; }
+.md-list { margin: 0 0 10px; padding-left: 22px; }
+.md-list li { margin: 2px 0; }
+.md-list li::marker { color: var(--dsw-alias-label-caption); }
+.md-quote { margin: 0 0 10px; padding: 2px 0 2px 12px; border-left: 2px solid var(--dsw-alias-border-l3); color: var(--dsw-alias-label-secondary); }
+.md-rule { margin: 14px 0; border: 0; border-top: .5px solid var(--dsw-alias-border-l2); }
+/* Inline code reads as a chip so it is distinguishable from prose at a glance. */
+.md-code { padding: 1px 5px; border-radius: 4px; background: var(--dsw-alias-markdown-code-block); color: var(--dsw-alias-label-secondary); font-family: var(--ds-font-family-code); font-size: .92em; }
+.md-link { color: var(--dsw-static-deepseek-500); text-decoration: none; }
+.md-link:hover { text-decoration: underline; }
+
+/*
+ * A fenced block. Borrows `.code-block` from the Code Mode stylesheet so the
+ * transcript has one code presentation rather than two that drift.
+ */
+.md-fence { position: relative; margin: 0 0 10px; }
+.md-fence-lang { position: absolute; top: 6px; right: 10px; color: var(--dsw-alias-label-caption); font-family: var(--ds-font-family-code); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; pointer-events: none; }
+.md-fence .code-block { margin: 0; }
+.reasoning { color: var(--dsw-alias-label-tertiary); font-size: 13px; }
+/*
+ * Thinking, while it is happening.
+ *
+ * It used to render only inside a collapsed disclosure, so a turn that spent
+ * forty-five seconds thinking showed "Reaper is working…" and nothing else —
+ * indistinguishable from a turn that had hung. Streaming it visible is what
+ * makes the wait legible; it collapses once the turn ends so a finished
+ * transcript stays readable. Dimmed and italic so it reads as a different
+ * register from the answer and is never mistaken for one.
+ */
+.reasoning-head { display: flex; align-items: center; gap: 6px; margin: 6px 0 2px; color: var(--dsw-alias-label-caption); font-size: 11px; letter-spacing: .03em; }
+.reasoning-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--dsw-static-deepseek-500); animation: reasoning-pulse 1.4s ease-in-out infinite; }
+@keyframes reasoning-pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .reasoning-dot { animation: none; opacity: .7; } }
+.reasoning-live { margin: 4px 0 2px; padding-left: 12px; border-left: 2px solid var(--dsw-alias-border-l3); color: var(--dsw-alias-label-tertiary); font-size: 13px; font-style: italic; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 15rem; overflow-y: auto; }
+.reasoning-live::after { content: "▍"; margin-left: 1px; color: var(--dsw-alias-label-caption); animation: reasoning-caret 1.1s steps(2, start) infinite; }
+@keyframes reasoning-caret { to { visibility: hidden; } }
+@media (prefers-reduced-motion: reduce) { .reasoning-live::after { animation: none; } }
+.reasoning-body { margin: 3px 0 0 11px; padding-left: 14px; border-left: .5px solid var(--dsw-alias-border-l3); white-space: pre-wrap; overflow-wrap: anywhere; }
+.disclosure { display: flex; align-items: center; gap: 7px; width: 100%; padding: 5px 0; border: 0; background: transparent; color: var(--dsw-alias-label-tertiary); text-align: left; cursor: pointer; }
+.disclosure:hover { color: var(--dsw-alias-label-primary); }
+.chevron { display: inline-grid; place-items: center; width: 14px; height: 14px; color: var(--dsw-alias-label-caption); font-size: 17px; transition: transform 120ms ease; }
+.chevron[data-open] { transform: rotate(90deg); }
+.tool-disclosure { min-width: 0; }
+.sub-disclosure { margin-left: 22px; width: auto; font-size: 12px; }
+/*
+ * Context management.
+ *
+ * Reaper shrinking the conversation is housekeeping, not an action the user
+ * took, so it is quieter than a tool row: no icon column, a smaller label, and
+ * a left rule instead of a box. The one thing it must not be is invisible,
+ * which is what the previous single unstyled row amounted to — a session that
+ * compacted four times looked identical to one that never did.
+ *
+ * The accent colour on the dot is the same token the reasoning indicator uses,
+ * so "something is happening right now" reads the same way everywhere.
+ */
+.context-row { display: flex; flex-direction: column; gap: 3px; margin: 6px 0; padding: 6px 10px; border-left: 2px solid var(--dsw-alias-border-l3); border-radius: 0 8px 8px 0; background: color-mix(in srgb, var(--dsw-alias-bg-layer-1) 55%, transparent); }
+.context-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.context-dot { flex: none; width: 5px; height: 5px; border-radius: 50%; background: var(--dsw-alias-label-caption); }
+.context-dot-live { background: var(--dsw-static-deepseek-500); animation: reasoning-pulse 1.4s ease-in-out infinite; }
+.context-label { min-width: 0; overflow: hidden; color: var(--dsw-alias-label-secondary); font-size: 12px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.context-saved { flex: none; padding: 1px 5px; border-radius: 4px; background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 16%, transparent); color: var(--dsw-alias-state-success-primary); font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.context-time { flex: none; color: var(--dsw-alias-label-caption); font-size: 10px; font-variant-numeric: tabular-nums; }
+.context-failed { flex: none; padding: 1px 5px; border-radius: 4px; background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 18%, transparent); color: var(--dsw-alias-state-error-primary); font-size: 10px; font-weight: 600; }
+.context-toggle { flex: none; margin-left: auto; padding: 1px 6px; border: 0; border-radius: 4px; background: transparent; color: var(--dsw-alias-label-caption); font-size: 10px; cursor: pointer; }
+.context-toggle:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.context-detail { color: var(--dsw-alias-label-tertiary); font-size: 11px; }
+.context-facts { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 3px 0 0; }
+.context-fact { display: flex; gap: 5px; align-items: baseline; }
+.context-fact dt { color: var(--dsw-alias-label-caption); font-size: 10px; }
+.context-fact dd { margin: 0; color: var(--dsw-alias-label-secondary); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+.tool-row { display: flex; align-items: baseline; gap: 7px; min-width: 0; padding: 5px 0; color: var(--dsw-alias-label-tertiary); font-size: 13px; }
+.tool-icon { flex: none; width: 16px; color: var(--dsw-alias-label-caption); font-family: var(--ds-font-family-code); font-size: 11px; }
+.tool-label { flex: none; font-weight: 500; }
+.tool-detail { min-width: 0; overflow: hidden; color: var(--dsw-alias-label-tertiary); font-family: var(--ds-font-family-code); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.tool-meta { flex: none; margin-left: auto; color: var(--dsw-alias-label-caption); font-size: 11px; font-variant-numeric: tabular-nums; }
+/* The per-row status was the one element in `.tool-*` without a rule, so the
+ * "✕" also inherited `.tool-row`'s caption colour and read as decoration
+ * rather than failure. A fixed width stops the row content from shifting
+ * between "⋯" and "✓". */
+.tool-status { flex: none; width: 13px; font-weight: 600; text-align: center; }
+.tool-status[data-status="completed"] { color: var(--dsw-alias-state-success-primary); }
+.tool-status[data-status="failed"] { color: var(--dsw-alias-state-error-primary); }
+/* The reason a turn stopped, which `Transcript.tsx` renders behind a "✕".
+ *
+ * It carries `.tool-status` for the colour, but that class is a 13px glyph
+ * column sized for "✓" and "⋯" — so a sentence inside it wrapped at roughly one
+ * character per line and the failure appeared on screen as a vertical ribbon of
+ * single words. Width, wrapping and alignment are restored here; `flex: none`
+ * and the fixed width are what have to be undone, not the colour.
+ *
+ * `--font-mono` and pre-wrap for the same reason the message contains one: a
+ * provider error ends in a JSON body, and that body has to keep its shape. */
+.transcript-error { width: auto; max-width: 74ch; align-self: flex-start; margin: 8px 0 2px; font-size: 13px; font-weight: 400; line-height: 19px; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; }
+.output, .file-contents { max-height: 24rem; margin: 5px 0; padding: 10px 12px; overflow: auto; border: .5px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-markdown-code-block); color: var(--dsw-alias-label-secondary); font-size: 11px; line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.diff { max-height: 34rem; margin: 6px 0; overflow: auto; border: .5px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-markdown-code-block); font-family: var(--ds-font-family-code); font-size: 11px; line-height: 18px; }
+.diff-line { min-width: max-content; padding: 0 12px; white-space: pre; }
+.diff-line[data-kind="add"] { background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent); color: var(--dsw-alias-state-success-primary); }
+.diff-line[data-kind="del"] { background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent); color: var(--dsw-alias-state-error-primary); }
+.diff-line[data-kind="meta"] { color: var(--dsw-alias-label-caption); }
+.stat-add { color: var(--dsw-alias-state-success-primary); }
+.stat-del { color: var(--dsw-alias-state-error-primary); }
+
+/* ── Code Mode ─────────────────────────────────────────────────────────────
+ *
+ * The transcript's first tool that contains other work. A single tool row can
+ * report that a script ran; it cannot show what the script did, and with Code
+ * Mode that is the whole point. So the row keeps the ordinary shape — icon,
+ * label, one-line summary, status — and everything else opens underneath it.
+ *
+ * Three decisions are load-bearing.
+ *
+ * The inner sections are indented to the label column (23px: the 16px icon
+ * plus the 7px gap every `.disclosure` uses) rather than the full width. That
+ * is what makes them read as *inside* the row rather than as three more rows
+ * in the transcript, which is the difference between a script and a sequence.
+ *
+ * The source block has a line-number gutter that is `position: sticky`-safe —
+ * it is a fixed-width column, so wrapped lines still start under the code and
+ * not under the numbers. A script is the one thing here that must not reflow
+ * into an unreadable paragraph.
+ *
+ * The stream uses `overflow-wrap: anywhere` rather than `white-space: pre`,
+ * unlike the diff. Diffs come from a tool that formats them; a stream comes
+ * from `console.log` on whatever the model felt like printing, and one long
+ * token — a minified bundle, a base64 blob — must not widen the transcript.
+ */
+.code-mode-icon { letter-spacing: -1px; }
+/* A different glyph deserves a different weight: "{ }" set in the caption
+ * colour at 11px reads as punctuation rather than as a tool. */
+.code-mode .tool-icon { color: var(--dsw-alias-label-secondary); }
+.code-mode[data-state="running"] .tool-icon { color: var(--dsw-static-deepseek-500); }
+.code-mode-body { display: flex; flex-direction: column; gap: 10px; margin: 2px 0 10px 23px; }
+.code-mode-section, .code-mode-source { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.code-mode-section-head { display: flex; align-items: center; gap: 7px; color: var(--dsw-alias-label-caption); font-size: 11px; font-weight: 500; letter-spacing: .04em; text-transform: uppercase; }
+.code-mode-count, .code-mode-live, .code-mode-warn { padding: 1px 5px; border-radius: 4px; font-size: 10px; font-weight: 500; letter-spacing: 0; text-transform: none; }
+.code-mode-count { background: var(--dsw-specific-selector); color: var(--dsw-alias-label-tertiary); font-variant-numeric: tabular-nums; }
+.code-mode-live { background: color-mix(in srgb, var(--dsw-static-deepseek-500) 20%, transparent); color: var(--dsw-alias-label-primary); }
+.code-mode-warn { background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 18%, transparent); color: var(--dsw-alias-state-warn-label); }
+.code-mode-count + .code-mode-warn, .code-mode-warn + .code-mode-count { margin-left: -3px; }
+
+/* The script, with its line numbers pinned in their own column. */
+.code-block { display: grid; max-height: 26rem; margin: 0; overflow: auto; border: .5px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-markdown-code-block); }
+.code-line { display: flex; gap: 10px; padding: 0 12px; font-family: var(--ds-font-family-code); font-size: 11px; line-height: 18px; }
+.code-line:first-child { padding-top: 8px; }
+.code-line:last-child { padding-bottom: 8px; }
+.code-gutter { flex: none; width: 3ch; color: var(--dsw-alias-label-caption); text-align: right; user-select: none; font-variant-numeric: tabular-nums; }
+.code-text { min-width: 0; color: var(--dsw-alias-label-secondary); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Live output. The `data-terminal` attribute it borrows from the shell view
+ * brings the monospace face and the no-autospace rule; everything else is
+ * here, because a stream needs a different overflow policy than a command. */
+.code-mode-stream { display: flex; flex-direction: column; max-height: 15rem; margin: 0; padding: 8px 12px; overflow: auto; border: .5px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-markdown-code-block); font-size: 11px; line-height: 18px; }
+.code-mode-stream-line { color: var(--dsw-alias-label-secondary); white-space: pre-wrap; overflow-wrap: anywhere; }
+.code-mode-stream-line[data-kind="warn"] { color: var(--dsw-alias-state-warn-label); }
+.code-mode-stream-line[data-kind="error"] { color: var(--dsw-alias-state-error-primary); }
+/* A tool crossing is not output the script printed — it is Reaper being used.
+ * Dimmed and italic so a reader scanning a forty-iteration loop sees the
+ * `console.log` lines it was looking for and not the ticks between them. */
+.code-mode-stream-line[data-kind="tool"] { color: var(--dsw-alias-label-caption); font-style: italic; }
+
+.code-mode-calls { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
+.code-mode-call { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 2px 0; font-family: var(--ds-font-family-code); font-size: 11px; }
+/* The verdict marker, and the only one on the row. It sits at the left edge
+ * because that is where the eye lands when scanning a ledger to find the call
+ * that went wrong — a checkmark column on the right has to be read, this one
+ * is caught. The bullet is deliberately quiet: a hundred successful calls
+ * should look like a list, not like a hundred affirmations. */
+.code-mode-call::before { content: "·"; flex: none; width: 9px; color: var(--dsw-alias-label-caption); text-align: center; }
+.code-mode-call[data-failed]::before { content: "✕"; color: var(--dsw-alias-state-error-primary); }
+.code-mode-call-name { flex: none; color: var(--dsw-alias-label-secondary); }
+.code-mode-call-error { min-width: 0; overflow: hidden; color: var(--dsw-alias-state-error-primary); text-overflow: ellipsis; white-space: nowrap; }
+.code-mode-call-time { flex: none; margin-left: auto; color: var(--dsw-alias-label-caption); font-variant-numeric: tabular-nums; }
+
+.code-mode-result { max-height: 20rem; margin: 0; padding: 8px 12px; overflow: auto; border: .5px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-markdown-code-block); color: var(--dsw-alias-label-primary); font-size: 11px; line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.code-mode-raw-toggle { margin-left: auto; padding: 2px 0; font-size: 11px; text-transform: none; letter-spacing: 0; }
+/* The one thing shown without being asked for, matching how the command row
+ * surfaces a non-zero exit. */
+.code-mode-error { align-self: stretch; margin: 0 0 6px 23px; padding: 7px 11px; border-left: 2px solid var(--dsw-alias-state-error-primary); border-radius: 0 8px 8px 0; background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 9%, transparent); color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
+/*
+  Subordinate to the error it corrects, and marked the way the CLI marks it so
+  the two surfaces read as one product. Dimmer and a step indented: the reader
+  finds the failure first and the remedy second, which is the order they want
+  them in.
+*/
+.code-mode-hint { display: block; margin-top: 5px; padding-left: 14px; color: var(--dsw-alias-label-caption); text-indent: -14px; }
+.code-mode-hint::before { content: "↳ "; opacity: 0.7; }
+.code-mode-note { margin: 0; color: var(--dsw-alias-label-caption); font-size: 12px; line-height: 18px; }
+.turn-status { align-self: flex-start; margin-top: 12px; font-weight: 500; background: linear-gradient(90deg,var(--dsw-static-deepseek-500) 0%,var(--dsw-static-deepseek-500) 40%,var(--dsw-static-deepseek-200) 50%,var(--dsw-static-deepseek-500) 60%,var(--dsw-static-deepseek-500) 100%); background-size: 250% 100%; background-clip: text; color: transparent; animation: status-shimmer 1.8s linear infinite; }
+/*
+ * The elapsed number, in the normal text colour so a shimmering gradient does
+ * not smear the one value a waiting person is actually reading.
+ */
+.turn-elapsed { color: var(--dsw-alias-label-tertiary); font-variant-numeric: tabular-nums; font-size: 12px; }
+@media (prefers-reduced-motion: reduce) { .turn-status { animation: none; background: none; color: var(--dsw-alias-label-secondary); } }
+@keyframes status-shimmer { to { background-position: -150% 0; } }
+
+.queued-message { align-self: flex-end; width: min(86%, 620px); margin: 8px 0 8px auto; padding: 10px 13px; border: 1px dashed var(--dsw-alias-border-l4); border-radius: 16px 16px 5px 16px; color: var(--dsw-alias-label-secondary); }
+.queued-message[data-sent] { border-style: solid; }
+.queued-message footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 5px; color: var(--dsw-alias-label-caption); font-size: 11px; }
+.queued-message footer button { padding: 0; border: 0; background: transparent; color: var(--dsw-alias-state-business-primary); cursor: pointer; }
+
+/* Approval takeover adapted from DeepSeek ApprovalPanel. */
+.approval-root { display: flex; flex-direction: column; align-items: center; padding: 8px 0 12px; }
+.approval-card { overflow: hidden; width: 100%; border: 1px solid var(--dsw-alias-state-warn-secondary); border-radius: 20px; background: var(--dsw-specific-input-major); box-shadow: var(--dsw-shadow-lv2); }
+.approval-strip { display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: var(--dsw-alias-state-warn-tertiary); color: var(--dsw-alias-state-warn-primary); font-size: 13px; }
+.approval-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dsw-alias-state-warn-primary); }
+.approval-body { display: flex; flex-direction: column; gap: 6px; max-height: 260px; padding: 12px 16px 0; overflow-y: auto; }
+.approval-title { font-size: 15px; font-weight: 500; line-height: 24px; }
+.approval-reason { margin: 0; color: var(--dsw-alias-label-secondary); font-size: 13px; }
+.approval-command { margin: 0; color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 19px; white-space: pre-wrap; word-break: break-all; }
+.approval-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 16px; }
+.sticky-approval { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; padding: 10px 12px; border: 1px solid var(--dsw-alias-state-warn-secondary); border-radius: 14px; background: var(--dsw-specific-input-major); box-shadow: var(--dsw-elevation-panel); }
+.sticky-approval-copy { flex: 1; min-width: 0; }
+.sticky-approval-copy .tool-detail { display: block; }
+
+/* Shared buttons and fields follow DeepSeek primitives. */
+.button { display: inline-flex; align-items: center; justify-content: center; min-height: 34px; padding: 6px 13px; border: 0; border-radius: 10px; background: transparent; color: var(--dsw-alias-label-primary); font-size: 13px; font-weight: 500; text-decoration: none; cursor: pointer; }
+.button[data-variant="primary"] { background: var(--dsw-alias-button-primary-fill); color: var(--dsw-alias-label-primary-inverted); }
+.button[data-variant="primary"]:hover:not(:disabled) { background: var(--dsw-alias-button-primary-hover); }
+.button[data-variant="outline"] { --dsw-elevation-stroke-color: var(--dsw-alias-border-l3); background: var(--dsw-alias-button-elevated-fill); box-shadow: var(--dsw-elevation-stroke); }
+.button[data-variant="outline"]:hover:not(:disabled), .button[data-variant="ghost"]:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
+.button:active:not(:disabled) { transform: translateY(.5px); }
+.button[data-variant="outline"]:active:not(:disabled), .button[data-variant="ghost"]:active:not(:disabled) { background: var(--dsw-alias-interactive-bg-active); }
+.button[data-variant="ghost"] { color: var(--dsw-alias-label-secondary); }
+.button[data-variant="danger"] { background: var(--dsw-alias-interactive-bg-hover-danger); color: var(--dsw-alias-state-error-primary); }
+.button:disabled { opacity: .45; cursor: default; }
+/* A button that reads as a link inside a sentence. Used where prose points at
+   another surface: the affordance is real navigation, so it must be a real
+   control, but a bordered button mid-sentence would break the paragraph. */
+.link-button { padding: 0; border: 0; background: none; color: var(--dsw-alias-state-business-primary); font: inherit; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.link-button:hover { text-decoration-thickness: 2px; }
+.link-button:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 2px; border-radius: 3px; }
+.field { display: grid; gap: 5px; color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.field small { color: var(--dsw-alias-label-caption); font-weight: 400; }
+.field input, .field select, .settings-search, .policy-rule-pattern, .policy-rule-outcome, .settings-routing-row select { width: 100%; min-height: 38px; padding: 7px 10px; border: .5px solid var(--dsw-alias-border-l3); border-radius: 10px; outline: none; background: var(--dsw-specific-input-major); color: var(--dsw-alias-label-primary); }
+.field input:focus, .field select:focus, .settings-search:focus, .policy-rule-pattern:focus, .policy-rule-outcome:focus, .settings-routing-row select:focus { border-color: var(--dsw-alias-state-business-primary); }
+.form-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.field-error { margin: 9px 0 0; color: var(--dsw-alias-state-error-primary); font-size: 12px; }
+.settings-note { margin: 7px 0; color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; }
+.empty { padding: 22px 12px; color: var(--dsw-alias-label-caption); font-size: 13px; text-align: center; }
+
+/* DeepSeek ModelSelect-derived menu. */
+.model-picker, .effort-picker { position: relative; min-width: 0; }
+.model-trigger, .effort-trigger { display: flex; align-items: center; gap: 4px; max-width: min(280px, 30vw); height: 30px; padding: 0 7px 0 10px; border: 0; border-radius: 18px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 13px; font-weight: 500; cursor: pointer; }
+.model-trigger:hover:not(:disabled), .effort-trigger:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
+.model-trigger:disabled, .effort-trigger:disabled { color: var(--dsw-alias-label-dimmed); cursor: default; }
+.model-trigger-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-trigger-chevron { display: inline-grid; place-items: center; flex: none; color: var(--dsw-alias-label-caption); }
+.model-trigger-chevron svg { transition: transform 140ms var(--ds-ease-in-out); }
+.model-trigger-chevron[data-open] svg { transform: rotate(180deg); }
+.model-check { display: inline-grid; place-items: center; margin-left: auto; color: var(--dsw-alias-state-business-primary); }
+.model-menu, .effort-menu { position: absolute; right: 0; top: calc(100% + 8px); z-index: 50; display: flex; flex-direction: column; width: max-content; min-width: 260px; max-width: min(420px, calc(100vw - 32px)); max-height: min(420px, calc(100vh - 90px)); padding: 4px; overflow-y: auto; border-radius: 20px; background: var(--dsw-specific-menu); --dsw-elevation-stroke-color: var(--dsw-alias-border-l1); box-shadow: var(--dsw-elevation-prominent); }
+/*
+ * The search box had no rule at all, so it rendered as a UA-default input —
+ * square, light-filled, with its own border — inside a rounded dark menu.
+ */
+.model-search { position: sticky; top: 0; z-index: 1; display: block; padding: 4px 4px 6px; background: var(--dsw-specific-menu); }
+.model-search input { box-sizing: border-box; width: 100%; height: 34px; padding: 0 10px; border: .5px solid var(--dsw-alias-border-l3); border-radius: 10px; outline: none; background: var(--dsw-specific-input-major); color: var(--dsw-alias-label-primary); font-family: inherit; font-size: 13px; }
+.model-search input::placeholder { color: var(--dsw-alias-label-tertiary); opacity: 1; }
+.model-search input:focus-visible { border-color: var(--dsw-alias-state-business-primary); }
+.model-group + .model-group { margin-top: 4px; }
+/* Offset by the sticky search box above it, or the two overlap while scrolling. */
+.model-group-title { position: sticky; top: 44px; padding: 5px 8px 3px; background: var(--dsw-specific-menu); color: var(--dsw-alias-label-tertiary); font-size: 12px; font-weight: 500; }
+.model-option, .effort-option { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 38px; padding: 6px 8px; border: 0; border-radius: 10px; background: transparent; color: inherit; font-size: 14px; font-weight: 500; text-align: left; cursor: pointer; }
+.model-option:hover, .effort-option:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.model-option:active, .effort-option:active { background: var(--dsw-alias-interactive-bg-active); }
+.model-option[data-selected], .effort-option[data-selected] { background: var(--dsw-specific-sidebar-nav-item-active); }
+.model-option:disabled, .effort-option:disabled { opacity: .5; cursor: default; }
+/* A model this build has no transport for. Colour alone would not carry it, so
+ * the label reads "unavailable" and the row is disabled; this only keeps the
+ * word small enough not to compete with the model name beside it. */
+.model-unavailable { font-size: 11px; font-weight: 500; color: var(--dsw-alias-text-tertiary); }
+.effort-option > span:first-child { display: flex; flex-direction: column; gap: 1px; }
+.effort-option small { color: var(--dsw-alias-label-caption); font-size: 11px; font-weight: 400; }
+.model-note { position: absolute; right: 0; top: calc(100% + 4px); white-space: nowrap; color: var(--dsw-alias-label-caption); font-size: 10px; }
+.menu-status, .menu-error { padding: 9px; font-size: 12px; }
+.menu-error { color: var(--dsw-alias-state-error-primary); }
+.context-meter { display: flex; align-items: center; gap: 6px; }
+.context-meter-bar { width: 56px; height: 4px; overflow: hidden; border-radius: 3px; background: var(--dsw-specific-selector); }
+.context-meter-fill { height: 100%; border-radius: 3px; background: var(--dsw-alias-state-success-primary); }
+.context-meter[data-level="warning"] .context-meter-fill { background: var(--dsw-alias-state-warn-primary); }
+.context-meter[data-level="error"] .context-meter-fill { background: var(--dsw-alias-state-error-primary); }
+.context-meter-label { color: var(--dsw-alias-label-caption); font-size: 10px; white-space: nowrap; }
+
+/* Plans and verification are quiet dock cards on the shared chat axis. */
+.checklist, .verification { margin-bottom: 12px; padding: 12px 14px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 14px; background: var(--dsw-alias-bg-module-platform); }
+.checklist { display: flex; flex-direction: column; gap: 8px; }
+.checklist-head { display: flex; align-items: baseline; }
+.checklist-title { margin: 0; color: var(--dsw-alias-label-tertiary); font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; }
+.checklist-progress { margin-left: auto; color: var(--dsw-alias-label-caption); font-size: 11px; }
+.checklist-steps { display: flex; flex-direction: column; gap: 5px; list-style: none; margin: 0; padding: 0; }
+.checklist-step { display: flex; align-items: flex-start; gap: 6px; font-size: 12px; }
+.checklist-glyph { width: 16px; color: var(--dsw-alias-label-caption); font-size: 13px; line-height: 18px; text-align: center; }
+.checklist-step[data-status="completed"] .checklist-glyph, .checklist-evidence { color: var(--dsw-alias-state-success-primary); }
+.checklist-step[data-status="in_progress"] .checklist-glyph { color: var(--dsw-alias-state-business-primary); }
+.checklist-step[data-status="blocked"] .checklist-glyph { color: var(--dsw-alias-state-error-primary); }
+.checklist-body { display: flex; flex-direction: column; min-width: 0; }
+/* The step title had no rule, so it sat at the step's inherited 12px and its
+ * weight against the 11px dimmed detail line was accidental rather than
+ * chosen. Give it the primary label colour so the pair reads as title/detail. */
+.checklist-step-title { color: var(--dsw-alias-label-primary); line-height: 18px; }
+.checklist-detail, .checklist-evidence, .checklist-priority { color: var(--dsw-alias-label-tertiary); font-size: 11px; }
+.verification[data-tone="verified"] { border-color: color-mix(in srgb,var(--dsw-alias-state-success-primary) 45%,var(--dsw-alias-border-l2)); }
+.verification[data-tone="failed"] { border-color: color-mix(in srgb,var(--dsw-alias-state-error-primary) 45%,var(--dsw-alias-border-l2)); }
+.verification-head { display: flex; align-items: center; gap: 7px; }
+.verification-verdict { font-weight: 600; }
+.verification-attempts { margin-left: auto; color: var(--dsw-alias-label-caption); font-size: 11px; }
+.verification-command, .verification-signal, .verification-warning { display: block; margin: 7px 0 0; font-size: 11px; }
+.verification-warning { color: var(--dsw-alias-state-warn-label); }
+.verification-classes { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 8px; }
+.verification-class { padding: 2px 6px; border-radius: 7px; background: var(--dsw-alias-interactive-bg-hover-danger); color: var(--dsw-alias-state-error-primary); font-size: 10px; }
+.verification-detail { margin-top: 7px; color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.verification-detail p { margin: 5px 0; }
+/* The verdict glyph carries the tone, so it has to follow it. Every other tone
+ * element in this card (`--verification-verdict`, the border, the failure
+ * chips) is coloured; the glyph alone stayed at the default label colour, which
+ * left the ✓/~/✗ distinguishable only by character shape. */
+.verification-glyph { flex: none; width: 14px; font-weight: 600; text-align: center; }
+.verification[data-tone="verified"] .verification-glyph { color: var(--dsw-alias-state-success-primary); }
+.verification[data-tone="claimed"] .verification-glyph { color: var(--dsw-alias-state-warn-primary); }
+.verification[data-tone="failed"] .verification-glyph { color: var(--dsw-alias-state-error-primary); }
+/* No global list reset exists, so this rendered with the UA's 40px indent and
+ * disc bullets inside an otherwise flat card. */
+.verification-feedback { margin: 5px 0 0; padding-left: 18px; font-size: 11px; line-height: 17px; }
+.verification-feedback li + li { margin-top: 3px; }
+
+/* Workbench details column. */
+.workbench { display: grid; grid-template-rows: auto 1fr; height: 100%; min-width: 0; background: var(--dsw-alias-bg-layer-1); }
+.workbench-tabs { display: flex; align-items: stretch; gap: 22px; min-width: 0; height: 52px; padding: 0 16px; overflow-x: auto; border-bottom: .5px solid var(--dsw-alias-border-l3); }
+.workbench-tab { position: relative; flex: none; padding: 0; border: 0; background: transparent; color: var(--dsw-alias-label-tertiary); font-size: 12px; font-weight: 500; cursor: pointer; }
+.workbench-tab::after { content: ""; position: absolute; right: 0; bottom: 0; left: 0; height: 2px; border-radius: 2px; background: transparent; transition: background-color 140ms ease; }
+.workbench-tab:hover { color: var(--dsw-alias-label-primary); }
+.workbench-tab[aria-selected="true"] { color: var(--dsw-alias-state-business-primary); }
+.workbench-tab[aria-selected="true"]::after { background: var(--dsw-alias-state-business-primary); }
+.tab-count { margin-left: 4px; padding: 1px 5px; border-radius: 8px; background: var(--dsw-specific-selector); color: var(--dsw-alias-label-secondary); font-size: 9px; }
+.tab-presence { display: inline-block; width: 5px; height: 5px; margin-left: 5px; vertical-align: 2px; border-radius: 50%; background: var(--dsw-alias-state-success-primary); }
+.follow-toggle { display: flex; align-items: center; gap: 5px; margin-left: auto; color: var(--dsw-alias-label-caption); font-size: 10px; white-space: nowrap; }
+.workbench-body { min-height: 0; padding: 14px; overflow: auto; }
+/* Neither pane stacked anything: `.back-button` has no bottom margin and
+ * `.file-path` has no top margin, so in the file view the two ran together and
+ * the contents box butted against the path line. */
+.file-view, .file-tree { display: flex; flex-direction: column; }
+.file-view { gap: 6px; }
+.file-tree-location, .file-path { margin-bottom: 8px; padding: 0 7px; overflow: hidden; color: var(--dsw-alias-label-caption); font-family: var(--ds-font-family-code); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+/* The location line carries the upload controls, so it is a row rather than a
+   single string: the path takes the space that is left and the buttons keep
+   their own width instead of being squeezed by a long directory name. */
+.file-tree-location { display: flex; align-items: center; gap: 8px; }
+.file-tree-path { overflow: hidden; text-overflow: ellipsis; }
+.upload-control { display: flex; flex: none; gap: 4px; margin-left: auto; }
+.upload-control .button { min-height: 24px; padding: 0 8px; font-size: 11px; }
+.tree-entry, .back-button { display: flex; align-items: center; gap: 7px; width: 100%; padding: 5px 7px; border: 0; border-radius: 7px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 12px; text-align: left; cursor: pointer; }
+.tree-entry:hover, .back-button:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.tree-icon { display: inline-grid; place-items: center; flex: none; width: 14px; color: var(--dsw-alias-label-caption); }
+.tree-entry:hover .tree-icon, .back-button:hover .tree-icon { color: var(--dsw-alias-label-secondary); }
+.file-contents { max-height: none; min-height: 240px; }
+.process + .process { margin-top: 18px; }
+.process-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.process-head .tool-meta { margin-left: auto; }
+.preview, .browser { display: flex; flex-direction: column; gap: 10px; height: 100%; min-height: 0; }
+.preview-bar, .browser-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.preview-manual { display: flex; align-items: center; gap: 5px; }
+.preview-manual input { width: 76px; min-height: 34px; padding: 5px 8px; border: .5px solid var(--dsw-alias-border-l3); border-radius: 9px; background: var(--dsw-specific-input-major); color: inherit; }
+.preview-reload, .browser-reload { margin-left: auto; }
+.preview-frame { flex: 1; min-height: 360px; width: 100%; border: .5px solid var(--dsw-alias-border-l3); border-radius: 12px; background: #fff; }
+.browser-page { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.browser-meta a { display: block; overflow: hidden; color: var(--dsw-alias-label-secondary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.browser-stage { position: relative; width: 100%; overflow: hidden; border: .5px solid var(--dsw-alias-border-l3); border-radius: 12px; background: #fff; }
+.browser-shot { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.browser-box { position: absolute; border: 1px solid var(--dsw-alias-state-business-primary); border-radius: 3px; background: color-mix(in srgb,var(--dsw-alias-state-business-primary) 20%,transparent); pointer-events: none; }
+.browser-elements { display: flex; flex-direction: column; gap: 3px; list-style: none; margin: 0; padding: 0; }
+.browser-element { display: flex; gap: 7px; font-size: 11px; }
+.browser-ref { flex: none; color: var(--dsw-alias-label-caption); font-family: var(--ds-font-family-code); }
+
+/* Full routed settings page using DeepSeek settings/menu material. */
+.settings-page { height: 100%; overflow-y: auto; background: var(--dsw-alias-bg-base); }
+.settings-page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; max-width: 1180px; margin: 0 auto; padding: 42px 32px 28px; border-bottom: .5px solid var(--dsw-alias-border-l2); }
+.settings-page-header .eyebrow { margin: 0 0 3px; color: var(--dsw-alias-state-business-primary); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+.settings-page-header h1 { margin: 0; font-size: 28px; line-height: 36px; letter-spacing: -.025em; }
+.settings-page-header p:not(.eyebrow) { margin: 5px 0 0; color: var(--dsw-alias-label-tertiary); }
+.settings-page-grid { display: grid; grid-template-columns: 190px minmax(0,1fr); gap: 42px; max-width: 1180px; margin: 0 auto; padding: 30px 32px 70px; }
+.settings-nav { position: sticky; top: 24px; display: flex; align-self: start; flex-direction: column; gap: 3px; }
+.settings-nav a { padding: 8px 10px; border-radius: 10px; color: var(--dsw-alias-label-secondary); font-size: 13px; text-decoration: none; }
+.settings-nav a:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.settings-nav a.active { background: var(--dsw-specific-sidebar-nav-item-active-accent); color: var(--dsw-alias-state-business-primary); font-weight: 500; }
+.settings-content { min-width: 0; max-width: 820px; }
+.settings-caveat { display: flex; gap: 10px; margin-bottom: 20px; padding: 12px 14px; border-radius: 12px; background: var(--dsw-alias-state-warn-tertiary); color: var(--dsw-alias-state-warn-label); }
+.settings-caveat strong { font-size: 13px; }
+.settings-caveat p { margin: 2px 0 0; font-size: 12px; }
+.settings-section { display: flex; flex-direction: column; gap: 16px; }
+.settings-section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.settings-section-heading h2 { margin: 0; font-size: 20px; line-height: 28px; }
+.settings-section-heading p { max-width: 660px; margin: 4px 0 0; color: var(--dsw-alias-label-tertiary); font-size: 13px; line-height: 20px; }
+
+/*
+ * Theme picker. Each swatch paints its *own* palette rather than the active
+ * one, so the preview stays truthful when it is not the selected option. The
+ * radios are real inputs (keyboard, arrow-key group navigation, screen-reader
+ * state) visually hidden behind the swatch rather than replaced by divs.
+ */
+.theme-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin: 0; padding: 0; border: 0; }
+.theme-option { position: relative; display: flex; align-items: center; gap: 12px; padding: 12px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 14px; cursor: pointer; }
+.theme-option:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.theme-option[data-selected] { border-color: var(--dsw-alias-state-business-primary); background: var(--dsw-specific-sidebar-nav-item-active); }
+.theme-option input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; }
+.theme-option:has(input:focus-visible) { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 2px; }
+.theme-option-text { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.theme-option-text strong { font-size: 14px; font-weight: 500; }
+.theme-option-text small { color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 17px; }
+.theme-swatch { display: grid; flex: none; grid-template-columns: 26px 12px; grid-template-rows: 12px 12px; gap: 2px; width: 40px; height: 26px; }
+.theme-swatch > span { border-radius: 3px; }
+.theme-swatch-surface { grid-row: 1 / 3; }
+.theme-swatch-accent { background: var(--dsw-static-deepseek-400); }
+.theme-swatch[data-theme="dark"] .theme-swatch-surface { background: rgb(21, 21, 23); }
+.theme-swatch[data-theme="dark"] .theme-swatch-raised { background: rgb(35, 35, 36); }
+.theme-swatch[data-theme="black"] .theme-swatch-surface { background: rgb(0, 0, 0); }
+.theme-swatch[data-theme="black"] .theme-swatch-raised { background: rgb(20, 20, 21); }
+.theme-option[data-selected] .theme-swatch { box-shadow: 0 0 0 1px var(--dsw-alias-border-l3); }
+.section-count { min-width: 28px; padding: 3px 8px; border-radius: 12px; background: var(--dsw-specific-selector); color: var(--dsw-alias-label-secondary); font-size: 11px; text-align: center; }
+.settings-card { padding: 16px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 14px; background: var(--dsw-alias-bg-layer-1); }
+.settings-card h3 { margin: 0 0 10px; font-size: 14px; }
+.settings-card p { margin: 3px 0 0; color: var(--dsw-alias-label-tertiary); font-size: 12px; }
+.settings-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 8px; }
+.settings-card-heading h3 { margin-bottom: 0; }
+.settings-empty-state { padding: 28px 20px; border: .5px dashed var(--dsw-alias-border-l3); border-radius: 14px; color: var(--dsw-alias-label-secondary); text-align: center; }
+.settings-empty-state p { max-width: 520px; margin: 5px auto 0; color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; }
+.settings-add-provider { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
+.settings-add-provider > .provider-list { align-self: stretch; }
+.provider-list-available { padding: 0 16px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 14px; background: var(--dsw-alias-bg-layer-1); }
+.settings-model-provider-list { display: flex; flex-direction: column; gap: 12px; }
+.provider-list, .settings-routing, .settings-models, .inventory-list { list-style: none; margin: 0; padding: 0; }
+.provider-row { padding: 18px 0; border-top: .5px solid var(--dsw-alias-border-l2); }
+.provider-row:first-child { border-top: 0; }
+.provider-head { display: flex; align-items: center; gap: 16px; }
+.provider-identity { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.provider-identity > div { display: flex; flex-direction: column; }
+.provider-mark { display: grid; place-items: center; flex: none; width: 34px; height: 34px; border-radius: 10px; background: var(--dsw-specific-selector); color: var(--dsw-alias-state-business-primary); font-weight: 650; }
+.provider-name { font-weight: 600; }
+.provider-state { color: var(--dsw-alias-label-caption); font-size: 11px; }
+.provider-state[data-tone="ready"] { color: var(--dsw-alias-state-success-primary); }
+.provider-actions { display: flex; gap: 4px; margin-left: auto; }
+.provider-models { margin: 7px 0 0 45px; color: var(--dsw-alias-label-caption); font-size: 11px; }
+.provider-health { margin: 7px 0 0 45px; font-size: 11px; line-height: 1.5; color: var(--dsw-alias-label-caption); }
+.provider-health strong { display: inline-block; margin-right: 4px; font-weight: 500; }
+.provider-health[data-tone="ready"] strong { color: var(--dsw-alias-state-success-primary); }
+.provider-health[data-tone="missing"] strong { color: var(--dsw-alias-state-error-primary); }
+.provider-form { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 14px 0 0 45px; padding: 14px; border-radius: 12px; background: var(--dsw-alias-bg-module-platform); }
+.provider-form .form-actions, .provider-form .field-error, .provider-form > .settings-note, .provider-form > .provider-auth-back { grid-column: 1 / -1; }
+.provider-picker, .provider-connect-panel { align-self: stretch; overflow: hidden; border: .5px solid var(--dsw-alias-border-l2); border-radius: 14px; background: var(--dsw-alias-bg-layer-1); }
+.provider-picker { padding: 16px; }
+.provider-picker-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.provider-picker-heading h3 { margin: 0; font-size: 14px; }
+.provider-picker-heading p { margin: 3px 0 0; color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; }
+.provider-search { display: block; margin: 16px 0 10px; }
+.provider-search input { width: 100%; }
+.provider-picker-list { list-style: none; margin: 0; padding: 0; }
+.provider-picker-list li + li { border-top: .5px solid var(--dsw-alias-border-l2); }
+.provider-picker-list button { display: grid; grid-template-columns: 34px minmax(0,1fr) auto; align-items: center; gap: 11px; width: 100%; padding: 10px 8px; border: 0; border-radius: 10px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.provider-picker-list button:hover, .provider-picker-list button:focus-visible { background: var(--dsw-alias-interactive-bg-hover); outline: none; }
+.provider-picker-list button > span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.provider-picker-list small { overflow: hidden; color: var(--dsw-alias-label-caption); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.provider-connect-panel { padding-bottom: 16px; }
+.provider-connect-panel > .provider-picker-heading { padding: 16px; border-bottom: .5px solid var(--dsw-alias-border-l2); }
+.provider-connect-title { display: flex; align-items: center; gap: 10px; }
+.provider-connect-title .button { padding-inline: 6px; }
+.provider-auth-methods { display: flex; flex-direction: column; gap: 4px; padding: 12px; }
+.provider-auth-methods button { display: flex; flex-direction: column; gap: 3px; padding: 12px; border: 0; border-radius: 10px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.provider-auth-methods button:hover, .provider-auth-methods button:focus-visible { background: var(--dsw-alias-interactive-bg-hover); outline: none; }
+.provider-auth-methods button span { color: var(--dsw-alias-label-tertiary); font-size: 12px; }
+.provider-connect-panel .provider-form { margin: 14px; }
+.provider-auth-back { width: max-content; padding: 0; border: 0; background: transparent; color: var(--dsw-alias-state-business-primary); font-size: 12px; cursor: pointer; }
+.provider-advanced { grid-column: 1 / -1; color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.provider-advanced summary { width: max-content; cursor: pointer; }
+.provider-advanced .field { margin-top: 10px; }
+.provider-auth-flow { display: flex; align-items: flex-start; flex-direction: column; gap: 14px; margin: 14px; padding: 16px; border-radius: 12px; background: var(--dsw-alias-bg-module-platform); }
+.provider-auth-flow p { margin: 0; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; }
+.provider-auth-flow form { display: flex; align-items: flex-start; flex-direction: column; gap: 12px; width: 100%; }
+.provider-auth-flow .field { width: 100%; }
+.provider-auth-wait { display: flex; align-items: center; gap: 8px; color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.settings-routing-row, .settings-model-row { display: flex; align-items: center; gap: 16px; min-height: 48px; padding: 8px 0; border-top: .5px solid var(--dsw-alias-border-l2); }
+.settings-routing-row:first-child, .settings-model-row:first-child { border-top: 0; }
+.settings-routing-row > span { display: flex; flex: 1; flex-direction: column; }
+.settings-routing-row small, .settings-model-row span { color: var(--dsw-alias-label-caption); font-size: 11px; }
+.settings-routing-row select { width: 220px; }
+.settings-model-row > div:first-child { display: flex; flex-direction: column; }
+.model-metadata { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.status-badge, .trust-badge { display: inline-flex; align-items: center; padding: 2px 6px; border-radius: 7px; background: var(--dsw-specific-selector); color: var(--dsw-alias-label-tertiary); font-size: 10px; }
+.status-badge[data-status="enabled"] { background: var(--dsw-alias-state-success-tertiary); color: var(--dsw-alias-state-success-primary); }
+.status-badge[data-status="disabled"], .status-badge[data-status="failed"] { background: var(--dsw-alias-interactive-bg-hover-danger); color: var(--dsw-alias-state-error-primary); }
+.settings-switch-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.switch input { position: absolute; opacity: 0; pointer-events: none; }
+.switch span { position: relative; display: block; width: 38px; height: 22px; border-radius: 12px; background: var(--dsw-alias-label-dimmed); cursor: pointer; }
+.switch span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: var(--dsw-shadow-lv1); transition: transform 120ms ease; }
+.switch input:checked + span { background: var(--dsw-alias-state-business-primary); }
+.switch input:checked + span::after { transform: translateX(16px); }
+.permission-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.permission-option { position: relative; display: flex; flex-direction: column; align-items: flex-start; min-height: 108px; padding: 15px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 14px; background: var(--dsw-alias-bg-layer-1); color: inherit; text-align: left; cursor: pointer; }
+.permission-option:hover { border-color: var(--dsw-alias-border-l4); background: var(--dsw-alias-interactive-bg-hover); }
+.permission-option[data-selected] { border-color: var(--dsw-alias-state-business-primary); background: color-mix(in srgb,var(--dsw-specific-sidebar-nav-item-active-accent) 60%,transparent); }
+.permission-option strong { margin-bottom: 5px; }
+.permission-option > span:last-child { color: var(--dsw-alias-label-tertiary); font-size: 12px; }
+.permission-check { position: absolute; top: 12px; right: 12px; color: var(--dsw-alias-state-business-primary); }
+.policy-editor { display: flex; flex-direction: column; gap: 7px; list-style: none; margin: 0; padding: 0; counter-reset: rule; }
+.policy-rule { display: grid; grid-template-columns: 28px 100px minmax(0,1fr) auto; align-items: center; gap: 8px; padding: 9px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 12px; background: var(--dsw-alias-bg-layer-1); }
+.policy-order { color: var(--dsw-alias-label-caption); font-size: 11px; text-align: center; }
+.policy-rule-actions { display: flex; align-items: center; gap: 2px; }
+.unsaved-state { color: var(--dsw-alias-state-warn-label); font-size: 11px; }
+.settings-search { max-width: 360px; }
+.inventory-heading { display: flex; align-items: center; gap: 7px; margin: 10px 0 0; font-size: 13px; }
+.inventory-heading span { padding: 1px 6px; border-radius: 7px; background: var(--dsw-specific-selector); color: var(--dsw-alias-label-tertiary); font-size: 10px; }
+.inventory-row { padding: 14px 0; border-top: .5px solid var(--dsw-alias-border-l2); }
+.inventory-row:first-child { border-top: 0; }
+.inventory-row-head { display: flex; align-items: center; gap: 7px; }
+.inventory-name { font-weight: 600; }
+.inventory-version { color: var(--dsw-alias-label-caption); font-size: 11px; }
+.inventory-description { margin: 5px 0; color: var(--dsw-alias-label-secondary); font-size: 12px; }
+/* An inline token in prose, not a code block: it names a thing a person types. */
+.inline-code { padding: 1px 5px; border-radius: 5px; background: var(--dsw-specific-selector); color: var(--dsw-alias-label-primary); font-family: var(--ds-font-family-code); font-size: 11px; }
+.inventory-meta { display: flex; gap: 10px; flex-wrap: wrap; color: var(--dsw-alias-label-caption); font-size: 10px; }
+
+@media (max-width: 1180px) {
+  .app-frame { grid-template-columns: 240px minmax(0,1fr) 0 !important; }
+  .details-column, .details-resize-handle { display: none; }
+  .details-toggle { display: none; }
+  .conversation-root { --dsh-chat-content-width: min(820px, calc(100% - 48px)); }
+}
+@media (max-width: 760px) {
+  .app-frame { grid-template-columns: 56px minmax(0,1fr) 0 !important; }
+  .sidebar-root { padding: 18px 10px 8px; align-items: center; }
+  .sidebar-root:not([data-collapsed]) .brand-button, .sidebar-root:not([data-collapsed]) .sidebar-section-head, .sidebar-root:not([data-collapsed]) .thread-list-scroll, .sidebar-root:not([data-collapsed]) .new-thread-button, .sidebar-root:not([data-collapsed]) .thread-create, .sidebar-root:not([data-collapsed]) .sidebar-connection, .sidebar-root:not([data-collapsed]) .sidebar-settings span { display: none; }
+  .sidebar-root:not([data-collapsed]) .sidebar-logo-row { width: 36px; height: 36px; padding: 0; }
+  .conversation-header { padding-inline: 10px; }
+  .workspace-crumb, .crumb-separator, .context-meter { display: none; }
+  .conversation-title { max-width: 160px; }
+  .chat-column { padding-inline: 12px; }
+  .composer-seat { width: calc(100% + 24px); margin-inline: -12px; padding-inline: 10px; }
+  .settings-page-header { padding: 24px 18px 20px; }
+  .settings-page-grid { display: block; padding: 18px 18px 50px; }
+  .settings-nav { position: static; flex-direction: row; margin-bottom: 24px; overflow-x: auto; }
+  .settings-nav a { flex: none; }
+  .provider-form { grid-template-columns: 1fr; margin-left: 0; }
+  .permission-grid { grid-template-columns: 1fr; }
+  .policy-rule { grid-template-columns: 24px 90px minmax(0,1fr); }
+  .policy-rule-actions { grid-column: 2 / -1; justify-content: flex-end; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .app-frame, .chevron, .model-trigger-chevron, .switch span::after { transition: none; }
+  .turn-status { animation: none; background-size: 100% 100%; }
+  .refresh-icon[data-spinning] { animation: none; }
+  .button:active:not(:disabled) { transform: none; }
+  .workbench-tab::after, .model-trigger-chevron svg { transition: none; }
 }
 
-button {
-  font: inherit;
-  color: inherit;
-  background: none;
-  border: none;
+/*
+ * Direct InputBar / HeroShell / ConversationRoot adaptation from DeepSeek
+ * Harness. Keep these measurements aligned with the vendored upstream CSS;
+ * Reaper only substitutes a controlled textarea and app-server actions.
+ */
+.conversation-scroll[data-phase="hero"] {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.dsh-hero-root {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 100%;
+  padding: 0 24px 32px;
+}
+
+.dsh-hero-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  width: min(calc(var(--dsh-composer-card-max-width) + 2 * var(--dsh-composer-side-clearance)), 100%);
+  overflow: visible;
+}
+
+.dsh-hero-headline {
+  display: grid;
+  grid-template-columns: 34px auto auto;
+  column-gap: 10px;
+  align-items: center;
+  justify-content: center;
+  color: var(--dsw-alias-label-primary);
+  font-size: 26px;
+  font-weight: 500;
+  line-height: 32px;
+}
+
+.dsh-hero-mark {
+  display: inline-flex;
+  grid-column: 1;
+  align-items: center;
+  justify-content: center;
+}
+
+.dsh-preview-badge {
+  grid-column: 3;
+  align-self: start;
+  margin-top: 2px;
+  margin-left: -3px;
+  padding: 1px 7px 0;
+  border: .5px solid var(--dsw-alias-interactive-bg-hover);
+  border-radius: 24px;
+  background: var(--dsw-alias-state-business-tertiary);
+  color: var(--dsw-alias-label-primary-bluish);
+  font-family: var(--ds-font-family-code);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.dsh-workspace-chip {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 4px;
+  max-width: min(100%, 360px);
+  min-height: 28px;
+  margin-left: 20px;
+  padding: 0 8px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 16px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
   cursor: pointer;
 }
 
-/* ---- Layout ---- */
-
-.app {
-  display: grid;
-  grid-template-rows: auto 1fr;
-  height: 100%;
-}
-
-.app-header {
-  display: flex;
-  align-items: center;
-  gap: calc(var(--step) * 3);
-  padding: 0 calc(var(--step) * 4);
-  height: 48px;
-  border-bottom: 1px solid var(--border);
-  background: var(--depth-1);
-}
-
-.app-title {
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-.app-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  min-height: 0;
-}
-
-.chat-pane {
-  display: grid;
-  grid-template-rows: 1fr auto;
-  min-height: 0;
-  min-width: 0;
-  border-right: 1px solid var(--border);
-}
-
-.workbench {
-  display: grid;
-  grid-template-rows: auto 1fr;
-  min-height: 0;
-  min-width: 0;
-  background: var(--depth-1);
-}
-
-/* Narrow: one column, chat only. This must come *after* `.workbench` — equal
-   specificity means source order decides, and placing it earlier let the
-   later `display: grid` win, dropping the workbench below the composer. */
-@media (max-width: 900px) {
-  .app-body { grid-template-columns: minmax(0, 1fr); }
-  .workbench { display: none; }
-  .chat-pane { border-right: none; }
-}
-
-/* ---- Status ---- */
-
-.status-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex: none;
-}
-.status-dot[data-status="open"] { background: var(--success); }
-.status-dot[data-status="connecting"] { background: var(--warning); }
-.status-dot[data-status="closed"] { background: var(--danger); }
-
-.status-label {
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-/* ---- Transcript ---- */
-
-.transcript {
-  overflow-y: auto;
-  padding: calc(var(--step) * 4) calc(var(--step) * 5) calc(var(--step) * 10);
-  min-height: 0;
-}
-
-.turn { padding-block: calc(var(--step) * 2); }
-
-.turn + .turn { border-top: 1px solid var(--border); }
-
-/* A step is one model request plus the tools it called. Rules and spacing
-   carry the grouping — no card, no border box. */
-.step { padding-block: calc(var(--step) * 1.5); }
-
-.step-tools {
-  margin-left: var(--indent);
-  padding-left: calc(var(--step) * 3);
-  border-left: 1px solid var(--border);
-}
-
-/* User input is the only thing that gets a container: it needs to read as an
-   interjection into the agent's stream. */
-.user-message {
-  background: var(--accent-dim);
-  border-radius: var(--radius);
-  padding: calc(var(--step) * 2.5) calc(var(--step) * 3.5);
-  margin-block: calc(var(--step) * 2);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-/* A queued message is a user message that has not landed yet. It shares the
-   user-message shape so it reads as the same kind of thing, and is set apart by
-   a dashed edge and reduced emphasis — not by color alone. */
-.queued-message {
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--radius);
-  padding: calc(var(--step) * 2.5) calc(var(--step) * 3.5);
-  margin-block: calc(var(--step) * 2);
-}
-
-/* Handed over: the border firms up as the message moves from "I can still take
-   this back" toward the transcript. Shape, not colour alone, carries the state. */
-.queued-message[data-sent="true"] {
-  border-style: solid;
-}
-
-.queued-body {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  color: var(--text-muted);
-}
-
-.queued-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: calc(var(--step) * 2);
-  margin-top: calc(var(--step) * 1.5);
-  font-size: 12px;
-  color: var(--text-faint);
-}
-
-/* The agent's prose is the page itself. */
-.agent-message {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  margin-block: calc(var(--step) * 2);
-}
-
-.reasoning {
-  color: var(--text-muted);
-  font-size: 13px;
-}
-
-.reasoning-body {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  padding-left: calc(var(--step) * 3);
-  border-left: 1px solid var(--border);
-  margin-top: var(--step);
-}
-
-/* ---- Tool rows ---- */
-
-.tool-row {
-  display: flex;
-  align-items: baseline;
-  gap: calc(var(--step) * 2);
-  padding-block: calc(var(--step) * 1.5);
-  min-width: 0;
-}
-
-.tool-label {
-  color: var(--text-muted);
-  flex: none;
-}
-
-.tool-detail {
-  font-family: var(--font-mono);
-  font-size: 12.5px;
+.dsh-workspace-chip span:nth-child(2) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.dsh-workspace-chip:hover { background: var(--dsw-alias-interactive-bg-hover); }
+/*
+ * Targeted by position, not by `:last-child`: the settings chip appends a
+ * status dot after its label, and `:last-child` would then paint the dot
+ * instead of the text — leaving the label at full strength on a chip whose
+ * whole purpose is to look secondary.
+ */
+.dsh-workspace-chip > span:nth-of-type(2) { color: var(--dsw-alias-label-caption); }
+
+.dsh-hero-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; }
+.dsh-hero-chips .dsh-workspace-chip { margin-left: 20px; }
+/* Same dot as the header control, positioned inline rather than absolutely. */
+.dsh-thread-settings-chip { position: relative; }
+.dsh-thread-settings-chip .thread-settings-dot { position: static; margin-left: 2px; }
+
+.dsh-composer-seat {
+  position: sticky;
+  bottom: 0;
+  z-index: 7;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  --dsh-composer-text-max-height: 336px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--dsw-alias-bg-base) 0%, transparent) 0,
+    var(--dsw-alias-bg-base) 36px
+  );
+}
+
+.dsh-inputbar-root {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0 var(--dsh-composer-side-clearance) 8px;
+}
+
+.dsh-hero-root .dsh-inputbar-root { padding: 0 var(--dsh-composer-side-clearance); }
+
+.dsh-inputbar-card {
+  position: relative;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  max-width: var(--dsh-composer-card-max-width);
+  padding-top: 10px;
+  border: 0;
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l2);
+  border-radius: 22px;
+  background: var(--dsw-specific-input-major);
+  box-shadow: var(--dsw-elevation-soft);
+  font-size: var(--dsh-content-font-size, 14px);
+  line-height: calc(24px + var(--dsh-content-font-delta, 0px));
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+
+.dsh-inputbar-scroll {
+  max-height: var(--dsh-composer-text-max-height);
+  margin-right: 4px;
+  overflow-y: auto;
+}
+
+.dsh-inputbar-scroll::-webkit-scrollbar-track { margin-top: 8px; }
+.dsh-inputbar-grow { position: relative; }
+
+.dsh-inputbar-input {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  max-height: var(--dsh-composer-text-max-height);
+  padding: 4px 8px 0 16px;
+  resize: none;
+  overflow-y: hidden;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  caret-color: var(--dsw-alias-state-business-primary);
+  font-family: var(--dsw-font-family);
+  font-size: inherit;
+  line-height: inherit;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/*
+ * The composer sits on the raised `input-major` surface, where the caption
+ * token only reaches 3.8:1 — under AA. Every label inside the card steps up one
+ * level to `tertiary` (6.5:1) instead. The token itself is left alone; it still
+ * clears AA against the base and sidebar fills it was measured for.
+ */
+.dsh-inputbar-input::placeholder { color: var(--dsw-alias-label-tertiary); opacity: 1; }
+.dsh-inputbar-card .context-meter-label,
+.dsh-inputbar-card .model-trigger-chevron,
+.dsh-permission-chip span:last-child { color: var(--dsw-alias-label-tertiary); }
+.dsh-inputbar-input:disabled { color: var(--dsw-alias-label-tertiary); cursor: not-allowed; }
+
+.dsh-inputbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 2px 8px 6px;
+  container-type: inline-size;
+}
+
+.dsh-inputbar-tools,
+.dsh-inputbar-modes,
+.dsh-inputbar-trailing {
+  display: flex;
+  align-items: center;
   min-width: 0;
 }
 
-.tool-meta {
-  margin-left: auto;
+.dsh-inputbar-tools { gap: 16px; }
+.dsh-inputbar-modes { gap: 12px; }
+.dsh-inputbar-trailing { flex: none; gap: 12px; margin-left: auto; }
+
+.dsh-inputbar-add {
+  display: grid;
+  place-items: center;
   flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  corner-shape: round;
+  background: var(--dsw-specific-selector);
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+
+.dsh-inputbar-add:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover-solid); }
+.dsh-inputbar-add:disabled { opacity: .5; cursor: default; }
+
+.dsh-permission-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  max-width: 220px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+  text-transform: capitalize;
+  cursor: pointer;
+}
+
+.dsh-permission-chip:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-permission-chip span:last-child { font-size: 11px; }
+
+.dsh-inputbar-primary {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  corner-shape: round;
+  background: var(--dsw-alias-button-info-fill);
+  color: #fff;
+  cursor: pointer;
+  transform: translateY(-2px);
+  transition: background-color 100ms ease;
+}
+
+.dsh-inputbar-primary:hover:not(:disabled) { background: var(--dsw-alias-button-info-hover); }
+.dsh-inputbar-primary:disabled { opacity: .4; cursor: default; }
+
+.dsh-inputbar-card .model-trigger {
+  max-width: 220px;
+  height: 28px;
+  padding: 0 4px 0 8px;
+  border-radius: 8px;
+}
+
+/*
+ * The shared menu hangs off the trigger's right edge, which is correct when the
+ * trigger sits at the right of its row. In the composer the model trigger is
+ * the leftmost control, so a right-anchored menu grew left, past the column
+ * edge, and `.conversation-root`'s `overflow: hidden` sliced the model names in
+ * half. Anchor to the left edge here and grow into the column instead.
+ */
+.dsh-inputbar-card .model-menu,
+.dsh-inputbar-card .effort-menu {
+  top: auto;
+  right: auto;
+  left: 0;
+  bottom: calc(100% + 16px);
+}
+
+.dsh-inputbar-card .model-note { display: none; }
+.dsh-inputbar-card .context-meter-bar { width: 34px; }
+
+@media (max-width: 760px) {
+  .dsh-hero-root { padding-inline: 8px; }
+  .dsh-hero-headline { grid-template-columns: 28px auto; font-size: 20px; line-height: 28px; }
+  .dsh-hero-mark svg { width: 28px; height: 28px; }
+  .dsh-preview-badge { display: none; }
+  .dsh-inputbar-trailing { gap: 6px; }
+  .dsh-inputbar-card .context-meter { display: none; }
+  .dsh-inputbar-card .model-trigger { max-width: 130px; }
+}
+
+/* ---------------------------------------------------------------------------
+ * Per-thread settings dialog
+ *
+ * A native `<dialog>` in the top layer, so it sits above the workbench and the
+ * composer without a z-index negotiation, and gets focus trapping and Escape
+ * for free. The panel is a grid of header / tabs / scrolling body / footer so
+ * a long tool list scrolls while the Save button stays reachable.
+ * ------------------------------------------------------------------------- */
+
+.thread-settings-trigger { position: relative; }
+
+/* Says "this thread carries its own configuration" without spending a label. */
+.thread-settings-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--dsw-alias-state-business-primary);
+}
+
+.thread-settings-dialog {
+  width: min(640px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 64px));
+  padding: 0;
+  border: .5px solid var(--dsw-alias-border-l2);
+  border-radius: 18px;
+  background: var(--dsw-specific-menu);
+  color: var(--dsw-alias-label-primary);
+  box-shadow: var(--dsw-shadow-lv3);
+  overflow: hidden;
+}
+
+.thread-settings-dialog::backdrop {
+  background: color-mix(in srgb, #000 62%, transparent);
+  backdrop-filter: blur(2px);
+}
+
+.thread-settings-panel { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; max-height: inherit; }
+
+.thread-settings-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 18px 18px 14px;
+  border-bottom: .5px solid var(--dsw-alias-border-l3);
+}
+
+.thread-settings-header h2 { margin: 0; font-size: 16px; font-weight: 600; line-height: 22px; }
+.thread-settings-header p { margin: 3px 0 0; color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 17px; }
+.thread-settings-header .icon-button { margin-left: auto; }
+
+.thread-settings-tabs { display: flex; gap: 2px; padding: 10px 18px 0; border-bottom: .5px solid var(--dsw-alias-border-l3); }
+
+.thread-settings-tab {
+  padding: 7px 12px 9px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.thread-settings-tab[data-active] { border-bottom-color: var(--dsw-alias-state-business-primary); color: var(--dsw-alias-label-primary); }
+.thread-settings-tab:hover:not([data-active]) { color: var(--dsw-alias-label-secondary); }
+
+.thread-settings-body { padding: 18px; overflow-y: auto; }
+.thread-settings-section { display: grid; gap: 16px; }
+.thread-settings-section .field { display: grid; gap: 6px; margin: 0; }
+.thread-settings-section .field > span { font-size: 12px; font-weight: 500; color: var(--dsw-alias-label-secondary); }
+.thread-settings-section .field small { color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; }
+.thread-settings-section .field .model-picker,
+.thread-settings-section .field .effort-picker { justify-self: start; }
+
+.thread-settings-count { justify-self: end; font-variant-numeric: tabular-nums; }
+
+/* The prompt is the one long free-text field in the app; monospace would
+ * suggest code, so it stays in the UI face but takes the full panel width. */
+.thread-settings-prompt {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 150px;
+  padding: 10px 12px;
+  border: .5px solid var(--dsw-alias-border-l3);
+  border-radius: 12px;
+  outline: none;
+  background: var(--dsw-specific-input-major);
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  resize: vertical;
+}
+
+.thread-settings-prompt:focus { border-color: var(--dsw-alias-state-business-primary); }
+.thread-settings-prompt::placeholder { color: var(--dsw-alias-label-caption); }
+
+/* Overrides `.settings-search`'s 360px cap — the dialog is wide enough for the
+   field to span it, and a half-width search box over a full-width list reads
+   as a stray control. */
+.thread-settings-search { max-width: none; box-sizing: border-box; }
+
+/*
+ * The model and effort pickers are composer controls: a borderless pill that
+ * sits inline in the InputBar. In the dialog they are form fields, and a pill
+ * between two bordered inputs reads as a stray link rather than something you
+ * can set. Restated at the field metrics used by `.field input` so the column
+ * scans as one form.
+ */
+/* `.model-picker` is width-agnostic in the composer, where the pill is sized by
+   its label. In the dialog it has to fill the field column, and the trigger's
+   `width: 100%` below is 100% of whatever the wrapper ends up being. */
+.thread-settings-dialog .model-picker,
+.thread-settings-dialog .effort-picker { width: 100%; }
+
+.thread-settings-dialog .model-trigger,
+.thread-settings-dialog .effort-trigger {
+  width: 100%;
+  max-width: none;
+  height: auto;
+  min-height: 38px;
+  padding: 7px 10px;
+  border: .5px solid var(--dsw-alias-border-l3);
+  border-radius: 10px;
+  background: var(--dsw-specific-input-major);
+  color: var(--dsw-alias-label-primary);
+  font-weight: 400;
+  text-align: left;
+}
+
+.thread-settings-dialog .model-trigger:hover:not(:disabled),
+.thread-settings-dialog .effort-trigger:hover:not(:disabled),
+.thread-settings-dialog .model-trigger:focus-visible,
+.thread-settings-dialog .effort-trigger:focus-visible {
+  border-color: var(--dsw-alias-state-business-primary);
+  background: var(--dsw-specific-input-major);
+  outline: none;
+}
+
+/* Pushes the chevron to the trailing edge now that the trigger spans the row. */
+.thread-settings-dialog .model-trigger-chevron { margin-left: auto; }
+
+/* The trigger carries its own effective text: "Effort medium" in the composer,
+   "Medium" here, where the "Reasoning effort" heading already supplies the
+   noun. The name comes from `aria-label`, not from generated content. */
+.thread-settings-dialog .effort-trigger > span:first-child { color: var(--dsw-alias-label-primary); }
+
+/* Anchored to the field rather than the picker, so a wide trigger does not
+   fling the menu to the far edge of the dialog. */
+.thread-settings-dialog .model-menu,
+.thread-settings-dialog .effort-menu { right: auto; left: 0; min-width: 100%; }
+
+.thread-settings-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--dsw-specific-selector);
+  color: var(--dsw-alias-label-secondary);
   font-size: 12px;
-  color: var(--text-faint);
+}
+
+.thread-settings-summary .button { margin-left: auto; min-height: 26px; padding: 2px 8px; font-size: 12px; }
+
+.thread-settings-toolgroup h3 {
+  margin: 0 0 4px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.thread-settings-toolgroup ul { margin: 0; padding: 0; list-style: none; }
+.thread-settings-tool { border-top: .5px solid var(--dsw-alias-border-l2); }
+.thread-settings-tool:first-child { border-top: 0; }
+
+.thread-settings-tool label {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 6px;
+  border-radius: 9px;
+  cursor: pointer;
+}
+
+.thread-settings-tool label:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.thread-settings-tool input { flex: none; margin: 2px 0 0; accent-color: var(--dsw-alias-state-business-primary); }
+/* A disabled tool stays readable: the row is how the user finds it again to
+ * turn it back on, so dimming it to the point of illegibility would strand it. */
+.thread-settings-tool[data-disabled] .thread-settings-tool-text { opacity: .55; }
+
+.thread-settings-tool-text { display: grid; gap: 2px; min-width: 0; }
+.thread-settings-tool-name { display: flex; align-items: center; gap: 7px; font-size: 13px; line-height: 18px; }
+.thread-settings-tool-text small { color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; }
+
+/* Says "off" in words so the state does not rest on opacity and a checkbox
+   tick alone — neither of which is legible when scanning a long list. */
+.thread-settings-tool-off {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--dsw-alias-interactive-bg-hover-danger);
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .02em;
+}
+
+.thread-settings-tool-badge {
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: var(--dsw-specific-selector);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: .02em;
+}
+
+.thread-settings-note {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--dsw-specific-selector);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.thread-settings-note strong { color: var(--dsw-alias-label-secondary); font-weight: 600; }
+
+.thread-settings-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px 16px;
+  border-top: .5px solid var(--dsw-alias-border-l3);
+}
+
+@media (max-width: 760px) {
+  .thread-settings-dialog { width: calc(100vw - 16px); max-height: calc(100vh - 24px); }
+  .thread-settings-body { padding: 14px; }
+}
+
+/* ---------------------------------------------------------------------------
+ * Skills — the composer strip and the `/skills` overlay
+ *
+ * The overlay is a native `<dialog>` like thread settings, so it inherits the
+ * same top-layer behaviour, focus trap, and Escape handling. It is taller and
+ * narrower than that dialog because its content is a list rather than a form:
+ * a form wants a fixed width it can label against, a list wants to fit the
+ * longest description without wrapping it into a column of two words.
+ *
+ * Pinned rows are marked three ways — a left rule, a badge, and the button's
+ * own pressed state — because "always on" is the one fact in this list with a
+ * lasting cost (the body rides in every future turn), and a colour change
+ * alone would be invisible to a lot of people and ambiguous to the rest.
+ * ------------------------------------------------------------------------- */
+
+.composer-skills {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: var(--dsh-composer-card-max-width);
+  min-height: 22px;
+  margin: 0 auto 6px;
+  padding: 0 var(--dsh-composer-side-clearance);
+  /* Reserved even when empty, so opening a `/name` does not shove the
+   * composer down the page as the hint appears. */
+  box-sizing: border-box;
+}
+
+.composer-skills-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border: .5px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.composer-skills-button:hover { background: var(--dsw-specific-selector); color: var(--dsw-alias-label-secondary); }
+.composer-skills-count {
+  padding: 0 5px;
+  border-radius: 7px;
+  background: var(--dsw-specific-selector);
+  color: var(--dsw-alias-label-caption);
+  font-size: 10px;
   font-variant-numeric: tabular-nums;
 }
 
-/* Status is never color alone — each state pairs the hue with a glyph, so it
-   survives color blindness and greyscale. */
-.tool-status[data-status="failed"] { color: var(--danger); }
-.tool-status[data-status="completed"] { color: var(--success); }
-.tool-status[data-status="inProgress"] { color: var(--text-faint); }
-
-.disclosure {
-  display: flex;
-  align-items: center;
-  gap: calc(var(--step) * 2);
-  color: var(--text-muted);
-  padding-block: calc(var(--step) * 1.5);
-  width: 100%;
-  text-align: left;
-}
-
-.disclosure:hover { color: var(--text); }
-
-.chevron {
-  flex: none;
-  transition: transform 0.15s ease;
+/* The one badge here that reports an ongoing cost, so it reads as a word and
+ * carries the accent rather than the neutral chrome of a plain count. */
+.composer-skills-pinned {
+  padding: 0 6px;
+  border-radius: 7px;
+  /* The same token the pinned row's left rule uses, so the badge in the
+   * composer and the mark in the list are recognisably the same fact. */
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 16%, transparent);
+  color: var(--dsw-alias-state-business-primary);
   font-size: 10px;
-  color: var(--text-faint);
-}
-.chevron[data-open="true"] { transform: rotate(90deg); }
-
-@media (prefers-reduced-motion: reduce) {
-  .chevron { transition: none; }
+  font-variant-numeric: tabular-nums;
 }
 
-/* ---- Output and diffs ---- */
+.composer-skill-hint { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
 
-.output {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.5;
-  background: var(--depth-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: calc(var(--step) * 2.5) calc(var(--step) * 3);
-  max-height: 22rem;
-  overflow: auto;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  margin: 0;
+.composer-skill-chip {
+  flex: none;
+  padding: 3px 8px;
+  border-radius: 7px;
+  background: var(--dsw-alias-markdown-code-block);
+  color: var(--dsw-alias-label-primary);
+  font-family: var(--ds-font-family-code);
+  font-size: 11px;
 }
 
-.diff {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  background: var(--depth-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: auto;
-  max-height: 26rem;
-  margin-block: var(--step);
-}
-
-.diff-line { padding: 0 calc(var(--step) * 3); white-space: pre; }
-.diff-line[data-kind="add"] { background: rgba(70, 185, 120, 0.12); color: #9fe3bd; }
-.diff-line[data-kind="del"] { background: rgba(229, 106, 99, 0.12); color: #f2b0ac; }
-.diff-line[data-kind="meta"] { color: var(--text-faint); }
-
-.stat-add { color: var(--success); }
-.stat-del { color: var(--danger); }
-
-/* ---- Approvals ---- */
-
-.approval {
-  border: 1px solid var(--accent);
-  border-radius: var(--radius);
-  background: var(--depth-2);
-  padding: calc(var(--step) * 3);
-  margin-block: calc(var(--step) * 2);
-}
-
-.approval-title {
-  font-weight: 600;
-  margin-bottom: var(--step);
-}
-
-.approval-actions {
-  display: flex;
-  gap: calc(var(--step) * 2);
-  margin-top: calc(var(--step) * 3);
-  flex-wrap: wrap;
-}
-
-.btn {
-  padding: calc(var(--step) * 1.5) calc(var(--step) * 3);
-  border-radius: calc(var(--radius) - 2px);
-  border: 1px solid var(--border-strong);
-  background: var(--depth-3);
-  font-size: 13px;
-}
-
-.btn:hover { border-color: var(--text-faint); }
-
-.btn[data-variant="primary"] {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #0a0d12;
-  font-weight: 600;
-}
-
-.btn[data-variant="danger"] { color: var(--danger); }
-
-.btn[data-variant="ghost"] {
-  background: none;
-  border-color: transparent;
-  color: var(--text-muted);
-  padding-inline: calc(var(--step) * 1.5);
-}
-
-.btn[data-variant="ghost"]:hover { color: var(--text); border-color: var(--border-strong); }
-
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
-/* The one shadow in the app. This bar genuinely floats over the transcript
-   when the approval it mirrors has scrolled out of view. */
-.sticky-approval {
-  position: sticky;
-  bottom: 0;
-  z-index: 10;
-  background: var(--depth-3);
-  border-top: 1px solid var(--accent);
-  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.35);
-  padding: calc(var(--step) * 3) calc(var(--step) * 4);
-  display: flex;
-  align-items: center;
-  gap: calc(var(--step) * 3);
-  flex-wrap: wrap;
-}
-
-/* ---- Composer ---- */
-
-.composer {
-  border-top: 1px solid var(--border);
-  background: var(--depth-1);
-  padding: calc(var(--step) * 3);
-  display: flex;
-  gap: calc(var(--step) * 2);
-  align-items: flex-end;
-}
-
-.composer textarea {
-  flex: 1;
-  resize: none;
-  background: var(--depth-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text);
-  padding: calc(var(--step) * 2.5) calc(var(--step) * 3);
-  font: inherit;
-  min-height: 2.75rem;
-  max-height: 12rem;
-}
-
-.composer textarea:focus { border-color: var(--border-strong); }
-
-/* ---- Workbench ---- */
-
-.tabs {
-  display: flex;
-  gap: var(--step);
-  padding: 0 calc(var(--step) * 3);
-  border-bottom: 1px solid var(--border);
-  height: 40px;
-  align-items: stretch;
-}
-
-.tab {
-  padding-inline: calc(var(--step) * 3);
-  color: var(--text-muted);
-  font-size: 13px;
-  border-bottom: 2px solid transparent;
-}
-
-.tab[aria-selected="true"] {
-  color: var(--text);
-  border-bottom-color: var(--accent);
-}
-
-.workbench-body {
-  overflow: auto;
-  min-height: 0;
-  padding: calc(var(--step) * 3);
-}
-
-.file-tree { font-size: 13px; }
-
-.tree-entry {
-  display: flex;
-  gap: calc(var(--step) * 2);
-  padding: calc(var(--step) * 0.75) calc(var(--step) * 2);
-  border-radius: 4px;
-  width: 100%;
-  text-align: left;
-  color: var(--text-muted);
-}
-
-.tree-entry:hover { background: var(--depth-2); color: var(--text); }
-.tree-entry[data-active="true"] { background: var(--accent-dim); color: var(--text); }
-
-.empty {
-  color: var(--text-faint);
-  font-size: 13px;
-  padding: calc(var(--step) * 4);
-  text-align: center;
-}
-
-.toggle {
-  display: flex;
-  align-items: center;
-  gap: var(--step);
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-/* Screen-reader-only: gives live regions and icon buttons real names without
-   occupying layout. */
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
+.composer-skill-note {
+  min-width: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  /* One line, clipped: the strip keeps the composer's rhythm, and the full
+   * text is available on the row inside the overlay. */
   overflow: hidden;
-  clip: rect(0, 0, 0, 0);
+  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.composer-skill-note kbd {
+  padding: 1px 4px;
+  border: .5px solid var(--dsw-alias-border-l2);
+  border-radius: 4px;
+  background: var(--dsw-specific-selector);
+  font-family: inherit;
+  font-size: 10px;
+}
+
+.composer-skill-clear {
+  flex: none;
+  padding: 0;
   border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-caption);
+  font-family: inherit;
+  font-size: 11px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.composer-skill-clear:hover { color: var(--dsw-alias-label-secondary); }
+
+.skills-dialog {
+  width: min(720px, calc(100vw - 32px));
+  max-height: min(680px, calc(100vh - 64px));
+  padding: 0;
+  border: .5px solid var(--dsw-alias-border-l2);
+  border-radius: 18px;
+  background: var(--dsw-specific-menu);
+  color: var(--dsw-alias-label-primary);
+  box-shadow: var(--dsw-shadow-lv3);
+  overflow: hidden;
+}
+
+.skills-dialog::backdrop {
+  background: color-mix(in srgb, #000 62%, transparent);
+  backdrop-filter: blur(2px);
+}
+
+/* header / toolbar / scrolling list / footer */
+.skills-panel { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto; max-height: inherit; }
+
+.skills-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 18px 18px 14px;
+}
+
+.skills-header h2 { margin: 0; font-size: 16px; font-weight: 600; line-height: 22px; }
+.skills-header p { margin: 3px 0 0; max-width: 56ch; color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 17px; }
+.skills-header p em { color: var(--dsw-alias-label-secondary); font-style: normal; font-weight: 500; }
+.skills-header .icon-button { margin-left: auto; }
+
+.skills-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 18px 12px;
+}
+
+.skills-filter { flex: 1; max-width: none; }
+.skills-count { flex: none; color: var(--dsw-alias-label-caption); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+.skills-status {
+  margin: 0 18px 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--dsw-alias-state-success-tertiary);
+  color: var(--dsw-alias-state-success-primary);
+  font-size: 12px;
+}
+
+.skills-dialog .field-error { margin: 0 18px 10px; }
+
+.skills-body {
+  padding: 0 18px;
+  border-top: .5px solid var(--dsw-alias-border-l3);
+  overflow-y: auto;
+}
+
+.skills-list { margin: 0; padding: 0; list-style: none; }
+
+.skills-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 12px 0 12px 12px;
+  border-bottom: .5px solid var(--dsw-alias-border-l2);
+  /* The left rule is a sibling of the badge, not a replacement for it: one is
+   * found by scanning, the other is read. */
+  border-left: 2px solid transparent;
+  margin-left: -2px;
+}
+
+.skills-row[data-pinned] { border-left-color: var(--dsw-alias-state-business-primary); background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 6%, transparent); }
+.skills-row[data-disabled] .skills-name,
+.skills-row[data-disabled] .skills-description { color: var(--dsw-alias-label-caption); }
+.skills-row:last-child { border-bottom: 0; }
+
+.skills-row-main { flex: 1; min-width: 0; }
+.skills-row-head { display: flex; align-items: center; gap: 7px; }
+.skills-name { font-family: var(--ds-font-family-code); font-size: 13px; font-weight: 500; }
+.skills-description { margin: 4px 0 0; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 17px; }
+
+.skills-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 5px; color: var(--dsw-alias-label-caption); font-size: 11px; }
+
+.skills-row-actions { display: flex; flex: none; align-items: center; gap: 6px; padding-top: 1px; }
+
+.skills-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: .5px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.skills-action:hover:not(:disabled) { background: var(--dsw-specific-selector); color: var(--dsw-alias-label-primary); }
+.skills-action:disabled { opacity: .45; cursor: not-allowed; }
+
+.skills-pin[aria-pressed="true"] {
+  border-color: transparent;
+  background: var(--dsw-alias-state-business-primary);
+  color: var(--dsw-static-white, #fff);
+}
+
+.skills-pin[aria-pressed="true"]:hover { background: var(--dsw-alias-state-business-primary); color: var(--dsw-static-white, #fff); }
+.skills-pin svg { width: 11px; height: 11px; }
+
+/*
+ * Switched off.
+ *
+ * Deliberately quieter than `always on`. Off is the absence of a thing, and a
+ * row painted as loudly as a pinned one would read as "this skill is doing
+ * something" — the opposite of true. This is the control catching up with the
+ * dimmed row, not a second way of saying the same thing.
+ */
+.skills-off[aria-pressed="true"] {
+  border-color: transparent;
+  background: var(--dsw-alias-bg-module-platform);
+  color: var(--dsw-alias-label-caption);
+}
+
+/*
+ * The left rule only. The text is already dimmed by `[data-disabled]` above —
+ * a switched-off skill sets that flag too, because discovery ORs the settings
+ * list into the record — so restating it here would be two rules maintaining
+ * one appearance, which is how they drift apart.
+ */
+.skills-row[data-off] { border-left-color: var(--dsw-alias-label-caption); }
+
+.skills-more {
+  display: block;
+  width: 100%;
+  margin: 12px 0 4px;
+  padding: 8px;
+  border: .5px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.skills-more:hover { background: var(--dsw-specific-selector); }
+
+.skills-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 18px;
+  border-top: .5px solid var(--dsw-alias-border-l3);
+}
+
+/* The standing cost, stated where the decision is made. */
+.skills-footer-hint { flex: 1; min-width: 0; color: var(--dsw-alias-label-caption); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skills-footer-hint strong { color: var(--dsw-alias-label-secondary); font-variant-numeric: tabular-nums; }
+
+.skills-done {
+  flex: none;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--dsw-alias-state-business-primary);
+  color: var(--dsw-static-white, #fff);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+@media (max-width: 760px) {
+  .skills-dialog { width: calc(100vw - 16px); max-height: calc(100vh - 24px); }
+  /* The row's two actions are the reason it cannot simply get narrower: below
+   * this width the description is squeezed to a column of single words, so the
+   * row stacks and the actions go under the text. */
+  .skills-row { flex-direction: column; gap: 10px; }
+  .skills-row-actions { padding-top: 0; }
 }

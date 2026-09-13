@@ -11,7 +11,6 @@ import test from "node:test";
 import {
   FileEditArgsSchema,
   FileFindArgsSchema,
-  FileScrollArgsSchema,
   FileViewArgsSchema,
   LinterManifestSchema,
   VIEWER_ERROR_CODES,
@@ -47,15 +46,6 @@ test("FileViewArgsSchema rejects window above the cap of 500", () => {
   assert.equal(r.success, false);
 });
 
-test("FileScrollArgsSchema enforces direction enum", () => {
-  const ok = FileScrollArgsSchema.safeParse({ path: "/tmp/a.ts", direction: "up" });
-  assert.equal(ok.success, true);
-  const bad = FileScrollArgsSchema.safeParse({
-    path: "/tmp/a.ts",
-    direction: "sideways",
-  });
-  assert.equal(bad.success, false);
-});
 
 test("FileFindArgsSchema requires non-empty pattern", () => {
   const r = FileFindArgsSchema.safeParse({ path: "/tmp/a.ts", pattern: "" });

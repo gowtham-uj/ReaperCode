@@ -143,6 +143,8 @@ export function createValidConfig(): ReaperConfig {
       modelCallTimeoutMs: 120_000,
       modelRouterLlmDecisions: false,
       permissionMode: "yolo",
+      pinnedSkills: [],
+      disabledSkills: [],
       printReasoning: false,
       progressGuardV2: true,
       rescueMaxAttemptsPerDiagnostic: 1,

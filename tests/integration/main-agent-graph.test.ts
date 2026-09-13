@@ -156,12 +156,32 @@ test("main-agent transport retry exhaustion reports infra failure without comple
     modelGateway: gateway,
   }).run();
 
-  // The transport retry loop (backoffsMs = [0, 1_000, 3_000, 9_000]) attempts
-  // every backoff slot. The gateway records one request per attempt.
+  // The transport retry loop attempts every one of its slots, however long
+  // those slots last. The gateway records one request per attempt.
   assert.equal(gateway.requests.length, 4);
-  // summarizeNode always emits task_completed (even on infra failure), so we
-  // check the assistant message and trajectory instead.
-  assert.match(result.assistantMessage, /transport error|infrastructure\/provider|rate_limit transport/i);
+
+  /*
+   * The infra failure is reported through `runtimeBlockers`, which is what the
+   * app-server reads to decide the turn's status — and the failure is *only*
+   * there.
+   *
+   * This assertion used to read `result.assistantMessage`, because that is
+   * where the failure used to be: the runtime's note to the model was emitted
+   * as an assistant reply, so it reached the transcript as prose from the
+   * assistant and then again as the failure alert. Naming the blocker is both
+   * the correct mechanism and the stronger test — a message that merely
+   * contains the word "transport" proves nothing about whether anything
+   * downstream treats the run as failed.
+   */
+  const blocker = (result.runtimeBlockers ?? []).find((entry) => entry.code === "main_agent_transport_error");
+  assert.ok(blocker, `expected a transport blocker, got: ${JSON.stringify(result.runtimeBlockers ?? [])}`);
+  assert.match(blocker.message, /transport error|rate_limit/i);
+  assert.equal(
+    result.assistantMessage,
+    "",
+    "a run that produced no reply must not carry the runtime's note as the assistant's message",
+  );
+
   const trajectory = await readFile(result.trajectoryPath, "utf8");
   assert.match(trajectory, /rate_limit/);
   assert.doesNotMatch(trajectory, /gate_exhausted/);

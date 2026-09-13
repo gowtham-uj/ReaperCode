@@ -1,11 +1,17 @@
 /**
- * Zod schemas for the 5 model-callable skill authoring tools.
+ * Zod schemas for skill authoring, now a single model-callable tool.
  *
- *   create_skill      author a new skill as a draft
- *   test_skill        run validation.commands for a skill
- *   approve_skill     promote a draft to user-trusted (gated)
- *   uninstall_skill   remove a skill (gated for non-draft)
- *   reload_skills     re-walk the disk and rebuild the registry
+ *   skill_manager(action="create")     author a new skill as a draft
+ *   skill_manager(action="test")       run validation.commands for a skill
+ *   skill_manager(action="approve")    promote a draft to user-trusted (gated)
+ *   skill_manager(action="uninstall")  remove a skill (gated for non-draft)
+ *
+ * There is no `reload` action. Skill state is fully in memory — `list` and
+ * `selectTopN` read the current records on every call, and the lifecycle
+ * registers into the registry on every mutation — so the only honest
+ * implementation of a reload tool was to return the count it already had.
+ * A tool that cannot do anything is worse than no tool: it teaches the model
+ * that hand-copied skill folders need a nudge to appear, which was never true.
  */
 
 import { z } from "zod";
@@ -72,14 +78,40 @@ export const UninstallSkillArgsSchema = z
   })
   .strict();
 
-export const ReloadSkillsArgsSchema = z
+/**
+ * The consolidated manager.
+ *
+ * A flat `action` enum with optional fields, validated per action in the
+ * handler — the same shape `scratchpad` and `job` already use. The alternative
+ * (a discriminated union) buys schema-level enforcement at the cost of a much
+ * larger wire schema on every turn for a tool the model reaches for rarely,
+ * and the handler's error message is more useful than a schema violation
+ * anyway: it can name the action that was asked for and the field it needs.
+ *
+ * `scope` is the union of the create and uninstall ranges. `create` re-parses
+ * through `CreateSkillArgsSchema`, which rejects `builtin` with the same
+ * message it always did.
+ *
+ * The create fields are spread through `partial()`: only `create` sets them, so
+ * requiring them here would make `{action: "test", name}` — the common case —
+ * a schema violation, and the model would have to send an entire skill
+ * definition it is not authoring. Defaults are deliberately *not* applied at
+ * this level either; `create` re-parses through the strict create schema, which
+ * is where `version` and `scope` get their defaults.
+ */
+export const SkillManagerArgsSchema = z
   .object({
-    from_dirs: z.array(z.enum(["user", "project", "builtin"])).optional(),
+    action: z
+      .enum(["create", "test", "approve", "uninstall"])
+      .describe("create a draft skill, test one, approve a draft, or uninstall one"),
+    ...CreateSkillArgsSchema.omit({ scope: true }).partial().shape,
+    scope: z.enum(["project", "user", "builtin"]).optional(),
   })
   .strict();
+
+export type SkillManagerArgs = z.infer<typeof SkillManagerArgsSchema>;
 
 export type CreateSkillArgs = z.infer<typeof CreateSkillArgsSchema>;
 export type TestSkillArgs = z.infer<typeof TestSkillArgsSchema>;
 export type ApproveSkillArgs = z.infer<typeof ApproveSkillArgsSchema>;
 export type UninstallSkillArgs = z.infer<typeof UninstallSkillArgsSchema>;
-export type ReloadSkillsArgs = z.infer<typeof ReloadSkillsArgsSchema>;

@@ -73,6 +73,17 @@ const safeWritePatterns = [
   /^(git\s+(add|commit|checkout|switch|restore))\b/,
 ];
 
+/**
+ * Tools whose own effect is nothing, because everything they do they do by
+ * calling other tools that are classified on their own merits.
+ *
+ * Kept in step with the same-named set in `sandbox.ts` by
+ * `tests/unit/code-mode.test.ts`, which fails if one gains a name the other
+ * does not have — a drift here would silently make `eval` need confirmation in
+ * one gate and not the other.
+ */
+export const COMPOSITE_TOOL_NAMES: ReadonlySet<string> = new Set(["eval"]);
+
 // ── Classifier ──
 export class PermissionClassifier {
   private denialTracker = new DenialTracker();
@@ -121,34 +132,15 @@ export class PermissionClassifier {
     }
 
     // Read tools are always safe
-    if (["file_view", "file_scroll", "file_find", "view_file", "list_directory", "grep_search", "skim_file", "get_tool_output",
-          "read_background_output"].includes(call.name)) {
+    if (["file_view", "file_find", "list_directory", "grep_search", "skim_file"].includes(call.name)) {
       return { outcome: "safe", reasoning: "Read-only tool", confidence: 1.0 };
     }
 
-    if (
-      [
-        "browser_control",
-        "computer_control",
-        "mouse_move",
-        "mouse_click",
-        "mouse_scroll",
-        "keyboard_type",
-        "keyboard_press",
-        "screenshot",
-        "get_screen_size",
-        "get_mouse_position",
-        "wait",
-        "start_live_view",
-        "stop_live_view",
-        "request_human_approval",
-        "is_human_intervening",
-      ].includes(call.name)
-    ) {
+    if (call.name === "browser_control") {
       if (this.mode === "accept_edits") {
-        return { outcome: "safe", reasoning: "Browser/computer UI control — auto-accepted", confidence: 0.85 };
+        return { outcome: "safe", reasoning: "Browser UI control — auto-accepted", confidence: 0.85 };
       }
-      return { outcome: "needs_confirmation", reasoning: "Browser/computer UI control — needs approval", confidence: 0.5 };
+      return { outcome: "needs_confirmation", reasoning: "Browser UI control — needs approval", confidence: 0.5 };
     }
 
     // Shell commands go through shell-specific logic
@@ -167,6 +159,30 @@ export class PermissionClassifier {
     // Control tools
     if (call.name === "activate_skill") {
       return { outcome: "safe", reasoning: "Control tool", confidence: 0.95 };
+    }
+
+    /*
+     * Composite tools carry no authority of their own — for the calls this
+     * classifier can see.
+     *
+     * Every Reaper tool `eval` reaches is dispatched individually through the
+     * executor, which means this method runs again — on the inner call, with the
+     * model's real arguments — before anything happens. Classifying the
+     * container as needing confirmation would therefore ask the user to approve
+     * "run some JavaScript" (with the old reasoning string "Unknown tool type",
+     * since the fallthrough has no idea what it is looking at) and *then* ask
+     * again for each write inside it. One useless prompt, and a misleading one.
+     *
+     * What a script does with raw Node is not a Reaper tool call and never
+     * arrives here, so "composite" is a claim about the `tools.*` half only.
+     * Classifying the container as a plain unknown tool would ask the same
+     * useless question without gating any of the raw path either — there is no
+     * answer this function could return that would make `fs` need approval, so
+     * the approval would buy nothing but a prompt. See the note in
+     * `src/tools/code/node-runtime.ts`.
+     */
+    if (COMPOSITE_TOOL_NAMES.has(call.name)) {
+      return { outcome: "safe", reasoning: "Composite tool — its own calls are classified individually", confidence: 0.9 };
     }
 
     return { outcome: "needs_confirmation", reasoning: "Unknown tool type", confidence: 0.3 };

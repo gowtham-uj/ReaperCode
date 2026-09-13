@@ -7,6 +7,7 @@ import type {
   StreamEvent,
 } from "../types.js";
 import type { ProviderModelClient } from "../gateway.js";
+import { resolveApiKey } from "../credentials.js";
 
 interface ResponsesToolCall {
   id?: string;
@@ -20,10 +21,7 @@ function apiBase(profile: ResolvedModelProfile): string {
 }
 
 function apiKey(profile: ResolvedModelProfile): string {
-  const envName = profile.apiKeyEnv ?? "OPENAI_CODEX_ACCESS_TOKEN";
-  const value = process.env[envName];
-  if (!value) throw new Error(`openai-codex requires ${envName} in the environment`);
-  return value;
+  return resolveApiKey(profile, "OPENAI_CODEX_ACCESS_TOKEN");
 }
 
 function requestId(profile: ResolvedModelProfile): string {

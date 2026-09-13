@@ -229,9 +229,21 @@ test("distinct denial categories produce stable error codes", async () => {
 
   const ip = await executor.execute({
     id: "ip",
-    name: "view_file",
+    name: "file_view",
     args: { path: 42 },
   } as never);
   assert.equal(ip.ok, false);
-  assert.equal(ip.error?.code, "INVALID_TOOL_PARAMS");
+  assert.equal(ip.error?.code, "invalid_argument");
+
+  // The point of the test is the word *distinct*: four different denials must
+  // not collapse into one code, or the model cannot tell "you may not do that"
+  // from "you spelled the arguments wrong" and will retry the wrong thing.
+  // Asserting the four literals above would not catch that; asserting the set
+  // size does.
+  const codes = [esc.error?.code, hd.error?.code, ut.error?.code, ip.error?.code];
+  assert.equal(
+    new Set(codes).size,
+    codes.length,
+    `denial categories collapsed onto one code: ${codes.join(", ")}`,
+  );
 });

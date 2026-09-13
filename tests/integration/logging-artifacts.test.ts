@@ -83,7 +83,7 @@ test("second logger on same run resumes session.jsonl without a second header", 
   assert.equal(lines.filter((line) => line.kind === "header").length, 1);
   assert.equal(lines.at(-1)?.type, "operation_finished");
   assert.equal(lines.at(-1)?.seq, 3);
-  const conversation = await readFile(path.join(workspaceRoot, ".reaper", "logs", "run-resume", "conversation.md"), "utf8");
+  const conversation = await readFile(path.join(workspaceRoot, ".reaper", "sessions", "run-resume", "conversation.md"), "utf8");
   assert.match(conversation, /mid-run text/);
   assert.equal((conversation.match(/^# Conversation/gm) ?? []).length, 1);
 });
@@ -117,7 +117,7 @@ test("langfuse adapter stores all reaper observations in one local run log", asy
     else process.env.REAPER_DEV = prev;
   }
 
-  const log = await readFile(path.join(workspaceRoot, ".reaper", "logs", "run-1", "langfuse-events.jsonl"), "utf8");
+  const log = await readFile(path.join(workspaceRoot, ".reaper", "sessions", "run-1", "langfuse-events.jsonl"), "utf8");
   assert.match(log, /reaper\.test\.observation/);
   assert.match(log, /exportMode/);
   assert.match(log, /local_only/);
@@ -145,8 +145,8 @@ test.skip("large shell outputs are stored as artifacts and retrievable", async (
 
   const fetched = await executor.execute({
     id: "2",
-    name: "get_tool_output",
-    args: { artifactId },
+    name: "file_view",
+    args: { path: artifactId },
   });
 
   assert.equal(fetched.ok, true);

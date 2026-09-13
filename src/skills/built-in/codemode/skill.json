@@ -1,0 +1,38 @@
+{
+  "name": "codemode",
+  "version": "1.0.0",
+  "description": "Write and use the `eval` tool well: batch tool calls in JavaScript, keep large intermediate data inside the script, and return one compact result.",
+  "category": "prompt-enhancement",
+  "whenToUse": "Before writing an eval call that makes more than a couple of tool calls, loops over tool calls, or filters/aggregates results \u2014 load this to get the return semantics, the tools.* API, and the failure shapes right the first time.",
+  "triggers": [
+    "eval",
+    "code mode",
+    "codemode",
+    "javascript",
+    "loop over files",
+    "batch",
+    "fan out",
+    "aggregate",
+    "tools.",
+    "many tool calls",
+    "script"
+  ],
+  "allowedTools": [
+    "eval",
+    "file_view",
+    "write_file",
+    "grep_search",
+    "list_directory",
+    "glob",
+    "bash"
+  ],
+  "trust": "builtin",
+  "author": "Reaper",
+  "license": "MIT",
+  "memoryPolicy": {
+    "mayReadProjectMemory": false,
+    "mayWriteProjectMemory": false,
+    "mayReadUserMemory": false,
+    "mayWriteUserMemory": false
+  }
+}

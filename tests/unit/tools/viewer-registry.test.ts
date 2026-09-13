@@ -1,7 +1,7 @@
 /**
  * Unit tests for FileViewerRegistry.
  *
- * Pure state-management: no filesystem access. Covers scroll bounds
+ * Pure state-management: no filesystem access. Covers window bounds
  * clamping, find-empty pattern, edit-line-overlap invariants, and hash-
  * anchored invalidation.
  */
@@ -73,35 +73,6 @@ test("registry invalidates when the file's mtimeMs changes (noteEdit anchor reus
   const view = r.get("/tmp/a.ts");
   assert.equal(view?.totalLines, 120);
   assert.equal(view?.mtimeMs, 200);
-});
-
-test("scroll with direction=top resets to start", () => {
-  const r = new FileViewerRegistry();
-  r.readOrInit("/tmp/a.ts", 100, "h", 1);
-  r.scroll("/tmp/a.ts", "down", 25, 100);
-  const w = r.scroll("/tmp/a.ts", "top", 25, 100);
-  assert.equal(w?.startLine, 1);
-});
-
-test("scroll with direction=bottom clamps to totalLines", () => {
-  const r = new FileViewerRegistry();
-  r.readOrInit("/tmp/a.ts", 80, "h", 1);
-  const w = r.scroll("/tmp/a.ts", "bottom", 25, 80);
-  assert.ok(w!.endLine <= 81);
-});
-
-test("scroll with direction=up does not go below line 1", () => {
-  const r = new FileViewerRegistry();
-  r.readOrInit("/tmp/a.ts", 100, "h", 1);
-  const w = r.scroll("/tmp/a.ts", "up", 25, 100);
-  assert.equal(w?.startLine, 1);
-});
-
-test("scroll with direction=down never exceeds totalLines - window + 1", () => {
-  const r = new FileViewerRegistry();
-  r.readOrInit("/tmp/a.ts", 80, "h", 1);
-  const w = r.scroll("/tmp/a.ts", "down", 25, 80);
-  assert.ok(w!.startLine <= 56); // 80 - 25 + 1
 });
 
 test("find returns undefined when nothing matches", () => {

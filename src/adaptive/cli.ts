@@ -25,6 +25,7 @@ import {
   renderSkillForModel,
   loadSkill,
 } from "./skill-author.js";
+import type { ReaperSkill } from "./types.js";
 import { SkillMemoryRegistry } from "./skill-memory-registry.js";
 import { PersistentMemoryStore } from "./persistent-memory-store.js";
 import { MemoryScopePolicy } from "./memory-scope-policy.js";
@@ -35,6 +36,13 @@ import { redactSecrets } from "./redact.js";
 
 // Skills + Extensions plugin system (src/skills/, src/extensions/, src/commands/)
 import { SkillRegistry } from "../skills/registry.js";
+import type { InstalledSkillRecord } from "../skills/types.js";
+import {
+  MAX_DISABLED_SKILLS,
+  normalizePinnedNames,
+  readDisabledSkills,
+} from "../context/pinned-skills.js";
+import { isPlainObject, updateUserSettings } from "../config/settings-file.js";
 import { SkillLifecycle } from "../skills/lifecycle.js";
 import { TrustResolver as SkillTrustResolver } from "../skills/trust.js";
 import { discoverSkills} from "../skills/discovery.js";
@@ -45,6 +53,7 @@ import { HookLifecycle } from "../hooks/lifecycle.js";
 import { SlashCommandRegistry, ConsoleHost } from "../extensions/slash-command-registry.js";
 import { registerBuiltinCommands } from "../commands/index.js";
 import { builtinSkillsRoot } from "../skills/built-in/index.js";
+import { packagedSkillBody, packagedSkills } from "../context/packaged-skills.js";
 import { runExec, type ExecRunnerOptions } from "./exec-runner.js";
 import { startAppServer } from "../app-server/server.js";
 
@@ -53,6 +62,78 @@ export interface ReaperCLIOptions {
   workspaceRoot: string;
   userHome?: string;
   capabilities?: ModelCapabilitiesRegistry;
+}
+
+/**
+ * `InstalledSkillRecord` → `ReaperSkill`, in one place.
+ *
+ * Four commands render a skill and they must not disagree about what a skill
+ * *is*: `show` prints it, `render` feeds it to a model, and `search` scores it.
+ * The conversion used to be spelled out inline in `show` alone, which is how
+ * `search` and `render` ended up reading a different registry entirely — the
+ * same skill had two bodies depending on which command you ran. One function
+ * means one answer.
+ */
+function toReaperSkill(record: InstalledSkillRecord): ReaperSkill {
+  return {
+    name: record.manifest.name,
+    description: record.manifest.description,
+    type: "prompt",
+    /*
+     * `extension` skills live under the project's own skills directory as far
+     * as the legacy shape is concerned; `ReaperSkill` predates the scope and
+     * has no fourth value. Collapsing rather than inventing one keeps
+     * `serializeSkill` honest about what it can express.
+     */
+    scope: record.scope === "extension" ? "project" : record.scope,
+    whenToUse: record.manifest.whenToUse ?? record.manifest.description,
+    disableAutoInvocation: record.disabled === true,
+    disableModelInvocation: record.disabled === true,
+    arguments: (record.manifest.arguments ?? []).map((a) => a.name),
+    allowedTools: record.manifest.allowedTools ?? [],
+    /*
+     * Deny by default. A skill that has not asked for memory access is not
+     * granted it by a missing field — `recordToReaperSkill` in the skills
+     * registry makes the opposite choice, and the direction that fails closed
+     * is the right one for a value the model will read as permission.
+     */
+    memoryPolicy: record.manifest.memoryPolicy ?? {
+      mayReadProjectMemory: false,
+      mayWriteProjectMemory: false,
+      mayReadUserMemory: false,
+      mayWriteUserMemory: false,
+    },
+    body: record.body,
+    references: [],
+    sourcePath: record.sourcePath,
+    version: 1,
+    createdBy: "skill-registry",
+    createdAt: new Date(record.installedAt).toISOString(),
+    updatedAt: new Date(record.installedAt).toISOString(),
+    skillDir: record.skillDir,
+  };
+}
+
+/**
+ * Write the switched-off skill list through the one settings writer.
+ *
+ * A twin of the pin writer in `builtin-skills-commands.ts`, deliberately not
+ * merged with it: both write `runtimeTunables`, but from different processes
+ * with different things in hand, and a shared mutator would have to be given
+ * the `home` the other one resolves for itself. What matters is that neither
+ * writes the file directly — the partial-schema validation and the atomic
+ * replace live in `updateUserSettings` and must not be reimplemented.
+ */
+function writeDisabledSkills(home: string, names: readonly string[]): string[] {
+  const cleaned = normalizePinnedNames(names).slice(0, MAX_DISABLED_SKILLS);
+  updateUserSettings(home, (before) => ({
+    ...before,
+    runtimeTunables: {
+      ...(isPlainObject(before.runtimeTunables) ? before.runtimeTunables : {}),
+      disabledSkills: cleaned,
+    },
+  }));
+  return cleaned;
 }
 
 export class ReaperCLI {
@@ -129,16 +210,54 @@ export class ReaperCLI {
     }
   }
 
+  /**
+   * `skill list` — every installed skill, read from disk.
+   *
+   * This used to read only `SkillMemoryRegistry`, which is a *snapshot*: it is
+   * written when some other command calls `ensureNewSkillRegistry()`, and
+   * nothing refreshes it afterwards. Two things followed, and both were wrong.
+   * On a machine that had never run one of those commands, `skill list` showed
+   * no built-ins at all — the 18 skills shipped in `src/skills/built-in/` were
+   * invisible until something else happened to write the index. And after
+   * that, editing a built-in's `SKILL.md` had no visible effect, because every
+   * later `list` and `show` served the body captured the first time.
+   *
+   * The disk walk is the source of truth; the memory registry is the fallback
+   * for a workspace where discovery finds nothing.
+   */
   private async skillList(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     const scope = (args[0] as "project" | "user" | "builtin" | undefined) ?? undefined;
-    const skills = this.skillRegistry.listSkills(scope);
-    const lines = skills.map((s) => `${s.scope}\t${s.name}\t${s.type}\t${s.disableAutoInvocation ? "disabled" : "active"}\t${s.description}`);
+    const { registry } = this.ensureNewSkillRegistry();
+    const records = registry.list().filter((r) => scope === undefined || r.scope === scope);
+
+    const lines = records.length > 0
+      ? records.map((r) => `${r.scope}\t${r.manifest.name}\tprompt\t${r.disabled ? "disabled" : "active"}\t${r.manifest.description}`)
+      : this.skillRegistry
+          .listSkills(scope)
+          .map((s) => `${s.scope}\t${s.name}\t${s.type}\t${s.disableAutoInvocation ? "disabled" : "active"}\t${s.description}`);
     return { exitCode: 0, stdout: `scope\tname\ttype\tstatus\tdescription\n${lines.join("\n")}\n`, stderr: "" };
   }
 
   private async skillShow(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     const name = args[0];
     if (!name) return { exitCode: 2, stdout: "", stderr: "skill name required" };
+
+    /*
+     * Disk first, and built-ins included.
+     *
+     * The old order was memory-registry-first with a fallback that only looked
+     * under the workspace and user skill directories — so a built-in skill
+     * could not be shown at all unless the snapshot happened to contain it,
+     * and once the snapshot existed it won on every later read, including after
+     * the file it was taken from changed. `skill show codemode` printed the
+     * body of a file that no longer existed in that form.
+     */
+    const { registry } = this.ensureNewSkillRegistry();
+    const installed = registry.get(name);
+    if (installed) {
+      return { exitCode: 0, stdout: serializeSkill(toReaperSkill(installed)), stderr: "" };
+    }
+
     const skill = this.skillRegistry.getSkill(name);
     if (!skill) {
       const candidates = [
@@ -184,11 +303,74 @@ export class ReaperCLI {
     return { exitCode: 0, stdout: JSON.stringify({ name: skill.name, scope: skill.scope, sourcePath: skill.sourcePath }, null, 2) + "\n", stderr: "" };
   }
 
+  /**
+   * `skill disable` — a settings write, not a file in the skill's folder.
+   *
+   * Three things were wrong with the old version, and only the first was
+   * visible.
+   *
+   * It wrote through `SkillMemoryRegistry`, whose "disabled" flag lives in its
+   * own index. `SkillRegistry` — which `list` reads — decides the same
+   * question by looking for a marker file beside the manifest, so the two
+   * disagreed and the command printed `disabled <name>` while the skill stayed
+   * active.
+   *
+   * Routing it through `SkillRegistry.disable` fixed the disagreement and
+   * exposed the real problem: the marker it wrote went into the skill's own
+   * directory. For a built-in that is `src/skills/built-in/<name>/` in a source
+   * checkout — editing the repository — and in the bundle it is a temp
+   * directory regenerated from the inlined manifest, so the marker survives
+   * exactly until the next process starts. There is no version of "write into
+   * the thing you are disabling" that works for a skill the user did not
+   * author.
+   *
+   * So the state moved to where the user's other skill preference already
+   * lives — `runtimeTunables.disabledSkills` in `~/.reaper/settings.json`,
+   * beside `pinnedSkills`, through the same single writer.
+   */
+  /**
+   * The home whose `settings.json` this CLI reads and writes.
+   *
+   * `opts.userHome` exists so tests can point a CLI at a scratch directory, and
+   * it has to be honoured on *every* path into the settings file or a test
+   * would edit the real one. Resolved in a single accessor for that reason.
+   */
+  private settingsHome(): string {
+    return this.opts.userHome ?? process.env.HOME ?? "";
+  }
+
   private async skillDisable(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     const [name, reason] = args;
     if (!name) return { exitCode: 2, stdout: "", stderr: "skill name required" };
-    const ok = this.skillRegistry.disable(name, reason ?? "manual");
-    return ok ? { exitCode: 0, stdout: `disabled ${name}\n`, stderr: "" } : { exitCode: 1, stdout: "", stderr: `skill "${name}" not found` };
+    if (!this.skillExists(name)) return { exitCode: 1, stdout: "", stderr: `skill "${name}" not found` };
+    try {
+      const next = writeDisabledSkills(this.settingsHome(), [...readDisabledSkills(this.settingsHome()), name]);
+      /*
+       * The registry in this process was built before the write, so its
+       * records still say active. Reloading keeps `skill list` honest
+       * immediately rather than at the next command.
+       */
+      this._newSkillRegistry = null;
+      this._newSkillLifecycle = null;
+      const note = reason ? ` (${reason})` : "";
+      return { exitCode: 0, stdout: `disabled ${name}${note} (${next.length} off)\n`, stderr: "" };
+    } catch (cause) {
+      return { exitCode: 1, stdout: "", stderr: `could not write settings: ${cause instanceof Error ? cause.message : String(cause)}` };
+    }
+  }
+
+  /**
+   * Is this a skill the CLI can name?
+   *
+   * Checked before writing, so `skill disable typo` fails loudly instead of
+   * quietly adding an inert name to the settings file that nothing will ever
+   * resolve. The opposite choice — accept anything, ignore unknown names —
+   * belongs on the *read* path, where a stale reference must not break a turn.
+   */
+  private skillExists(name: string): boolean {
+    const { registry } = this.ensureNewSkillRegistry();
+    if (registry.get(name)) return true;
+    return this.skillRegistry.getSkill(name) !== null;
   }
 
   private async skillDelete(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
@@ -201,7 +383,17 @@ export class ReaperCLI {
   private async skillSearch(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     const [query, ...rest] = args;
     if (!query) return { exitCode: 2, stdout: "", stderr: "query required" };
-    const candidates = this.skillRegistry.listSkills();
+    /*
+     * Searched over the same set `list` shows. Searching the memory index would
+     * have answered from the stale snapshot, so a skill that exists on disk
+     * would come up empty — and `search` is the command a person reaches for
+     * precisely when they cannot remember whether a skill exists.
+     */
+    const { registry } = this.ensureNewSkillRegistry();
+    const onDisk = registry.list();
+    const candidates = onDisk.length > 0
+      ? onDisk.map((r) => toReaperSkill(r))
+      : this.skillRegistry.listSkills();
     const context = { taskKeywords: rest };
     const picks = selectRelevantSkills({ query, context, candidates, maxResults: 5 });
     if (picks.length === 0) return { exitCode: 0, stdout: "(no matches)\n", stderr: "" };
@@ -211,10 +403,24 @@ export class ReaperCLI {
   private async skillRender(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     const [name, ...rest] = args;
     if (!name) return { exitCode: 2, stdout: "", stderr: "skill name required" };
-    const skill = this.skillRegistry.getSkill(name);
-    if (!skill) return { exitCode: 1, stdout: "", stderr: `skill "${name}" not found` };
-    const rendered = renderSkillForModel(skill, rest);
-    return { exitCode: 0, stdout: rendered, stderr: "" };
+    /*
+     * Disk first here too, because this is the command that feeds the model:
+     * `render` produces the text that goes into a turn, so serving it from the
+     * snapshot meant a model could be working from a body the person had
+     * already edited.
+     */
+    const onDisk = this.ensureNewSkillRegistry().registry.get(name);
+    const skill = onDisk ? toReaperSkill(onDisk) : this.skillRegistry.getSkill(name);
+    if (skill) return { exitCode: 0, stdout: renderSkillForModel(skill, rest), stderr: "" };
+    /*
+     * Packaged skills are not in the index — nothing syncs it on a plain
+     * `reaper slash /codemode`, and requiring an operator to run `skill add`
+     * on something that already ships would make the command useless for the
+     * one skill a person is most likely to type.
+     */
+    const packaged = packagedSkillBody(name);
+    if (packaged) return { exitCode: 0, stdout: packaged, stderr: "" };
+    return { exitCode: 1, stdout: "", stderr: `skill "${name}" not found` };
   }
 
   /* --- memory --- */
@@ -548,7 +754,8 @@ export class ReaperCLI {
       "  skill       list | show | create | disable | delete | search | render",
       "              add | enable | trust | untrust | test | doctor",
       "  extensions  list | add | enable | disable | trust | untrust | doctor | remove",
-      "  slash       /<name> [args...]   (host-agnostic slash command registry)",
+      "  slash       <name> [args...]    (host-agnostic slash command registry;",
+      "                                   leading slash is added, so: slash skills list)",
       "  memory      list | search | forget | summarize | health",
       "  visual      list | analyze | bridge",
       "  capability  show | probe",
@@ -564,7 +771,9 @@ export class ReaperCLI {
   private ensureNewSkillRegistry(): { registry: SkillRegistry; lifecycle: SkillLifecycle } {
     if (!this._newSkillRegistry) {
       this._newSkillRegistry = new SkillRegistry({ builtinMetadata: {}, memory: this.skillRegistry });
-      // Load built-ins so `skill list` shows all 17.
+      // Load built-ins so `skill list` shows them. `codemode` is the only
+      // one with a body; `completion-gate-debugging` and `swarm-orchestration`
+      // were deleted on purpose and must not reappear here.
       try {
         const userHome = this.opts.userHome ?? process.env.HOME ?? "";
         const resolver = new SkillTrustResolver({
@@ -578,6 +787,7 @@ export class ReaperCLI {
           projectSkillsDir: join(this.opts.workspaceRoot, ".reaper", "skills"),
           workspaceRoot: this.opts.workspaceRoot,
           resolver,
+          disabledNames: new Set(readDisabledSkills(userHome)),
         });
         for (const r of result.records) this._newSkillRegistry.register(r);
         this._newSkillRegistry.syncTo(this.skillRegistry);
@@ -624,12 +834,42 @@ export class ReaperCLI {
     return { exitCode: 0, stdout: `installed "${result.name ?? from}" as ${scope}${trust ? " (trusted)" : ""}\n`, stderr: "" };
   }
 
+  /**
+   * `skill enable` — the inverse, and it must clear *both* sources.
+   *
+   * A skill can be off because the user switched it off (the settings list) or
+   * because it shipped with a `disabled` marker. Clearing only the settings
+   * entry would leave a built-in that arrived disabled still disabled, and the
+   * command would report success. So this removes the name from the list and
+   * asks the registry to clear a marker it owns — which, for a directory the
+   * user owns, is exactly the right file to touch.
+   */
   private async skillEnable(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     const [name] = args;
     if (!name) return { exitCode: 2, stdout: "", stderr: "skill name required" };
+    if (!this.skillExists(name)) return { exitCode: 1, stdout: "", stderr: `skill "${name}" not found` };
     const { registry } = this.ensureNewSkillRegistry();
-    const ok = registry.enable(name);
-    return ok ? { exitCode: 0, stdout: `enabled ${name}\n`, stderr: "" } : { exitCode: 1, stdout: "", stderr: `skill "${name}" not found` };
+    const clearedMarker = registry.enable(name);
+    /*
+     * Only for a skill the user actually owns. `enable` on a built-in would
+     * otherwise try to unlink a file inside the shipped skill — the same class
+     * of mistake `disable` used to make, just less destructive.
+     */
+    const record = registry.get(name);
+    const userOwned = record !== null && (record.scope === "user" || record.scope === "project");
+
+    try {
+      const home = this.settingsHome();
+      const current = readDisabledSkills(home);
+      const next = current.includes(name) ? writeDisabledSkills(home, current.filter((entry) => entry !== name)) : current;
+      this._newSkillRegistry = null;
+      this._newSkillLifecycle = null;
+      const bits = [!next.includes(name) && current.includes(name) ? "settings cleared" : undefined,
+                    clearedMarker && userOwned ? "marker removed" : undefined].filter(Boolean);
+      return { exitCode: 0, stdout: `enabled ${name}${bits.length > 0 ? ` (${bits.join(", ")})` : ""}\n`, stderr: "" };
+    } catch (cause) {
+      return { exitCode: 1, stdout: "", stderr: `could not write settings: ${cause instanceof Error ? cause.message : String(cause)}` };
+    }
   }
 
   private async skillTrust(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
@@ -803,7 +1043,13 @@ export class ReaperCLI {
   }
 
   /* --- slash --- */
-  /** Host-agnostic slash-command entry: `reaper slash /<name> [args...]`. */
+  /**
+   * Host-agnostic slash-command entry: `reaper slash <name> [args...]`.
+   *
+   * The name is given *without* its leading slash — this method adds one. The
+   * usage text used to show `/<name>`, which invited `reaper slash /skills`,
+   * and that arrives here as `//skills` and matches nothing.
+   */
   private async slash(sub: string | undefined, args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     const line = sub ? `/${sub}${args.length > 0 ? " " + args.join(" ") : ""}` : "";
     if (!line || line === "/") {
@@ -814,13 +1060,26 @@ export class ReaperCLI {
     }
     const reg = this.ensureSlashRegistry();
     const result = await reg.handle(line, { host: new ConsoleHost() });
-    if (!result.ok) return { exitCode: 1, stdout: result.output, stderr: result.error };
+    if (!result.ok) {
+      /*
+       * A skill name is not a command, but `/codemode` is what a person
+       * types. Rather than growing a command per skill, this prints the body
+       * — the same text `activate_skill` would hand a model — so the two ways
+       * of loading a skill produce the same thing to read.
+       */
+      const invocation = reg.resolveSkillInvocation(line);
+      if (invocation) return await this.skillRender([invocation.name, ...invocation.args]);
+      return { exitCode: 1, stdout: result.output, stderr: result.error };
+    }
     return { exitCode: 0, stdout: result.output, stderr: "" };
   }
 
   private ensureSlashRegistry(): SlashCommandRegistry {
     if (!this._slashRegistry) {
       this._slashRegistry = new SlashCommandRegistry();
+      // `/codemode` and any other skill name resolve as skill invocations
+      // rather than "unknown command". See `resolveSkillInvocation`.
+      this._slashRegistry.setSkillNames(() => packagedSkills().map((skill) => skill.name));
       const { registry: skillReg, lifecycle: skillLifecycle } = this.ensureNewSkillRegistry();
       const extReg = this.ensureExtensionRegistry();
       const hookLifecycle = this.ensureHookLifecycle();

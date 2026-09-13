@@ -35,7 +35,7 @@ import { TrajectoryLogger } from "../logging/trajectory.js";
 import { lastEntryId } from "../context/session-journal.js";
 import { generateFinalSummary, summarizeExplicitToolRun } from "./final-summary.js";
 import { classifyRunFinalStatus, persistRunFailure } from "./run-finalize.js";
-import { buildGeneralAgentTools, buildAgentToolDescriptor, userPromptRequestsScratchpad, type AgentToolDescriptor } from "./agent-tools.js";
+import { buildGeneralAgentTools, buildAgentToolDescriptor, userPromptRequestsScratchpad, EMPTY_TOOL_SET, type AgentToolDescriptor } from "./agent-tools.js";
 import {
   escapeRegExp, 
   hasSourceMutationShellFragment, 
@@ -54,6 +54,9 @@ import { RecoverySession } from "../recovery/session.js";
 import {ToolExecutor} from "../tools/executor.js";
 import type { ShellRunner} from "../tools/executor.js";
 import type { ToolApprovalRequester } from "../tools/approval.js";
+import { runnerAsHooks } from "./hook-bridge.js";
+import { AuthoringRuntime } from "../tools/write/authoring-deps.js";
+import { HookRunner } from "../extensions/hook-runner.js";
 import type {Hooks} from "../adaptive/hooks.js";
 import {
   extractFilePathsFromFailure, 
@@ -69,6 +72,8 @@ import {
 } from "./task-store.js";
 import { getDiscoveredTools, discoverTools, clearDiscoveredTools } from "../tools/discovery.js";
 import { toolRegistry, CORE_TOOL_NAMES } from "../tools/registry.js";
+import type { CodeModelDescriptor } from "../tools/code/types.js";
+import type { CodeModelRunner } from "../tools/code/bridge.js";
 import { isKnownToolName, stripUnknownToolArgs } from "./tool-args.js";
 import {
   getShellCommandArg} from "./tool-call-utils.js";
@@ -121,7 +126,7 @@ import { buildDerivedSecretEncodingFeedback } from "./derived-secret-encoding.js
 import { buildSessionMetricsSummary, countVerificationAttempts, hasPassingVerifyAfterLastEdit } from "./session-metrics.js";
 import { collectWorkspaceDiff, runFreshContextDiffReview } from "../verify/diff-review.js";
 import { buildRescueHypothesisLedger, renderRescueHypothesisLedger } from "./hypothesis-ledger.js";
-import { printToolCalls, printTurnHeader } from "./session-printer.js";
+import { printContextEvent, printToolCalls, printToolResult, printTurnHeader } from "./session-printer.js";
 import { validateToolCallBatch, type ToolValidationBlocker } from "./tool-validation.js";
 import { getRuntimeDeadlinePressure, type RuntimeDeadlinePressure } from "./deadline-pressure.js";
 import { hasRecentIncompleteGeneratedArtifact, hasRecentStructuredResponseFallbackFeedback } from "./generated-artifact-feedback.js";
@@ -191,6 +196,25 @@ export interface RuntimeEngineInput {
   callerRole?: string;
   /** True when running inside a trusted sandbox (skips high-risk approval). */
   trustedSandbox?: boolean;
+  /**
+   * Extra instructions for this run, appended after the built-in prompt.
+   *
+   * Appended, never substituted. The built-in text is the contract the tool
+   * schemas, verification loop, and stopping rules are written against; a
+   * caller-supplied string that replaced it could quietly remove every one of
+   * them, and the run would look identical from the outside until it did
+   * something the prompt forbade.
+   */
+  systemPromptSuffix?: string;
+  /**
+   * Tool names this run must neither offer the model nor execute.
+   *
+   * Enforced on both sides of the model: removed from the wire tool list so it
+   * is never advertised, and refused at the execution gate so a model that
+   * emits the name anyway (from memory, or from an earlier turn's transcript)
+   * gets a stated refusal instead of the tool actually running.
+   */
+  disabledTools?: readonly string[];
 }
 
 export interface RuntimeEngineResult {
@@ -200,6 +224,15 @@ export interface RuntimeEngineResult {
   events: AgentEventEnvelope[];
   trajectoryPath: string;
   contentFingerprint?: string;
+  /**
+   * Why the run stopped short, when it did. The agent loop raises these, but
+   * for a long time nothing downstream read them: they were built, carried in
+   * graph state, and dropped on the floor at the result boundary — so a run
+   * that failed for a reason the engine knew perfectly well still closed as a
+   * successful turn with an empty message. `managed-thread` decides turn status
+   * from this field, and the transcript renders what it carries.
+   */
+  runtimeBlockers?: RuntimeBlocker[];
   notices?: import("./notices.js").Notice[];
   verification?: {
     ok: boolean;
@@ -552,10 +585,82 @@ function hasObservedPassingVerification(toolResults: ToolResult[]): boolean {
   return false;
 }
 
+/**
+ * Emit the widened `verification.completed` event the introspection panel
+ * renders. Only fires when there is something to say: a declared verification
+ * result, or a grounded verification-class command in the model's own tool
+ * history. A turn that never ran any verifier emits nothing, so the panel
+ * stays empty instead of claiming a pass that never happened.
+ */
+async function emitVerificationCompleted(
+  sink: RuntimeEventSink | undefined,
+  result: RuntimeEngineResult,
+): Promise<void> {
+  if (!sink) return;
+  const evidence = selectRecentStrictVerificationEvidence(result.toolResults);
+  const observedVerified = hasObservedPassingVerification(result.toolResults);
+  const declared = result.verification;
+  const verified = declared?.ok === true || observedVerified;
+  const command = declared?.command ?? evidence?.command;
+  const attemptCount = typeof declared?.attemptCount === "number"
+    ? declared.attemptCount
+    : countVerificationAttempts(result.toolResults);
+  const hasSomething = verified || command !== undefined || (declared !== undefined && declared.ok === false);
+  if (!hasSomething) return;
+  await emitRuntimeEvent(sink, {
+    type: "verification.completed",
+    ok: declared?.ok ?? observedVerified,
+    ...(command !== undefined ? { command } : {}),
+    ...(verified ? { verified: true } : {}),
+    ...(declared?.groundedSignal
+      ? { groundedSignal: declared.groundedSignal }
+      : evidence
+        ? { groundedSignal: classifyGroundedVerificationSignal(evidence.command) }
+        : {}),
+    ...(declared?.failureClasses?.length ? { failureClasses: declared.failureClasses } : {}),
+    ...(declared?.feedback?.length ? { feedback: declared.feedback } : {}),
+    attemptCount,
+    ...(declared?.selfDebugExplanation ? { selfDebugExplanation: declared.selfDebugExplanation } : {}),
+    ...(declared?.diffReviewExplanation ? { diffReviewExplanation: declared.diffReviewExplanation } : {}),
+  });
+}
+
 export class RuntimeEngine {
   private readonly config: ReaperConfig;
   private trajectoryLogger: TrajectoryLogger;
   private ctxHooks?: ContextEngineeringHooks;
+  /**
+   * O(1) membership for the run's tool policy, built once.
+   *
+   * Every `buildGeneralAgentTools` call and every executed batch consults this,
+   * and the second call site runs inside the model loop — rebuilding a `Set`
+   * from the array on each iteration would be work proportional to the policy
+   * size on every tool call.
+   */
+  private readonly disabledTools: ReadonlySet<string>;
+
+  /**
+   * Dependencies for the three authoring manager tools, built on first use.
+   *
+   * These were never supplied to the executor at all, so `skill_manager`,
+   * `extension_manager`, and `hook_manager` were advertised to the model,
+   * promotable by `search_tools`, and then answered every call with "not wired
+   * for this run". One per engine, because each caches a registry and a
+   * lifecycle that read the workspace's install directories — rebuilding them
+   * per turn would re-walk those trees on every tool call.
+   */
+  private authoringRuntime: AuthoringRuntime | undefined;
+
+  /**
+   * The runner approved hooks dispatch through.
+   *
+   * Shared deliberately between the executor's pre/post-tool gates and
+   * `hook_manager`: the manager registers handlers here, and the gates are what
+   * fire them. A second runner would accept every registration and dispatch
+   * none of them, which reads to the user as "my hook is approved and does
+   * nothing".
+   */
+  private hookRunner: HookRunner | undefined;
 
   constructor(private readonly input: RuntimeEngineInput) {
     // mergeWorkspaceConfigSync may return `undefined` for an empty
@@ -568,6 +673,125 @@ export class RuntimeEngine {
     const mergedConfig = mergeWorkspaceConfigSync(input.config, input.workspaceRoot) ?? {};
     this.config = parseReaperConfig(mergedConfig);
     this.trajectoryLogger = new TrajectoryLogger(input.workspaceRoot, this.config.logging);
+    this.disabledTools = input.disabledTools?.length
+      ? new Set(input.disabledTools)
+      : EMPTY_TOOL_SET;
+  }
+
+  /**
+   * The authoring deps for this engine, built on first use.
+   *
+   * `userHome` falls back to `HOME` exactly as the CLI does, so a managed run
+   * and a `reaper skills` invocation resolve the same user-global install
+   * directory. An empty string is passed through rather than guessed at: the
+   * lifecycles join it with `.reaper/skills` and will report a read failure on
+   * a path that does not exist, which is truer than silently writing to a
+   * directory nobody asked for.
+   */
+  /**
+   * The models a script may call, advertised to `models.list()`.
+   *
+   * Resolved once per run rather than per call: a script asking what it can
+   * reach should get a stable answer, and re-reading the catalog for a value
+   * that does not change mid-turn would be a per-call cost for no benefit.
+   *
+   * `undefined` when the profile cannot be resolved, which leaves `models`
+   * unbound inside a script rather than advertising a model that would fail on
+   * first use.
+   */
+  private codeModelCatalogue: readonly CodeModelDescriptor[] | undefined;
+
+  private buildCodeModelRunner(gateway: ModelGateway): CodeModelRunner {
+    return async (invocation) => {
+      const started = Date.now();
+      try {
+        /*
+         * `source: "code_mode"` rather than `"main_agent"`, and it matters for
+         * two reasons. The transcript needs to tell a model call made by a
+         * script apart from the turn's own model calls — they are different
+         * events with different causes, and a reader seeing only "model call"
+         * cannot tell which. And the attention the runtime pays to model calls
+         * (retries, context accounting, the token-limit recovery path) is about
+         * the turn's own conversation, which a script's call is not part of.
+         */
+        const result = await gateway.generate({
+          role: "main_agent",
+          source: "code_mode",
+          messages: invocation.messages.map((message) => ({
+            role: message.role,
+            content: message.content,
+          })),
+          ...(invocation.system ? { system: invocation.system } : {}),
+          ...(invocation.signal ? { signal: invocation.signal } : {}),
+        } as never);
+
+        /*
+         * The text, and an explicit failure when there is none.
+         *
+         * `GenerateResult` carries the assistant message and its tool calls
+         * together; a script that asked for text and received a tool call has
+         * nothing to return, and saying so is better than returning an empty
+         * string that reads as "the model said nothing".
+         */
+        const text = typeof result?.content === "string" ? result.content : "";
+        if (!text) {
+          return {
+            ok: false,
+            error: {
+              code: "empty_response",
+              message: "The model returned no text. Scripts cannot pass tools, so a tool-only response has nothing to hand back.",
+            },
+            durationMs: Date.now() - started,
+          };
+        }
+        return {
+          ok: true,
+          text,
+          model: result.model || "model",
+          durationMs: Date.now() - started,
+          ...(result.usage
+            ? {
+                usage: {
+                  ...(result.usage.inputTokens !== undefined ? { inputTokens: result.usage.inputTokens } : {}),
+                  ...(result.usage.outputTokens !== undefined ? { outputTokens: result.usage.outputTokens } : {}),
+                },
+              }
+            : {}),
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          error: {
+            code: "model_error",
+            message: error instanceof Error ? error.message : String(error),
+          },
+          durationMs: Date.now() - started,
+        };
+      }
+    };
+  }
+
+  private getAuthoringRuntime(): AuthoringRuntime {
+    if (!this.authoringRuntime) {
+      this.authoringRuntime = new AuthoringRuntime({
+        workspaceRoot: this.input.workspaceRoot,
+        userHome: this.input.userHome ?? process.env.HOME ?? "",
+        hookRunner: this.getHookRunner(),
+      });
+    }
+    return this.authoringRuntime;
+  }
+
+  /**
+   * The one HookRunner for this engine, created on first need.
+   *
+   * Both the authoring manager and the executor's pre/post-tool gates need the
+   * same instance — see the field comment. Creating it lazily keeps a run that
+   * touches neither from paying for it.
+   */
+  private getHookRunner(): HookRunner {
+    if (!this.hookRunner) this.hookRunner = new HookRunner();
+    return this.hookRunner;
   }
 
   static shouldHandle(input: RuntimeEngineInput): boolean {
@@ -582,6 +806,23 @@ export class RuntimeEngine {
         runWithQueryGuard(() => this.runScoped()),
       ),
     );
+  }
+
+  /**
+   * Context-window metadata for the context meter: the active model's window
+   * when its resolved profile advertises one, plus Reaper's own soft budget.
+   * The soft cap is Reaper's ceiling, not the model's — the two differ (a 1M
+   * model still runs under a 270k Reaper budget), so the meter shows both.
+   */
+  private contextWindowInfo(): { modelContextWindow?: number; contextSoftCap?: number } {
+    const profile = this.config.models[modelRoute(this.config, "mainAgent")] ?? this.config.models.default_model;
+    const window = profile?.capabilities?.maxContextTokens;
+    return {
+      ...(typeof window === "number" && window > 0 ? { modelContextWindow: window } : {}),
+      ...(this.config.contextManagement?.softCap
+        ? { contextSoftCap: this.config.contextManagement.softCap }
+        : {}),
+    };
   }
 
   private async runScoped(): Promise<RuntimeEngineResult> {
@@ -600,6 +841,14 @@ export class RuntimeEngine {
           Object.assign(error, { code: "ProviderNotReady", status: 401, provider: readiness.provider, model: readiness.model });
           throw error;
         }
+        /*
+         * Transport coverage is deliberately *not* checked here. Answering it
+         * needs the catalog, and reading the catalog here costs about 2.5s on
+         * the first model call of every turn — which is the entire budget
+         * between the user pressing Enter and the first streamed token. The
+         * client that actually builds the transport already holds the catalog,
+         * so the check lives there instead and costs nothing extra.
+         */
       } catch (error) {
         if ((error as { code?: string }).code === "ProviderNotReady") throw error;
         // Other errors during preflight (gateway unreachable, schema
@@ -620,6 +869,19 @@ export class RuntimeEngine {
     // This prefix stays byte-identical for provider prompt caching. The
     // dynamic tool schemas continue to travel in GenerateRequest.tools.
     const systemPromptPrefix = MAIN_AGENT_SYSTEM_PROMPT_TEXT;
+    /*
+     * A thread's own instructions are appended, so the built-in text remains
+     * the exact prefix of every request and the provider's prefix cache still
+     * hits on it — appending is the cache-preserving way to add instructions,
+     * while rewriting in place would invalidate the cached prefix for that
+     * thread on every edit.
+     *
+     * Computed once per run, like the prefix: the transcript should record one
+     * system prompt for the whole turn, not one per model call.
+     */
+    const systemPrompt = this.input.systemPromptSuffix
+      ? `${systemPromptPrefix}\n\n# Thread instructions\n${this.input.systemPromptSuffix}`
+      : systemPromptPrefix;
     return runWithCleanupScope(runContext.runDir, () =>
       runWithModelCallLogContext(
         { workspaceRoot: this.input.workspaceRoot, runId: runContext.runId },
@@ -632,7 +894,7 @@ export class RuntimeEngine {
             source: "runtime",
             callId: runContext.runId,
             promptPreview: String(initialRequest.payload?.prompt ?? "").slice(0, 500),
-            system: systemPromptPrefix,
+            system: systemPrompt,
           },
           async () => {
             await emitRuntimeEvent(this.input.eventSink, {
@@ -641,13 +903,36 @@ export class RuntimeEngine {
               sessionId: runContext.sessionId,
             });
             try {
-              const result = await this.runInner({ startedAt, initialRequest, runContext, systemPromptPrefix });
-              await emitRuntimeEvent(this.input.eventSink, {
-                type: "turn.completed",
-                runId: runContext.runId,
-                sessionId: runContext.sessionId,
-                assistantMessage: result.assistantMessage,
-              });
+              const result = await this.runInner({ startedAt, initialRequest, runContext, systemPromptPrefix: systemPrompt });
+              // Surface the verification verdict before the turn closes, so the
+              // panel already has the classification by the time the transcript
+              // marks the turn done. `verified` is the trust-relevant bit:
+              // `ok` means the commands exited 0, `verified` means the evidence
+              // was grounded in a real test/build/typecheck signal.
+              await emitVerificationCompleted(this.input.eventSink, result);
+              /*
+               * A run that stopped short must not announce itself as completed.
+               *
+               * The turn status is decided downstream from `runtimeBlockers`,
+               * but this event is emitted first and the UI folds it into a
+               * finished turn immediately — so emitting it for a failed run
+               * makes the transcript flash "completed" and then flip to the
+               * error, and a client that only listened for this event would
+               * never see the failure at all.
+               *
+               * Only the blockers that mean "the run did not do what was asked"
+               * count. The engine raises advisory blockers for conditions it
+               * worked around, and calling those failures would be its own bug.
+               */
+              const stoppedShort = (result.runtimeBlockers ?? []).some(isStoppedShortBlocker);
+              if (!stoppedShort) {
+                await emitRuntimeEvent(this.input.eventSink, {
+                  type: "turn.completed",
+                  runId: runContext.runId,
+                  sessionId: runContext.sessionId,
+                  assistantMessage: result.assistantMessage,
+                });
+              }
               return result;
             } catch (error) {
               if (this.input.abortSignal?.aborted) {
@@ -740,6 +1025,39 @@ export class RuntimeEngine {
       });
       auditLogger = new AuditLogger(this.input.workspaceRoot, { runId: boot.state.runId });
 
+      const hookForwarder = runnerAsHooks(this.getHookRunner());
+
+      /*
+       * The model a script will reach by default, and the only one advertised.
+       *
+       * One entry, not the whole catalog. A script calling a model is asking
+       * *this thread* to think — it is not a model picker, and offering every
+       * model the user has configured would invite a script to run on a
+       * provider the thread never chose, with credentials resolved for a
+       * profile nobody selected. The turn already decided which model is
+       * running; `models.call()` uses that one, and `models.list()` says so
+       * honestly rather than advertising reach the script does not have.
+       */
+      if (this.input.modelGateway) {
+        try {
+          const profile = await this.input.modelGateway.resolveRole("default_model");
+          this.codeModelCatalogue = [
+            {
+              id: `${profile.provider}/${profile.model}`,
+              provider: profile.provider,
+              model: profile.model,
+              ...(profile.capabilities?.maxContextTokens
+                ? { contextTokens: profile.capabilities.maxContextTokens }
+                : {}),
+            },
+          ];
+        } catch {
+          // Unresolvable profile: leave the surface unbound rather than
+          // advertising a model that would fail on first use.
+          this.codeModelCatalogue = undefined;
+        }
+      }
+
       executor = new ToolExecutor({
         workspaceRoot: this.input.workspaceRoot,
         runId: boot.state.runId,
@@ -764,6 +1082,42 @@ export class RuntimeEngine {
         ...(this.input.eventSink ? { eventSink: this.input.eventSink } : {}),
         ...(this.input.approvalRequester ? { approvalRequester: this.input.approvalRequester } : {}),
         ...(this.input.abortSignal ? { abortSignal: this.input.abortSignal } : {}),
+        // Passed even when empty: the executor's own default is "nothing is
+        // disabled", so omitting it would be identical — but threading the
+        // engine's set through explicitly keeps the tool surface the model is
+        // offered and the tool surface the executor honours the same value
+        // rather than two values that happen to agree.
+        disabledTools: this.disabledTools,
+        // The three authoring managers dispatch through this. Their handlers
+        // and the executor switch that calls them were both written and both
+        // tested; the option that joins them was never supplied by any caller,
+        // so all three tools threw "not wired for this run" on every call since
+        // they were added. Nothing caught it earlier because each layer was
+        // correct in isolation and no test stood at the join.
+        authoringTools: this.getAuthoringRuntime().build(),
+        /*
+         * The models a Code Mode script may call.
+         *
+         * Supplied unconditionally when a gateway exists, because the surface
+         * is not opt-in: the model decides whether a script that orchestrates
+         * model calls is the right answer, and it cannot make that decision
+         * about a capability it does not have. The runner closes over the same
+         * gateway the turn itself is using, so a script's call carries this
+         * turn's resolved credentials and role rather than reaching for a
+         * second configuration that could disagree with it.
+         */
+        ...(this.input.modelGateway
+          ? { codeModelRunner: this.buildCodeModelRunner(this.input.modelGateway) }
+          : {}),
+        ...(this.codeModelCatalogue ? { codeModels: this.codeModelCatalogue } : {}),
+        // The other half of the same gap. The executor's PreToolUse /
+        // PostToolUse / PreSkillInvoke gates all read `options.hooks`, and
+        // nothing ever set it — so an approved hook was registered on a runner
+        // that no gate consulted, and fired for nothing. This forwards the
+        // gates to the same runner the authoring manager writes to, and unlike
+        // the extension bus's fan-out it keeps the veto: an `enforce: true`
+        // hook is exactly the hook whose answer must not be discarded.
+        ...(hookForwarder ? { hooks: hookForwarder } : {}),
       });
 
       // Run-boundary metadata: resolve which provider + model the
@@ -947,6 +1301,54 @@ export class RuntimeEngine {
         };
         ctxHooks = createContextEngineeringHooks({
           infer: inferSummariser,
+          /*
+           * One `context.updated` per technique, straight through to the same
+           * sink every other runtime event uses. The wiring knows which
+           * technique ran and how much it reclaimed; the engine only ever saw
+           * the aggregate return value, which is why this is emitted from
+           * there rather than reconstructed here.
+           */
+          onContextEvent: (event) => {
+            void emitRuntimeEvent(this.input.eventSink, { type: "context.updated", ...event });
+            // The terminal has no event sink to subscribe to, so the same
+            // callback drives it directly. Both surfaces are fed from one
+            // place, which is what keeps their wording from drifting.
+            printContextEvent(event);
+            /*
+             * Append-only accounting, in the session's own record.
+             *
+             * The transcript is per-turn and the events are transient; a
+             * session that runs for days needs a durable line saying what
+             * happened to its context and when, and it must be readable after
+             * the fact — a user asking "why does the agent not remember the
+             * first hour" should be able to see that a summary ran and what it
+             * reclaimed. Written here rather than in the wiring because the
+             * workspace and session live in this scope, and because a failure
+             * to write must never affect the run.
+             */
+            if (event.phase === "completed" && ((event.savedChars ?? 0) > 0 || (event.savedTokens ?? 0) > 0)) {
+              void (async () => {
+                try {
+                  const { recordCompactionSavings } = await import("../context/session-journal.js");
+                  await recordCompactionSavings(this.input.workspaceRoot, {
+                    ts: Date.now(),
+                    session: getBoot().state.sessionId,
+                    kind: event.technique,
+                    savedChars: event.savedChars ?? 0,
+                    ...(event.savedTokens !== undefined ? { savedTokens: event.savedTokens } : {}),
+                    ...(event.messagesBefore !== undefined ? { cleared: event.messagesBefore } : {}),
+                    ...(event.softCap !== undefined ? { contextWindow: event.softCap } : {}),
+                    ...(event.usedTokens !== undefined && event.softCap
+                      ? { ratio: event.usedTokens / event.softCap }
+                      : {}),
+                    ...(event.detail !== undefined ? { detail: event.detail } : {}),
+                  });
+                } catch {
+                  /* never let accounting break a run */
+                }
+              })();
+            }
+          },
           config: this.config as { models?: unknown } as any,
           // Prefer last provider-reported input tokens as a floor so
           // shake/full-summary gates track real usage, not only chars/4.
@@ -993,7 +1395,7 @@ export class RuntimeEngine {
       if (!this.input.modelGateway || !state.contentPrep) return {};
 
 
-      const allGeneralAgentTools = buildGeneralAgentTools(getDiscoveredTools(getBoot().state.runId));
+      const allGeneralAgentTools = buildGeneralAgentTools(getDiscoveredTools(getBoot().state.runId), this.disabledTools);
       const generalAgentTools = selectGeneralAgentToolsForTurn({
         request: getRequest(),
         state,
@@ -1013,6 +1415,13 @@ export class RuntimeEngine {
         to_step: "Main Agent",
       });
 
+      /*
+       * Declared outside the `try` because the `catch` sets it too: a model
+       * call that throws has to become a blocker just like one that returns
+       * nothing three times running. Inside the block it was unreachable from
+       * the handler, which is part of why that path reported success.
+       */
+      let terminalRuntimeBlocker: RuntimeBlocker | undefined;
       try {
         printTurnHeader(state.iteration + 1);
         // reference-style live-execution loop: stream a model turn, fire any
@@ -1031,7 +1440,6 @@ export class RuntimeEngine {
         let prematureStopNudges = 0;
         const EMPTY_STOP_MAX_RETRIES = 3;
         const PREMATURE_STOP_MAX_NUDGES = 2;
-        let terminalRuntimeBlocker: RuntimeBlocker | undefined;
         const rawPromptValue = getRequest().payload.prompt;
         const rawUserPrompt = typeof rawPromptValue === "string" ? rawPromptValue : "";
         let currentRequestLogged = false;
@@ -1256,15 +1664,21 @@ export class RuntimeEngine {
           const currentGeneralAgentTools = selectGeneralAgentToolsForTurn({
             request: getRequest(),
             state: { toolResults: [...state.toolResults, ...liveToolResults] },
-            tools: buildGeneralAgentTools(getDiscoveredTools(getBoot().state.runId)),
+            tools: buildGeneralAgentTools(getDiscoveredTools(getBoot().state.runId), this.disabledTools),
           });
-          // WORKFLOW 2: System bytes are built ONCE per autonomous run
-          // (see `run()` -> `systemPromptPrefix`) and reused on every
-          // model call. Dynamic tool inventory ships on the wire via
-          // `turnRequest.tools`; the system string itself stays byte-
-          // identical so provider prompt caches hit reliably across
+          // The role prompt is built ONCE per autonomous run (see `run()` ->
+          // `systemPromptPrefix`) and reused byte-for-byte on every model call,
+          // which is what keeps the provider's prefix cache hitting across
           // compaction and cockpit refresh.
-          const currentSystem = systemPromptPrefix;
+          //
+          // The tool inventory is the one thing appended per call, because it
+          // is the one thing that legitimately changes mid-run: discovering a
+          // tool must remove it from this list on the very next call, or the
+          // model keeps being told a tool it now holds a schema for is still
+          // locked. Appending is what makes that free — the cached prefix is
+          // untouched, and only the tail after it is new bytes.
+          const currentSystem = systemPromptPrefix
+            + renderAvailableTools(getBoot().state.runId, this.disabledTools);
 
           // ─── Cockpit insert (once per run) ─────────────────────────
           // The cockpit is the model's anchor for the run's environment,
@@ -1405,7 +1819,20 @@ export class RuntimeEngine {
           const visibleContent = inlineReasoning ? stripThinkingBlocks(rawTurnContent).trim() : rawTurnContent;
           (turn as { content?: string }).content = visibleContent;
           const turnReasoning = channelReasoning || inlineReasoning;
-          if (visibleContent) {
+          /*
+           * A transport-fallback turn is the runtime talking, not the model,
+           * and its text is a note addressed to the model ("you decide what to
+           * do next…"). Streaming that to the transcript put runtime
+           * instructions in the conversation as an assistant reply, and then
+           * the same paragraph appeared a second time inside the failure alert,
+           * because the blocker is built from the same words.
+           *
+           * The run still needs the note in its own conversation to decide what
+           * to do next — that happens in `liveConversation` below. What it does
+           * not need is for the note to be presented as the model's answer.
+           */
+          const isRuntimeSyntheticTurn = Boolean((turn as any)?.raw?.transportFallback);
+          if (visibleContent && !isRuntimeSyntheticTurn) {
             await emitRuntimeEvent(this.input.eventSink, {
               type: "assistant.message.completed",
               text: visibleContent,
@@ -1423,6 +1850,7 @@ export class RuntimeEngine {
               type: "token.usage",
               inputTokens: turnUsage.inputTokens,
               outputTokens: turnUsage.outputTokens,
+              ...this.contextWindowInfo(),
             });
           }
           if (turnReasoning) {
@@ -1521,10 +1949,26 @@ export class RuntimeEngine {
           if (tc.length === 0) {
             const assistantText = typeof turn.content === "string" ? turn.content.trim() : "";
             if ((turn as any)?.raw?.transportFallback) {
+              /*
+               * The turn is a stand-in the retry helper synthesises after the
+               * provider has refused every attempt, not something the model
+               * said. Its `content` is a note addressed to the model — "you
+               * decide what to do next" — and it was reaching the screen as
+               * the assistant's reply, under an alert that repeated it. The
+               * helper now supplies the sentence a person should read instead,
+               * and the note stays where it belongs.
+               *
+               * `lastAssistantMessage` is left alone for the same reason: with
+               * no reply from this turn, the transcript must not show the
+               * previous turn's text as though it were this one's.
+               */
+              lastAssistantMessage = "";
               terminalRuntimeBlocker = {
                 source: "model",
                 code: "main_agent_transport_error",
-                message: assistantText || "Main-agent provider transport retries were exhausted.",
+                message:
+                  (turn as any)?.raw?.transportBlockerMessage
+                  || "Main-agent provider transport retries were exhausted.",
               };
             }
             if (
@@ -1593,6 +2037,27 @@ export class RuntimeEngine {
                 } as any)
                 .catch(() => undefined);
               continue;
+            }
+            // The ladder above is the only thing between an empty stop and a
+            // silent turn. Once it is exhausted the model has returned nothing
+            // three times running, and falling through leaves `assistantMessage`
+            // empty — which reaches the transcript as a user message with no
+            // reply, no error and no spinner, permanently. Record why, so the
+            // turn can close as failed with something the user can act on.
+            //
+            // Not hypothetical: DeepInfra's GLM-5.3-Flash answers identical
+            // requests with `finish_reason: "stop"` and no content or
+            // tool_calls roughly four times in six, so this path is the
+            // expected outcome for a real fraction of turns.
+            if (!assistantText && emptyStopRetries >= EMPTY_STOP_MAX_RETRIES) {
+              terminalRuntimeBlocker = {
+                source: "model",
+                code: "empty_model_response",
+                message:
+                  `The model returned ${EMPTY_STOP_MAX_RETRIES} empty responses in a row — no text and no tool calls — `
+                  + "and the run was stopped. This is usually the provider rather than your prompt: send the message "
+                  + "again, or switch models.",
+              };
             }
             if (turn.content) {
               liveConversation.push({ role: "assistant", content: turn.content, ...(turnReasoning ? { reasoning: turnReasoning } : {}) });
@@ -1674,9 +2139,18 @@ export class RuntimeEngine {
           // every model-emitted tool_call id gets exactly one matching
           // tool message.
           const liveSplit = splitControlToolCalls(tc);
+          const prevPlan = livePlanState;
+          const prevTodo = liveTodoState;
           const advisoryUpdate = applyAdvisoryToolCalls(
             { planState: livePlanState, todoState: liveTodoState },
             liveSplit.advisoryToolCalls ?? [],
+          );
+          await emitPlanTodoDelta(
+            this.input.eventSink,
+            prevPlan,
+            advisoryUpdate.planState,
+            prevTodo,
+            advisoryUpdate.todoState,
           );
           livePlanState = advisoryUpdate.planState ?? livePlanState;
           liveTodoState = advisoryUpdate.todoState ?? liveTodoState;
@@ -1799,6 +2273,14 @@ export class RuntimeEngine {
                 output: outputString,
                 trajectoryLogger: this.trajectoryLogger,
                 persistedOutputSize: typeof persistedSize === "number" ? persistedSize : undefined,
+                // The complete-output pointer the tool result carries, so the
+                // transcript row can name the file the model was told about.
+                fullOutputPath:
+                  typeof outputObj?.full_output_path === "string"
+                    ? outputObj.full_output_path
+                    : typeof outputObj?.fullOutputPath === "string"
+                      ? outputObj.fullOutputPath
+                      : undefined,
               } as any);
               if ((afterTr as any)?.output && (afterTr as any).output !== result.output) {
                 (result as any).output = (afterTr as any).output;
@@ -1819,6 +2301,37 @@ export class RuntimeEngine {
               content: toolContent,
               timestamp: Date.now(),
             } as any);
+          }
+          // Same repair path as the all-calls-dropped branch above, for the
+          // turn that mixed valid and malformed calls. Without this the model
+          // sees its good calls execute and never learns the other one was
+          // discarded, so it proceeds as if that work happened.
+          if (Array.isArray(droppedRaw) && droppedRaw.length > 0) {
+            const detail = droppedRaw
+              .map(
+                (d: { name?: string; id?: string; error?: string }) =>
+                  `- ${d.name ?? "unknown"} (${d.id ?? "?"}): ${d.error ?? "invalid args"}`,
+              )
+              .join("\n");
+            liveConversation.push({
+              role: "user",
+              content:
+                `[runtime notice] Alongside the tool calls that ran, you emitted the calls below. They failed runtime schema validation, were NOT executed, and were stripped from the assistant message above:\n${detail}\n` +
+                `Re-emit them with corrected arguments. Do not assume those tools already ran.`,
+            });
+            await this.trajectoryLogger
+              .write({
+                event_id: randomUUID(),
+                run_id: getBoot().state.runId,
+                session_id: getBoot().state.sessionId,
+                trace_id: getBoot().state.runId,
+                timestamp: new Date().toISOString(),
+                log_schema_version: 1,
+                kind: "tool_call_parse_error",
+                level: getBoot().state.logLevel,
+                dropped: droppedRaw,
+              } as any)
+              .catch(() => undefined);
           }
           if (scheduled.aborted) {
             // R4: surface the abort instead of swallowing it. Mark the run
@@ -1918,15 +2431,46 @@ export class RuntimeEngine {
           level: getBoot().state.logLevel,
           content: `[main_agent_error] ${message}`,
         });
-        // Non-transport error from the model call. The runtime never
-        // marks the run as completion-gate-exhausted; the model owns
-        // the stop. We surface the error to the model as a normal
-        // final assistant message and let summarize pick it up on the
-        // next pass. We do not synthesize a fresh LLM summary here.
+        /*
+         * A model call that threw is a failed run, and for a long time this
+         * catch said otherwise.
+         *
+         * It wrote the error text into `assistantMessage` as though the model
+         * had said it, returned no blocker, and let the graph route
+         * main_agent → summarize → metrics. Nothing was ever emitted as an
+         * assistant message, so the transcript stayed empty; `task_completed`
+         * fired anyway, because nothing had failed as far as that check could
+         * see; and the turn closed as `completed` carrying the error text as
+         * its reply. The user's screen showed their own message and then
+         * nothing, permanently — no reply, no error, no spinner.
+         *
+         * The comment that used to sit here claimed the error would be
+         * "surfaced to the model" and "picked up on the next pass". There is no
+         * next pass: `plannedToolCalls: []` routes straight to summarize. The
+         * error was surfaced to nobody.
+         *
+         * The trajectory line above is a debug trail, not a reply, so it is
+         * still not what belongs in `assistantMessage`. Raise the blocker and
+         * leave the message empty; the failure reaches the user through the
+         * turn's own status, which `Transcript.tsx` already renders as the
+         * reason it is.
+         *
+         * This catch holds every model-call failure the transport classifier
+         * did not claim, so the text has to describe the failure without
+         * assuming which kind it was.
+         */
+        terminalRuntimeBlocker = {
+          source: "model",
+          code: "model_call_failed",
+          message:
+            `The model call failed and the run was stopped: ${message}\n`
+            + "Send the message again, or switch models in the composer.",
+        };
         return {
           plannedToolCalls: [],
-          assistantMessage: message,
+          assistantMessage: "",
           feedback: [...state.feedback, message],
+          runtimeBlockers: [...state.runtimeBlockers, terminalRuntimeBlocker],
           iteration: state.iteration + 1,
         } satisfies Partial<GraphState>;
       }
@@ -1962,6 +2506,13 @@ export class RuntimeEngine {
 
       const split = splitControlToolCalls(toolCalls);
       const advisoryUpdate = applyAdvisoryToolCalls(state, split.advisoryToolCalls ?? []);
+      await emitPlanTodoDelta(
+        this.input.eventSink,
+        state.planState,
+        advisoryUpdate.planState,
+        state.todoState,
+        advisoryUpdate.todoState,
+      );
       const categorized = split.executableToolCalls.map((call) => ({ id: call.id, name: call.name, kind: classifyToolCall(call) }));
       return {
         split,
@@ -2050,6 +2601,13 @@ export class RuntimeEngine {
       });
       const categorized = split.executableToolCalls.map((call) => ({ id: call.id, name: call.name, kind: classifyToolCall(call) }));
       const advisoryUpdate = applyAdvisoryToolCalls(state, split.advisoryToolCalls ?? []);
+      await emitPlanTodoDelta(
+        this.input.eventSink,
+        state.planState,
+        advisoryUpdate.planState,
+        state.todoState,
+        advisoryUpdate.todoState,
+      );
       return {
         split,
         ...advisoryUpdate,
@@ -2091,8 +2649,20 @@ export class RuntimeEngine {
       const requestMetadata = activeRequest.metadata && typeof activeRequest.metadata === "object" ? (activeRequest.metadata as Record<string, unknown>) : {};
       const execMode = requestMetadata.transport === "http_json" && requestMetadata.yolo === true;
       const executableToolCalls = normalizeExecutableToolCalls(split.executableToolCalls);
-      const allowedToolCalls = executableToolCalls;
-      const blockedBeforeScheduling: ToolResult[] = [];
+      /*
+       * Second half of the thread's tool policy. The tool list already omitted
+       * these names, so a well-behaved model never asks — but a thread that
+       * disables a tool mid-conversation keeps the earlier turns in its
+       * transcript, and the model reads those as evidence the tool exists.
+       * Refusing here means the disabled state holds even then, and the model
+       * gets a reason instead of silence.
+       *
+       * Sibling calls in the same batch still run: a policy refusal is one
+       * tool's outcome, not a batch abort, and dropping the others would let a
+       * single stale call cost the model the work it legitimately asked for.
+       */
+      const [policyBlocked, allowedToolCalls] = partitionByToolPolicy(executableToolCalls, this.disabledTools);
+      const blockedBeforeScheduling: ToolResult[] = policyBlocked;
       const currentStep = state.executionPlan?.[state.currentStepIndex];
       const startedEvents = split.executableToolCalls.map((toolCall) => makeEvent(activeRequest, "tool_call_started", { toolCall }));
       printToolCalls(
@@ -2129,6 +2699,20 @@ export class RuntimeEngine {
         ...postMutationResults,
       ];
       const toolResults = [...state.toolResults, ...batchResults];
+      /*
+       * The completion half of the terminal's tool narration. Calls are printed
+       * as they are issued; results only for Code Mode, where the script's
+       * output is the substance of the call and half a report is not worth
+       * printing at all.
+       */
+      for (const result of batchResults) {
+        printToolResult({
+          name: result.name,
+          ok: result.ok,
+          output: result.output,
+          ...(result.error ? { error: { code: result.error.code, message: result.error.message } } : {}),
+        });
+      }
       const completedEvents = batchResults.map((result) => makeEvent(activeRequest, "tool_call_completed", { result }));
       const encodingFeedback = buildDerivedSecretEncodingFeedback(toolResults);
       const runtimeGuardFeedback = [
@@ -2399,8 +2983,11 @@ export class RuntimeEngine {
         ...state.events,
         makeEvent(activeRequest, "assistant_message", { content: modelSummary }),
       ];
-      const transportFailed = state.runtimeBlockers.some((blocker) => blocker.code === "main_agent_transport_error");
-      if (!transportFailed) {
+      // `task_completed` is the event the metrics node reads to score the run as
+      // verified, so a run that stopped short must not carry it — otherwise the
+      // failure is recorded as a success in the same breath as being reported.
+      const stoppedShort = state.runtimeBlockers.some(isStoppedShortBlocker);
+      if (!stoppedShort) {
         nextEvents.push(makeEvent(activeRequest, "task_completed", { verification: finalVerification }));
       }
       return {
@@ -2614,6 +3201,7 @@ export class RuntimeEngine {
         events: finalState.events,
         trajectoryPath: this.trajectoryLogger.path,
         ...(finalState.contentFingerprint ? { contentFingerprint: finalState.contentFingerprint } : {}),
+        ...(finalState.runtimeBlockers?.length ? { runtimeBlockers: finalState.runtimeBlockers } : {}),
         ...(finalState.explicitVerification ? { verification: finalState.explicitVerification } : {}),
       };
       const finalStatus = classifyRunFinalStatus(finalState as unknown as Parameters<typeof classifyRunFinalStatus>[0]);
@@ -2681,7 +3269,7 @@ export function selectGeneralAgentToolsForTurn(input: {
 
   // Build-like tasks still get a compact fast-start surface, but keep canonical
   // tool names on the wire. The model should see and learn `file_view`,
-  // `file_scroll`, `file_find`, and `file_edit` directly — no legacy aliases or
+  // `file_find`, and `file_edit` directly — no legacy aliases or
   // short-name renames (`read`/`edit`/`write`).
   if (writeCount < 20) {
     return toCanonicalBuildFastStartTools(tools);
@@ -2689,22 +3277,45 @@ export function selectGeneralAgentToolsForTurn(input: {
   return tools;
 }
 
+/**
+ * The compact surface a build-like task starts with.
+ *
+ * It must contain every core tool. `renderAvailableTools` omits core names from
+ * the deferred inventory on the assumption that they are already on the wire —
+ * so narrowing a core tool off the wire here would hide it in *both*
+ * directions: absent from the tool list, and absent from the list of tools the
+ * model is told it can discover.
+ *
+ * **Everything else the caller passed in is kept.** This started as a fixed
+ * name list — core, plus `file_find`, plus `scratchpad` if the prompt asked —
+ * which quietly made the fast-start surface the *only* surface for the whole
+ * run. `selectGeneralAgentToolsForTurn` calls this on every turn until the
+ * twentieth successful write, so for the entire early phase of a build task it
+ * rebuilt the tool list from scratch and discarded every promotion the model
+ * had earned. A model could call `search_tools`, be told `create_checkpoint`
+ * was now unlocked, see it listed in `# Available tools`... and never get its
+ * schema, on that turn or any turn after, until it had written twenty files.
+ * The observed result is a model that re-searches for the same tool four times,
+ * concludes the unlock is broken, tries calling it blind, and gives up.
+ *
+ * So the narrowing is a *reorder and a floor*, not a filter: the core names
+ * lead (they are the ones a build task reaches for first), and the rest follow
+ * in their original order. Dropping something the caller already decided to
+ * attach is never this function's business — `disabledTools` and the caller
+ * itself are the only things allowed to withhold a tool.
+ */
 function toCanonicalBuildFastStartTools(tools: AgentToolDescriptor[]): AgentToolDescriptor[] {
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
-  const base = [
-    byName.get("write_file"),
-    byName.get("file_edit"),
-    byName.get("bash"),
-    byName.get("file_view"),
-    byName.get("file_scroll"),
-    byName.get("file_find"),
-    byName.get("list_directory"),
-    byName.get("grep_search"),
-    byName.get("search_tools"),
-  ].filter((tool): tool is AgentToolDescriptor => Boolean(tool));
-  // Include scratchpad only when already promoted (user prompt requested it).
-  const scratch = byName.get("scratchpad");
-  return scratch ? [...base, scratch] : base;
+  const leading: string[] = [...CORE_TOOL_NAMES, "file_find"];
+  const ordered = [
+    ...leading,
+    // Promoted or otherwise attached tools, in the order the caller had them,
+    // minus anything already placed above.
+    ...tools.map((tool) => tool.name).filter((name) => !leading.includes(name)),
+  ];
+  return ordered
+    .map((name) => byName.get(name))
+    .filter((tool): tool is AgentToolDescriptor => Boolean(tool));
 }
 
 export function selectMainAgentMaxTokensForTurn(input: {
@@ -2724,6 +3335,28 @@ export function selectMainAgentMaxTokensForTurn(input: {
 
 function renderToolResultSnippet(result: ToolResult): string {
   return JSON.stringify(renderToolResultForModel(result)).slice(0, 9000);
+}
+
+/**
+ * Push `plan.updated` / `todo.updated` events when an advisory call actually
+ * changed state. Only a reference change counts: `applyAdvisoryToolCalls`
+ * returns the input references untouched when it changed nothing, so an
+ * unchanged checklist emits no event and the UI never re-renders for a no-op.
+ */
+async function emitPlanTodoDelta(
+  sink: RuntimeEventSink | undefined,
+  prevPlan: PlanState | undefined,
+  nextPlan: PlanState | undefined,
+  prevTodo: TodoState | undefined,
+  nextTodo: TodoState | undefined,
+): Promise<void> {
+  if (!sink) return;
+  if (nextPlan !== prevPlan && nextPlan?.steps) {
+    await emitRuntimeEvent(sink, { type: "plan.updated", steps: nextPlan.steps });
+  }
+  if (nextTodo !== prevTodo) {
+    await emitRuntimeEvent(sink, { type: "todo.updated", items: nextTodo?.items ?? [] });
+  }
 }
 
 function applyAdvisoryToolCalls(
@@ -2804,10 +3437,48 @@ function normalizeExecutableToolCalls(toolCalls: ToolCall[]): ToolCall[] {
   return toolCalls.filter((call) => !["advance_step", "update_plan", "update_todo"].includes(call.name));
 }
 
+/**
+ * Split a batch into the calls a thread's tool policy refuses and the ones it
+ * allows, turning each refusal into a failed `ToolResult`.
+ *
+ * Exactly one result per model-emitted call is the invariant the scheduler and
+ * the transcript both rely on, so a blocked call has to produce its own result
+ * here rather than being filtered out silently — otherwise the batch would
+ * come back short and the missing result would be attributed to a sibling.
+ */
+function partitionByToolPolicy(
+  toolCalls: ToolCall[],
+  disabledTools: ReadonlySet<string>,
+): [ToolResult[], ToolCall[]] {
+  if (disabledTools.size === 0) return [[], toolCalls];
+  const blocked: ToolResult[] = [];
+  const allowed: ToolCall[] = [];
+  for (const call of toolCalls) {
+    if (!disabledTools.has(call.name)) {
+      allowed.push(call);
+      continue;
+    }
+    blocked.push({
+      toolCallId: call.id,
+      name: call.name,
+      ok: false,
+      durationMs: 0,
+      args: call.args,
+      error: {
+        code: "tool_disabled",
+        message:
+          `The tool '${call.name}' is disabled for this thread by its settings. ` +
+          "It is not available in this conversation; use another tool or tell the user why this one is needed.",
+      },
+    });
+  }
+  return [blocked, allowed];
+}
+
 
 
 export function isReadOnlyToolResult(result: ToolResult): boolean {
-  return ["file_view", "file_scroll", "file_find", "view_file", "list_directory", "grep_search", "skim_file", "inspect_env", "web_search", "web_fetch", "get_tool_output"].includes(result.name);
+  return ["file_view", "file_find", "list_directory", "grep_search", "skim_file", "inspect_env", "web_search", "web_fetch"].includes(result.name);
 }
 function isMutationOrProducerResult(result: ToolResult): boolean {
   if (["write_file", "file_edit", "edit_file", "delete_file"].includes(result.name)) return true;
@@ -3456,7 +4127,7 @@ function hasSuccessfulArtifactValidationAfter(results: ToolResult[], artifact: s
   if (blockerIndex < 0) return false;
   return results.slice(blockerIndex + 1).some((result) => {
     if (!result.ok) return false;
-    if (result.name === "file_view" || result.name === "view_file") {
+    if (result.name === "file_view") {
       const args = result.args && typeof result.args === "object" ? (result.args as Record<string, unknown>) : {};
       return typeof args.path === "string" && artifactPathMatches(args.path, artifact);
     }
@@ -3567,7 +4238,7 @@ export function isRuntimeOrVerificationFailure(result: ToolResult): boolean {
 function extractMissingArtifactPaths(result: ToolResult): string[] {
   const paths: string[] = [];
   const args = result.args && typeof result.args === "object" ? (result.args as Record<string, unknown>) : {};
-  if (!result.ok && (result.name === "file_view" || result.name === "view_file") && typeof args.path === "string" && /no such file|ENOENT/i.test(result.error?.message ?? "")) {
+  if (!result.ok && result.name === "file_view" && typeof args.path === "string" && /no such file|ENOENT/i.test(result.error?.message ?? "")) {
     paths.push(args.path);
   }
   const message = result.error?.message ?? "";
@@ -3647,10 +4318,10 @@ function getToolResultSummary(result: ToolResult): string {
   return typeof args.summary === "string" ? args.summary : "";
 }
 function makeLowInformationToolCallSignature(call: ToolCall): string | undefined {
-  if (call.name === "view_file" || call.name === "file_view" || call.name === "file_scroll" || call.name === "list_directory") {
-    const args = call.args as { path?: unknown; direction?: unknown; lines?: unknown; start_line?: unknown; window?: unknown };
+  if (call.name === "file_view" || call.name === "list_directory") {
+    const args = call.args as { path?: unknown; start_line?: unknown; window?: unknown };
     if (typeof args.path !== "string") return undefined;
-    return `${call.name}:${JSON.stringify({ path: args.path, direction: args.direction, lines: args.lines, start_line: args.start_line, window: args.window })}`;
+    return `${call.name}:${JSON.stringify({ path: args.path, start_line: args.start_line, window: args.window })}`;
   }
   if (call.name === "file_find") {
     const args = call.args as { path?: unknown; pattern?: unknown; start_line?: unknown };
@@ -3674,10 +4345,10 @@ function makeLowInformationToolCallSignature(call: ToolCall): string | undefined
 }
 
 function makeLowInformationToolResultSignature(result: ToolResult): string | undefined {
-  if (result.name === "view_file" || result.name === "file_view" || result.name === "file_scroll" || result.name === "list_directory") {
-    const args = result.args && typeof result.args === "object" ? (result.args as { path?: unknown; direction?: unknown; lines?: unknown; start_line?: unknown; window?: unknown }) : {};
+  if (result.name === "file_view" || result.name === "list_directory") {
+    const args = result.args && typeof result.args === "object" ? (result.args as { path?: unknown; start_line?: unknown; window?: unknown }) : {};
     if (typeof args.path !== "string") return undefined;
-    return `${result.name}:${JSON.stringify({ path: args.path, direction: args.direction, lines: args.lines, start_line: args.start_line, window: args.window })}`;
+    return `${result.name}:${JSON.stringify({ path: args.path, start_line: args.start_line, window: args.window })}`;
   }
   if (result.name === "file_find") {
     const args = result.args && typeof result.args === "object" ? (result.args as { path?: unknown; pattern?: unknown; start_line?: unknown }) : {};
@@ -3873,7 +4544,7 @@ function normalizeCommandForSignature(command: string): string {
 
 function isLowInformationToolResult(result: ToolResult): boolean {
   if (result.name === "bash") return isLowInformationShellCommand(getToolResultCommand(result));
-  if (result.name !== "file_view" && result.name !== "file_scroll" && result.name !== "view_file" && result.name !== "list_directory" && result.name !== "grep_search") return false;
+  if (result.name !== "file_view"&& result.name !== "list_directory" && result.name !== "grep_search") return false;
   const args = result.args as { path?: unknown; pattern?: unknown };
   return result.name === "grep_search" ? typeof args.pattern === "string" : typeof args.path === "string";
 }
@@ -3915,12 +4586,62 @@ function hasSuccessfulAcceptanceEvidence(results: ToolResult[]): boolean {
     return isSuccessfulVerificationResult(result, cmd, output);
   });
 }
+/**
+ * Blocker codes that mean the run did not do what was asked.
+ *
+ * The engine raises blockers for two different reasons: some report a failure,
+ * and some are advisory notes about a condition it already worked around.
+ * Only the first kind may change how a turn reads — calling an advisory note a
+ * failure would be its own bug — and that decision is made in three places:
+ * whether to publish `turn.completed`, whether to publish `task_completed`, and
+ * what status the turn closes with.
+ *
+ * Those three were separate `||` chains over the same two codes until a third
+ * code was added to the engine and none of the three, so a run that failed with
+ * a plain model-call error still announced itself as finished everywhere.
+ * Membership lives here now, and the three sites ask.
+ */
+const STOPPED_SHORT_BLOCKER_CODES = new Set<string>([
+  // The model returned an empty response on every retry.
+  "empty_model_response",
+  // The provider was reachable-failed (429/5xx/timeout) and retries were spent.
+  "main_agent_transport_error",
+  // The model call threw something that is not a recognised transport error.
+  "model_call_failed",
+]);
+
+export function isStoppedShortBlocker(blocker: { code: string }): boolean {
+  return STOPPED_SHORT_BLOCKER_CODES.has(blocker.code);
+}
+
+/**
+ * The HTTP status a provider error is about, whether it is a property or only
+ * written into the message.
+ *
+ * Most of the provider clients construct a plain `Error` and bake the status
+ * into the text — `Anthropic stream failed: HTTP 502 - {...}` — so reading
+ * `.status` alone finds nothing and every one of those failures fell through to
+ * the generic handler. The match is deliberately on `HTTP <code>` rather than
+ * any three-digit number: a message reading "input is 4012 tokens" must not be
+ * mistaken for a 401.
+ */
+function httpStatusOf(error: unknown, message: string): number | undefined {
+  if (typeof error === "object" && error !== null) {
+    const candidate = (error as { status?: unknown }).status;
+    if (typeof candidate === "number") return candidate;
+  }
+  const match = message.match(/\bHTTP\s+(\d{3})\b/i);
+  if (!match) return undefined;
+  const code = Number.parseInt(match[1]!, 10);
+  return code >= 400 ? code : undefined;
+}
+
 export function classifyMainAgentTransportError(error: unknown):
   | { code: "main_agent_transport_error"; message: string; details: string[] }
   | undefined {
   const message = error instanceof Error ? error.message : String(error);
   const lower = message.toLowerCase();
-  const status = typeof (error as { status?: unknown })?.status === "number" ? (error as { status: number }).status : undefined;
+  const status = httpStatusOf(error, message);
   const isTransport =
     status === 408 ||
     status === 409 ||
@@ -3943,12 +4664,25 @@ export function classifyMainAgentTransportError(error: unknown):
     lower.includes("etimedout") ||
     lower.includes("fetch failed");
   if (!isTransport) return undefined;
-  const retryClass = status === 429 || lower.includes("rate_limit") || lower.includes("rate limit") || lower.includes("too many requests")
-    ? "rate_limit"
-    : "transport";
+  const rateLimited =
+    status === 429 || lower.includes("rate_limit") || lower.includes("rate limit") || lower.includes("too many requests");
+  const retryClass = rateLimited ? "rate_limit" : "transport";
   return {
     code: "main_agent_transport_error",
-    message: `Main-agent model call failed with a ${retryClass} transport error. This is infrastructure/provider backpressure, not a malformed agent response; retry the model call without consuming completion-gate attempts. Original error: ${message}`,
+    /*
+     * Written to be read by a person, because `message` is not only fed back
+     * into the loop — it is what the failed turn shows the user. It used to
+     * explain itself to the model ("this is infrastructure/provider
+     * backpressure, not a malformed agent response; retry the model call
+     * without consuming completion-gate attempts"), which is the right advice
+     * for the run and useless on screen: it never says which provider failed or
+     * why. The model-facing instruction lives in the nudge built by the
+     * transport-retry helper, where the model will actually read it.
+     */
+    message:
+      `The model provider failed with a ${status ?? "network"} ${rateLimited ? "rate limit" : "transport"} error, `
+      + `and the run was stopped after retrying.\n${message}\n`
+      + "Send the message again, or switch models in the composer.",
     details: [
       `status=${status ?? "unknown"}`,
       `class=${retryClass}`,
@@ -4017,6 +4751,25 @@ export function replaceConversationMessages<T>(target: T[], replacement: T[]): v
  * Non-transport errors (schema, parse) are not retried here; they
  * propagate to the live loop's outer catch.
  */
+/**
+ * The backoff ladder, with the waits removable.
+ *
+ * A test that exercises the exhausted-retry path has to let it exhaust, and the
+ * ladder sleeps thirteen seconds doing it — which is most of such a test's
+ * runtime, and the reason `main-agent-transport-retry.test.ts` alone takes
+ * thirteen seconds every run. `REAPER_TRANSPORT_RETRY_BACKOFF_MS=0` removes the
+ * waiting and nothing else: the number of attempts, the classification, the
+ * blocker and the transcript are all untouched, so a test that passes with it
+ * set has still exercised the real path.
+ *
+ * This is a test seam, not a product option. Nothing in the app sets it, and
+ * unset behaviour is unchanged.
+ */
+function transportBackoffsMs(): number[] {
+  if (process.env.REAPER_TRANSPORT_RETRY_BACKOFF_MS !== "0") return [0, 1_000, 3_000, 9_000];
+  return [0, 0, 0, 0];
+}
+
 export async function streamMainAgentResponseWithTransportRetry(
   modelGateway: ModelGateway,
   request: GenerateRequest,
@@ -4026,7 +4779,7 @@ export async function streamMainAgentResponseWithTransportRetry(
   runId?: string,
   streamCallbacks?: Parameters<typeof streamMainAgentResponse>[2],
 ): Promise<Awaited<ReturnType<typeof streamMainAgentResponse>>> {
-  const backoffsMs = [0, 1_000, 3_000, 9_000];
+  const backoffsMs = transportBackoffsMs();
   let lastError: unknown;
   for (const delayMs of backoffsMs) {
     if (delayMs > 0) {
@@ -4080,7 +4833,22 @@ export async function streamMainAgentResponseWithTransportRetry(
     message: lastError instanceof Error ? lastError.message : String(lastError),
     details: [],
   };
-  const friendlyMessage =
+  /*
+   * Two audiences, two messages, and until now they were one string.
+   *
+   * Everything here used to be folded into a single note and handed back as the
+   * assistant's content. That content is fed into the conversation for the model
+   * to read, so the note has to be addressed to the model — and it was, which
+   * is precisely why it read so badly once the failure started reaching the
+   * screen: a user got a paragraph of runtime instructions ("the runtime retried
+   * with backoff… you decide what to do next") instead of being told the
+   * provider was down. The same sentence then appeared twice, because the alert
+   * repeated it.
+   *
+   * So the model keeps its instructions and the user gets the sentence from
+   * `transportInfo.message`, which names the provider, the status and the cause.
+   */
+  const modelNote =
     `[Reaper note] Your last model call failed with a transport error: ${transportInfo.message}\n` +
     `The runtime retried ${backoffsMs.length - 1} times with backoff. The provider is still unavailable.\n` +
     `You decide what to do next: stop and write a final summary, keep working with the results you already have, or take some other action.`;
@@ -4094,19 +4862,19 @@ export async function streamMainAgentResponseWithTransportRetry(
       log_schema_version: 1,
       kind: "assistant_message",
       level: "info",
-      content: friendlyMessage,
+      content: modelNote,
     });
   } catch {
     // Trajectory is best-effort; never let it block the live loop.
   }
   return {
-    content: friendlyMessage,
+    content: modelNote,
     finishReason: "stop" as const,
     toolCalls: [],
     role: "assistant" as const,
     provider: "reaper-fallback",
     model: "transport-fallback",
-    raw: { transportFallback: true },
+    raw: { transportFallback: true, transportBlockerMessage: transportInfo.message },
   } as unknown as Awaited<ReturnType<typeof streamMainAgentResponse>>;
 }
 
@@ -4395,7 +5163,7 @@ export function hasInformativeToolResultOutput(result: ToolResult): boolean {
   const stdout = typeof output.stdout === "string" ? output.stdout.trim() : "";
   const stderr = typeof output.stderr === "string" ? output.stderr.trim() : "";
   if (stdout || stderr) return true;
-  return ["file_view", "file_scroll", "file_find", "view_file", "list_directory", "grep_search", "skim_file", "inspect_environment"].includes(result.name);
+  return ["file_view", "file_find", "list_directory", "grep_search", "skim_file", "inspect_environment"].includes(result.name);
 }
 
 function hasLaterPlanStep(plan: ExecutionPlanStep[] | undefined, currentStepIndex: number): boolean {
@@ -4468,7 +5236,7 @@ function isMutatingShellCommand(command: string): boolean {
  * the run for the same inputs; the model sees it as data (rendered
  * via `renderContextCockpit`), not as system authority.
  */
-function buildCockpitInput(input: {
+export function buildCockpitInput(input: {
   contentPrep: ContentPrepResult;
   runtimeFacts: {
     activeWorkspaceRoot: string;
@@ -4476,14 +5244,27 @@ function buildCockpitInput(input: {
   };
 }): CockpitInput {
   const { contentPrep } = input;
-  const trustedSkills = contentPrep.resourceTrust.trusted
-    ? contentPrep.skills
-    : [];
+  /*
+   * Everything here is already trusted, and this no longer re-checks it.
+   *
+   * `content-prep` merges the packaged skills with the workspace walk and
+   * applies the project-trust gate to the workspace half only — the gate is
+   * about repository-controlled text, and a skill compiled into the binary is
+   * not that. Re-applying `resourceTrust.trusted` here would filter the merged
+   * list as a whole and drop the packaged skills in exactly the workspace state
+   * they were written for: a fresh, untrusted one.
+   *
+   * What is left to exclude is explicit silencing, which is a different flag
+   * from trust and reaches here through the manifest's
+   * `disable-model-invocation`.
+   */
+  const trustedSkills = contentPrep.skills.filter((skill) => skill.disableModelInvocation !== true);
   return {
     preparedContext: contentPrep.preparedContext,
     contextFiles: contentPrep.contextFiles,
     skills: contentPrep.skills,
     trustedSkills,
+    invokedSkills: contentPrep.invokedSkills,
     resourceTrust: contentPrep.resourceTrust,
     environmentFingerprint: contentPrep.environmentFingerprint,
     mentions: contentPrep.mentions,
@@ -4641,8 +5422,8 @@ function renderRecentToolResultSummary(result: ToolResult): Record<string, unkno
   const output = (result.output && typeof result.output === "object" ? result.output : {}) as Record<string, unknown>;
   const args = (result.args && typeof result.args === "object" ? result.args : {}) as Record<string, unknown>;
 
-  // file_view / view_file: just the path + line range + truncated marker. The model can re-read.
-  if (result.name === "file_view" || result.name === "view_file") {
+  // file_view: just the path + line range + truncated marker. The model can re-read.
+  if (result.name === "file_view") {
     const path = typeof output.path === "string" ? output.path : typeof args.path === "string" ? args.path : "";
     return {
       ...base,
@@ -4867,7 +5648,7 @@ function selectContextEfficientRecentResults(results: ToolResult[], count: numbe
   const seenLargeReadPaths = new Set<string>();
   for (let i = recent.length - 1; i >= 0; i--) {
     const result = recent[i]!;
-    if ((result.name === "file_view" || result.name === "view_file") && isLargeToolOutput(result)) {
+    if (result.name === "file_view" && isLargeToolOutput(result)) {
       const key = toolResultPath(result) ?? result.toolCallId;
       if (seenLargeReadPaths.has(key)) continue;
       seenLargeReadPaths.add(key);
@@ -4883,7 +5664,7 @@ function hasRecentLargeToolOutput(results: ToolResult[]): boolean {
 
 function isLargeToolOutput(result: ToolResult): boolean {
   const rendered = result.output === undefined ? "" : typeof result.output === "string" ? result.output : JSON.stringify(result.output);
-  return rendered.length > 4500 || ((result.name === "file_view" || result.name === "view_file") && rendered.split(/\r?\n/).length > 120);
+  return rendered.length > 4500 || (result.name === "file_view" && rendered.split(/\r?\n/).length > 120);
 }
 function toolResultPath(result: ToolResult): string | undefined {
   const output = result.output && typeof result.output === "object" ? (result.output as Record<string, unknown>) : {};
@@ -4996,91 +5777,130 @@ function renderDiagnosticTargeting(results: ToolResult[]): string {
     "This rule is language-agnostic and applies to compiler, test, runtime, parser, config, and schema diagnostics.",
   ].join("\n");
 }
-export function renderToolCallContract(runId?: string): string {
-  // Determine which tools get full-schema rendering
-  const discovered = runId ? getDiscoveredTools(runId) : new Set<string>();
-  const fullSchemaTools = new Set([...CORE_TOOL_NAMES, ...discovered]);
 
-  // Build the deferred tool list (tools not yet discovered)
-  const deferredTools: Array<{ name: string; description: string }> = [];
-  for (const [name, spec] of Object.entries(toolRegistry)) {
-    if (!fullSchemaTools.has(name)) {
-      deferredTools.push({ name, description: spec.description });
-    }
+/**
+ * The inventory of tools the model is *not* currently holding a schema for.
+ *
+ * The wire only carries `CORE_TOOL_NAMES` plus whatever this run has already
+ * discovered, and a model can only call what it can see — so without this
+ * block the other fifty-odd tools are unreachable in practice: the model has no
+ * way to learn that `web_search` or `web_fetch` exist, and
+ * `search_tools` is a dead end it has no reason to try. Naming them here, with
+ * the one-line description already written for each, is what turns
+ * `search_tools` from an unguessable secret into a documented directory.
+ *
+ * It is rebuilt on every model call while the system prompt itself is not, and
+ * that split is the point: the prompt stays byte-identical for provider prefix
+ * caching, and the inventory — which legitimately changes mid-run as tools are
+ * discovered — travels where it costs one cheap append rather than a cache miss
+ * on the whole prefix.
+ *
+ * Names and one line each, deliberately. A deferred tool's *schema* is what
+ * `search_tools` exists to hand over, and printing full argument shapes here
+ * would make discovery pointless while spending the context it was meant to
+ * save.
+ */
+
+/**
+ * Words that read as broken when they are the last thing on the line. The
+ * truncation is mid-sentence by construction, so it needs to look deliberate
+ * rather than cut off.
+ */
+const TRAILING_WORDS = new Set([
+  "a", "an", "the", "and", "or", "of", "to", "in", "for", "from", "with", "by",
+  "as", "at", "on", "into", "that", "which", "is", "are", "be", "then", "so",
+]);
+
+/**
+ * One line of a tool description, cut on a word boundary.
+ *
+ * The first version was `slice(0, 110)`, which severed words in **17 of the 20
+ * deferred entries** — `paths be`, `mutation batch. Stores met`, `Supports new
+ * file creation (--- /d`. These lines are the entire reason the model knows a
+ * tool exists, and 17 of 20 read as a broken listing; a model deciding whether
+ * to spend a discovery call on `hook_manager` was shown 110 characters of
+ * `hook_manager`'s 527 and no indication the rest mattered.
+ *
+ * Marking the cut is the point. Without a marker the line reads as the whole
+ * description — the difference between "an event hook. Drafts are NOT regis"
+ * and "an event hook. Drafts are NOT registered on the live runner until
+ * approved. …" is the difference between a model that knows there is more to
+ * find and one that thinks it has read the whole thing.
+ */
+export function summarizeToolDescription(description: string, limit = 110): string {
+  const line = description.split("\n")[0]!.trim();
+  if (line.length <= limit) return line;
+
+  let cut = line.slice(0, limit - 1);
+  const boundary = cut.lastIndexOf(" ");
+  // Only honour the boundary when it is not near the start; a single very long
+  // token has no good break and a hard cut is the honest answer.
+  if (boundary > limit * 0.6) cut = cut.slice(0, boundary);
+  const words = cut.split(" ").filter(Boolean);
+  while (words.length > 1 && TRAILING_WORDS.has(words[words.length - 1]!.toLowerCase())) {
+    words.pop();
   }
-
-  const lines = [
-    "# Required Tool Call Format",
-    "Every tool call MUST be exactly: {\"id\":\"stable-id\",\"name\":\"tool_name\",\"args\":{...}}.",
-    "Do NOT use OpenAI wrappers such as {\"type\":\"function\",\"function\":{\"name\":\"...\",\"arguments\":{...}}}.",
-    "Do NOT invent tool names. Unsupported examples: install_dependencies, create_directory, mkdir, read, write, replace, shell.",
-    "Use bash for installs, mkdir, scaffolding, tests, builds, and other shell-only operations.",
-    "Do not create, edit, delete, chmod, copy, or redirect output into external verifier-owned absolute paths such as /tests or /test. Treat those harness files as read-only and satisfy their contract from workspace files.",
-    "Use argument names exactly as shown in the offered tool schema. Do not invent aliases or nested file objects.",
-    "Every bash call requires args.cmd and args.timeout in seconds. Add args.description when its purpose is not obvious.",
-    "Final verification must be command-backed and strict: tests, build/check commands, diff/cmp/grep -q/jq -e/test assertions, or python/node assertions. Plain ls/cat/curl, version probes, producer scripts, echo success, and print-only checks do not prove completion.",
-    "When checking an expected value, hash, count, schema, or exact content, encode the expectation in the command and exit nonzero on mismatch. Printing observed values for the model to compare is inspection, not verification.",
-    "",
-    "Available tools and exact argument shapes:",
-    "- view_file: {\"id\":\"read-1\",\"name\":\"view_file\",\"args\":{\"path\":\"server/app.js\",\"startLine\":20,\"endLine\":60}}",
-    "- list_directory: {\"id\":\"list-1\",\"name\":\"list_directory\",\"args\":{\"path\":\"server\"}}",
-    "- grep_search: {\"id\":\"grep-1\",\"name\":\"grep_search\",\"args\":{\"pattern\":\"TODO\",\"path\":\"src\"}}",
-    "- write_file: {\"id\":\"write-1\",\"name\":\"write_file\",\"args\":{\"path\":\"src/file.js\",\"content\":\"full file content\"}}",
-    "- file_edit: {\"id\":\"edit-1\",\"name\":\"file_edit\",\"args\":{\"path\":\"src/file.js\",\"edits\":[{\"oldString\":\"old exact text\",\"newString\":\"new exact text\"}]}}",
-    "- delete_file: {\"id\":\"delete-1\",\"name\":\"delete_file\",\"args\":{\"path\":\"tmp/file.txt\"}}",
-    "- bash: {\"id\":\"shell-1\",\"name\":\"bash\",\"args\":{\"cmd\":\"npm install\",\"description\":\"install declared project dependencies\",\"timeout\":300}}",
-    "- bash background server: {\"id\":\"server-1\",\"name\":\"bash\",\"args\":{\"cmd\":\"npm run dev\",\"description\":\"start app server for runtime check\",\"timeout\":300,\"run_in_background\":true}}",
-  ];
-
-
-  // Conditionally render non-core tool examples only when discovered
-  if (fullSchemaTools.has("read_background_output")) {
-    lines.push("- read_background_output: {\"id\":\"read-bg-1\",\"name\":\"read_background_output\",\"args\":{\"pid\":123,\"lines\":80}}");
-  }
-  if (fullSchemaTools.has("signal_process")) {
-    lines.push("- signal_process: {\"id\":\"stop-1\",\"name\":\"signal_process\",\"args\":{\"pid\":123,\"signal\":\"SIGTERM\"}}");
-  }
-  if (fullSchemaTools.has("web_search")) {
-    lines.push("- web_search: {\"id\":\"web-1\",\"name\":\"web_search\",\"args\":{\"query\":\"current package documentation\",\"engine\":\"auto\",\"maxResults\":10}}");
-  }
-  if (fullSchemaTools.has("web_fetch")) {
-    lines.push("- web_fetch: {\"id\":\"fetch-1\",\"name\":\"web_fetch\",\"args\":{\"url\":\"https://example.com/docs\",\"extractText\":true}}");
-  }
-
-  lines.push(
-    "- advance_step: {\"id\":\"advance-1\",\"name\":\"advance_step\",\"args\":{\"summary\":\"what was completed\",\"evidence\":[\"specific evidence\"]}}",
-    "- search_tools keyword: {\"id\":\"search-1\",\"name\":\"search_tools\",\"args\":{\"query\":\"background process\"}}",
-    "- search_tools direct select: {\"id\":\"search-2\",\"name\":\"search_tools\",\"args\":{\"query\":\"select:read_background_output,signal_process\"}}",
-    "To finish the run, return a concise final assistant_message with no tool_calls.",
-    "Executor rule: implementation, repair, review, and testing remain on the main model path.",
-  );
-
-  // Deferred tools section
-  if (deferredTools.length > 0) {
-    lines.push(
-      "",
-      "Additional tools available via search_tools (call search_tools with a keyword to unlock full schema):",
-      ...deferredTools.map((t) => `  - ${t.name}: ${t.description.slice(0, 80)}`),
-    );
-  }
-
-  lines.push(
-    "",
-    "Common conversions:",
-    "- To create a directory, use bash with {\"cmd\":\"mkdir -p path/to/dir\",\"timeout\":60}.",
-    "- To install dependencies, use bash with the real package-manager command for the active ecosystem, for example {\"cmd\":\"npm install express\",\"timeout\":300} only in a JavaScript/Node project.",
-    "- To run create-vite or another scaffold non-interactively, include documented non-interactive flags or create files directly with write_file.",
-    "",
-    "Build/config path discipline:",
-    "- If a build tool says a source/config file is missing, list/read the owning build config and the exact referenced path before rerunning the build.",
-    "- Fix source/config path mismatches by either creating the file at the path referenced by the build config or updating the build config to the actual file path. Do not keep building from a directory that lacks the required config.",
-    "- If a command fails because it was run from the wrong directory, rerun from the directory containing the relevant manifest/build config, or pass the build tool's explicit source/build directory flags.",
-    "- If recent tool results include workspacePathAliases, treat those as equivalent roots. When writing scripts/configs that run through bash, embed the runtime/container path or a relative path, not the host scratch path.",
-    "- After a failed build/test/runtime command, continue with concrete repair or check tool calls unless a later command has passed and the requested work is complete.",
-  );
-
-  return lines.join("\n");
+  return `${words.join(" ").replace(/[.,;:!?]$/, "")} …`;
 }
+
+/**
+ * How many deferred tools are spelled out before the list is summarised.
+ *
+ * This block is in the system prompt on every turn, and each line costs about
+ * 35 tokens, so an unbounded list is an unbounded standing cost — the exact
+ * problem Code Mode's fixed-size description was arranged to avoid. Extensions
+ * register tools into the same registry, so the count is not bounded by
+ * Reaper's own catalogue and cannot be reasoned about as if it were.
+ *
+ * 24 is chosen to be above the registry's current 19 deferred names, so nothing
+ * is hidden today and the change is invisible until it is load-bearing. Past
+ * that, a model reads a list of 200 tool names no more usefully than a list of
+ * 24 plus a count — the *searching* is what finds the right one either way.
+ */
+const MAX_RENDERED_DEFERRED_TOOLS = 24;
+
+export function renderAvailableTools(
+  runId?: string,
+  disabledTools: ReadonlySet<string> = EMPTY_TOOL_SET,
+): string {
+  const discovered = runId ? getDiscoveredTools(runId) : new Set<string>();
+  const deferred: string[] = [];
+  let offeredCount = 0;
+  for (const [name, spec] of Object.entries(toolRegistry)) {
+    if (disabledTools.has(name)) continue;
+    if (CORE_TOOL_NAMES.has(name) || discovered.has(name)) {
+      offeredCount += 1;
+      continue;
+    }
+    deferred.push(`  - ${name}: ${summarizeToolDescription(spec.description)}`);
+  }
+  if (deferred.length === 0) return "";
+
+  const shown = deferred.slice(0, MAX_RENDERED_DEFERRED_TOOLS);
+  const hidden = deferred.length - shown.length;
+  return [
+    "",
+    "# Available tools",
+    `You currently hold full schemas for ${offeredCount} tools. ${deferred.length} more are available:`,
+    ...shown,
+    /*
+     * The elision is stated, never silent. A truncated list that reads as
+     * complete is worse than the long one it replaced: the model would check it,
+     * not find what it wanted, and conclude the capability does not exist.
+     * Naming the remainder and pointing at the two ways to reach it keeps the
+     * list honest at any length.
+     */
+    ...(hidden > 0
+      ? [
+          `  … and ${hidden} more.`,
+          "Call `search_tools` with keywords describing what you need, or `select:<name>` to unlock one by name.",
+        ]
+      : []),
+    "",
+    "These are real, callable tools whose schemas are withheld only to keep each request small. Call `search_tools` with keywords describing the capability you need, or `select:<name>` to unlock a specific one by name; unlocked tools render with full schemas on your next call. Check this list before concluding a capability is missing, and prefer a listed tool over improvising with bash. When you want several at once, or want to chain them over a lot of data, `eval` can reach every one of them without any of this list growing.",
+  ].join("\n");
+}
+
 function parsePlannedToolCalls(value: unknown): { tool_calls: ToolCall[]; assistant_message?: string } {
   const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
   const toolCalls = parseToolCallArray(raw.tool_calls, { context: "executor response", limit: 32 });
@@ -5184,9 +6004,13 @@ function normalizeToolCallInput(input: unknown): unknown {
   if (name !== "bash") delete args.description;
   delete args.reason;
   delete args.explanation;
-  if (["read_background_output", "signal_process", "write_to_process"].includes(String(name)) && typeof args.pid === "number" && args.pid <= 0) {
-    args.pid = 1;
-  }
+  /*
+   * A model that emits a pid of 0 or a negative number is not targeting a
+   * process; it is emitting a placeholder. Clamping to 1 makes the call target
+   * *something* real, which is worse than letting it fail — the call is now
+   * aimed at an unrelated process instead of saying it had no target. Carry the
+   * value through and let `job` reject it.
+   */
   if (typeof args.path !== "string") {
     for (const key of ["file_path", "filepath", "filePath", "file", "targetPath"]) {
       if (typeof args[key] === "string") {

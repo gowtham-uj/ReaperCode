@@ -25,17 +25,32 @@ import { buildGeneralAgentTools } from "../../../src/runtime/agent-tools.js";
 import { getDiscoveredTools } from "../../../src/tools/discovery.js";
 
 test("CORE_TOOL_NAMES contains the expected always-present basics", () => {
+  // Exactly the set a competent turn needs without a discovery round trip:
+  // find (glob), read (file_view), edit in place (file_edit), rewrite
+  // (write_file), search across files (grep_search), list (list_directory),
+  // run (bash), see what changed (git_status / git_diff), write a program
+  // (eval), and the escape hatch itself (search_tools). `file_find` and
+  // `delete_file` are deliberately absent — see the rationale on
+  // CORE_TOOL_NAMES.
+  //
+  // `eval` is in this list and not on demand for the reason given there: a
+  // model cannot route to a tool it has not seen, and the moment Code Mode
+  // pays off — when a task turns out to want a loop rather than a dozen calls
+  // — is a moment that arrives before the first call, not after the fifth.
   const expected: ToolName[] = [
     "file_view",
-    "file_scroll",
-    "file_find",
     "file_edit",
     "write_file",
     "bash",
     "list_directory",
     "grep_search",
+    "glob",
+    "git_status",
+    "git_diff",
+    "eval",
     "search_tools",
   ];
+  assert.equal(CORE_TOOL_NAMES.size, expected.length);
   for (const name of expected) {
     assert.ok(CORE_TOOL_NAMES.has(name), `Expected '${name}' in CORE_TOOL_NAMES`);
   }

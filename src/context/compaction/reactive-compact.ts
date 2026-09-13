@@ -83,7 +83,7 @@ function scoreImportance(result: ToolResult, index: number, total: number): numb
   }
 
   // Reads are moderately important but less than writes
-  if (["file_view", "file_scroll", "view_file", "grep_search"].includes(result.name)) {
+  if (["file_view", "grep_search"].includes(result.name)) {
     score += 15;
   }
 

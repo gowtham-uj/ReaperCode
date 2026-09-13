@@ -20,10 +20,11 @@
  * - `danger_full_access` — no restrictions. Used for explicit, one-shot
  *                    dangerous operations the user has signed off on.
  *
- * `request_human_approval` is the universal escape hatch: a tool call that
- * would be denied can still be allowed if the agent invokes the
- * `request_human_approval` tool with a justification, and the operator
- * has approved it. The implementation lives in `src/tools/global/`.
+ * The escape hatch for a call that would be denied is the approval flow the
+ * runtime already owns: the executor raises an approval request over the
+ * app-server and the operator decides. There is no model-facing tool that
+ * grants its own permission — a tool the agent calls to authorise itself is a
+ * tool that can be talked out of saying no.
  */
 
 import type { ToolCall } from "../tools/types.js";
@@ -59,23 +60,50 @@ export interface SandboxDecision {
  */
 const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   "file_view",
-  "file_scroll",
   "file_find",
-  "view_file",
   "grep_search",
   "list_directory",
   "skim_file",
   "inspect_environment",
   "git_status",
   "git_diff",
-  "get_tool_output",
   "search_tools",
-  "request_human_approval",
   "update_plan",
   "update_todo",
   "advance_step",
   "web_search",
   "web_fetch",
+]);
+
+/**
+ * Tools that this policy allows unconditionally, because this policy cannot
+ * see what they do.
+ *
+ * `eval` runs JavaScript with the whole Node platform behind it. Every call it
+ * makes through `tools.*` is turned into a real `ToolCall` and dispatched
+ * through the same executor that produced this evaluation — so this policy runs
+ * again on the inner call, with the same mode, and a script reaching for
+ * `tools.write_file` under `read_only` gets exactly the error a direct
+ * `write_file` would have got.
+ *
+ * **Everything else a script can do is not visible here.** `fs.writeFileSync`,
+ * `child_process`, `fetch`, an npm package — none of it passes through this
+ * function, and none of it can be inspected from a tool name and a `code`
+ * string. So under `read_only`, `tools.write_file` is refused and
+ * `fs.writeFileSync` is not: a model that wants to write can write. That is not
+ * a subtlety, it is the design — Code Mode was built without a sandbox on
+ * purpose, and the note in `src/tools/code/node-runtime.ts` is where the
+ * reasoning lives.
+ *
+ * Which means this entry is a deliberate concession rather than a conclusion:
+ * the alternative is denying the container outright, and that would take Code
+ * Mode away from `read_only` entirely — including the read-only analysis (grep,
+ * read, filter, aggregate) that is the feature's most obvious use. Allowing it
+ * and letting `tools.*` carry the mode's intent is the smaller lie of the two.
+ * It should not be read as a security boundary, because it isn't one.
+ */
+const COMPOSITE_TOOLS: ReadonlySet<string> = new Set([
+  "eval",
 ]);
 
 const WORKSPACE_WRITE_TOOLS: ReadonlySet<string> = new Set([
@@ -143,7 +171,7 @@ export interface SandboxPolicyOptions {
   mode: SandboxMode;
   /**
    * If true, mutating shell commands and workspace-write tools are sent to
-   * `request_human_approval` instead of being auto-allowed. The default is
+   * the operator for approval instead of being auto-allowed. The default is
    * to auto-allow within the active mode's risk class.
    */
   requireHumanApproval?: boolean;
@@ -185,6 +213,11 @@ export class SandboxPolicy {
     // Read-only tools are always allowed in every mode.
     if (READ_ONLY_TOOLS.has(call.name)) {
       return { verdict: "allow", reason: "Read-only tool", ruleId: "read_only" };
+    }
+
+    // Composite tools carry no authority of their own; see COMPOSITE_TOOLS.
+    if (COMPOSITE_TOOLS.has(call.name)) {
+      return { verdict: "allow", reason: "Composite tool — its own calls are gated individually", ruleId: "composite" };
     }
 
     // Tool classes that mutate state.

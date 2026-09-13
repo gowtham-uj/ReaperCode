@@ -8,14 +8,14 @@ import {
   shouldUseBufferedProviderGenerate,
 } from "../provider-quirks.js";
 import { extractUsage, OpenAIChatResponseSchema, parseToolArguments } from "./response.js";
+import { resolveApiKey } from "../credentials.js";
 
 /** Cerebras native OpenAI-compatible API via https://api.cerebras.ai/v1. */
 export class CerebrasClient implements ProviderModelClient {
   private readonly baseUrl = "https://api.cerebras.ai/v1";
 
   async generate(request: GenerateRequest, profile: ResolvedModelProfile): Promise<GenerateResult> {
-    const apiKey = profile.apiKeyEnv ? process.env[profile.apiKeyEnv] : process.env.CEREBRAS_PROVIDER_KEY;
-    if (!apiKey) throw new Error(`${profile.apiKeyEnv ?? "CEREBRAS_PROVIDER_KEY"} is required for Cerebras provider`);
+    const apiKey = resolveApiKey(profile, "CEREBRAS_PROVIDER_KEY");
 
     const body = {
       model: profile.model,

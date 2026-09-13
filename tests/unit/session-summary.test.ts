@@ -43,10 +43,10 @@ test("summarizeSessionForCompaction extracts intent, files, failures, verificati
   const summary = summarizeSessionForCompaction({
     prompt: "wire content prep",
     toolResults: [
-      { name: "view_file", ok: true, args: { path: "src/index.ts" } },
+      { name: "file_view", ok: true, args: { path: "src/index.ts" } },
       { name: "bash", ok: true, args: { cmd: "npm test" }, output: { exitCode: 0 } },
       { name: "edit_file", ok: true, args: { path: "src/runtime/engine.ts" } },
-      { name: "view_file", ok: true, args: { path: "src/runtime/engine.ts" } },
+      { name: "file_view", ok: true, args: { path: "src/runtime/engine.ts" } },
       { name: "bash", ok: false, args: { cmd: "npm test" }, error: { message: "1 failing" } },
     ],
   });

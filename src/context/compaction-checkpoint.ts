@@ -23,9 +23,7 @@ const GENERATED_CONTEXT_PREFIXES = [
 
 const FILE_TOOLS = new Set([
   "file_view",
-  "file_scroll",
   "file_find",
-  "view_file",
   "file_edit",
   "write_file",
 ]);

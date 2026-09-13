@@ -1,4 +1,5 @@
 import { redactSecrets } from "../logging/redaction.js";
+import type { PlanStep, TodoItem } from "./plan-state.js";
 import type { ToolCall, ToolResult } from "../tools/types.js";
 
 export type RuntimeEventData =
@@ -14,14 +15,123 @@ export type RuntimeEventData =
   | { type: "tool.completed"; toolCall: ToolCall; result: ToolResult }
   | { type: "tool.failed"; toolCall: ToolCall; error: { name: string; message: string } }
   | { type: "command.output.delta"; toolCallId: string; stream: "stdout" | "stderr"; text: string }
+  /**
+   * Output from a *background* process — one that outlived the tool call that
+   * started it. Distinct from `command.output.delta`, which belongs to a
+   * foreground call and is keyed by `toolCallId`: a background process has no
+   * live tool call to attach to, so it is keyed by pid and carries its command
+   * so a client can label it without holding a separate registry.
+   */
+  | { type: "background.output.delta"; pid: number; stream: "stdout" | "stderr" | "system"; text: string; cmd: string }
+  /** A loopback dev server announced itself in background output. */
+  | { type: "background.server.detected"; pid: number; url: string; port: number }
   | { type: "verification.started"; command?: string }
-  | { type: "verification.completed"; ok: boolean; command?: string; summary?: string }
-  | { type: "compaction.updated"; phase: "started" | "completed" | "failed"; savedChars?: number }
-  | { type: "token.usage"; inputTokens: number; outputTokens: number }
+  /**
+   * The verification verdict. `ok` means every command exited 0; `verified`
+   * additionally means the evidence was *grounded* in a real test/build/
+   * typecheck/lint/artifact signal (not `echo done`). `groundedSignal` names
+   * which kind of signal grounded it, so the panel can answer the trust
+   * question — did it actually pass, or fake it?
+   */
+  | {
+      type: "verification.completed";
+      ok: boolean;
+      command?: string;
+      summary?: string;
+      verified?: boolean;
+      groundedSignal?: { kind: string; command: string; grounded: boolean };
+      failureClasses?: string[];
+      feedback?: string[];
+      attemptCount?: number;
+      selfDebugExplanation?: string;
+      diffReviewExplanation?: string;
+    }
+  /**
+   * The typed plan and todo checklists. Emitted when an `update_plan` /
+   * `update_todo` advisory call changes them, so the UI can render the same
+   * checklist the cockpit shows the model — without re-implementing the merge.
+   */
+  | { type: "plan.updated"; steps: PlanStep[] }
+  | { type: "todo.updated"; items: TodoItem[] }
+  | {
+      /**
+       * One context-management technique ran, is running, or failed.
+       *
+       * Reaper shrinks a conversation several ways and they are not
+       * interchangeable: shake drops stale tool output, tool-history compaction
+       * replaces a run of results with summaries, full summarization calls a
+       * model to rewrite the whole middle, and so on. A user watching a
+       * transcript needs to know which one happened and how much it reclaimed,
+       * because that is the difference between "the agent forgot" and "the
+       * agent deliberately dropped 40 stale file reads".
+       *
+       * Every field but `phase` and `technique` is optional: the cheapest pass
+       * knows only a character count, and a model-call summary knows tokens and
+       * message counts but not the exact character delta.
+       */
+      type: "context.updated";
+      phase: "started" | "completed" | "failed";
+      technique: ContextTechnique;
+      /** Characters removed from the conversation. */
+      savedChars?: number;
+      /** Tokens removed, when the technique measured them. */
+      savedTokens?: number;
+      /** Message count before and after, when the technique removes messages. */
+      messagesBefore?: number;
+      messagesAfter?: number;
+      /** Provider-reported input tokens at the moment it fired. */
+      usedTokens?: number;
+      /** Reaper's soft budget then in force, for the meter's denominator. */
+      softCap?: number;
+      /**
+       * A short note for the transcript, e.g. "3 superseded tool results
+       * dropped". Distinct from `reason`, which means the technique failed.
+       */
+      detail?: string;
+      /** Why it failed. Present only on `phase: "failed"`. */
+      reason?: string;
+    }
+  | {
+      type: "token.usage";
+      inputTokens: number;
+      outputTokens: number;
+      /**
+       * The active model's context window (tokens), when the resolved profile
+       * advertises one. Distinct from Reaper's own soft cap: a model may offer
+       * 1M while Reaper only budgets up to 270k.
+       */
+      modelContextWindow?: number;
+      /** Reaper's soft context budget (tokens). Defaults to the 270k hard cap. */
+      contextSoftCap?: number;
+    }
   | { type: "approval.requested"; approvalId: string; toolCallId: string; toolName: string; reason: string }
   | { type: "approval.resolved"; approvalId: string; toolCallId: string; decision: "approved" | "denied" | "cancelled" | "timeout" }
   | { type: "warning"; code: string; message: string }
   | { type: "error"; code: string; message: string };
+
+/**
+ * The context-management techniques a transcript can report.
+ *
+ * Named for the mechanism, not the effect, because two of them can free the
+ * same number of characters and mean very different things. `shake` drops
+ * output the conversation has moved past; `full_summary` is a model call that
+ * rewrites the middle and is the only one that can lose detail a user cared
+ * about. Collapsing them into one "compacted" label would hide that.
+ */
+export type ContextTechnique =
+  | "supersede"
+  | "tool_output_prune"
+  | "bash_head_tail"
+  | "shake"
+  | "microcompact"
+  | "tool_history"
+  | "snapcompact"
+  | "full_summary"
+  | "handoff_summary"
+  | "idle_compaction"
+  | "incomplete_recovery"
+  | "ptl_recovery"
+  | "model_promotion";
 
 export type RuntimeEvent = RuntimeEventData & { timestamp: string };
 export type RuntimeEventSink = (event: RuntimeEvent) => void | Promise<void>;

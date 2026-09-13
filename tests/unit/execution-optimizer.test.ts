@@ -9,9 +9,9 @@ function call(name: string, args: Record<string, unknown> = {}, id = ""): any {
 
 test("optimizer deduplicates identical reads", () => {
   const calls = [
-    call("view_file", { path: "src/a.ts" }, "1"),
-    call("view_file", { path: "src/a.ts" }, "2"),
-    call("view_file", { path: "src/b.ts" }, "3"),
+    call("file_view", { path: "src/a.ts" }, "1"),
+    call("file_view", { path: "src/a.ts" }, "2"),
+    call("file_view", { path: "src/b.ts" }, "3"),
   ];
   const result = optimizeToolCallBatch(calls);
   assert.equal(result.uniquePlan.length, 2);
@@ -42,8 +42,23 @@ test("optimizer does not deduplicate writes or shell commands", () => {
   assert.equal(result.uniquePlan.length, 4, "writes and shell should not collapse");
 });
 
+test("optimizer treats different windows of one file as different reads", () => {
+  // `file_view` is a start plus a length, so two calls to the same path at
+  // different offsets are not the same read. The dedup key has to carry the
+  // window, or the second call would be answered from the first's result and
+  // the model would silently get the wrong lines.
+  const calls = [
+    call("file_view", { path: "src/a.ts", start_line: 1, window: 50 }, "1"),
+    call("file_view", { path: "src/a.ts", start_line: 1, window: 50 }, "2"),
+    call("file_view", { path: "src/a.ts", start_line: 60, window: 50 }, "3"),
+  ];
+  const result = optimizeToolCallBatch(calls);
+  assert.equal(result.uniquePlan.length, 2, "same window dedupes, different window does not");
+  assert.deepEqual(result.uniqueIndex, [0, 0, 1]);
+});
+
 test("optimizer caps concurrency for large read batches", () => {
-  const calls = Array.from({ length: 30 }, (_, i) => call("view_file", { path: `f${i}.ts` }, `${i}`));
+  const calls = Array.from({ length: 30 }, (_, i) => call("file_view", { path: `f${i}.ts` }, `${i}`));
   const result = optimizeToolCallBatch(calls);
   assert.ok(result.concurrency <= 8, "concurrency should be capped at 8");
   assert.ok(result.concurrency >= 1, "concurrency should be at least 1");
@@ -51,15 +66,15 @@ test("optimizer caps concurrency for large read batches", () => {
 });
 
 test("optimizer keeps concurrency at least 1 for single-entry pools", () => {
-  const result = optimizeToolCallBatch([call("view_file", { path: "a.ts" })]);
+  const result = optimizeToolCallBatch([call("file_view", { path: "a.ts" })]);
   assert.equal(result.concurrency, 1);
 });
 
 test("fanoutDeduplicatedResults returns one result per original call", () => {
   const calls = [
-    call("view_file", { path: "a.ts" }, "1"),
-    call("view_file", { path: "a.ts" }, "2"),
-    call("view_file", { path: "b.ts" }, "3"),
+    call("file_view", { path: "a.ts" }, "1"),
+    call("file_view", { path: "a.ts" }, "2"),
+    call("file_view", { path: "b.ts" }, "3"),
   ];
   const opt = optimizeToolCallBatch(calls);
   // Simulate execution: two results, one per unique plan entry.

@@ -13,5 +13,5 @@
     "types": ["node"],
     "rootDir": "."
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts"]
+  "include": ["src/**/*.ts", "tests/**/*.ts", "web/shared/src/**/*.ts"]
 }

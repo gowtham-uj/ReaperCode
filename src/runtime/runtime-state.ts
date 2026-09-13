@@ -24,7 +24,9 @@ export function inferTransport(value: unknown): TransportKind {
 
 export async function persistRunResult(runContext: ReaperRunContext, result: RuntimeEngineResult, status: "completed" | "failed" | "cancelled"): Promise<void> {
   if (!isReaperDevMode()) return;
-  await mkdir(runContext.runDir, { recursive: true });
+  // Private like the rest of the run directory: this file sits beside the
+  // session transcript, and `recursive` can create the workspace root here.
+  await mkdir(runContext.runDir, { recursive: true, mode: 0o700 });
   const completedAt = new Date().toISOString();
   await writeFile(
     path.join(runContext.runDir, "result.json"),

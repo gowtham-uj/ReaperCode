@@ -5,6 +5,7 @@ import {
   getEffectiveMaxOutputTokens,
   shouldRequestStreamUsage,
 } from "../provider-quirks.js";
+import { resolveApiKey } from "../credentials.js";
 
 export interface DeepSeekClientOptions {
   fetchImpl?: typeof fetch;
@@ -45,8 +46,7 @@ export class DeepSeekClient implements ProviderModelClient {
   }
 
   async generate(request: GenerateRequest, profile: ResolvedModelProfile): Promise<GenerateResult> {
-    const apiKey = profile.apiKeyEnv ? process.env[profile.apiKeyEnv] : process.env.DEEPSEEK_API_KEY;
-    if (!apiKey) throw new Error("DEEPSEEK_API_KEY is required for DeepSeek provider");
+    const apiKey = resolveApiKey(profile, "DEEPSEEK_API_KEY");
 
     const maxTokens = getEffectiveMaxOutputTokens(profile, request.maxTokens);
 
@@ -195,8 +195,7 @@ export class DeepSeekClient implements ProviderModelClient {
   }
 
   async *stream(request: GenerateRequest, profile: ResolvedModelProfile): AsyncIterable<StreamEvent> {
-    const apiKey = profile.apiKeyEnv ? process.env[profile.apiKeyEnv] : process.env.DEEPSEEK_API_KEY;
-    if (!apiKey) throw new Error("DEEPSEEK_API_KEY is required");
+    const apiKey = resolveApiKey(profile, "DEEPSEEK_API_KEY");
 
     const body = {
       model: profile.model,

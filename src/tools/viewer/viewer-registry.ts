@@ -14,7 +14,7 @@
 export interface FileViewState {
   /** Absolute, normalized path. */
   path: string;
-  /** Anchor line for `file_scroll up`/`down`. */
+  /** Anchor line the viewport was recentred on (set by `file_find`). */
   anchorLine: number;
   /** Last shown start line. */
   startLine: number;
@@ -26,6 +26,13 @@ export interface FileViewState {
   sha256: string;
   /** Last seen file `mtimeMs` (0 if unavailable). */
   mtimeMs: number;
+  /**
+   * How many times in a row this exact window has been served for this exact
+   * file content. A model that keeps re-issuing an argument-less `file_view`
+   * gets the identical page forever; this is what lets the viewer notice and
+   * break out instead of serving page 1 indefinitely.
+   */
+  repeatCount?: number;
 }
 
 export interface ViewWindow {
@@ -95,9 +102,25 @@ function candidatePatterns(pattern: string): PatternCandidate[] {
   ];
 }
 
-function findPatternLine(lines: string[], pattern: string, startLine: number): PatternMatch | undefined {
+function findPatternLine(
+  lines: string[],
+  pattern: string,
+  startLine: number,
+  /**
+   * Whether to continue past the end of the file and resume at the top.
+   * Correct for "find the next occurrence" — repeated calls cycle through
+   * matches. Wrong when the caller named a `start_line`, where wrapping means
+   * answering with a match *above* the line they asked to search from.
+   */
+  wrap = true,
+): PatternMatch | undefined {
   const startIdx = Math.max(0, Math.min(lines.length - 1, startLine - 1));
-  const order = [...Array.from({ length: lines.length - startIdx }, (_, i) => startIdx + i), ...Array.from({ length: startIdx }, (_, i) => i)];
+  const order = wrap
+    ? [
+        ...Array.from({ length: lines.length - startIdx }, (_, i) => startIdx + i),
+        ...Array.from({ length: startIdx }, (_, i) => i),
+      ]
+    : Array.from({ length: lines.length - startIdx }, (_, i) => startIdx + i);
   for (const candidate of candidatePatterns(pattern)) {
     const needle = candidate.caseInsensitive ? candidate.pattern.toLocaleLowerCase() : candidate.pattern;
     for (const idx of order) {
@@ -196,57 +219,27 @@ export class FileViewerRegistry {
     };
   }
 
-  /** Apply a scroll delta to an existing view. */
-  scroll(
-    path: string,
-    direction: "up" | "down" | "top" | "bottom",
-    lines = DEFAULT_WINDOW,
-    totalLines = this.states.get(path)?.totalLines ?? 0,
-  ): ViewWindow | undefined {
-    const cur = this.states.get(path);
-    if (!cur) return undefined;
-    const anchor = cur.anchorLine;
-    let start: number;
-    switch (direction) {
-      case "top":
-        start = 1;
-        break;
-      case "bottom": {
-        const endExclusive = Math.min(totalLines + 1, anchor + lines);
-        start = Math.max(1, endExclusive - lines);
-        break;
-      }
-      case "up":
-        start = Math.max(1, cur.startLine - lines);
-        break;
-      case "down":
-        start = Math.min(Math.max(1, totalLines - lines + 1), cur.endLine);
-        break;
-      default:
-        return undefined;
-    }
-    const end = Math.min(totalLines + 1, start + lines);
-    const next: FileViewState = {
-      ...cur,
-      startLine: start,
-      endLine: end,
-      anchorLine: Math.max(start, Math.min(end - 1, anchor)),
-    };
-    this.states.set(path, next);
-    return this.windowOf(next);
-  }
-
-  /** Find the first match of `pattern` within `lines`, centered the viewport. */
+  /**
+   * Find the first match of `pattern` within `lines`, centered the viewport.
+   *
+   * `fromLine` is the caller's explicit starting point. When it is supplied the
+   * search covers that line and everything below it, and does *not* wrap — a
+   * caller that says "from line 200" is not asking to be sent to line 51.
+   * Without it the search starts at the current viewport and wraps, which is
+   * what makes repeated `find` calls step through successive matches.
+   */
   find(
     path: string,
     pattern: string,
     lines: string[],
+    fromLine?: number,
   ): { view: FileViewState; matchedLine: number; matchedPattern: string; caseInsensitive: boolean } | undefined {
     if (!lines.length) return undefined;
     const cur = this.states.get(path);
     const totalLines = lines.length;
 
-    const match = findPatternLine(lines, pattern, cur?.startLine ?? 1);
+    const explicit = typeof fromLine === "number";
+    const match = findPatternLine(lines, pattern, explicit ? fromLine : cur?.startLine ?? 1, !explicit);
     if (!match) return undefined;
 
     const halfWindow = Math.floor(DEFAULT_WINDOW / 2);

@@ -72,6 +72,10 @@ function main() {
     path.join(ROOT, "src", "tools", "viewer", "linters", "manifest.json"),
     "utf8",
   );
+  const modelsDev = readFileSync(
+    path.join(ROOT, "src", "model", "provider", "models-dev.json"),
+    "utf8",
+  );
 
   console.log("[build-bundle] bundling scripts/run-reaper.ts -> bin/reaper.mjs");
   esbuild.buildSync({
@@ -88,6 +92,7 @@ function main() {
       // quoted JS string; of an object it is an object literal.)
       __REAPER_BUNDLED_SKILLS__: JSON.stringify(skills),
       __REAPER_BUNDLED_LINTERS__: JSON.stringify(linters),
+      __REAPER_BUNDLED_MODELS_DEV__: JSON.stringify(modelsDev),
     },
     banner: {
       js: [

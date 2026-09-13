@@ -31,11 +31,14 @@ test("extracts TypeScript compiler diagnostic hints", () => {
   assert.equal(hints[0]?.column, 12);
 });
 
-test("formats localization hints as bounded view_file guidance", () => {
+test("formats localization hints as bounded read guidance", () => {
   const feedback = formatLocalizationHintsForFeedback(extractLocalizationHints("tests/test_app.py:12: AssertionError\n"));
 
-  assert.match(feedback[0] ?? "", /Use view_file/);
-  assert.match(feedback[0] ?? "", /startLine=1/);
+  assert.match(feedback[0] ?? "", /Use file_view/);
+  // The hint names the argument the schema actually has. `startLine` was the
+  // old camelCase spelling of `file_view`'s own parameter as well as of its
+  // alias, so the guidance and the schema disagreed about what to pass.
+  assert.match(feedback[0] ?? "", /start_line=1/);
 });
 
 test("verification classifier prepends localization feedback facts", () => {

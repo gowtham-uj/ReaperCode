@@ -1,230 +1,154 @@
-/**
- * model/provider/catalog.ts — the data file that drives provider
- * resolution. Adding a new vendor = one entry here, no code
- * changes (unless the vendor uses `sdkFamily: "custom"`, in which
- * case you also drop a client module under `model/providers/`).
- *
- * Each entry is a `ProviderDescriptor` — see `types.ts` for the
- * full shape. Notes on the field choices:
- *
- *   - `baseUrl` is the API root; the family appends the path
- *     (`/v1/messages` for anthropic, `/chat/completions` for
- *     openai). Trailing slashes are tolerated.
- *   - `envVar` is the standard env var name. Resolution order at
- *     startup: env var → onboarding file → fallback to the
- *     `ANTHROPIC_AUTH_TOKEN` legacy alias for backward compat.
- *   - `models` is the catalogue surfaced in the TUI picker.
- *     `defaultModel` must be in this list.
- *   - `capabilities` are shared across all models in the catalogue
- *     today; per-model overrides land later.
- */
+import type {
+  ProviderDescriptor,
+  ProviderIntegration,
+  ProviderModelDescriptor,
+  SdkFamilyId,
+} from "./types.js";
+import {
+  getModelsDevCatalog,
+  type ModelsDevCatalogService,
+} from "./models-dev-catalog.js";
+import type {
+  ModelsDevModel,
+  ModelsDevProvider,
+} from "./models-dev-types.js";
+import { specializeProviderIntegration } from "./auth-integrations.js";
 
-import type { ProviderDescriptor } from "./types.js";
+const catalog = getModelsDevCatalog();
 
-export const PROVIDER_CATALOG: ProviderDescriptor[] = [
-  // ── Anthropic native (sdkFamily: anthropic-messages) ────────────
-  {
-    id: "anthropic",
-    label: "Anthropic",
-    sdkFamily: "anthropic-messages",
-    baseUrl: "https://api.anthropic.com",
-    envVar: "ANTHROPIC_API_KEY",
-    keyHint: "Get a key at https://console.anthropic.com — uses the native /v1/messages API",
-    defaultModel: "claude-opus-4-8",
-    models: [
-      "claude-opus-4-8",
-      "claude-sonnet-4-6",
-      "claude-haiku-4-5-20251001",
-    ],
-    capabilities: {
-      streaming: true,
-      toolCalling: true,
-      jsonMode: true,
-      structuredOutput: true,
-      embeddings: false,
-      maxContextTokens: 200_000,
-      maxOutputTokens: 32_000,
-    },
-    supportsReasoning: true,
-    authScheme: "x-api-key",
-  },
+/** Current provider integrations derived from the pinned/refreshed Models.dev catalog. */
+export function listProviderIntegrations(
+  source: ModelsDevCatalogService = catalog,
+  includeModelDetails = true,
+): ProviderIntegration[] {
+  return source.providers().map((provider) => toIntegration(provider, source, includeModelDetails));
+}
 
-  // ── MiniMax OAuth proxy (sdkFamily: openai-chat) ───────────────
-  {
-    id: "minimax-oauth",
-    label: "MiniMax (OAuth)",
-    sdkFamily: "openai-chat",
-    baseUrl: "https://api.minimax.io/v1",
-    envVar: "MINIMAX_OAUTH_TOKEN",
-    keyHint: "OAuth token for MiniMax's OpenAI-compatible endpoint",
-    defaultModel: "MiniMax-M3",
-    models: ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"],
-    capabilities: {
-      streaming: true,
-      toolCalling: true,
-      jsonMode: true,
-      structuredOutput: false,
-      embeddings: false,
-      maxContextTokens: 1_000_000,
-      maxOutputTokens: 4096,
-    },
-    authScheme: "bearer",
-  },
+/** Backward-compatible startup snapshot for CLI callers. */
+export const PROVIDER_INTEGRATIONS: ProviderIntegration[] = listProviderIntegrations(catalog, false);
+export const PROVIDER_CATALOG: ProviderDescriptor[] =
+  PROVIDER_INTEGRATIONS.map((integration) => integration.descriptor);
 
-  // ── OpenAI native (sdkFamily: openai-chat) ──────────────────────
-  {
-    id: "openai",
-    label: "OpenAI",
-    sdkFamily: "openai-chat",
-    baseUrl: "https://api.openai.com/v1",
-    envVar: "OPENAI_API_KEY",
-    keyHint: "Get a key at https://platform.openai.com/api-keys",
-    defaultModel: "gpt-4.1",
-    models: ["gpt-4.1", "gpt-4.1-mini", "gpt-4o", "gpt-4o-mini", "o3", "o4-mini"],
-    capabilities: {
-      streaming: true,
-      toolCalling: true,
-      jsonMode: true,
-      structuredOutput: true,
-      embeddings: true,
-      maxContextTokens: 200_000,
-      maxOutputTokens: 16_384,
-    },
-    supportsReasoning: true,
-    authScheme: "bearer",
-  },
+export function providerIntegrationFor(
+  id: string,
+  source: ModelsDevCatalogService = catalog,
+  includeModelDetails = true,
+): ProviderIntegration | undefined {
+  const provider = source.provider(id);
+  return provider ? toIntegration(provider, source, includeModelDetails) : undefined;
+}
 
-  // ── OpenAI Codex (ChatGPT OAuth backend) ───────────────────────
-  {
-    id: "openai-codex",
-    label: "OpenAI Codex (ChatGPT OAuth)",
-    sdkFamily: "openai-chat",
-    baseUrl: "https://chatgpt.com/backend-api/codex",
-    envVar: "OPENAI_CODEX_ACCESS_TOKEN",
-    keyHint: "OAuth access token copied from Hermes auth openai-codex credential pool; do not persist it in repo files",
-    defaultModel: "gpt-5.4",
-    models: ["gpt-5.4", "gpt-5", "gpt-5-codex", "gpt-5.5", "gpt-5.5-codex"],
-    capabilities: {
-      streaming: true,
-      toolCalling: true,
-      jsonMode: true,
-      structuredOutput: true,
-      embeddings: false,
-      maxContextTokens: 200_000,
-      maxOutputTokens: 32_000,
-    },
-    supportsReasoning: true,
-    authScheme: "bearer",
-  },
-
-  // ── NuralWatt / NeuralWatt (sdkFamily: openai-chat) ────────────
-  {
-    id: "nuralwatt",
-    label: "NuralWatt (NeuralWatt API)",
-    sdkFamily: "openai-chat",
-    baseUrl: "https://api.neuralwatt.com/v1",
-    envVar: "NURALWATT_API_KEY",
-    keyHint: "Uses NURALWATT_API_KEY from the env file against NeuralWatt's OpenAI-compatible /v1 endpoint",
-    defaultModel: "kimi-k2.7-code",
-    models: [
-      "kimi-k2.7-code",
-      "kimi-k2.7-code-flex",
-      "qwen3.6-35b",
-      "qwen3.6-35b-fast",
-      "glm-5.2",
-      "glm-5.2-fast",
-      "glm-5.2-flex",
-      "glm-5.2-short",
-      "glm-5.2-short-flex",
-      "glm-5.2-short-fast",
-      "glm-5.2-short-fast-flex",
-      "kimi-k2.6",
-      "kimi-k2.6-fast",
-      "kimi-k2.6-flex",
-      "qwen3.5-397b",
-      "qwen3.5-397b-fast",
-    ],
-    capabilities: {
-      streaming: true,
-      toolCalling: true,
-      jsonMode: true,
-      structuredOutput: true,
-      embeddings: false,
-      maxContextTokens: 262_128,
-      maxOutputTokens: 32_000,
-    },
-    supportsReasoning: true,
-    authScheme: "bearer",
-  },
-
-  // ── NuralWatt2 — second NeuralWatt key (sdkFamily: openai-chat) ─
-  {
-    id: "nuralwatt2",
-    label: "NuralWatt2 (NeuralWatt API — key 2)",
-    sdkFamily: "openai-chat",
-    baseUrl: "https://api.neuralwatt.com/v1",
-    envVar: "NURALWATT_API_KEY2",
-    keyHint: "Uses NURALWATT_API_KEY2 from the env file against NeuralWatt's OpenAI-compatible /v1 endpoint",
-    defaultModel: "kimi-k2.7-code",
-    models: [
-      "kimi-k2.7-code",
-      "kimi-k2.7-code-flex",
-      "qwen3.6-35b",
-      "qwen3.6-35b-fast",
-      "glm-5.2",
-      "glm-5.2-fast",
-      "glm-5.2-flex",
-      "glm-5.2-short",
-      "glm-5.2-short-flex",
-      "glm-5.2-short-fast",
-      "glm-5.2-short-fast-flex",
-      "kimi-k2.6",
-      "kimi-k2.6-fast",
-      "kimi-k2.6-flex",
-      "qwen3.5-397b",
-      "qwen3.5-397b-fast",
-    ],
-    capabilities: {
-      streaming: true,
-      toolCalling: true,
-      jsonMode: true,
-      structuredOutput: true,
-      embeddings: false,
-      maxContextTokens: 262_128,
-      maxOutputTokens: 32_000,
-    },
-    supportsReasoning: true,
-    authScheme: "bearer",
-  },
-
-  // ── MiniMax (sdkFamily: openai-chat) ────────────────────────────
-  {
-    id: "minimax",
-    label: "MiniMax (api.minimax.io)",
-    sdkFamily: "openai-chat",
-    baseUrl: "https://api.minimax.io/v1",
-    envVar: "MINIMAX_API_KEY",
-    keyHint: "Get a key at https://api.minimax.io — works with OpenAI-compatible clients",
-    defaultModel: "MiniMax-M3",
-    models: ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5", "MiniMax-M2.1"],
-    capabilities: {
-      streaming: true,
-      toolCalling: true,
-      jsonMode: true,
-      structuredOutput: true,
-      embeddings: false,
-      maxContextTokens: 1_000_000,
-      maxOutputTokens: 16_384,
-    },
-    supportsReasoning: true,
-    authScheme: "bearer",
-  },
-];
-
-/**
- * Lookup by id. Returns `undefined` if the id is not in the catalog.
- * Pure data — no side effects.
- */
 export function findProviderDescriptor(id: string): ProviderDescriptor | undefined {
-  return PROVIDER_CATALOG.find((p) => p.id === id);
+  return providerIntegrationFor(id)?.descriptor;
+}
+
+export function modelsDevCatalog(): ModelsDevCatalogService {
+  return catalog;
+}
+
+function toIntegration(
+  provider: ModelsDevProvider,
+  source: ModelsDevCatalogService,
+  includeModelDetails: boolean,
+): ProviderIntegration {
+  return specializeProviderIntegration({
+    descriptor: toDescriptor(provider, source, includeModelDetails),
+    authMethods: [{ id: "api-key", type: "api", label: "API key" }],
+  });
+}
+
+function toDescriptor(
+  provider: ModelsDevProvider,
+  source: ModelsDevCatalogService,
+  includeModelDetails: boolean,
+): ProviderDescriptor {
+  const models = Object.values(provider.models);
+  const defaultModel = source.defaultModel(provider.id)?.id ?? models[0]?.id ?? "";
+  const modelDetails = includeModelDetails
+    ? Object.fromEntries(models.map((model) => [model.id, toModelDescriptor(provider, model)]))
+    : undefined;
+  const maxContextTokens = maximum(models.map((model) => model.limit.context));
+  const maxOutputTokens = maximum(models.map((model) => model.limit.output));
+  const inputModalities = new Set(models.flatMap((model) => model.modalities?.input ?? ["text"]));
+  return {
+    id: provider.id,
+    label: provider.name,
+    sdkFamily: sdkFamily(provider.npm),
+    baseUrl: provider.api ?? "",
+    envVar: provider.env[0] ?? "",
+    envVars: provider.env,
+    ...(provider.npm ? { npm: provider.npm } : {}),
+    ...(provider.api ? { api: provider.api } : {}),
+    ...(provider.doc ? { doc: provider.doc } : {}),
+    keyHint: provider.doc ? `Provider documentation: ${provider.doc}` : `API key for ${provider.name}`,
+    defaultModel,
+    models: models.map((model) => model.id),
+    ...(modelDetails ? { modelDetails } : {}),
+    capabilities: {
+      streaming: true,
+      toolCalling: models.some((model) => model.tool_call),
+      jsonMode: models.some((model) => model.structured_output === true),
+      structuredOutput: models.some((model) => model.structured_output === true),
+      embeddings: false,
+      imageInput: inputModalities.has("image"),
+      videoInput: inputModalities.has("video"),
+      ...(maxContextTokens ? { maxContextTokens } : {}),
+      ...(maxOutputTokens ? { maxOutputTokens } : {}),
+    },
+    supportsReasoning: models.some((model) => model.reasoning),
+    authScheme: provider.npm === "@ai-sdk/anthropic" ? "x-api-key" : "bearer",
+  };
+}
+
+function toModelDescriptor(
+  provider: ModelsDevProvider,
+  model: ModelsDevModel,
+): ProviderModelDescriptor {
+  const npm = model.provider?.npm ?? provider.npm;
+  const api = model.provider?.api ?? provider.api;
+  return {
+    id: model.id,
+    name: model.name,
+    ...(model.description ? { description: model.description } : {}),
+    ...(model.family ? { family: model.family } : {}),
+    status: model.status ?? "active",
+    releaseDate: model.release_date,
+    ...(model.last_updated ? { lastUpdated: model.last_updated } : {}),
+    contextTokens: model.limit.context,
+    ...(model.limit.input ? { inputTokens: model.limit.input } : {}),
+    outputTokens: model.limit.output,
+    supportsReasoning: model.reasoning,
+    ...(model.reasoning_options ? { reasoningOptions: model.reasoning_options } : {}),
+    supportsAttachments: model.attachment,
+    supportsToolCalls: model.tool_call,
+    supportsTemperature: model.temperature,
+    supportsStructuredOutput: model.structured_output ?? false,
+    ...(model.modalities ? { modalities: model.modalities } : {}),
+    ...(model.cost ? { cost: model.cost } : {}),
+    ...(npm ? { npm } : {}),
+    ...(api ? { api } : {}),
+  };
+}
+
+function sdkFamily(npm: string | undefined): SdkFamilyId {
+  if (npm === "@ai-sdk/anthropic") return "anthropic-messages";
+  if (
+    npm === "@ai-sdk/openai-compatible"
+    || npm === "@ai-sdk/openai"
+    || npm === "@ai-sdk/azure"
+    || npm === "@ai-sdk/cerebras"
+    || npm === "@ai-sdk/deepinfra"
+    || npm === "@ai-sdk/groq"
+    || npm === "@ai-sdk/perplexity"
+    || npm === "@ai-sdk/togetherai"
+    || npm === "@ai-sdk/xai"
+    || npm === "@openrouter/ai-sdk-provider"
+  ) {
+    return "openai-chat";
+  }
+  return "custom";
+}
+
+function maximum(values: number[]): number | undefined {
+  return values.length ? Math.max(...values) : undefined;
 }

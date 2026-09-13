@@ -65,8 +65,21 @@ const richRunner: ManagedTurnRunner = async (input) => {
   });
   await emit({ type: "verification.started", command: "node --test", timestamp: now() });
   await emit({ type: "verification.completed", ok: true, command: "node --test", summary: "pass", timestamp: now() });
-  await emit({ type: "compaction.updated", phase: "started", timestamp: now() });
-  await emit({ type: "compaction.updated", phase: "completed", savedChars: 120, timestamp: now() });
+  // Full summarization is the one technique that reports a `started` phase
+  // from the runtime, because it wraps a model call that takes seconds. The
+  // cheap passes emit `completed` only, which is why the row is asserted
+  // through both phases here.
+  await emit({ type: "context.updated", phase: "started", technique: "full_summary", timestamp: now() });
+  await emit({
+    type: "context.updated",
+    phase: "completed",
+    technique: "full_summary",
+    savedChars: 120,
+    savedTokens: 30,
+    messagesBefore: 18,
+    messagesAfter: 3,
+    timestamp: now(),
+  });
   await emit({ type: "assistant.message.delta", text: " Done.", timestamp: now() });
   await emit({ type: "assistant.message.completed", text: "I'll list files, then write a note. Done.", timestamp: now() });
   await emit({ type: "token.usage", inputTokens: 80, outputTokens: 24, timestamp: now() });
@@ -135,7 +148,10 @@ test("mock frontend consumes Codex-shaped thread, turn, and item session output"
       "item/agentMessage/delta",
       "item/commandExecution/outputDelta",
       "item/verification/updated",
-      "item/compaction/updated",
+      // Context management rides the ordinary item lifecycle (`item/started`
+      // then `item/completed`) rather than a method of its own, so the row
+      // appears while the technique runs and the frontend needed no new
+      // notification handler to see it at all.
       "thread/tokenUsage/updated",
       "turn/completed",
     ];
@@ -151,7 +167,7 @@ test("mock frontend consumes Codex-shaped thread, turn, and item session output"
       "commandExecution",
       "fileChange",
       "dynamicToolCall",
-      "contextCompaction",
+      "contextManagement",
     ]);
     assert.deepEqual(ui.userTexts("frontend-session"), ["Inspect the repo and leave a note"]);
     assert.equal(ui.agentText("frontend-session", turnId), "I'll list files, then write a note. Done.");

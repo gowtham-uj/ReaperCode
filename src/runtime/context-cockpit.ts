@@ -35,9 +35,37 @@ export const COCKPIT_LIMITS = {
   maxEnvironmentBytes: 1_500,
   maxProjectContextBytes: 3_000,
   maxUserContextBytes: 3_000,
-  maxSkillsBytes: 1_500,
+  /* Raised from 1.5 KB: each line now carries a description, and a workspace
+   * with a dozen project skills would otherwise have the tail truncated away
+   * — which is the half a model would have matched against. */
+  maxSkillsBytes: 4_000,
+  /* The invoked-skills section, bounded. Raised from 8 KB once skills could be
+   * pinned: a pinned body is paid for on *every* turn, so a set of them is a
+   * standing cost that has to stop somewhere, and several ordinary skills now
+   * share one budget where a single `/name` invocation used to. A body larger
+   * than this is a skill that needs splitting rather than a budget that needs
+   * raising — and the truncation is visible in the section, not silent. */
+  maxInvokedSkillBytes: 16_000,
   maxRuntimeFactsBytes: 1_000,
-  hardCapBytes: 12_000,
+  /*
+   * The ceiling for the whole cockpit, and it must exceed the sum of the
+   * per-section budgets above.
+   *
+   * It was 12,000 while the sections it bounds could reach 41,500 between them,
+   * so the last sections were always the ones cut. `renderInvokedSkills` sits
+   * second from the end, which meant a user typing `/codemode` could have the
+   * body they had just explicitly asked for truncated to nothing — the
+   * single most specific instruction in the prompt, silently dropped by
+   * arithmetic that no test covered because the sections are bounded
+   * individually and only their sum was over.
+   *
+   * The value is the sum of the section budgets plus room for the markers and
+   * the joins, so every section can reach its own limit before the hard cap is
+   * the thing that binds. The cap still exists: it is what stops a pathological
+   * input from blowing the cockpit past a fixed size, which is the property
+   * worth keeping.
+   */
+  hardCapBytes: 43_000,
 } as const;
 
 /** Render inputs. The cockpit is pure: identical inputs render to
@@ -53,6 +81,17 @@ export interface CockpitInput {
   /** Skills loaded from the trusted project (filtered subset of
    *  `skills`). Omit when project is not trusted. */
   trustedSkills?: Skill[];
+  /**
+   * Skills a human named explicitly, with their bodies.
+   *
+   * The list above is what the model may *ask* for; this is what someone
+   * already asked for, by typing `/name` in the composer or in
+   * `reaper exec --prompt`. The distinction matters because the two have
+   * different authority and different sizes: a name is a pointer the model
+   * spends a tool call to follow, a body is instructions it is being given.
+   */
+  /** `pinned` marks an always-on skill, as opposed to one a human named. */
+  invokedSkills?: Array<{ name: string; body: string; pinned?: boolean }>;
   environmentFingerprint: EnvironmentFingerprint;
   mentions: MentionResolution;
   /** Bounded runtime facts for this turn. */
@@ -74,6 +113,7 @@ export function renderContextCockpit(input: CockpitInput): string {
     truncateSection(renderTrustedProjectContext(input).join("\n\n"), COCKPIT_LIMITS.maxProjectContextBytes),
     truncateSection(renderUserContext(input).join("\n\n"), COCKPIT_LIMITS.maxUserContextBytes),
     truncateSection(renderSkills(input).join("\n\n"), COCKPIT_LIMITS.maxSkillsBytes),
+    truncateSection(renderInvokedSkills(input).join("\n\n"), COCKPIT_LIMITS.maxInvokedSkillBytes),
     truncateSection(renderRuntimeFacts(input).join("\n\n"), COCKPIT_LIMITS.maxRuntimeFactsBytes),
   ];
   const body = [COCKPIT_OPEN, ...sections, COCKPIT_CLOSE].join("\n\n");
@@ -201,8 +241,56 @@ function renderSkills(input: CockpitInput): string[] {
   }
   lines.push("# Trusted skill names");
   lines.push(`source=skills;authority=project_instruction;trust=trusted;count=${trustedSkills.length}`);
+  /*
+   * Names alone are not enough to act on.
+   *
+   * `activate_skill` is gated on an exact name, so a name is the one thing a
+   * model cannot guess — but a bare list also gives it nothing to match a task
+   * against, which is why skills were loaded, discovered, and then never
+   * called. The description is the router's own summary line and is already
+   * bounded at 240 characters by the manifest schema, so carrying it costs a
+   * few hundred bytes rather than the body that `activate_skill` still waits
+   * to be asked for.
+   */
   for (const skill of trustedSkills) {
-    lines.push(`- ${skill.name}`);
+    lines.push(`- ${skill.name}: ${skill.description}`);
+  }
+  return lines;
+}
+
+/**
+ * Skills invoked by name, bodies included.
+ *
+ * Everything else in the cockpit is *data the model may choose to act on*.
+ * This is the one section that is an instruction, and it is labelled that way
+ * because the alternative — folding a 4 KB body into the skills list — would
+ * make the same authority carry across every skill in the workspace, all of
+ * which arrived from a repository.
+ *
+ * The body is the file `activate_skill` would have returned, so a human
+ * triggering a skill and the model triggering its own produce the same context
+ * by construction rather than by agreement.
+ */
+/**
+ * Skills whose body is in this turn without being asked for.
+ *
+ * The two sources get different authority labels, and the difference is not
+ * cosmetic. A `/name` invocation is something the human said *this turn* — it is
+ * the most specific instruction in the whole prompt and outranks standing
+ * preferences. A pinned skill is a standing preference the user configured once;
+ * it is a real instruction, but it is not a thing anyone said now, and a model
+ * that treats it as the latest word will over-apply it when the actual message
+ * says otherwise.
+ */
+function renderInvokedSkills(input: CockpitInput): string[] {
+  const invoked = input.invokedSkills ?? [];
+  if (invoked.length === 0) return [];
+  const lines: string[] = [];
+  for (const skill of invoked) {
+    const authority = skill.pinned ? "user_configured;always_on" : "user_instruction";
+    lines.push(`<<<SKILL: ${skill.name}>>> (authority=${authority})`);
+    lines.push(skill.body.trim());
+    lines.push("<<<END_SKILL>>>");
   }
   return lines;
 }

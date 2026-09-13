@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 
+import { modelCallsDir } from "../logging/paths.js";
 import type { EvalGateSpec, EvalTask } from "./task-schema.js";
 
 export interface GateResult {
@@ -116,7 +117,9 @@ async function evaluateGate(gate: EvalGateSpec, task: EvalTask, ctx: ScoreContex
       };
     }
     case "model_calls_min": {
-      const dir = path.join(ctx.workspaceRoot, ".reaper", "logs", ctx.runId, "model-calls");
+      // `modelCallsDir` resolves the legacy root when a run predates the
+      // `sessions/` rename, so an old task fixture still scores.
+      const dir = modelCallsDir(ctx.workspaceRoot, ctx.runId);
       let count = 0;
       try {
         const files = await readdir(dir);
@@ -180,7 +183,7 @@ async function evaluateSystemPromptStability(ctx: ScoreContext): Promise<GateRes
     return { type, passed: false, details: { error: "no timestamped full_summary event" } };
   }
 
-  const modelCallDir = path.join(ctx.workspaceRoot, ".reaper", "logs", ctx.runId, "model-calls");
+  const modelCallDir = modelCallsDir(ctx.workspaceRoot, ctx.runId);
   let files: string[] = [];
   try {
     files = (await readdir(modelCallDir)).filter((file) => /^\d+-(?:stream|generate)\.json$/.test(file)).sort();

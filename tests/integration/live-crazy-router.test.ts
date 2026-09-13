@@ -4,19 +4,25 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { createLiveCrazyRouterGateway } from "../fixtures/live-gateway.js";
+import { liveTestSkipReason, skipLiveTest } from "../fixtures/live-gate.js";
 
+// `loadWorkspaceDotEnv()` still fills the key in — the fixture needs it to build
+// a config — but it no longer decides whether the test runs.
 loadWorkspaceDotEnv();
 
-const routerKeyPresent = Boolean(
-  process.env.RUN_LIVE_LLM_TESTS === "1" &&
-    (process.env.CRAZY_ROUTER_API_KEY ||
-    process.env.CRAZYROUTER_API_KEY ||
-    process.env.CRAZY_ROUTER_PROVIDER),
-);
+// The gateway accepts three spellings of the same key, so this test's gate is
+// deliberately the only one that asks about more than one variable.
+const ROUTER_KEY_NAMES = [
+  "CRAZY_ROUTER_API_KEY",
+  "CRAZYROUTER_API_KEY",
+  "CRAZY_ROUTER_PROVIDER",
+] as const;
+
+const skip = skipLiveTest(ROUTER_KEY_NAMES) ? liveTestSkipReason(ROUTER_KEY_NAMES[0]) : false;
 
 test(
   "live crazy router generate call works with claude-sonnet-4-6",
-  { skip: !routerKeyPresent, timeout: 120_000 },
+  { skip, timeout: 120_000 },
   async () => {
     const { gateway } = createLiveCrazyRouterGateway(
       "live crazy router generate call works with claude-sonnet-4-6",

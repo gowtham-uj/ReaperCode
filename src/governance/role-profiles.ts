@@ -54,30 +54,34 @@ export interface RoleProfile {
 /** Common read-only tool set. */
 const READ_ONLY_TOOLS: readonly string[] = [
   "file_view",
-  "file_scroll",
   "file_find",
-  "view_file",
   "list_directory",
   "grep_search",
   "skim_file",
   "inspect_environment",
   "web_search",
   "web_fetch",
-  "get_tool_output",
   "search_tools",
   "activate_skill",
 ];
 
-/** Tools a write-capable role may also use. */
+/**
+ * Tools a write-capable role may also use.
+ *
+ * `eval` belongs here rather than in a Code-Mode-specific list because the
+ * profile has to answer one question — may this role run code that changes the
+ * workspace — and eval answers it identically to `bash`. Listing it here also
+ * puts it in the read-only roles' `forbidden_tools`, which is the intent: the
+ * four read-only profiles spread this list into their forbids, so adding eval
+ * once keeps their existing answer ("no") rather than silently widening it.
+ */
 const WRITE_TOOLS: readonly string[] = [
   "write_file",
   "file_edit",
   "edit_file",
   "delete_file",
   "bash",
-  "read_background_output",
-  "signal_process",
-  "write_to_process",
+  "eval",
 ];
 
 /** Skill authoring (5 tools). Drafts only — no trust gate. */
@@ -138,7 +142,7 @@ export const ROLE_PROFILES: Record<PolicyRole, RoleProfile> = {
       ...HOOK_AUTHORING_TOOLS,
       "advance_step",
     ],
-    forbidden_tools: ["computer_control", "mouse_move", "mouse_click", "mouse_scroll", "keyboard_type", "keyboard_press", "screenshot", "start_live_view", "stop_live_view", "request_human_approval", "is_human_intervening", "wait", "get_screen_size", "get_mouse_position", "browser_control", "approve_skill", "uninstall_skill", "enable_extension", "trust_extension", "uninstall_extension", "approve_hook", "update_hook", "uninstall_hook"],
+    forbidden_tools: ["browser_control", "approve_skill", "uninstall_skill", "enable_extension", "trust_extension", "uninstall_extension", "approve_hook", "update_hook", "uninstall_hook"],
     can_write: true,
     can_run_commands: true,
     shell_risk_tolerance: "medium", // high still requires approval
@@ -160,7 +164,7 @@ export const ROLE_PROFILES: Record<PolicyRole, RoleProfile> = {
       "list_hooks",
       "advance_step",
     ],
-    forbidden_tools: ["computer_control", "mouse_move", "mouse_click", "mouse_scroll", "keyboard_type", "keyboard_press", "screenshot", "start_live_view", "stop_live_view", "request_human_approval", "is_human_intervening", "wait", "get_screen_size", "get_mouse_position", "browser_control", "create_skill", "approve_skill", "uninstall_skill", "create_extension", "enable_extension", "trust_extension", "uninstall_extension", "create_hook", "update_hook", "approve_hook", "uninstall_hook"],
+    forbidden_tools: ["browser_control", "create_skill", "approve_skill", "uninstall_skill", "create_extension", "enable_extension", "trust_extension", "uninstall_extension", "create_hook", "update_hook", "approve_hook", "uninstall_hook"],
     can_write: true,
     can_run_commands: true,
     shell_risk_tolerance: "medium",
@@ -171,8 +175,8 @@ export const ROLE_PROFILES: Record<PolicyRole, RoleProfile> = {
   reviewer: {
     role: "reviewer",
     description: "Reviews the diff. Read-only; cannot edit files. May run read-only or test commands.",
-    allowed_tools: [...READ_ONLY_TOOLS, "bash", "read_background_output"],
-    forbidden_tools: ["write_file", "file_edit", "edit_file", "delete_file", "advance_step", "computer_control", "mouse_move", "mouse_click", "mouse_scroll", "keyboard_type", "keyboard_press", "screenshot", "start_live_view", "stop_live_view", "request_human_approval", "is_human_intervening", "wait", "get_screen_size", "get_mouse_position", "browser_control"],
+    allowed_tools: [...READ_ONLY_TOOLS, "bash"],
+    forbidden_tools: ["write_file", "file_edit", "edit_file", "delete_file", "advance_step", "browser_control"],
     can_write: false,
     can_run_commands: true, // for tests / inspection
     shell_risk_tolerance: "medium",
@@ -184,7 +188,7 @@ export const ROLE_PROFILES: Record<PolicyRole, RoleProfile> = {
     role: "critic",
     description: "Adversarially challenges the solution. Strictly read-only.",
     allowed_tools: READ_ONLY_TOOLS,
-    forbidden_tools: [...WRITE_TOOLS, "advance_step", "computer_control", "mouse_move", "mouse_click", "mouse_scroll", "keyboard_type", "keyboard_press", "screenshot", "start_live_view", "stop_live_view", "request_human_approval", "is_human_intervening", "wait", "get_screen_size", "get_mouse_position", "browser_control"],
+    forbidden_tools: [...WRITE_TOOLS, "advance_step", "browser_control"],
     can_write: false,
     can_run_commands: false,
     shell_risk_tolerance: "low-only",
@@ -197,7 +201,6 @@ export const ROLE_PROFILES: Record<PolicyRole, RoleProfile> = {
     description: "Specialized for web tasks: web search, web fetch, browser_control, screen inspection. No file edits.",
     allowed_tools: [
       "file_view",
-      "view_file",
       "list_directory",
       "grep_search",
       "skim_file",
@@ -205,19 +208,10 @@ export const ROLE_PROFILES: Record<PolicyRole, RoleProfile> = {
       "web_search",
       "web_fetch",
       "search_tools",
-      "get_tool_output",
       "browser_control",
-      "screenshot",
-      "get_screen_size",
-      "get_mouse_position",
-      "wait",
-      "start_live_view",
-      "stop_live_view",
-      "request_human_approval",
-      "is_human_intervening",
       "activate_skill",
     ],
-    forbidden_tools: ["write_file", "file_edit", "edit_file", "delete_file", "bash", "advance_step", "computer_control", "mouse_move", "mouse_click", "mouse_scroll", "keyboard_type", "keyboard_press", "read_background_output", "signal_process", "write_to_process"],
+    forbidden_tools: ["write_file", "file_edit", "edit_file", "delete_file", "bash", "advance_step"],
     can_write: false,
     can_run_commands: false,
     shell_risk_tolerance: "low-only",

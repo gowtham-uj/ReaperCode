@@ -34,11 +34,20 @@ import { getAllToolDescriptors } from "../descriptor.js";
  * the old keyword-substring scoring. Select: prefix still works for exact
  * name promotion.
  */
-export function executeSearchTools(query: string, runId: string): SearchToolsResult {
+export function executeSearchTools(
+  query: string,
+  runId: string,
+  disabledTools: ReadonlySet<string> = EMPTY_DISABLED,
+): SearchToolsResult {
   ensureDescriptors();
 
+  // A tool this thread has switched off must not be findable, let alone
+  // promotable: `buildGeneralAgentTools` withholds it from the wire, so
+  // answering a search with it would hand the model a schema it will then be
+  // refused for using. Filtering the catalog rather than the results means the
+  // `total_tools` count below agrees with what can actually be searched.
+  const catalog = Object.entries(toolRegistry).filter(([name]) => !disabledTools.has(name));
   const normalized = query.toLowerCase().trim();
-  const catalog = Object.entries(toolRegistry);
   const selectMatch = normalized.match(/^select:(.+)$/i);
   if (selectMatch) {
     const requested = selectMatch[1]!
@@ -57,18 +66,24 @@ export function executeSearchTools(query: string, runId: string): SearchToolsRes
     return {
       matches: selected.filter((item, index) => selected.findIndex((other) => other.name === item.name) === index),
       discovered,
-      total_tools: Object.keys(toolRegistry).length,
+      total_tools: catalog.length,
     };
   }
 
-  // Phase 2: BM25 search over descriptor index
-  const bm25Results = bm25SearchTools(query, 6);
+  // Phase 2: BM25 search over descriptor index. The index is built from the
+  // whole registry once, so a disabled tool can still rank; dropping anything
+  // this thread has switched off is what keeps a search from advertising it.
+  const bm25Results = bm25SearchTools(query, 6)
+    .filter((result) => !disabledTools.has(result.name));
   const discovered = bm25Results.map((r) => r.name);
   discoverTools(discovered, runId);
 
   return {
     matches: bm25Results.map(({ name, description }) => ({ name, description })),
     discovered,
-    total_tools: Object.keys(toolRegistry).length,
+    total_tools: catalog.length,
   };
 }
+
+/** Shared empty set, so the common no-tools-disabled path allocates nothing. */
+const EMPTY_DISABLED: ReadonlySet<string> = new Set<string>();

@@ -16,9 +16,13 @@ test("default main-agent tools expose executable coding tools, not plan/todo boo
 
   assert.ok(names.includes("write_file"));
   assert.ok(names.includes("file_view"));
-  assert.ok(names.includes("file_scroll"));
-  assert.ok(names.includes("file_find"));
   assert.ok(names.includes("file_edit"));
+  // `file_scroll` was folded into `file_view`, so the full agent surface must
+  // not offer it as a second way to read the same file. `file_find` is
+  // registered and reachable, but it is deferred — this list is the core
+  // surface, which is exactly the set that renders on every turn.
+  assert.ok(!names.includes("file_scroll"));
+  assert.ok(!names.includes("file_find"));
   assert.ok(!names.includes("read_file"));
   assert.ok(!names.includes("replace_in_file"));
   assert.ok(names.includes("bash"));

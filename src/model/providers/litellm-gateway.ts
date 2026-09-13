@@ -20,6 +20,7 @@ import {
   prefersBufferedJsonGenerate,
   providerBackoffMs,
 } from "../provider-quirks.js";
+import { resolveApiKey } from "../credentials.js";
 
 export interface LiteLLMGatewayOptions {
   fetchImpl?: typeof fetch;
@@ -331,12 +332,11 @@ export class LiteLLMProviderClient implements ProviderModelClient {
       "content-type": "application/json",
     };
 
-    if (profile.apiKeyEnv) {
-      const value = process.env[profile.apiKeyEnv];
-      if (!value) {
-        throw new Error(`Environment variable '${profile.apiKeyEnv}' is required for provider '${profile.provider}'`);
-      }
-
+    // An unauthenticated profile is legitimate here — a local LiteLLM proxy or
+    // Ollama needs no key — so the header is added only when a credential was
+    // actually asked for, either as a stored key or a named variable.
+    if (profile.apiKey || profile.apiKeyEnv) {
+      const value = resolveApiKey(profile, profile.apiKeyEnv ?? "OPENAI_API_KEY");
       const defaults = resolveProviderDefaults(profile);
       if (defaults.authHeader === "api-key") {
         headers[defaults.authHeader] = value;

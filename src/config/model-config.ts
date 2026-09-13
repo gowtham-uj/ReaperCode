@@ -256,7 +256,7 @@ export const ContextManagementConfigSchema = z
   })
   .strict()
   .optional()
-  .default({
+  .prefault({
     softCap: REAPER_DEFAULT_SOFT_CAP_TOKENS,
     shakeTriggerPct: 60,
     shakeProtectWindowChars: 64_000,
@@ -311,7 +311,7 @@ export const ModelRoutingConfigSchema = z
   })
   .strict()
   .optional()
-  .default({
+  .prefault({
     mainAgent: "secondary_model",
     planner: "secondary_model",
     executor: "fast_reasoner",
@@ -356,6 +356,37 @@ export const RuntimeTunablesConfigSchema = z
     modelCallTimeoutMs: z.number().int().positive().default(120_000),
     modelRouterLlmDecisions: z.boolean().default(false),
     permissionMode: z.enum(["yolo", "accept_edits", "auto", "strict"]).default("accept_edits"),
+    /**
+     * Skills whose full body goes into every turn, not just on demand.
+     *
+     * A list of names rather than a flag on each skill's manifest, because
+     * pinning is a property of the *user's* setup and not of the skill: the
+     * same skill is essential in one workspace and noise in another, and a
+     * manifest field would let an author pin themselves into everyone's prompt.
+     *
+     * Names that resolve to nothing are ignored rather than fatal — a pinned
+     * skill can be deleted, and a config that refuses to load because a skill
+     * moved is worse than a turn that quietly lost one.
+     */
+    pinnedSkills: z.array(z.string().min(1).max(200)).default([]),
+    /**
+     * Skills the user has switched off.
+     *
+     * Here rather than as a marker file beside the skill, for the reason
+     * `pinnedSkills` is here: switching a skill off is a statement about *this
+     * user's* setup, and the skill directory is not necessarily the user's to
+     * write. For a built-in skill it is the shipped source tree — or, in the
+     * bundle, a temp directory regenerated on every run — so a marker written
+     * there either mutated the install or vanished. Disabling a built-in has
+     * never actually worked; this is the list that makes it work.
+     *
+     * A marker file is still honoured when a skill author ships one, so a
+     * skill can arrive switched off. The two are OR'd, not merged: a skill is
+     * disabled if either says so. Unknown names are ignored rather than fatal,
+     * matching `pinnedSkills` — a settings file must not stop loading because
+     * a skill was deleted.
+     */
+    disabledSkills: z.array(z.string().min(1).max(200)).default([]),
     printReasoning: z.boolean().default(false),
     progressGuardV2: z.boolean().default(true),
     rescueMaxAttemptsPerDiagnostic: z.number().int().nonnegative().default(1),
@@ -379,7 +410,7 @@ export const RuntimeTunablesConfigSchema = z
   })
   .strict()
   .optional()
-  .default({});
+  .prefault({});
 
 /**
  * Secrets block — every API credential lives here. Optional with empty
@@ -409,11 +440,11 @@ export const SecretsConfigSchema = z
   })
   .strict()
   .optional()
-  .default({});
+  .prefault({});
 
 export const ReaperConfigSchema = z
   .object({
-    connection: ConnectionPoliciesSchema.optional().default({}),
+    connection: ConnectionPoliciesSchema.optional().prefault({}),
     /**
      * Workflow 3: security knobs. Currently exposes the child-process
      * environment allowlist used by `tools/child-env.ts`. Default empty;

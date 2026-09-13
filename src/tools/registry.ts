@@ -1,12 +1,7 @@
 import {
   DeleteFileArgsSchema,
-  GetToolOutputArgsSchema,
   GrepSearchArgsSchema,
   ListDirectoryArgsSchema,
-  ReadBackgroundOutputArgsSchema,
-  SignalProcessArgsSchema,
-  WriteToProcessArgsSchema,
-  ViewFileArgsSchema,
   SkimFileArgsSchema,
   InspectEnvironmentArgsSchema,
   CreateCheckpointArgsSchema,
@@ -17,17 +12,6 @@ import {
   EditFileArgsSchema,
   BashArgsSchema,
   BrowserControlArgsSchema,
-  ComputerControlArgsSchema,
-  MouseMoveArgsSchema,
-  MouseClickArgsSchema,
-  MouseScrollArgsSchema,
-  KeyboardTypeArgsSchema,
-  KeyboardPressArgsSchema,
-  ScreenshotArgsSchema,
-  EmptyArgsSchema,
-  WaitArgsSchema,
-  StartLiveViewArgsSchema,
-  RequestHumanApprovalArgsSchema,
   WriteFileArgsSchema,
   ActivateSkillArgsSchema,
   WebFetchArgsSchema,
@@ -37,13 +21,11 @@ import {
 } from "./types.js";
 import {
   FileViewArgsSchema,
-  FileScrollArgsSchema,
   FileFindArgsSchema,
   FileEditArgsSchema,
 } from "./viewer/types.js";
 import { ApplyPatchArgsSchema } from "./apply-patch.js";
 import { GlobArgsSchema } from "./glob.js";
-import { EvalArgsSchema } from "./eval.js";
 import { JobArgsSchema } from "./job.js";
 import { DiagnosticsArgsSchema } from "./diagnostics.js";
 import {
@@ -51,7 +33,7 @@ import {
   TestSkillArgsSchema,
   ApproveSkillArgsSchema,
   UninstallSkillArgsSchema,
-  ReloadSkillsArgsSchema,
+  SkillManagerArgsSchema,
 } from "./types/skill-tools.schema.js";
 import {
   CreateExtensionArgsSchema,
@@ -59,7 +41,7 @@ import {
   EnableExtensionArgsSchema,
   TrustExtensionArgsSchema,
   UninstallExtensionArgsSchema,
-  ReloadExtensionsArgsSchema,
+  ExtensionManagerArgsSchema,
 } from "./types/extension-tools.schema.js";
 import {
   CreateHookArgsSchema,
@@ -67,21 +49,21 @@ import {
   UpdateHookArgsSchema,
   ApproveHookArgsSchema,
   UninstallHookArgsSchema,
-  ReloadHooksArgsSchema,
+  HookManagerArgsSchema,
 } from "./types/hook-tools.schema.js";
+import { EvalArgsSchema, EVAL_TOOL_DESCRIPTION } from "./eval.js";
 
 export const toolRegistry = {
-  view_file: {
-    description:
-      "Read a bounded file window with line numbers. Use this for a full file read; use file_view for ranged inspection when diagnostics or grep point to a specific range.",
-    argsSchema: ViewFileArgsSchema,
-  },
   list_directory: {
     description: "List directory entries",
     argsSchema: ListDirectoryArgsSchema,
   },
   grep_search: {
-    description: "Search text across files",
+    description:
+      "Search text with a per-line regular expression. `path` may be a directory (searched recursively) " +
+      "or a single file, so locating a pattern in one known file is one call rather than a directory " +
+      "sweep. Optional `include` filters by glob. Returns the file, line number, and matching line for " +
+      "each hit.",
     argsSchema: GrepSearchArgsSchema,
   },
   skim_file: {
@@ -129,13 +111,8 @@ export const toolRegistry = {
   // ---- viewer tools (Phase 2: schemas registered, NOT in CORE_TOOL_NAMES yet).
   file_view: {
     description:
-      "View a numbered window of a file (default 50 lines starting at line 1). The model always sees line numbers in the response. Use file_scroll to navigate within the same file. Bounded by file_line_limit_max (config; default 500 lines per response).",
+      "View a numbered window of a file (default 50 lines starting at line 1). The model always sees line numbers in the response; move through a large file by passing an explicit start_line. Bounded by file_line_limit_max (config; default 500 lines per response).",
     argsSchema: FileViewArgsSchema,
-  },
-  file_scroll: {
-    description:
-      "Move the viewport for an already-viewed file. Direction: up/down/top/bottom. Lines optional (defaults to the previous window size). Reuses the same viewport as file_view / file_find for the same file.",
-    argsSchema: FileScrollArgsSchema,
   },
   file_find: {
     description:
@@ -144,7 +121,9 @@ export const toolRegistry = {
   },
   file_edit: {
     description:
-      "Edit a single contiguous line range and run the configured language linter on the result. On lint failure the file is rolled back atomically and the error is returned to the model (file content is never left in a broken state). Preferred for line-anchored edits because oldString never has to be guessed.",
+      "Edit a single contiguous line range and run the configured language linter on the result. On lint failure the file is rolled back atomically and the error is returned to the model (file content is never left in a broken state). " +
+      "Always pass `expected_content`: the exact text currently occupying start_line..end_line. Every edit shifts the lines below it, so line numbers read earlier in the turn are stale; with the anchor the edit is relocated or refused instead of splicing into the wrong block. " +
+      "The response returns the edited region as it now reads — use those line numbers for the next edit, not the ones you read before.",
     argsSchema: FileEditArgsSchema,
   },
   // -------------------------------------------------------------------------------
@@ -162,79 +141,6 @@ export const toolRegistry = {
     description:
       "Control a persistent Playwright browser page: navigate, compact ref-based snapshot, screenshot, click/type/select by selector or ref (e.g. e0), press keys, scroll, or close. Use humanize:true when slower mouse/typing behavior is useful for UI reliability.",
     argsSchema: BrowserControlArgsSchema,
-  },
-  computer_control: {
-    description:
-      "Coordinate-level computer control for the active browser viewport: screenshot, mouse move/click/double-click/drag, keyboard type/press, and scroll. Use when DOM refs/selectors are unavailable; humanize:true enables slower curved mouse movement, typing delays, and chunked scrolling.",
-    argsSchema: ComputerControlArgsSchema,
-  },
-  mouse_move: {
-    description: "Native OS computer control: move the real mouse cursor to screen coordinates with a bounded human-like Bezier path.",
-    argsSchema: MouseMoveArgsSchema,
-  },
-  mouse_click: {
-    description: "Native OS computer control: move to screen coordinates, add small jitter/hesitation, then click left/right/middle one or more times.",
-    argsSchema: MouseClickArgsSchema,
-  },
-  mouse_scroll: {
-    description: "Native OS computer control: smooth inertial scrolling with deltaX/deltaY on the active desktop.",
-    argsSchema: MouseScrollArgsSchema,
-  },
-  keyboard_type: {
-    description: "Native OS computer control: type text into the focused app with variable delays; typoProbability is optional and defaults to zero.",
-    argsSchema: KeyboardTypeArgsSchema,
-  },
-  keyboard_press: {
-    description: "Native OS computer control: press a key or key combination such as ['ctrl','c']; dangerous combos are blocked unless explicitly authorized.",
-    argsSchema: KeyboardPressArgsSchema,
-  },
-  screenshot: {
-    description: "Native OS computer control: capture the full screen or a region and return base64 or a saved artifact path.",
-    argsSchema: ScreenshotArgsSchema,
-  },
-  get_screen_size: {
-    description: "Native OS computer control: return current screen width and height.",
-    argsSchema: EmptyArgsSchema,
-  },
-  get_mouse_position: {
-    description: "Native OS computer control: return current mouse x/y coordinates.",
-    argsSchema: EmptyArgsSchema,
-  },
-  wait: {
-    description: "Native OS computer control: wait for a number of seconds with optional jitter.",
-    argsSchema: WaitArgsSchema,
-  },
-  start_live_view: {
-    description: "Native OS computer control: start a local MJPEG screen stream and supervisor/approval UI, default http://127.0.0.1:8765/live.",
-    argsSchema: StartLiveViewArgsSchema,
-  },
-  stop_live_view: {
-    description: "Native OS computer control: stop the local live screen stream and supervisor UI.",
-    argsSchema: EmptyArgsSchema,
-  },
-  request_human_approval: {
-    description: "Native OS computer control: block for local human approval with Approve, Deny, or Take Over in the supervisor UI.",
-    argsSchema: RequestHumanApprovalArgsSchema,
-  },
-  is_human_intervening: {
-    description: "Native OS computer control: check whether human takeover is currently active.",
-    argsSchema: EmptyArgsSchema,
-  },
-  read_background_output: {
-    description: "Read stdout/stderr of a background process",
-    argsSchema: ReadBackgroundOutputArgsSchema,
-  },
-  signal_process: {
-    description: "Send a signal (SIGINT, SIGTERM, etc.) to a background process group.",
-    argsSchema: SignalProcessArgsSchema,
-  },
-  write_to_process: {
-    description: "Write text to the stdin of a background process.",
-    argsSchema: WriteToProcessArgsSchema,
-  },
-  get_tool_output: {
-    description: "Read a stored artifact output",
-    argsSchema: GetToolOutputArgsSchema,
   },
   activate_skill: {
     description: "Activates a specialized agent skill by name (Available: 'skill-creator', 'github', etc.). Returns the skill's instructions wrapped in <activated_skill> tags.",
@@ -259,88 +165,40 @@ export const toolRegistry = {
       "Search prior session summaries persisted under `.reaper/summaries/`. Use after compaction or on resume to recall what the agent was doing earlier.",
     argsSchema: SearchMemoryArgsSchema,
   },
-  /* ----- Skill authoring (5) ----- */
-  create_skill: {
+  /*
+   * Authoring, three tools instead of seventeen.
+   *
+   * Each family was a linear workflow — create, test/validate, approve/trust,
+   * enable, uninstall, reload — where every step names the same skill or
+   * extension, and the model had to hold the sequence and the exact verb for
+   * its current position. As one tool with an `action` the whole workflow is
+   * visible in a single schema, and getting to step three is a value change
+   * rather than a name it has to have remembered or rediscovered.
+   *
+   * The three stay separate rather than becoming one `authoring` tool because
+   * they act on three different stores with three different trust models, and
+   * a single action enum would carry every field of every one of them — the
+   * opposite of the disclosure this is meant to achieve.
+   *
+   * `activate_skill` is deliberately *not* folded in here. Activating is what
+   * the agent does during ordinary work; authoring is what it does rarely, at
+   * the user's direction. Grouping them would put a tool the model needs
+   * constantly behind the same gate as one it should almost never reach for.
+   */
+  skill_manager: {
     description:
-      "Author a new skill from a description. Writes a draft `skill.json` + `SKILL.md` to `<workspace>/.reaper/skills/<name>/`. The skill is `trust: \"draft\"` until `approve_skill` promotes it (gated by `request_human_approval`).",
-    argsSchema: CreateSkillArgsSchema,
+      "Author and manage skills. Actions: create (writes a draft `skill.json` + `SKILL.md` to `.reaper/skills/<name>/`, `trust: \"draft\"`), test (runs the skill's `validation.commands` in order, fails fast), approve (promotes a draft to `user-trusted`; gated by the approval flow), uninstall (removes it from the registry and disk; gated for any non-draft).",
+    argsSchema: SkillManagerArgsSchema,
   },
-  test_skill: {
+  extension_manager: {
     description:
-      "Run the skill's `validation.commands` in order and report per-command exit codes + stderr. Fails-fast on the first non-zero exit. Updates `lastValidatedAt` on success.",
-    argsSchema: TestSkillArgsSchema,
+      "Author and manage extensions (JavaScript only). Actions: create (writes `extension.json` + `main.js` to `.reaper/extensions/<id>/`, lands dormant as `project-untrusted`), validate (runs `validation.commands`, does not activate), trust (promotes to `user-trusted`; gated), enable (marks enabled and runs `default.activate(ctx)`; requires `user-trusted` first), uninstall (removes from registry and disk; gated).",
+    argsSchema: ExtensionManagerArgsSchema,
   },
-  approve_skill: {
+  hook_manager: {
     description:
-      "Promote a draft skill to `user-trusted`. Gated by `request_human_approval` — the user sees the skill description + draft path before approval.",
-    argsSchema: ApproveSkillArgsSchema,
-  },
-  uninstall_skill: {
-    description:
-      "Remove a skill from the registry + SkillMemoryRegistry + disk. Gated for any non-draft trust level.",
-    argsSchema: UninstallSkillArgsSchema,
-  },
-  reload_skills: {
-    description:
-      "Re-walk the skill install dirs and rebuild the in-memory `SkillRegistry`. Useful after hand-editing or copying skill folders in. Cheap.",
-    argsSchema: ReloadSkillsArgsSchema,
-  },
-  /* ----- Extension authoring (6, JS only) ----- */
-  create_extension: {
-    description:
-      "Author a new extension from a description. Writes `extension.json` + `main.js` to `<workspace>/.reaper/extensions/<id>/`. Extensions are JS-only (no TypeScript). The extension lands dormant as `project-untrusted` until `trust_extension` + `enable_extension` activate it.",
-    argsSchema: CreateExtensionArgsSchema,
-  },
-  validate_extension: {
-    description: "Run the extension's `validation.commands` (if any) and report exit codes. Does NOT activate the extension.",
-    argsSchema: ValidateExtensionArgsSchema,
-  },
-  enable_extension: {
-    description:
-      "Mark the extension `enabled` and run `default.activate(ctx)` via the HookRunner envelope. On success, copies the extension's tools into the live executor dispatch on the next turn. Requires the extension to be `user-trusted` first.",
-    argsSchema: EnableExtensionArgsSchema,
-  },
-  trust_extension: {
-    description: "Promote an extension from `project-untrusted` to `user-trusted`. Gated by `request_human_approval`.",
-    argsSchema: TrustExtensionArgsSchema,
-  },
-  uninstall_extension: {
-    description: "Remove an extension from the registry + disk. Gated by `request_human_approval`.",
-    argsSchema: UninstallExtensionArgsSchema,
-  },
-  reload_extensions: {
-    description:
-      "Re-walk the extension install dirs (built-in + user + project). Returns the count of loaded extensions. Use after hand-placing an extension folder.",
-    argsSchema: ReloadExtensionsArgsSchema,
-  },
-  /* ----- Hook authoring (6, event-driven) ----- */
-  create_hook: {
-    description:
-      "Author a new event hook from a description. Writes a draft `<scope-root>/.reaper/hooks/<id>.json`. Drafts are NOT registered on the live `HookRunner` — call `approve_hook` to compile + register. Hooks default to `enforce: false` (observation-only).",
-    argsSchema: CreateHookArgsSchema,
-  },
-  list_hooks: {
-    description:
-      "Read-only inventory of the hook registry: id, event, description, matcher, enforce flag, trust, compiled + registered flags. Use to check the live state before approving or updating.",
-    argsSchema: ListHooksArgsSchema,
-  },
-  update_hook: {
-    description:
-      "Re-compile and re-register a hook. Re-approval is required if `enforce` flips from false to true (the hook gains blocking power).",
-    argsSchema: UpdateHookArgsSchema,
-  },
-  approve_hook: {
-    description:
-      "Compile the hook's JS handler with `new Function('event', body)` and register on the live `HookRunner`. Gated by `request_human_approval` — the user sees the description, matcher, `enforce` flag, and the first 4KB of source before approval.",
-    argsSchema: ApproveHookArgsSchema,
-  },
-  uninstall_hook: {
-    description: "Remove a hook from disk + the live `HookRunner`. Gated by `request_human_approval` for non-draft hooks.",
-    argsSchema: UninstallHookArgsSchema,
-  },
-  reload_hooks: {
-    description: "Re-walk the hook install dirs and rebuild the in-memory hook registry. Useful after hand-editing.",
-    argsSchema: ReloadHooksArgsSchema,
+      "Author and manage event hooks. Actions: create (writes a draft `.reaper/hooks/<id>.json`; drafts are NOT registered on the live runner), list (read-only inventory: id, event, matcher, enforce, trust, compiled/registered flags), update (re-compile and re-register; re-approval required if `enforce` flips to true), approve (compiles with `new Function` and registers; gated — the user sees the description, matcher, enforce flag, and first 4KB of source), uninstall (removes from disk and the live runner; gated for non-drafts).",
+    argsSchema: HookManagerArgsSchema,
   },
   apply_patch_edit: {
     description:
@@ -352,14 +210,9 @@ export const toolRegistry = {
       "Find files matching a glob pattern without using bash. Supports patterns like 'src/tools/*.ts' or 'double-star recursive matching'. Returns matching file paths and count. Faster and more structured than 'bash find'.",
     argsSchema: GlobArgsSchema,
   },
-  eval: {
-    description:
-      "Evaluate a short JavaScript or Python code snippet and return the output. Faster than bash for small computations, counting, or AST probes. Supports timeout (default 10s, max 30s). Use 'javascript' (default) or 'python' language.",
-    argsSchema: EvalArgsSchema,
-  },
   job: {
     description:
-      "Unified facade over background processes already started by bash (run_in_background: true). Actions: list (all jobs), poll (read output), cancel (send signal), write (to stdin). jobId is the pid bash returned. Unifies read_background_output + signal_process + write_to_process. Cannot start processes — use bash for that.",
+      "Background processes already started by bash (run_in_background: true). Actions: list (all jobs), poll (read output), cancel (send signal), write (to stdin). jobId is the pid bash returned. Cannot start processes — use bash for that.",
     argsSchema: JobArgsSchema,
   },
   diagnostics: {
@@ -367,33 +220,63 @@ export const toolRegistry = {
       "Run post-write diagnostics (tsc, eslint) on a file and return results as advisory info. Never blocks the write — just reports. Use after editing a file to check for type or lint errors.",
     argsSchema: DiagnosticsArgsSchema,
   },
+  eval: {
+    description: EVAL_TOOL_DESCRIPTION,
+    argsSchema: EvalArgsSchema,
+  },
 } as const;
 
 /**
  * Tools always rendered with full schemas on every turn.
  * Everything else appears as a one-line name+description in the deferred list
  * until the model discovers it via search_tools.
+ *
+ * Eleven tools, chosen so a competent turn needs no discovery at all: find
+ * (glob), read (file_view), edit in place (file_edit), rewrite (write_file),
+ * search across files (grep_search), list (list_directory), run (bash),
+ * compose (eval), and see what changed (git_status / git_diff). `search_tools`
+ * is here because it is the escape hatch the other forty depend on — a
+ * deferred list you cannot query is a list you cannot use.
+ *
+ * Two promotions and two demotions, each deliberate:
+ * - `glob`, `git_status`, `git_diff` were on-demand and are not any more.
+ *   Every real coding turn touches them, and each discovery round trip costs a
+ *   model call to learn a schema the model already knows it needs.
+ * - `delete_file` and `file_find` moved out. Deleting is rare and irreversible
+ *   enough to deserve a discovery step, and `file_find` is a bounded window
+ *   with a recentre, which `file_view` with an explicit range already covers
+ *   without the viewport state.
+ *
+ * `eval` is core, and that is a deliberate reversal. It was withdrawn once —
+ * the version in the tree ran `node -e` in a child process, which is not a
+ * sandbox in any useful sense, and nothing about its description made a model
+ * reach for it at the right moments. It is back as Code Mode: a QuickJS
+ * interpreter with no host access except the tools the bridge hands it, and a
+ * description written to route rather than to impress. It is core because a
+ * tool that only works after the model has discovered it is a tool the model
+ * will not think to reach for when a task turns out to want a loop — and the
+ * decision to write a program instead of a dozen calls is exactly the decision
+ * that has to be available before the first call, not after the fifth.
  */
 export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
-  // ---- viewer (Phase 4: promoted to always-on so the model sees them every turn) ----
+  "bash",
   "file_view",
-  "file_scroll",
-  "file_find",
   "file_edit",
-  // ---- legacy fallbacks (Phase 4: demoted to on-demand; reach for the viewer equivalents) ----
-  "write_file",         // always-on: full-file rewrites for new files + intentional overrides
-  "delete_file",
+  "write_file",
+  "grep_search",
   "list_directory",
-  "grep_search",        // always-on: cross-file patterns
-  "bash",               // always-on: tests, git, installs only
+  "glob",
+  "git_status",
+  "git_diff",
+  "eval",
   "search_tools",
-  // scratchpad is on-demand: promote via search_tools or when the user
-  // prompt mentions it (selectGeneralAgentToolsForTurn). Do not nudge
-  // scratchpad from the system prompt — user request owns that.
 ]);
 
-// `read_file` and `replace_in_file` were removed entirely — legacy `read`,
-// `edit`, `edit_file`, and `replace` names alias to `file_view` / `file_edit`.
+// `read_file` and `replace_in_file` were removed entirely, and `view_file` and
+// `file_scroll` were folded into `file_view`. Legacy `read`, `view_file`, and
+// `file_scroll` spellings alias to `file_view`; `edit` and `replace` alias to
+// `file_edit`. `edit_file` is a tool of its own — multi-block search and
+// replace — and is not an alias of anything.
 
 export type ToolName = keyof typeof toolRegistry;
 
@@ -402,6 +285,16 @@ export type ToolName = keyof typeof toolRegistry;
  * turn (until the model promotes them via search_tools). Everything not in
  * CORE_TOOL_NAMES lands here automatically — MCP and extension tools are
  * added at runtime by their respective registries.
+ *
+ * The split is load-bearing in a way that is easy to get wrong.
+ * `renderAvailableTools` lists the *deferred* names and skips the core ones on
+ * the assumption that core tools are already attached to the request. So a core
+ * tool that gets narrowed off the wire is invisible in both directions: it is
+ * absent from the schemas, and absent from the inventory that would have told
+ * the model to go looking for it. Any code path that computes a reduced tool
+ * set for the wire must therefore build it *from* `CORE_TOOL_NAMES` rather than
+ * from a hand-written list — see `toCanonicalBuildFastStartTools` in
+ * `runtime/engine.ts`, which had exactly this bug.
  */
 export const ON_DEMAND_TOOL_NAMES: ReadonlySet<string> = new Set(
   Object.keys(toolRegistry).filter((name) => !CORE_TOOL_NAMES.has(name)),

@@ -203,7 +203,29 @@ test("end-to-end live validation: multi-file dev task with Pi-parity sessions", 
   const mainRequests = gateway.requests.filter((item) => item.source === "main_agent");
   assert.ok(mainRequests.length >= 3, `expected >=3 main_agent turns, got ${mainRequests.length}`);
   const sys0 = mainRequests[0]!.system;
-  assert.equal(sys0, MAIN_AGENT_SYSTEM_PROMPT_TEXT, "main agent receives canonical stable system prompt");
+  assert.equal(typeof sys0, "string", "the main agent request must carry a system message");
+  assert.ok(typeof sys0 === "string");
+  /*
+   * The caching invariant is about the *prefix*, not the whole string.
+   *
+   * The role prompt must be the first bytes of every request so a provider's
+   * prefix cache can hit on it; what follows it is the tool inventory, which is
+   * appended precisely because it is allowed to change mid-run — discovering a
+   * tool has to remove it from the "unlock this" list on the very next call.
+   * Asserting full equality would forbid that, and asserting only `startsWith`
+   * would let the prompt be rewritten in place as long as the new text happened
+   * to begin the same way, so the tail is pinned to the inventory exactly.
+   */
+  assert.ok(
+    sys0.startsWith(MAIN_AGENT_SYSTEM_PROMPT_TEXT),
+    "the canonical prompt must be the exact prefix of the system message",
+  );
+  const tail = sys0.slice(MAIN_AGENT_SYSTEM_PROMPT_TEXT.length);
+  assert.ok(
+    tail === "" || tail.startsWith("\n# Available tools\n"),
+    `only the tool inventory may follow the canonical prompt, got: ${JSON.stringify(tail.slice(0, 80))}`,
+  );
+  assert.match(tail, /# Available tools/, "the model must be told which tools exist beyond its schemas");
   for (const req of mainRequests) {
     assert.equal(req.system, sys0, "system bytes are byte-identical across turns");
   }

@@ -1,0 +1,202 @@
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import type { JsonRpcClient } from "@reaper/web-shared";
+import { CheckIcon, ChevronIcon } from "./icons.jsx";
+import {
+  isModelRunnable,
+  sendableProviders,
+  type CatalogModel,
+  type CatalogProvider,
+  type ModelCatalog,
+} from "./models.js";
+
+/* A NUL byte no model id or provider id can contain, so the joined key is
+ * unambiguous. Written as an escape rather than a literal byte: a raw NUL
+ * makes the file binary to grep, diff, and most editors. */
+const SEPARATOR = "\u0000";
+
+export function ModelPicker({ catalog, client, threadId, provider, model, turnActive, onSetup, onError }: {
+  catalog: ModelCatalog;
+  client: JsonRpcClient | undefined;
+  threadId: string | undefined;
+  provider: string | null | undefined;
+  model: string | null | undefined;
+  turnActive: boolean;
+  onSetup(): void;
+  onError(message: string): void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [query, setQuery] = useState("");
+  const [deferred, setDeferred] = useState<string>();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const id = useId();
+  const available = useMemo(() => sendableProviders(catalog.providers), [catalog.providers]);
+  const current = provider && model ? `${provider}${SEPARATOR}${model}` : "";
+  /*
+   * A thread with no model is not a thread with no model.
+   *
+   * The turn path falls back to the user's configured provider, so a thread
+   * that has never been pinned still runs on a real model — and the picker
+   * saying "Choose model" while a turn quietly succeeds on DeepInfra tells the
+   * user nothing is selected when something is. The server computes the same
+   * fallback it will use for the turn and sends it along, so this shows the
+   * model that will actually answer rather than a client-side guess.
+   */
+  const fallback = !current ? catalog.defaultSelection : null;
+  const currentLabel = model
+    ?? fallback?.model
+    ?? (available.length === 0 ? "Add provider" : "Choose model");
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent): void => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+
+  const change = async (value: string): Promise<void> => {
+    if (!client || !threadId || !value) return;
+    const [nextProvider, nextModel] = value.split(SEPARATOR);
+    if (!nextProvider || !nextModel) return;
+    setBusy(true);
+    try {
+      const result = await client.call<{ appliesTo?: string }>("thread/model/set", { threadId, provider: nextProvider, model: nextModel });
+      setDeferred(result.appliesTo === "nextTurn" ? nextModel : undefined);
+      setOpen(false);
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : "Could not change the model");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="model-picker" ref={rootRef}>
+      <button
+        className="model-trigger"
+        type="button"
+        disabled={busy || (available.length > 0 && !threadId)}
+        aria-haspopup={available.length > 0 ? "menu" : undefined}
+        aria-expanded={available.length > 0 ? open : undefined}
+        aria-controls={open ? id : undefined}
+        title={available.length === 0 ? "Set up a model provider" : `Model: ${currentLabel}`}
+        onClick={() => {
+          if (available.length === 0) onSetup();
+          else setOpen((value) => !value);
+        }}
+      >
+        <span className="model-trigger-label">{currentLabel}</span>
+        <span className="model-trigger-chevron" data-open={open || undefined}><ChevronIcon /></span>
+      </button>
+      {open && (
+        <div className="model-menu" id={id} role="menu" aria-label="Model for this thread">
+          {catalog.error && <div className="menu-error">{catalog.error}</div>}
+          <label className="model-search"><span className="sr-only">Search models</span><input type="search" value={query} placeholder="Search models" autoFocus onChange={(event) => setQuery(event.currentTarget.value)} /></label>
+          {available.map((entry) => (
+            <ProviderModelGroup
+              provider={entry}
+              catalog={catalog}
+              client={client}
+              query={query}
+              current={current}
+              busy={busy}
+              onChoose={(value) => void change(value)}
+              key={entry.providerId}
+            />
+          ))}
+        </div>
+      )}
+      {deferred && turnActive && <span className="model-note" role="status">{deferred} applies next turn</span>}
+    </div>
+  );
+}
+
+function ProviderModelGroup({ provider, catalog, client, query, current, busy, onChoose }: {
+  provider: CatalogProvider;
+  catalog: ModelCatalog;
+  client: JsonRpcClient | undefined;
+  query: string;
+  current: string;
+  busy: boolean;
+  onChoose(value: string): void;
+}) {
+  const modelQuery = useMemo(() => ({ providerId: provider.providerId, query }), [provider.providerId, query]);
+  const page = catalog.modelPage(modelQuery);
+  const { loadModels } = catalog;
+  useEffect(() => {
+    const timer = setTimeout(() => void loadModels(client, modelQuery), query ? 200 : 0);
+    return () => clearTimeout(timer);
+  }, [client, loadModels, modelQuery, query]);
+
+  // The selected model may sit outside the current page. Keep it visible so
+  // searching never makes the active choice look unset.
+  const selectedId = current.startsWith(`${provider.providerId}${SEPARATOR}`)
+    ? current.slice(provider.providerId.length + SEPARATOR.length)
+    : undefined;
+  /*
+   * The synthesised row is runnable and claims no capabilities.
+   *
+   * It stands for whatever the user already has selected, and it is replaced
+   * by the real entry as soon as the provider's page for that name loads.
+   * Deriving "unrunnable" from a missing field would disable the user's own
+   * current choice, which is the one row this exists to keep visible; the
+   * capability flags are only read by the composer's effort control, which
+   * gets them from the real metadata.
+   */
+  const rows: CatalogModel[] = selectedId && !page.models.some((model) => model.id === selectedId)
+    ? [{
+        id: selectedId,
+        name: selectedId,
+        status: "active",
+        supportsReasoning: false,
+        supportsAttachments: false,
+        supportsToolCalls: false,
+        runnable: true,
+        transportNpm: "",
+      }, ...page.models]
+    : page.models;
+
+  if (!page.loading && rows.length === 0) return null;
+  return (
+    <section className="model-group" role="group" aria-label={provider.label}>
+      <div className="model-group-title">{provider.label}</div>
+      {page.error && <div className="menu-error">{page.error}</div>}
+      {page.loading && rows.length === 0 && <div className="menu-status">Loading models…</div>}
+      {rows.map((model) => {
+        const value = `${provider.providerId}${SEPARATOR}${model.id}`;
+        const selected = value === current;
+        const runnable = isModelRunnable(model);
+        return (
+          <button
+            className="model-option"
+            data-selected={selected || undefined}
+            data-runnable={runnable ? undefined : "false"}
+            role="menuitemradio"
+            aria-checked={selected}
+            disabled={busy || !runnable}
+            key={model.id}
+            /*
+             * A disabled row with no explanation reads as a broken picker, so
+             * the reason travels in `title` — which is also what a screen
+             * reader announces for a disabled control.
+             */
+            title={runnable ? undefined : `Not available in this build: no ${model.transportNpm} transport`}
+            onClick={() => onChoose(value)}
+          >
+            <span>{model.id}</span>
+            <span className="model-check">
+              {!runnable ? <span className="model-unavailable">unavailable</span> : selected && <CheckIcon />}
+            </span>
+          </button>
+        );
+      })}
+      {page.nextCursor && (
+        <button className="model-option" type="button" disabled={page.loading} onClick={() => void loadModels(client, modelQuery, true)}>
+          <span>{page.loading ? "Loading…" : `Show more (${page.models.length} of ${page.total})`}</span>
+        </button>
+      )}
+    </section>
+  );
+}

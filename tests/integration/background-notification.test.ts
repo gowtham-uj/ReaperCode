@@ -36,8 +36,8 @@ test("background process can be started and read", async () => {
   // Read output (may be empty while running)
   const readResult = await executor.execute({
     id: "2",
-    name: "read_background_output",
-    args: { pid, lines: 10 },
+    name: "job",
+    args: { action: "poll", jobId: String(pid), lines: 10 },
   });
   assert.equal(readResult.ok, true);
   assert.equal((readResult.output as { status: string }).status, "running");

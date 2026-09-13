@@ -5,16 +5,39 @@ import { microcompact } from "../context/compaction/microcompact.js";
 import { resolveMentions } from "../context/mentions.js";
 import { prepareContext, type PreparedContext } from "../context/pruner.js";
 import { discoverSkills, formatSkillsForPrompt, type Skill } from "../context/skills.js";
+import { packagedSkills } from "../context/packaged-skills.js";
+import { readPinnedSkills, resolvePinnedSkills } from "../context/pinned-skills.js";
 import { searchTools } from "../context/tool-search.js";
 import { runMiddlewareChain, type MiddlewareDefinition } from "./middleware.js";
 import { getEnvironmentFingerprint, type EnvironmentFingerprint } from "./fingerprint.js";
 import type { ToolResult } from "../tools/types.js";
+import { readFileSync } from "node:fs";
 import { z } from "zod";
 import type { SwePrunerConfig } from "../context/swe-pruner.js";
 import { ProjectTrustStore, resolveProjectTrusted, type ProjectTrustResolution } from "../resources/project-trust.js";
 import { resolveResources, type ResolvedResources } from "../resources/resource-loader.js";
 import { DefaultResourcePackageManager } from "../resources/package-manager.js";
 import { loadContextFiles, type ContextFileLoadResult } from "../resources/context-files.js";
+
+/**
+ * Whether to skip the keyword pre-pass that pre-attaches tools to the wire.
+ *
+ * The pre-pass is an optimisation, not a mechanism: it looks at the user's
+ * prompt and promotes any tool the wording happens to match, so a well-phrased
+ * request arrives with the tool already attached and the model never has to go
+ * looking. That is the right default. It is also why the discovery path is
+ * hard to *test* — most prompts that would exercise `search_tools` never reach
+ * it, because the pre-pass got there first.
+ *
+ * Setting this turns the shortcut off so every deferred tool stays deferrable.
+ * Used by `scripts/verify-tool-discovery.mts` to prove the inventory →
+ * `search_tools` → schema route independently of the pre-pass. Not a
+ * product-facing option: nothing in the app sets it, and unset behaviour is
+ * unchanged.
+ */
+function toolPrePassDisabled(): boolean {
+  return process.env.REAPER_DISABLE_TOOL_PREPASS === "1";
+}
 
 export interface ContentPrepInput {
   workspaceRoot: string;
@@ -39,6 +62,21 @@ export interface ContentPrepResult {
   mentions: ReturnType<typeof resolveMentions>;
   skills: Skill[];
   skillsPrompt: string;
+  /**
+   * Skills whose full body is in this turn, without the model having asked.
+   *
+   * Two sources, and the field carries both because they are delivered the same
+   * way: a human typed `/name` at the head of the prompt, or the skill is
+   * pinned always-on in the user's settings. `pinned` is what tells them apart,
+   * and it matters to the reader of the transcript — "I asked for this" and
+   * "this is always here" are different facts about a turn.
+   *
+   * Carried on the result rather than folded into `skillsPrompt` so the
+   * cockpit can give it its own section and its own authority label: the other
+   * skills are names the model may ask about, these are instructions it has
+   * already been given.
+   */
+  invokedSkills: Array<{ name: string; body: string; pinned?: boolean }>;
   contextFiles: ContextFileLoadResult;
   environmentFingerprint: EnvironmentFingerprint;
   resourceTrust: ProjectTrustResolution & { diagnostics: string[] };
@@ -85,6 +123,78 @@ export function clearContentPrepCache(): void {
 
 export function contentPrepCacheSize(): number {
   return CONTENT_PREP_CACHE.length;
+}
+
+/**
+ * A skill a human named on the first line of their message, with its body.
+ *
+ * `/codemode` in the composer or in `reaper exec --prompt` means "start this
+ * turn with these instructions loaded", the same thing the model gets by
+ * calling `activate_skill` — and the same body, read through the same
+ * discovery walk, so the two cannot drift.
+ *
+ * Only the first token is considered, and only at the very start of the
+ * message. That is what keeps this from firing on prose: `/usr/bin is
+ * missing` and `run ls /tmp` both have a slash, and neither names a skill,
+ * but a rule that looked anywhere in the message would load a body for one
+ * of them the day somebody installed a skill called `usr`. A skill body is
+ * an instruction — the one thing here that must never arrive by accident.
+ *
+ * An unknown name resolves to nothing rather than an error. The message is
+ * still the user's message, and the model reads it either way; refusing the
+ * turn because a slash command was mistyped would be worse than ignoring it.
+ */
+function resolveInvokedSkill(prompt: string, skills: readonly Skill[]): Array<{ name: string; body: string }> {
+  const match = /^\s*\/([A-Za-z0-9._-]+)(?=\s|$)/.exec(prompt);
+  const name = match?.[1];
+  if (!name) return [];
+  /*
+   * Exact match first, then case-insensitive. Skill names are lowercase by
+   * schema, but a user-installed skill's name can come from its frontmatter or
+   * its folder, so the exact spelling is the one that must keep working.
+   */
+  const skill =
+    skills.find((candidate) => candidate.name === name) ??
+    skills.find((candidate) => candidate.name.toLowerCase() === name.toLowerCase());
+  if (!skill) return [];
+  /*
+   * Read the body from the file the summary the model was shown came from, so
+   * "which skill did I just load?" has one answer. Packaged skills are in the
+   * same list with the same field, which is why this does not need to know
+   * which half a skill came from.
+   *
+   * `disableModelInvocation` is honoured here too: a skill an operator has
+   * silenced must not become readable by typing its name.
+   */
+  if (skill.disableModelInvocation) return [];
+  const body = readSkillBody(skill.filePath);
+  // The skill's own name, not the spelling that was typed: everything
+  // downstream keys on it, and two spellings of one skill is a bug waiting.
+  return body ? [{ name: skill.name, body }] : [];
+}
+
+/**
+ * The markdown body of a skill file, frontmatter stripped. Never throws.
+ *
+ * Duplicated in `context/pinned-skills.ts` for the same reason it was written
+ * twice here rather than imported once: the two are the same four lines, and
+ * the alternative is a module depending on `runtime/` for a helper that has
+ * nothing to do with the runtime.
+ */
+function readSkillBody(filePath: string): string | undefined {
+  try {
+    const raw = readFileSync(filePath, "utf8");
+    const withoutFrontmatter = raw.startsWith("---\n")
+      ? (() => {
+          const end = raw.indexOf("\n---\n", 4);
+          return end === -1 ? raw : raw.slice(end + 5);
+        })()
+      : raw;
+    const body = withoutFrontmatter.trim();
+    return body.length > 0 ? body : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** FNV-1a 32-bit hash — fast, no crypto dep, plenty for a cache key. */
@@ -238,8 +348,35 @@ async function computeContentPrep(input: ContentPrepInput): Promise<ContentPrepR
         }).resolvePackageResourceInputs(),
       })
     : { extensions: [], skills: [], prompts: [], themes: [] };
-  const skills = resourceTrust.trusted ? discoverSkills(input.workspaceRoot) : [];
+  /*
+   * Packaged skills are merged in rather than gated on project trust.
+   *
+   * The trust gate is about *project* content: a `.reaper/skills` folder in a
+   * repo the user has not trusted is attacker-controlled text, and loading it
+   * would let a repository write the agent's instructions. A skill that ships
+   * inside the binary is neither project content nor attacker-controlled, and
+   * gating it on a workspace flag would mean the product's own skills are
+   * absent in exactly the fresh-workspace case they were written for.
+   */
+  const skills = [...packagedSkills(), ...(resourceTrust.trusted ? discoverSkills(input.workspaceRoot) : [])];
   const skillsPrompt = formatSkillsForPrompt(skills, input.prompt);
+  /*
+   * Two ways a body enters the turn without the model asking for it: a human
+   * typed `/name`, and a skill is pinned always-on. Both resolve against the
+   * *same* filtered list the model was offered, which is what keeps pinning
+   * from reaching past the project-trust gate that produced it.
+   *
+   * A skill that is both pinned and named in this turn appears once. The
+   * invocation is the more specific statement — the human said "this one, now"
+   * — so it keeps its position and its `user_instruction` authority, and the
+   * pin simply does not add a second copy.
+   */
+  const invoked = resolveInvokedSkill(input.prompt, skills);
+  const invokedNames = new Set(invoked.map((entry) => entry.name));
+  const pinned = resolvePinnedSkills(readPinnedSkills(userHome), skills)
+    .filter((entry) => !invokedNames.has(entry.name))
+    .map((entry) => ({ ...entry, pinned: true }));
+  const invokedSkills = [...invoked, ...pinned];
 
   const contextFiles = await loadContextFiles({
     workspaceRoot: input.workspaceRoot,
@@ -251,12 +388,15 @@ async function computeContentPrep(input: ContentPrepInput): Promise<ContentPrepR
     index,
     preparedContext,
     compactedHistory,
-    toolShortlist: searchTools(input.prompt, {
-      remainingTokenBudget: input.maxContextTokens,
-    }),
+    toolShortlist: toolPrePassDisabled()
+      ? []
+      : searchTools(input.prompt, {
+          remainingTokenBudget: input.maxContextTokens,
+        }),
     mentions,
     skills,
     skillsPrompt,
+    invokedSkills,
     contextFiles,
     resourceTrust,
     resources,
@@ -272,6 +412,7 @@ async function computeContentPrep(input: ContentPrepInput): Promise<ContentPrepR
     mentions: z.object({ fileMentions: z.array(z.string()), symbolMentions: z.array(z.string()) }),
     skills: z.array(z.any()),
     skillsPrompt: z.string(),
+    invokedSkills: z.array(z.any()),
     contextFiles: z.any(),
     resourceTrust: z.any(),
     resources: z.any(),

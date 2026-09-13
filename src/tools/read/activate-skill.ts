@@ -3,8 +3,12 @@ import path from "node:path";
 import { existsSync } from "node:fs";
 import os from "node:os";
 
+import { readDisabledSkills } from "../../context/pinned-skills.js";
 import { SkillMemoryRegistry } from "../../adaptive/skill-memory-registry.js";
-import { readDisabledMarker } from "../../skills/discovery.js";
+import { builtinSkillsRoot } from "../../skills/built-in/index.js";
+import { discoverSkills, readDisabledMarker } from "../../skills/discovery.js";
+import { TrustResolver } from "../../skills/trust.js";
+import type { InstalledSkillRecord } from "../../skills/types.js";
 
 /**
  * Simple frontmatter stripper.
@@ -137,25 +141,91 @@ async function resolveSkillFile(
   return null;
 }
 
+export function activationSkillDirs(
+  workspaceRoot: string,
+  userHome = os.homedir(),
+): string[] {
+  // Keep activation aligned with discovery and preserve its precedence:
+  // project overrides user, and an explicitly packaged built-in is the
+  // final fallback. The built-in root is intentionally empty today.
+  return [
+    path.join(workspaceRoot, ".reaper", "skills"),
+    path.join(userHome, ".reaper", "skills"),
+    builtinSkillsRoot(),
+  ];
+}
+
+/**
+ * Look a skill up in the on-disk discovery walk.
+ *
+ * `SkillMemoryRegistry` is the older, persisted half of the system: it is
+ * synced from discovery by whoever boots a `SkillRegistry`, and the CLI is
+ * currently the only thing that does. A long-lived app-server therefore holds
+ * an index snapshot taken whenever a CLI last ran, so a skill that ships with
+ * the product — or one added to `~/.reaper/skills` since — is *on disk and
+ * discoverable* while the index has never heard of it. Going to the source
+ * removes the boot-order dependency without removing the allowlist: the walk
+ * only ever yields folders with a valid `skill.json`, which is exactly the
+ * gate the registry was there to provide.
+ */
+function findDiscoveredSkill(workspaceRoot: string, name: string): { record: InstalledSkillRecord; filePath: string } | null {
+  const userHome = os.homedir();
+  const projectSkillsDir = path.join(workspaceRoot, ".reaper", "skills");
+  const userHomeSkillsDir = path.join(userHome, ".reaper", "skills");
+  const builtinRoot = builtinSkillsRoot();
+  const discovered = discoverSkills({
+    builtinRoot,
+    userHomeSkillsDir,
+    projectSkillsDir,
+    workspaceRoot,
+    resolver: new TrustResolver({ builtinRoot, userHomeSkillsDir, projectSkillsDir }),
+    // A skill the user switched off must not be activatable by name from the
+    // model. Without this the settings list would only affect what is offered
+    // — and a model that remembers a name from an earlier turn could still
+    // pull the body.
+    disabledNames: new Set(readDisabledSkills()),
+  });
+  const record = discovered.records.find((entry) => entry.manifest.name === name);
+  if (!record) return null;
+  // The body lives at `<skillDir>/SKILL.md`. Reading it through the record's
+  // own directory (rather than re-resolving by name) means the file we open is
+  // the one discovery actually accepted.
+  return { record, filePath: path.join(record.skillDir, "SKILL.md") };
+}
+
 export async function activateSkillTool(workspaceRoot: string, args: { name: string }) {
   const name = validateSkillName(args?.name);
+  const skillDirs = activationSkillDirs(workspaceRoot);
 
-  // Align the scanned directories with what skill discovery actually
-  // enumerates (project-local and user-home `.reaper/skills`). The old
-  // extra roots (`.opencode`, `.pi`, bare `skills`) were never
-  // enumerated by discovery, so a body living there would bypass the
-  // trust/disable gate — the exact divergence S4 flags.
-  const skillDirs = [
-    path.join(workspaceRoot, ".reaper", "skills"),
-    path.join(os.homedir(), ".reaper", "skills"),
-  ];
-
-  // Registry allowlist: a skill must be registered before we will
-  // hand back its body. This prevents a model from activating
-  // arbitrary markdown that happens to live on disk.
+  /*
+   * Registry allowlist: a skill must be registered before we will hand back
+   * its body. This prevents a model from activating arbitrary markdown that
+   * happens to live on disk. The index is consulted first because it carries
+   * the persisted disable/trust state; discovery is the fallback for a skill
+   * that exists on disk but predates the last index sync.
+   */
   const registry = new SkillMemoryRegistry({ workspaceRoot });
+
+  /*
+   * The user's own switch, checked first and independently of both paths below.
+   *
+   * This has to be a separate check rather than folded into the record flags,
+   * because the two sources of truth disagree by construction: the settings
+   * list is written by `skill disable` in this process's settings file, while
+   * `SkillMemoryRegistry` serves `disableModelInvocation` from an index that
+   * was synced earlier — often by a different process, often before the user
+   * switched the skill off. Guarding only the discovered path left the hole
+   * that mattered: a skill present in the index took the `registered` branch
+   * and its body was returned even with the name sitting in the disabled list.
+   */
+  if (readDisabledSkills().includes(name)) {
+    throw new Error(`Skill '${name}' is switched off in Reaper's settings and cannot be activated.`);
+  }
+
   const registered = registry.getSkill(name);
-  if (!registered) {
+  const discovered = registered ? null : findDiscoveredSkill(workspaceRoot, name);
+
+  if (!registered && !discovered) {
     throw new Error(
       `Skill '${name}' is not registered in the SkillMemoryRegistry. ` +
         `Only skills registered in the registry may be activated.`,
@@ -167,19 +237,38 @@ export async function activateSkillTool(workspaceRoot: string, args: { name: str
   // set, refuse to surface the body to the model. The flag encodes
   // both trust (untrusted skills are persisted with it set) and an
   // explicit `skill disable`.
-  if (registered.disableModelInvocation === true || registered.disableAutoInvocation === true) {
+  if (registered && (registered.disableModelInvocation === true || registered.disableAutoInvocation === true)) {
     throw new Error(
       `Skill '${name}' has disableModelInvocation=true and cannot be activated.`,
     );
   }
 
-  const resolved = await resolveSkillFile(name, skillDirs);
+  /*
+   * The same guard for the discovery path, derived from the record rather than
+   * from the index: trust below accepted, or an explicit disable, means the
+   * body is not model-readable. This is the rule `recordToReaperSkill` applies
+   * when it syncs an index entry, applied one step earlier.
+   */
+  if (discovered) {
+    const { record } = discovered;
+    const accepted = record.trust === "builtin" || record.trust === "user-trusted" || record.trust === "extension-inherited";
+    if (record.disabled === true || !accepted) {
+      throw new Error(`Skill '${name}' has disableModelInvocation=true and cannot be activated.`);
+    }
+  }
+
+  const resolved = discovered
+    ? { filePath: discovered.filePath, realPath: await realpath(discovered.filePath) }
+    : await resolveSkillFile(name, skillDirs);
   if (!resolved) {
     throw new Error(
       `Skill '${name}' is registered in the registry but no on-disk file was found ` +
         `in any of the skill directories: ${skillDirs.join(", ")}.`,
     );
   }
+  // A discovered record's path is trusted because discovery built it from the
+  // walk's own roots; a name-resolved path is not, and keeps its symlink check.
+  if (discovered) await assertInsideAllowedDirs(resolved.realPath, skillDirs);
 
   // Defense-in-depth: honor the on-disk `disabled` marker even if the
   // registry index has not been re-synced since the disable. The

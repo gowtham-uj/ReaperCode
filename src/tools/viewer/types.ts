@@ -22,14 +22,6 @@ export const FileViewArgsSchema = z
   })
   .strict();
 
-export const FileScrollArgsSchema = z
-  .object({
-    path: NonEmptyPath,
-    direction: z.enum(["up", "down", "top", "bottom"]),
-    lines: z.number().int().positive().max(500).optional(),
-  })
-  .strict();
-
 export const FileFindArgsSchema = z
   .object({
     path: NonEmptyPath,
@@ -44,6 +36,14 @@ export const FileEditArgsSchema = z
     start_line: z.number().int().positive(),
     end_line: z.number().int().positive(),
     new_content: z.string(),
+    /**
+     * The exact text currently occupying `start_line..end_line`. When supplied,
+     * the edit only applies if the file still reads that way there; otherwise
+     * the range is relocated to the unique occurrence of this text, or the edit
+     * is refused. Line numbers drift after every prior edit, so an unanchored
+     * edit silently lands in the wrong place.
+     */
+    expected_content: z.string().optional(),
     /** Optional model-supplied rationale; ignored by execution. */
     reason: z.string().optional(),
   })
@@ -53,7 +53,6 @@ export const FileEditArgsSchema = z
   });
 
 export type FileViewArgs = z.infer<typeof FileViewArgsSchema>;
-export type FileScrollArgs = z.infer<typeof FileScrollArgsSchema>;
 export type FileFindArgs = z.infer<typeof FileFindArgsSchema>;
 export type FileEditArgs = z.infer<typeof FileEditArgsSchema>;
 
@@ -72,6 +71,8 @@ export const FileViewResultSchema = z
     mtimeMs: z.number().nonnegative(),
     truncated: z.boolean(),
     window: z.array(z.string()),
+    /** Present when the viewer auto-advanced past an already-read window. */
+    note: z.string().optional(),
   })
   .strict();
 
@@ -113,6 +114,10 @@ export const FileEditResultSchema = z
     totalLines: z.number().int().nonnegative(),
     window: z.array(z.string()),
     lintVerdict: LintVerdictSchema,
+    /** Set when `expected_content` matched elsewhere and the range was moved. */
+    relocatedFrom: z.object({ startLine: z.number().int().positive(), endLine: z.number().int().positive() }).optional(),
+    /** Set when the lint verdict failed and nothing was written. */
+    rolledBack: z.boolean().optional(),
   })
   .strict();
 
@@ -175,6 +180,7 @@ export const VIEWER_ERROR_CODES = [
   "not_found",
   "invalid_argument",
   "permission_denied",
+  "stale_range",
   "lint_failed",
   "lint_unavailable",
   "io_error",

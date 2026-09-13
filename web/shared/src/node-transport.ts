@@ -1,9 +1,9 @@
 /**
  * Node `ws` adapter for `JsonRpcClient`.
  *
- * Used by the test fixture and by the BFF's connection to the app-server.
- * Kept in its own module so browser bundles never pull `ws` in — `index.ts`
- * deliberately does not re-export it.
+ * Used by the test fixture's connection to the app-server. Kept in its own
+ * module so browser bundles never pull `ws` in — `index.ts` deliberately does
+ * not re-export it.
  */
 
 import type { JsonRpcTransport } from "./jsonrpc-client.js";

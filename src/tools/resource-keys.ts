@@ -49,9 +49,7 @@ function dirKey(target: string | undefined): string[] {
 export function declaredResourcesForToolCall(call: ToolCall): ResourceKeys {
   const args = asRecord(call.args);
   switch (call.name) {
-    case "view_file":
     case "file_view":
-    case "file_scroll":
     case "file_find":
     case "skim_file":
       return { declared: true, keys: fileKey(stringArg(args, "path")) };
@@ -80,7 +78,17 @@ export function declaredResourcesForToolCall(call: ToolCall): ResourceKeys {
       return kind === "shell_non_barrier" ? EMPTY_RESOURCE_KEYS : { declared: false, keys: ["shell:barrier"] };
     }
 
-      return EMPTY_RESOURCE_KEYS;
+    /*
+     * `eval` reports the same barrier key as `bash`, and it is the same claim:
+     * "the workspace this call observes is only well-defined once everything
+     * staged is on disk, and anything staged after it must wait." `declared:
+     * false` is the half that does the work in the optimizer — it stops a
+     * script from being folded into a parallel island with the reads and
+     * writes around it. The key is what stops two barriers from being treated
+     * as independent.
+     */
+    case "eval":
+      return { declared: false, keys: ["shell:barrier"] };
 
     default:
       return { declared: false, keys: [`tool:${call.name}`] };

@@ -8,6 +8,7 @@ import path from "node:path";
 import { ToolExecutor } from "../../src/tools/executor.js";
 import { getReaperScratchpadPaths } from "../../src/workspace/scratchpad.js";
 import { createTempWorkspace } from "../fixtures/workspace.js";
+import { outputOf } from "../helpers/tool-output.js";
 
 async function createExecutor(workspaceRoot: string) {
   return new ToolExecutor({
@@ -31,24 +32,35 @@ test("file_view reads actual workspace content", async () => {
   });
 
   assert.equal(result.ok, true);
-  const output = JSON.parse(result.output as string) as { window: string[] };
+  const output = outputOf<{ window: string[] }>(result);
   assert.match(output.window.join("\n"), /Temp Workspace/);
 });
 
-test("view_file reads a bounded file window", async () => {
+test("file_view reads a bounded file window", async () => {
   const workspaceRoot = await createTempWorkspace();
   const executor = await createExecutor(workspaceRoot);
 
   const result = await executor.execute({
     id: "view-1",
-    name: "view_file",
-    args: { path: "src/app.ts", startLine: 1, endLine: 1 },
+    name: "file_view",
+    args: { path: "src/app.ts", start_line: 1, window: 1 },
   });
 
   assert.equal(result.ok, true);
-  assert.equal((result.output as { startLine: number; endLine: number }).startLine, 1);
-  assert.equal((result.output as { startLine: number; endLine: number }).endLine, 1);
-  assert.match(String((result.output as { content: string }).content), /^1: /);
+  // The viewer returns its window as a value, and it describes the window with
+  // `startLine`/`endLine`/`window`. Both the request's `window` and the
+  // result's `endLine` are counts, not a range: `window` is how many lines to
+  // return and `endLine` is exclusive, so a 1-line window starting at line 1
+  // ends at 2.
+  const output = outputOf<{
+    startLine: number;
+    endLine: number;
+    window: string[];
+  }>(result);
+  assert.equal(output.startLine, 1);
+  assert.equal(output.endLine, 2);
+  assert.equal(output.window.length, 1);
+  assert.match(output.window[0] ?? "", /^1: /);
 });
 
 test("list_directory lists actual entries", async () => {
@@ -370,12 +382,19 @@ test("background shell processes are logged and cleaned as process groups", asyn
     assert.equal(start.ok, true);
     const startOutput = start.output as { pid: number; logPath: string };
     assert.equal(typeof startOutput.pid, "number");
-    assert.match(startOutput.logPath, /\.reaper\/logs\/run-1\/artifacts\/processes\/bg\.log$/);
+    /*
+     * `sessions/`, not the pre-rename `logs/`. The directory a run's state
+     * lives in was renamed and `artifactDir` follows it; this literal was the
+     * last place still asserting the old one, so it failed the moment the
+     * rename landed and would have passed forever if the rename had gone the
+     * other way.
+     */
+    assert.match(startOutput.logPath, /\.reaper\/sessions\/run-1\/artifacts\/processes\/bg\.log$/);
 
     const read = await executor.execute({
       id: "read-bg",
-      name: "read_background_output",
-      args: { pid: startOutput.pid, waitForMatch: "server-ready", lines: 10 },
+      name: "job",
+      args: { action: "poll", jobId: String(startOutput.pid), lines: 10 },
     });
     assert.equal(read.ok, true);
     assert.match(String((read.output as { output: string }).output), /server-ready/);

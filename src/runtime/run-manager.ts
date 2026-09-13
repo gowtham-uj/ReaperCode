@@ -3,7 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { AgentRequestEnvelope } from "../connection/schemas.js";
-import { getReaperScratchpadPaths } from "../workspace/scratchpad.js";
+import { getNewReaperSessionDir, getReaperScratchpadPaths } from "../workspace/scratchpad.js";
 import { isReaperDevMode } from "./dev-mode.js";
 
 export interface ReaperRunContext {
@@ -29,7 +29,7 @@ export function createReaperRunContext(
     readMetadataString(request.metadata, "session");
   const requestTraceId = typeof request.trace_id === "string" ? request.trace_id : undefined;
   // Named sessions and anonymous exec runs share one layout:
-  //   .reaper/logs/<id>/...
+  //   .reaper/sessions/<id>/...
   // Named session id = user-provided name; exec id = generated run id.
   const runId =
     resumeRunId ??
@@ -37,8 +37,13 @@ export function createReaperRunContext(
     (namedSession && /^[a-zA-Z0-9_.-]{1,128}$/.test(namedSession) ? namedSession : undefined) ??
     (isPlaceholderRunId(requestTraceId) ? createRunId() : requestTraceId ?? createRunId());
   const sessionId = isPlaceholderSessionId(request.session_id) ? `session-${runId}` : request.session_id;
-  const scratchpad = getReaperScratchpadPaths(workspaceRoot);
-  const runDir = path.join(scratchpad.logs, runId);
+  /*
+   * New runs always use `.reaper/sessions`. `getReaperLogDir` has a legacy
+   * fallback for opening an old thread, and using it here would make the
+   * existence of `.reaper/logs/<id>` decide where a *new* run writes — which is
+   * exactly the migration split the explicit new-path helper exists to avoid.
+   */
+  const runDir = getNewReaperSessionDir(workspaceRoot, runId);
   return {
     runId,
     sessionId,
@@ -54,10 +59,10 @@ export async function ensureReaperRunContext(context: ReaperRunContext, request:
   try {
     if (!isReaperDevMode()) {
       // Keep the directory reserved for session.jsonl; skip dev metadata.
-      await mkdir(context.runDir, { recursive: true });
+      await mkdir(context.runDir, { recursive: true, mode: 0o700 });
       return;
     }
-    await mkdir(context.artifactsDir, { recursive: true });
+    await mkdir(context.artifactsDir, { recursive: true, mode: 0o700 });
     await writeFile(
       path.join(context.runDir, "manifest.json"),
       JSON.stringify(
@@ -117,7 +122,7 @@ export function translateRunContextFsError(error: unknown, context: ReaperRunCon
 
 export async function writeLatestRunPointer(workspaceRoot: string, context: ReaperRunContext): Promise<void> {
   const scratchpad = getReaperScratchpadPaths(workspaceRoot);
-  await mkdir(scratchpad.root, { recursive: true });
+  await mkdir(scratchpad.root, { recursive: true, mode: 0o700 });
   await writeFile(
     path.join(scratchpad.root, "latest-run.json"),
     JSON.stringify(

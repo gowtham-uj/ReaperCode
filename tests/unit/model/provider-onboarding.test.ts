@@ -42,7 +42,17 @@ test("provider-onboarding: SUPPORTED_PROVIDERS mirrors the catalog (data-driven)
   }
   for (const p of SUPPORTED_PROVIDERS) {
     assert.ok(p.envVar.length > 0, `envVar for ${p.id} is empty`);
-    assert.ok(p.baseUrl.startsWith("https://"), `baseUrl for ${p.id} not https`);
+    // SDK-backed providers (@ai-sdk/groq, @ai-sdk/mistral, …) advertise no
+    // API base URL because their package owns the endpoint. Locally hosted
+    // providers (LM Studio and friends) legitimately use loopback http, and a
+    // few resolve their host from an environment variable at connect time.
+    // Everything reached over a real network must be https.
+    const loopback = /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(p.baseUrl);
+    const templated = p.baseUrl.startsWith("${");
+    assert.ok(
+      p.baseUrl === "" || p.baseUrl.startsWith("https://") || loopback || templated,
+      `baseUrl for ${p.id} is neither https nor loopback: ${p.baseUrl}`,
+    );
     assert.ok(p.models.length > 0, `no models listed for ${p.id}`);
   }
 });

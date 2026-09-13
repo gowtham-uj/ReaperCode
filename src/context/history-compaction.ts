@@ -85,7 +85,7 @@ function traditionalCompact(input: HistoryCompactionInput): CompactedHistory {
         ...(latestFailureSummary ? [latestFailureSummary] : []),
         ...compactRepeatedObservations(
           input.toolResults.map((result, index) => {
-            const isStale = index < lastWriteIndex && ["file_view", "file_scroll", "file_find", "view_file", "list_directory", "grep_search", "skim_file"].includes(result.name);
+            const isStale = index < lastWriteIndex && ["file_view", "file_find", "list_directory", "grep_search", "skim_file"].includes(result.name);
             const prefix = isStale ? "[STALE Observation]" : "[Observation]";
             return `${prefix} ${summarizeToolResult(result, 600)}`;
           }),
@@ -115,7 +115,7 @@ function traditionalCompact(input: HistoryCompactionInput): CompactedHistory {
   compacted = compactRepeatedObservations(
     truncatedMiddle.map((result, idx) => {
       const actualIdx = idx + (middlePart.length - truncatedMiddle.length) + firstCount;
-      const isStale = actualIdx < lastWriteIndex && ["file_view", "file_scroll", "file_find", "view_file", "list_directory", "grep_search", "skim_file"].includes(result.name);
+      const isStale = actualIdx < lastWriteIndex && ["file_view", "file_find", "list_directory", "grep_search", "skim_file"].includes(result.name);
       const prefix = isStale ? "[STALE Observation]" : "[Observation]";
       return `${prefix} ${summarizeToolResult(result, 600)}`;
     }),
@@ -173,7 +173,7 @@ function summarizeFileOps(results: ToolResult[]): string | undefined {
     const args = result.args && typeof result.args === "object" ? (result.args as Record<string, unknown>) : {};
     const path = typeof args.path === "string" ? args.path : undefined;
     if (!path) continue;
-    if (["file_view", "file_scroll", "file_find", "view_file", "skim_file"].includes(result.name)) read.add(path);
+    if (["file_view", "file_find", "skim_file"].includes(result.name)) read.add(path);
     if (["write_file", "file_edit", "edit_file"].includes(result.name)) modified.add(path);
     if (result.name === "delete_file") deleted.add(path);
   }
@@ -357,7 +357,7 @@ function renderOutputForModel(
 
 function renderCompactOutputForModel(output: unknown, result: ToolResult, maxChars: number): Record<string, unknown> {
   const metadata = output && typeof output === "object" ? extractModelMetadata(output as Record<string, unknown>) : {};
-  if ((result.name === "file_view" || result.name === "view_file") && output && typeof output === "object") {
+  if (result.name === "file_view" && output && typeof output === "object") {
     const record = output as Record<string, unknown>;
     const path = typeof record.path === "string" ? record.path : metadata.path;
     const startLine = record.startLine;

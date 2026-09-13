@@ -21,7 +21,6 @@ import { executeBashCommand, bashCommandToModelOutput, isBackgroundBashResult, t
 import type { BashExecutionResult } from "./bash/index.js";
 import { normalizeToolCall } from "./normalize.js";
 import { grepSearchTool } from "./read/grep-search.js";
-import { getToolOutputTool } from "./read/get-tool-output.js";
 import { listDirectoryTool } from "./read/list-directory.js";
 import { readFileTool, renderTextReadResult, type ReadFileToolResult } from "./read/read-file.js";
 import { skimFileTool } from "./read/skim-file.js";
@@ -29,24 +28,25 @@ import { inspectEnvironmentTool } from "./read/inspect-env.js";
 import { activateSkillTool } from "./read/activate-skill.js";
 import { webSearchTool, type WebSearchArgs } from "./read/web-search.js";
 import { ComputerBrowserController } from "./browser/computer-browser.js";
-import { NativeComputerController, type NativeComputerToolName } from "./computer/native-computer.js";
-import { toolRegistry } from "./registry.js";
-import { assertDeletablePath, deleteFileTool } from "./write/delete-file.js";
+import { CORE_TOOL_NAMES, toolRegistry } from "./registry.js";
+import { assertDeletablePath, assertDeletableTarget, deleteFileTool } from "./write/delete-file.js";
 import { applyEditFileContent, editFileTool } from "./write/edit-file.js";
 import { writeFileTool } from "./write/write-file.js";
 import { executeSearchTools } from "./write/search-tools.js";
 import { executeApplyPatch } from "./apply-patch.js";
 import { executeGlob } from "./glob.js";
-import { executeEval } from "./eval.js";
 import { executeJob } from "./job.js";
 import { executeDiagnostics } from "./diagnostics.js";
+import { evaluateScript } from "./eval.js";
+import { ReaperToolBridge, type CodeModelRunner } from "./code/bridge.js";
+import type { CodeModelDescriptor, CodeOutputChunk, CodeToolCallRecord } from "./code/types.js";
 import { webFetchTool } from "./read/web-fetch.js";
 import { executeScratchpad } from "./memory/scratchpad.js";
 import type { Hooks } from "../adaptive/hooks.js";
 import { ToolCallSchema, type ToolCall, type ToolResult, type ExecutionEvent } from "./types.js";
 import { countFileLines } from "../workspace/roots.js";
 import type { ReaperConfig } from "../config/model-config.js";
-import { ensureReaperScratchpad, getReaperScratchpadPaths } from "../workspace/scratchpad.js";
+import { getReaperScratchpadPaths } from "../workspace/scratchpad.js";
 import { normalizeWorkspacePath, relativeWorkspacePath } from "../policy/paths.js";
 import { BackgroundProcessManager } from "./background-process-manager.js";
 import { createCheckpoint, restoreCheckpoint } from "../runtime/checkpoints.js";
@@ -109,6 +109,18 @@ export interface ToolExecutorOptions {
   trustedSandbox?: boolean;
   /** Sandbox mode. When set, SandboxPolicy gates mutating tools/shell. */
   sandboxMode?: SandboxMode;
+  /**
+   * Tool names this thread has switched off.
+   *
+   * The engine already withholds these from the model's tool array, which
+   * covers a model that chooses what to call. It does not cover a call that
+   * arrives some other way — a transcript recorded before the tool was
+   * switched off, or a model that invents a name it saw in an earlier turn —
+   * so the same set is enforced here, at the point where a call becomes an
+   * action. Withholding a capability and then honouring it anyway is the one
+   * outcome the setting exists to prevent.
+   */
+  disabledTools?: ReadonlySet<string>;
   trajectoryLogger?: TrajectoryLogger;
   auditLogger?: AuditLogger;
   recoverySession?: RecoverySession;
@@ -120,10 +132,29 @@ export interface ToolExecutorOptions {
   approvalRequester?: ToolApprovalRequester;
   abortSignal?: AbortSignal;
   /**
+   * Where a Code Mode script's `models.call()` goes.
+   *
+   * Optional, and deliberately not part of `ReaperConfig`: this is the live
+   * per-run gateway carrying the turn's resolved credentials, not a setting.
+   * Absent — in tests, and in any run with no model behind it — the `models`
+   * surface is simply not bound inside a script, so a fixture never has to
+   * stub a provider to run an eval that does not call one.
+   */
+  codeModelRunner?: CodeModelRunner;
+  /**
+   * The models to advertise to `models.list()`, paired with `codeModelRunner`.
+   *
+   * Both or neither: a runner with no catalogue would let a script call a model
+   * it cannot discover, and a catalogue with no runner would advertise models
+   * that fail on first use. The engine supplies both from the turn's resolved
+   * provider and the shared catalog.
+   */
+  codeModels?: readonly CodeModelDescriptor[];
+  /**
    * Workflow 3: optional allowlist forwarded to the child-env builder
-   * for any Reaper-spawned child (foreground bash, background bash,
-   * JavaScript eval, Python eval). Names on this list survive even
-   * when the sensitive-name classifier would otherwise strip them.
+   * for any Reaper-spawned child (foreground bash, background bash).
+   * Names on this list survive even when the sensitive-name classifier
+   * would otherwise strip them.
    * Default `[]`. Use only when a command intentionally needs a
    * specific sensitive variable; never enable by default.
    */
@@ -153,28 +184,15 @@ export interface ToolExecutorOptions {
 /**
  * Backdoor hooks for the authoring tools. Each field is independently
  * optional so the executor can dispatch whatever the runtime wired.
+ *
+ * One entry per tool, not per action: the manager handlers dispatch on
+ * `action` internally, so the wiring layer stays a flat three-way map and the
+ * per-action switch lives next to the lifecycle classes it calls.
  */
 export interface AuthoringToolDeps {
-  /** Skill authoring (5 tools). */
-  handleCreateSkill?: (args: unknown) => Promise<unknown>;
-  handleTestSkill?: (args: unknown) => Promise<unknown>;
-  handleApproveSkill?: (args: unknown) => Promise<unknown>;
-  handleUninstallSkill?: (args: unknown) => Promise<unknown>;
-  handleReloadSkills?: (args: unknown) => unknown;
-  /** Extension authoring (6 tools). */
-  handleCreateExtension?: (args: unknown) => Promise<unknown>;
-  handleValidateExtension?: (args: unknown) => Promise<unknown>;
-  handleEnableExtension?: (args: unknown) => Promise<unknown>;
-  handleTrustExtension?: (args: unknown) => Promise<unknown>;
-  handleUninstallExtension?: (args: unknown) => Promise<unknown>;
-  handleReloadExtensions?: (args: unknown) => unknown;
-  /** Hook authoring (6 tools). */
-  handleCreateHook?: (args: unknown) => Promise<unknown>;
-  handleListHooks?: (args: unknown) => unknown;
-  handleUpdateHook?: (args: unknown) => Promise<unknown>;
-  handleApproveHook?: (args: unknown) => Promise<unknown>;
-  handleUninstallHook?: (args: unknown) => Promise<unknown>;
-  handleReloadHooks?: (args: unknown) => unknown;
+  handleSkillManager?: (args: unknown) => Promise<unknown>;
+  handleExtensionManager?: (args: unknown) => Promise<unknown>;
+  handleHookManager?: (args: unknown) => Promise<unknown>;
 }
 
 export type ShellRunner = (
@@ -228,11 +246,29 @@ function isStableSnapshot(before: FreshnessSnapshot, after: FreshnessSnapshot): 
  * Maximum stdout length (in characters) that the executor returns inline.
  * Anything larger is written to a file under `<workspace>/.reaper/spillover/<callId>.log`
  * and the inline stdout is replaced with a short summary pointing at the path.
- * This is the OpenCode / Hermes pattern: large outputs are spilled to disk so
+ * Large outputs are spilled to disk so
  * the next model call's prompt stays small, and the model can grep the file
  * instead of re-running the command.
  */
 const TOOL_RESULT_STDOUT_SPILLOVER_THRESHOLD = 8_192; // 8KB
+
+/**
+ * How one piece of live sandbox output reads in the transcript.
+ *
+ * The console kinds are already distinguishable by their own label, so they
+ * pass through as written. The two that are not `console` calls need a word in
+ * front or a reader cannot tell a tool crossing from something the script
+ * printed — and telling those apart is the whole reason the stream exists.
+ */
+function narration(chunk: CodeOutputChunk): string {
+  const line = chunk.text.endsWith("\n") ? chunk.text : `${chunk.text}\n`;
+  if (chunk.kind === "tool") return `\u2192 ${line}`;
+  if (chunk.kind === "error") return `! ${line}`;
+  return line;
+}
+
+/** Shared empty set, so the common nothing-disabled path allocates nothing. */
+const EMPTY_DISABLED_TOOLS: ReadonlySet<string> = new Set<string>();
 const TOOL_RESULT_STDOUT_INLINE_PREVIEW_CHARS = 1_200;
 
 export async function spillLargeToolResult(
@@ -299,8 +335,8 @@ export class ToolExecutor {
   private readonly fileWriteCounts = new Map<string, number>();
   private localRulesHash?: string;
   private readonly backgroundProcessManager: BackgroundProcessManager;
+  private unsubscribeBackgroundOutput: (() => void) | undefined;
   private computerBrowserController: ComputerBrowserController | undefined;
-  private nativeComputerController: NativeComputerController | undefined;
   private currentWorkingDirectory: string;
   private consecutiveUnknownTools = 0;
   private lastUnknownToolName?: string;
@@ -317,7 +353,16 @@ export class ToolExecutor {
   private readonly recentTools: string[] = [];
 
   constructor(private readonly options: ToolExecutorOptions) {
-    void ensureReaperScratchpad(options.workspaceRoot);
+    /*
+     * Do not create the whole `.reaper` tree here.
+     *
+     * Every turn constructs an executor, including turns that never use an
+     * artifact, recovery memory or package manager. The old eager call created
+     * seven directories for each one; six were empty in a real thread. Each
+     * writer already creates its own parent on first write, and the run manager
+     * creates the session directory when the run starts, so the constructor has
+     * nothing to reserve.
+     */
     this.trajectoryLogger = options.trajectoryLogger ?? new TrajectoryLogger(options.workspaceRoot);
     this.auditLogger = options.auditLogger ?? new AuditLogger(options.workspaceRoot, { runId: options.runId });
     this.recoverySession = options.recoverySession;
@@ -336,6 +381,37 @@ export class ToolExecutor {
       runId: options.runId,
       workspaceRoot: options.workspaceRoot,
     });
+    // Forward background output onto the runtime event stream.
+    //
+    // A backgrounded dev server or test watcher produces output for the whole
+    // rest of the session, long after the `bash` call that started it returned.
+    // Without this it reaches only the ring buffer and the JSONL log, so a UI
+    // has to poll and diff — which shows the output a poll interval late and
+    // re-sends what the poller already had.
+    if (options.eventSink) {
+      this.unsubscribeBackgroundOutput = this.backgroundProcessManager.onOutput((event) => {
+        void emitRuntimeEvent(options.eventSink, {
+          type: "background.output.delta",
+          pid: event.pid,
+          stream: event.stream,
+          text: event.text,
+          cmd: event.cmd,
+        });
+        for (const server of event.servers) {
+          void emitRuntimeEvent(options.eventSink, {
+            type: "background.server.detected",
+            pid: event.pid,
+            url: server.url,
+            port: server.port,
+          });
+        }
+      });
+    }
+  }
+
+  /** Detected loopback dev servers, for the preview pane. */
+  detectedServers(): ReturnType<BackgroundProcessManager["servers"]> {
+    return this.backgroundProcessManager.servers();
   }
 
   /**
@@ -585,10 +661,11 @@ export class ToolExecutor {
       await this.computerBrowserController.close();
       this.computerBrowserController = undefined;
     }
-    if (this.nativeComputerController) {
-      await this.nativeComputerController.close();
-      this.nativeComputerController = undefined;
-    }
+    // Unsubscribe before terminating: the exit notifications the kill produces
+    // belong to a turn that is already over, and forwarding them would push
+    // events into a sink whose turn has closed.
+    this.unsubscribeBackgroundOutput?.();
+    this.unsubscribeBackgroundOutput = undefined;
     await this.backgroundProcessManager.terminateAll(reason);
   }
 
@@ -609,6 +686,25 @@ export class ToolExecutor {
     }
   }
 
+  /** The names this thread has switched off; empty when it has switched off none. */
+  private disabledTools(): ReadonlySet<string> {
+    return this.options.disabledTools ?? EMPTY_DISABLED_TOOLS;
+  }
+
+  /**
+   * The tool names the model can actually call without discovery.
+   *
+   * Reported instead of the whole registry, which is what this message used to
+   * list: telling a model that a tool it was never offered exists and "use only
+   * registered tools" is advice it cannot follow, and the list of sixty-odd
+   * names was the largest single chunk of text in an error message that has to
+   * fit in a context window alongside the recovery attempt it is describing.
+   */
+  private offeredToolNames(): string {
+    const available = [...CORE_TOOL_NAMES].filter((name) => !this.disabledTools().has(name));
+    return available.join(", ");
+  }
+
   private async executeInternal(call: ToolCall): Promise<ToolResult> {
     // Normalize tool call aliases before validation
     const normalizedCall = normalizeToolCall(call) as ToolCall;
@@ -620,14 +716,14 @@ export class ToolExecutor {
     if (!isKnownTool) {
       this.consecutiveUnknownTools++;
       this.lastUnknownToolName = normalizedCall.name;
-      const discovery = executeSearchTools(normalizedCall.name, this.options.runId);
+      const discovery = executeSearchTools(normalizedCall.name, this.options.runId, this.disabledTools());
       const suggestionText = discovery.matches.length
         ? ` Closest discoverable tools: ${discovery.matches.map((item) => `${item.name} (${item.description})`).join("; ")}. Use search_tools with 'select:${discovery.matches.map((item) => item.name).join(",")}' if one of these is intended.`
         : " No close tool match was found; call search_tools with capability keywords before retrying.";
       const error = {
         message: this.consecutiveUnknownTools >= 3
-          ? `Unknown tool '${call.name}' called ${this.consecutiveUnknownTools} times in a row.${suggestionText} Available core tools: ${Object.keys(toolRegistry).join(", ")}. Please use only registered tools.`
-          : `Unknown tool '${call.name}'.${suggestionText} Available core tools: ${Object.keys(toolRegistry).join(", ")}.`,
+          ? `Unknown tool '${call.name}' called ${this.consecutiveUnknownTools} times in a row.${suggestionText} Offered right now: ${this.offeredToolNames()}. Other installed tools are reachable with search_tools.`
+          : `Unknown tool '${call.name}'.${suggestionText} Offered right now: ${this.offeredToolNames()}. Other installed tools are reachable with search_tools.`,
         code: this.consecutiveUnknownTools >= 3 ? "UNKNOWN_TOOL_LOOP" : "UNKNOWN_TOOL",
       };
       await this.trajectoryLogger.write({
@@ -656,21 +752,50 @@ export class ToolExecutor {
     }
     this.consecutiveUnknownTools = 0;
 
-    // ---- Phase 3 viewer tools.
-    //    Keep these as first-class model-facing tools. Legacy read/edit
-    //    aliases are handled by normalizeToolName; the model should see,
-    //    choose, and learn the viewer names directly from their descriptions.
-    const callNameRaw = (call.name ?? "") as string;
+    /*
+     * A tool this thread switched off is refused here, not merely hidden.
+     * Checked after alias normalization so `read` cannot slip past a disabled
+     * `file_view` — the two names are one tool, and the policy applies to the
+     * tool rather than to the spelling.
+     */
+    if (this.options.disabledTools?.has(normalizedCall.name)) {
+      const error = {
+        message: `Tool '${normalizedCall.name}' is switched off for this thread. Its configuration is in the thread's settings; use another tool or ask the user to re-enable it.`,
+        code: "TOOL_DISABLED",
+      };
+      return {
+        toolCallId: call.id,
+        name: call.name,
+        ok: false,
+        durationMs: Date.now() - start,
+        args: call.args,
+        error,
+      };
+    }
+
+    // ---- Viewer tools.
+    //    Keep these as first-class model-facing tools. Legacy aliases are
+    //    handled by normalizeToolCall above; the model should see, choose, and
+    //    learn the viewer names directly from their descriptions.
+    //
+    //    The test is on the *normalized* name and the args passed on are the
+    //    *normalized* args. Matching the raw name instead let an aliased call
+    //    (`file_scroll`, `read`, `view_file`, `edit`, ...) miss this block
+    //    entirely and fall through to `executeInner`, which intercepts the same
+    //    three names a second time and returns a result envelope as the tool's
+    //    output — a nested `{ok, output}` reaching the model instead of the
+    //    window it asked for. The alias still resolved, so nothing failed
+    //    loudly; it just answered with the wrong shape.
+    const callNameRaw = normalizedCall.name;
     if (
       callNameRaw === "file_view" ||
-      callNameRaw === "file_scroll" ||
       callNameRaw === "file_find" ||
       callNameRaw === "file_edit"
     ) {
       const callAnyBypass = {
         id: call.id,
         name: callNameRaw,
-        args: (call.args ?? {}) as Record<string, unknown>,
+        args: (normalizedCall.args ?? {}) as Record<string, unknown>,
       };
       let dirForViewer: string;
       try {
@@ -788,7 +913,15 @@ export class ToolExecutor {
       return result;
     }
 
-    // Validate params — return error instead of throwing so model sees feedback
+    // Validate params — return error instead of throwing so model sees feedback.
+    //
+    // The code is `invalid_argument`, not the old `INVALID_TOOL_PARAMS`. The
+    // viewer tools report a bad argument shape as `invalid_argument` (it is one
+    // of `VIEWER_ERROR_CODES`), so a model saw two different spellings for the
+    // same denial depending on which tool it had called — and the uppercase one
+    // was in no documented set. `invalid_argument` is a member of
+    // `ToolErrorCode` in `src/tools/result.ts`, which is the envelope every
+    // core tool documents, so it is the one worth keeping.
     const parsed = ToolCallSchema.safeParse(normalizedCall);
     if (!parsed.success) {
       const errors = parsed.error.issues.map(i => `${i.path.join(".")}: ${i.message}`).join("; ");
@@ -808,7 +941,7 @@ export class ToolExecutor {
         decision_id: decisionId,
         status: "failed",
         args,
-        error: { message, code: "INVALID_TOOL_PARAMS" },
+        error: { message, code: "invalid_argument" },
         duration_ms: Date.now() - start,
         is_error: true,
       });
@@ -818,7 +951,7 @@ export class ToolExecutor {
         ok: false,
         durationMs: Date.now() - start,
         args,
-        error: { message, code: "INVALID_TOOL_PARAMS" },
+        error: { message, code: "invalid_argument" },
       };
     }
     const parsedCall = parsed.data;
@@ -1135,9 +1268,10 @@ export class ToolExecutor {
    * `Promise<ToolResult>`:
    *
    *   1. Yields `tool_execution_start` immediately on entry.
-   *   2. For tools that opt in to partial-output streaming (bash and
-   *      eval), yields zero or more `tool_execution_delta` chunks
-   *      during execution. Other tools emit zero deltas.
+   *   2. For tools that opt in to partial-output streaming, yields
+   *      zero or more `tool_execution_delta` chunks during execution.
+   *      No tool opts in today, so in practice this is start followed
+   *      by a terminal event.
    *   3. Yields `tool_execution_complete` with the final `ToolResult`
    *      on success, or `tool_execution_failed` with a structured
    *      `{ code, message }` if dispatch throws before `execute()`
@@ -1202,15 +1336,18 @@ export class ToolExecutor {
   }
 
   private async executeInner(call: ToolCall, decisionId: string): Promise<unknown> {
-    // ---- Phase 3: viewer tool interception (BEFORE the typed switch).
-    //    The ToolCallSchema discriminated union doesn't include the four
-    //    viewer names; widening it would bust the type-narrowing budget
-    //    in 13+ files. So we intercept via a string compare at runtime,
-    //    delegate to the viewer's own dispatcher, and return early.
+    /*
+     * Viewer names are handled in `executeInternal` before it reaches here, so
+     * this is a backstop rather than a live path. It returns the viewer's own
+     * output — the *value* the caller will hand to the model — and not a
+     * result envelope. Wrapping was the bug: `executeInternal` treats whatever
+     * this returns as `output`, so an envelope became a nested
+     * `{ok, output:{ok, output}}` and the model received a result object where
+     * it expected a numbered window.
+     */
     const callAny = call as unknown as { id: string; name: string; args: unknown };
     if (
       callAny.name === "file_view" ||
-      callAny.name === "file_scroll" ||
       callAny.name === "file_find" ||
       callAny.name === "file_edit"
     ) {
@@ -1230,70 +1367,15 @@ export class ToolExecutor {
         linterRegistry: this.linterRegistry,
         ...this.stagedViewerContext(),
       });
-      // Wrap the viewer's ToolResult-like into the executor's envelope.
-      return {
-        toolCallId: call.id,
-        name: callAny.name,
-        ok: r.ok,
-        durationMs: r.durationMs,
-        output: r.output,
-        args: callAny.args,
-        ...(r.error ? { error: r.error } : {}),
-      };
+      if (!r.ok) {
+        // The outer catch turns an unrecognized Error into a `tool_error`
+        // result, which is the same envelope this branch used to build by hand.
+        throw new Error(r.error?.message ?? `viewer tool '${callAny.name}' failed`);
+      }
+      return r.output;
     }
 
     switch (call.name) {
-      case "view_file":
-        {
-          const parsedArgs = toolRegistry.view_file.argsSchema.parse(call.args);
-          const args = { ...parsedArgs, path: await this.resolveExistingPathCase(parsedArgs.path) };
-          const unboundedRead = args.startLine === undefined && args.endLine === undefined;
-          if (unboundedRead) {
-            this.fullReadPaths.add(args.path);
-          }
-          const absolutePath = normalizeWorkspacePath(this.options.workspaceRoot, args.path);
-          const cacheKey = this.makeReadOutputCacheKey(absolutePath, args);
-          const beforeReadSnapshot = await this.getFreshnessSnapshot(args.path, absolutePath);
-          const cached = this.readOutputCache.get(cacheKey);
-          if (cached) {
-            // LRU bump: re-insert to mark as most-recently-used.
-            this.readOutputCache.delete(cacheKey);
-            this.readOutputCache.set(cacheKey, cached);
-            cached.hits += 1;
-          }
-          if (
-            cached &&
-            cached.sha256 === beforeReadSnapshot.sha256 &&
-            cached.mtimeMs === beforeReadSnapshot.mtimeMs
-          ) {
-            cached.hits += 1;
-            await this.recordReadState(args.path, unboundedRead && !isTruncatedTextRead(cached.output), beforeReadSnapshot);
-            return this.withReadCacheNote(cached.output, cached.hits);
-          }
-          const result = this.recoverySession?.wal.hasEntry(args.path)
-            ? await this.readStagedFile(args.path, args)
-            : await readFileTool(this.options.workspaceRoot, {
-                path: args.path,
-                ...(args.startLine !== undefined ? { startLine: args.startLine } : {}),
-                ...(args.endLine !== undefined ? { endLine: args.endLine } : {}),
-              });
-          if (unboundedRead && isTruncatedTextRead(result)) {
-            this.fullReadPaths.delete(args.path);
-          }
-          const afterReadSnapshot = await this.getFreshnessSnapshot(args.path, absolutePath);
-          await this.recordReadState(args.path, unboundedRead && !isTruncatedTextRead(result), afterReadSnapshot);
-          if (!isStableSnapshot(beforeReadSnapshot, afterReadSnapshot)) {
-            return result;
-          }
-          const observedResult: FreshReadFileResult = {
-            ...result,
-            sha256: beforeReadSnapshot.sha256,
-            mtimeMs: beforeReadSnapshot.mtimeMs,
-          };
-          this.readOutputCache.set(cacheKey, { ...beforeReadSnapshot, output: observedResult, hits: 0 });
-          this.evictReadOutputCacheIfNeeded();
-          return observedResult;
-        }
       case "list_directory":
         {
           const args = toolRegistry.list_directory.argsSchema.parse(call.args);
@@ -1389,81 +1471,6 @@ export class ToolExecutor {
         }
         return skillResult;
       }
-      case "get_tool_output":
-        return getToolOutputTool(this.artifactStore, toolRegistry.get_tool_output.argsSchema.parse(call.args));
-      case "read_background_output": {
-        const args = toolRegistry.read_background_output.argsSchema.parse(call.args);
-        const entry = this.backgroundProcessManager.get(args.pid);
-        if (!entry) {
-          throw new Error(`No background process found with PID ${args.pid}`);
-        }
-
-        const pollInterval = 100;
-        const timeout = 10000;
-        const startWait = Date.now();
-
-        const minWaitMs = args.minWaitMs;
-        if (typeof minWaitMs === "number") {
-          await new Promise((resolve) => setTimeout(resolve, Math.min(minWaitMs, timeout)));
-        }
-
-        if (args.waitForMatch) {
-          while (Date.now() - startWait < timeout) {
-            const currentOutput = entry.output.join("\n");
-            if (currentOutput.includes(args.waitForMatch)) {
-              break;
-            }
-            if (entry.child.exitCode !== null) {
-              break;
-            }
-            await new Promise((resolve) => setTimeout(resolve, pollInterval));
-          }
-        }
-
-        const lines = args.lines ?? 100;
-        return {
-          pid: args.pid,
-          status: entry.child.exitCode === null ? "running" : "finished",
-          exitCode: entry.child.exitCode,
-          logPath: entry.logPath,
-          output: this.backgroundProcessManager.recentOutput(args.pid, lines),
-        };
-      }
-      case "signal_process": {
-        const args = toolRegistry.signal_process.argsSchema.parse(call.args);
-        const entry = this.backgroundProcessManager.get(args.pid);
-        if (!entry) {
-          throw new Error(`No background process found with PID ${args.pid}`);
-        }
-        try {
-          await this.backgroundProcessManager.killTree(args.pid, args.signal);
-          if (args.signal === "SIGTERM" || args.signal === "SIGKILL") {
-            await this.backgroundProcessManager.waitForExit(
-              entry.child,
-              args.signal === "SIGTERM" ? 1500 : 500,
-            );
-            if (entry.child.exitCode !== null || args.signal === "SIGKILL") {
-              this.backgroundProcessManager.delete(args.pid);
-            }
-          }
-          await this.persistProcessManifest();
-        } catch (error) {
-          throw error;
-        }
-        return { pid: args.pid, signal: args.signal, success: true };
-      }
-      case "write_to_process": {
-        const args = toolRegistry.write_to_process.argsSchema.parse(call.args);
-        const entry = this.backgroundProcessManager.get(args.pid);
-        if (!entry) {
-          throw new Error(`No background process found with PID ${args.pid}`);
-        }
-        if (!entry.child.stdin) {
-          throw new Error(`Process with PID ${args.pid} does not have an open stdin.`);
-        }
-        entry.child.stdin.write(args.input);
-        return { pid: args.pid, success: true };
-      }
       case "write_file":
         {
           const args = toolRegistry.write_file.argsSchema.parse(call.args);
@@ -1512,7 +1519,12 @@ export class ToolExecutor {
           this.fileWriteCounts.set(args.path, (this.fileWriteCounts.get(args.path) ?? 0) + 1);
           if (this.recoverySession) {
             const absolutePath = normalizeWorkspacePath(this.options.workspaceRoot, args.path);
-            assertDeletablePath(this.options.workspaceRoot, absolutePath);
+            // `assertDeletableTarget`, not `assertDeletablePath`: the sync check
+            // only covers the root and protected basenames, and a staged
+            // `rm` is the same recursive delete once the WAL flushes. Guarding
+            // one route and not the other is how the tree-removal bug would
+            // survive the fix for the direct path.
+            await assertDeletableTarget(this.options.workspaceRoot, absolutePath, args.path);
             await this.recoverySession.wal.stageDelete(args.path);
             return { path: absolutePath, deleted: true, staged: true };
           }
@@ -1694,11 +1706,23 @@ export class ToolExecutor {
           }
 
           const rendered = await bashCommandToModelOutput(bashInput, result, this.options.workspaceRoot);
-          const asForeground = toForegroundShellResult({
-            ...result,
-            stdout: rendered.content,
-            stderr: "",
-          });
+          /*
+           * `toForegroundShellResult` only carries `stdout`, `stderr`, `exitCode`
+           * and `logPath`, so everything `bashCommandToModelOutput` attached
+           * about where the *complete* output lives was being dropped here — the
+           * last place it could have been lost, and the reason
+           * `full_output_path` never reached the model even after the shell had
+           * computed it. The pointer fields are copied across explicitly.
+           */
+          const asForeground = {
+            ...toForegroundShellResult({
+              ...result,
+              stdout: rendered.content,
+              stderr: "",
+            }),
+            ...(rendered.output.full_output_path ? { fullOutputPath: rendered.output.full_output_path } : {}),
+            ...(rendered.output.full_output_size !== undefined ? { fullOutputSize: rendered.output.full_output_size } : {}),
+          };
           return spillLargeToolResult(asForeground, call, this.options.workspaceRoot);
         }
 
@@ -1730,11 +1754,23 @@ export class ToolExecutor {
           }
 
           const rendered = await bashCommandToModelOutput(bashInput, result, this.options.workspaceRoot);
-          const asForeground = toForegroundShellResult({
-            ...result,
-            stdout: rendered.content,
-            stderr: "",
-          });
+          /*
+           * `toForegroundShellResult` only carries `stdout`, `stderr`, `exitCode`
+           * and `logPath`, so everything `bashCommandToModelOutput` attached
+           * about where the *complete* output lives was being dropped here — the
+           * last place it could have been lost, and the reason
+           * `full_output_path` never reached the model even after the shell had
+           * computed it. The pointer fields are copied across explicitly.
+           */
+          const asForeground = {
+            ...toForegroundShellResult({
+              ...result,
+              stdout: rendered.content,
+              stderr: "",
+            }),
+            ...(rendered.output.full_output_path ? { fullOutputPath: rendered.output.full_output_path } : {}),
+            ...(rendered.output.full_output_size !== undefined ? { fullOutputSize: rendered.output.full_output_size } : {}),
+          };
           return spillLargeToolResult(asForeground, call, this.options.workspaceRoot);
         } finally {
           await view.cleanup();
@@ -1744,49 +1780,13 @@ export class ToolExecutor {
         const args = toolRegistry.browser_control.argsSchema.parse(call.args);
         return this.getComputerBrowserController().browserControl(args, this.toolRuntimeMetadata(call.id));
       }
-      case "computer_control": {
-        const args = toolRegistry.computer_control.argsSchema.parse(call.args);
-        return this.getComputerBrowserController().computerControl(args, this.toolRuntimeMetadata(call.id));
-      }
-      case "mouse_move":
-      case "mouse_click":
-      case "mouse_scroll":
-      case "keyboard_type":
-      case "keyboard_press":
-      case "screenshot":
-      case "get_screen_size":
-      case "get_mouse_position":
-      case "wait":
-      case "start_live_view":
-      case "stop_live_view":
-      case "is_human_intervening": {
-        const args = toolRegistry[call.name].argsSchema.parse(call.args) as Record<string, unknown>;
-        return this.getNativeComputerController().execute(call.name as NativeComputerToolName, args, this.toolRuntimeMetadata(call.id));
-      }
-      case "request_human_approval": {
-        const args = toolRegistry.request_human_approval.argsSchema.parse(call.args) as Record<string, unknown>;
-        if (this.options.approvalRequester) {
-          // In strict/auto mode the classifier gate immediately above already
-          // obtained approval before dispatch reached this switch. YOLO and
-          // accept_edits still honor this tool's explicit request here.
-          if (this.permissionMode !== "strict" && this.permissionMode !== "auto") {
-            await this.requestApprovalForTool(call, call.id, {
-              outcome: "needs_confirmation",
-              reasoning: typeof args.reason === "string" ? args.reason : "Agent requested human approval",
-              confidence: 1,
-            });
-          }
-          return { success: true, decision: "approved", externalApproval: true };
-        }
-        return this.getNativeComputerController().execute("request_human_approval", args, this.toolRuntimeMetadata(call.id));
-      }
       case "web_fetch": {
         const fetchArgs = toolRegistry.web_fetch.argsSchema.parse(call.args);
         return webFetchTool({ url: fetchArgs.url, ...(fetchArgs.extractText !== undefined ? { extractText: fetchArgs.extractText } : {}) });
       }
       case "search_tools": {
         const searchArgs = toolRegistry.search_tools.argsSchema.parse(call.args);
-        return executeSearchTools(searchArgs.query, this.options.runId);
+        return executeSearchTools(searchArgs.query, this.options.runId, this.disabledTools());
       }
       case "scratchpad": {
         const scratchArgs = toolRegistry.scratchpad.argsSchema.parse(call.args);
@@ -1812,13 +1812,6 @@ export class ToolExecutor {
         const globArgs = toolRegistry.glob.argsSchema.parse(call.args);
         return executeGlob(globArgs.pattern, this.options.workspaceRoot, globArgs.path);
       }
-      case "eval": {
-        const evalArgs = toolRegistry.eval.argsSchema.parse(call.args);
-        return executeEval(evalArgs.code, evalArgs.language, evalArgs.timeout, {
-          workspaceRoot: this.options.workspaceRoot,
-          ...(this.childEnvAllowlist.length > 0 ? { allowlist: this.childEnvAllowlist } : {}),
-        });
-      }
       case "job": {
         const jobArgs = toolRegistry.job.argsSchema.parse(call.args);
         return executeJob(jobArgs, {
@@ -1832,96 +1825,114 @@ export class ToolExecutor {
         return executeDiagnostics(diagArgs.path, this.options.workspaceRoot, diagArgs.kind);
       }
       /* ----------------------------------------------------------------
-       * Authoring tools — 5 skill + 6 extension + 6 hook = 17 new tools.
-       * Each routes through the runtime-injected authoringTools backdoor.
-       * The wiring layer (engine.ts) supplies handlers that call into
-       * the existing lifecycle classes; this switch stays thin so
-       * the executor doesn't need to know about lifecycle internals.
+       * Code Mode.
+       *
+       * The bridge is built from `this` — the same executor instance that is
+       * running this turn — so every `tools.*` call inside the sandbox goes
+       * back through `execute` and picks up the disabled-tools check, the
+       * governance gate, the approval flow, the hooks, the trajectory row, and
+       * the runtime events. There is no second path and no reduced variant of
+       * one.
+       *
+       * `abortSignal` is threaded here and this is the only place it is: the
+       * executor's own signal is read at the approval wait and at the
+       * scheduler's island boundary, and no tool body sees it. A running
+       * script does need it — a `while (true)` has no await in it, so nothing
+       * else can interrupt it — and the runtime consults it both in its drain
+       * loop and from the QuickJS interrupt handler.
        * ---------------------------------------------------------------- */
-      case "create_skill": {
-        const h = this.options.authoringTools?.handleCreateSkill;
-        if (!h) throw new Error("create_skill is not wired for this run (no authoringTools backdoor)");
+      case "eval": {
+        const evalArgs = toolRegistry.eval.argsSchema.parse(call.args);
+        /*
+         * The live view, wired here because this is the layer that knows both
+         * the sandbox and the event stream — and the only layer that knows the
+         * tool call id the deltas belong to.
+         *
+         * Reusing `command.output.delta` rather than inventing an event is
+         * deliberate. It already means "output arriving from a tool that is
+         * still running", it already carries a stream label the clients render
+         * as plain text, and it is already keyed by `toolCallId`. A script's
+         * console output is the same thing from the client's point of view; a
+         * second event type would have been a second path through the
+         * projection, the gateway and both renderers to say the same words.
+         *
+         * A tool crossing is reported on the same stream, prefixed rather than
+         * typed, so the ordering a reader sees is the order things actually
+         * happened. The inner call still emits its own `tool.started` and
+         * `tool.completed` — this is narration, not the record.
+         */
+        const sink = this.options.eventSink;
+        const stream = sink
+          ? (chunk: CodeOutputChunk) => {
+              void emitRuntimeEvent(sink, {
+                type: "command.output.delta",
+                toolCallId: call.id,
+                stream: chunk.kind === "error" ? "stderr" : "stdout",
+                text: narration(chunk),
+              });
+            }
+          : undefined;
+        /*
+         * A tool crossing is narrated on the same stream, so a reader watching
+         * a long loop sees which call it is on rather than a stalled line of
+         * console output. The inner call still emits its own `tool.started`
+         * and `tool.completed` — those are the record; this is the ticker.
+         */
+        const crossings = sink
+          ? (record: CodeToolCallRecord) => {
+              void emitRuntimeEvent(sink, {
+                type: "command.output.delta",
+                toolCallId: call.id,
+                stream: record.ok ? "stdout" : "stderr",
+                text: narration({ kind: "tool", text: `${record.name} ${record.ok ? "ok" : "failed"} (${record.durationMs}ms)` }),
+              });
+            }
+          : undefined;
+        return evaluateScript({
+          args: evalArgs,
+          toolCallId: call.id,
+          runId: this.options.runId,
+          host: new ReaperToolBridge({
+            executor: this,
+            disabledTools: this.disabledTools(),
+            ...(this.options.codeModelRunner && this.options.codeModels
+              ? { models: this.options.codeModels, callModel: this.options.codeModelRunner }
+              : {}),
+          }),
+          disabledTools: this.disabledTools(),
+          /*
+           * The thread's workspace, so the script's relative paths mean what
+           * every other tool in this executor means by them. Without it the
+           * worker falls back to `process.cwd()` — Reaper's own checkout — and
+           * `fs.readFileSync('src/sample/x.json')` reads the wrong tree, or
+           * misses a file that is sitting right there in the workspace.
+           */
+          workspace: this.options.workspaceRoot,
+          ...(this.options.abortSignal ? { signal: this.options.abortSignal } : {}),
+          ...(stream ? { onOutput: stream } : {}),
+          ...(crossings ? { onToolCall: crossings } : {}),
+        });
+      }
+      /* ----------------------------------------------------------------
+       * Authoring tools — 3 tools, each a manager over one store.
+       * The wiring layer (engine.ts) supplies handlers that call into the
+       * existing lifecycle classes; this switch stays thin so the executor
+       * doesn't need to know about lifecycle internals.
+       * ---------------------------------------------------------------- */
+      case "skill_manager": {
+        const h = this.options.authoringTools?.handleSkillManager;
+        if (!h) throw new Error("skill_manager is not wired for this run (no authoringTools backdoor)");
         return await h(call.args);
       }
-      case "test_skill": {
-        const h = this.options.authoringTools?.handleTestSkill;
-        if (!h) throw new Error("test_skill is not wired for this run");
+      case "extension_manager": {
+        const h = this.options.authoringTools?.handleExtensionManager;
+        if (!h) throw new Error("extension_manager is not wired for this run");
         return await h(call.args);
       }
-      case "approve_skill": {
-        const h = this.options.authoringTools?.handleApproveSkill;
-        if (!h) throw new Error("approve_skill is not wired for this run");
+      case "hook_manager": {
+        const h = this.options.authoringTools?.handleHookManager;
+        if (!h) throw new Error("hook_manager is not wired for this run");
         return await h(call.args);
-      }
-      case "uninstall_skill": {
-        const h = this.options.authoringTools?.handleUninstallSkill;
-        if (!h) throw new Error("uninstall_skill is not wired for this run");
-        return await h(call.args);
-      }
-      case "reload_skills": {
-        const h = this.options.authoringTools?.handleReloadSkills;
-        if (!h) throw new Error("reload_skills is not wired for this run");
-        return h(call.args);
-      }
-      case "create_extension": {
-        const h = this.options.authoringTools?.handleCreateExtension;
-        if (!h) throw new Error("create_extension is not wired for this run");
-        return await h(call.args);
-      }
-      case "validate_extension": {
-        const h = this.options.authoringTools?.handleValidateExtension;
-        if (!h) throw new Error("validate_extension is not wired for this run");
-        return await h(call.args);
-      }
-      case "enable_extension": {
-        const h = this.options.authoringTools?.handleEnableExtension;
-        if (!h) throw new Error("enable_extension is not wired for this run");
-        return await h(call.args);
-      }
-      case "trust_extension": {
-        const h = this.options.authoringTools?.handleTrustExtension;
-        if (!h) throw new Error("trust_extension is not wired for this run");
-        return await h(call.args);
-      }
-      case "uninstall_extension": {
-        const h = this.options.authoringTools?.handleUninstallExtension;
-        if (!h) throw new Error("uninstall_extension is not wired for this run");
-        return await h(call.args);
-      }
-      case "reload_extensions": {
-        const h = this.options.authoringTools?.handleReloadExtensions;
-        if (!h) throw new Error("reload_extensions is not wired for this run");
-        return h(call.args);
-      }
-      case "create_hook": {
-        const h = this.options.authoringTools?.handleCreateHook;
-        if (!h) throw new Error("create_hook is not wired for this run");
-        return await h(call.args);
-      }
-      case "list_hooks": {
-        const h = this.options.authoringTools?.handleListHooks;
-        if (!h) throw new Error("list_hooks is not wired for this run");
-        return h(call.args);
-      }
-      case "update_hook": {
-        const h = this.options.authoringTools?.handleUpdateHook;
-        if (!h) throw new Error("update_hook is not wired for this run");
-        return await h(call.args);
-      }
-      case "approve_hook": {
-        const h = this.options.authoringTools?.handleApproveHook;
-        if (!h) throw new Error("approve_hook is not wired for this run");
-        return await h(call.args);
-      }
-      case "uninstall_hook": {
-        const h = this.options.authoringTools?.handleUninstallHook;
-        if (!h) throw new Error("uninstall_hook is not wired for this run");
-        return await h(call.args);
-      }
-      case "reload_hooks": {
-        const h = this.options.authoringTools?.handleReloadHooks;
-        if (!h) throw new Error("reload_hooks is not wired for this run");
-        return h(call.args);
       }
       default:
         throw new Error(`Unknown tool: ${call.name}`);
@@ -1934,13 +1945,6 @@ export class ToolExecutor {
       this.computerBrowserController = new ComputerBrowserController();
     }
     return this.computerBrowserController;
-  }
-
-  private getNativeComputerController(): NativeComputerController {
-    if (!this.nativeComputerController) {
-      this.nativeComputerController = new NativeComputerController();
-    }
-    return this.nativeComputerController;
   }
 
   private toolRuntimeMetadata(toolCallId: string) {
@@ -2006,7 +2010,7 @@ export class ToolExecutor {
 
   /**
    * Staged read/write hooks for the viewer tools (`file_view`,
-   * `file_scroll`, `file_find`, `file_edit`).
+   * `file_find`, `file_edit`).
    *
    * `write_file`/`edit_file` stage into the WAL rather than writing to
    * disk (V1), so viewers that read the filesystem directly would report a

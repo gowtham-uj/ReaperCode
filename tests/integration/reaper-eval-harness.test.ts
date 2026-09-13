@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { parseEvalTask, scoreTask } from "../../src/eval/index.js";
+import { assertZodIssue } from "../fixtures/zod-issues.js";
 
 /**
  * Smoke test that exercises the tracked eval schema + scorer against
@@ -17,7 +18,7 @@ import { parseEvalTask, scoreTask } from "../../src/eval/index.js";
  */
 
 test("parseEvalTask rejects tasks with no gates", () => {
-  assert.throws(
+  assertZodIssue(
     () =>
       parseEvalTask({
         id: "no-gates",
@@ -29,7 +30,7 @@ test("parseEvalTask rejects tasks with no gates", () => {
         verification: { command: "node --test" },
         gates: [],
       }),
-    /at least 1 element/i,
+    { code: "too_small", path: "gates" },
   );
 });
 

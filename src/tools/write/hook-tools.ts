@@ -28,13 +28,15 @@ import type {
   UpdateHookInput,
 } from "../../hooks/lifecycle.js";
 import type { HookEventName } from "../../extensions/types.js";
+import { CreateHookArgsSchema } from "../types/hook-tools.schema.js";
+import { operationArgs } from "../types/manager-args.js";
 import type {
   CreateHookArgs,
   ListHooksArgs,
   UpdateHookArgs,
   ApproveHookArgs,
   UninstallHookArgs,
-  ReloadHooksArgs,
+  HookManagerArgs,
 } from "../types/hook-tools.schema.js";
 
 export interface HookToolDeps {
@@ -116,10 +118,50 @@ export async function handleUninstallHook(
   return deps.lifecycle.uninstall(args.id);
 }
 
-export function handleReloadHooks(
-  _args: ReloadHooksArgs,
+/**
+ * The one hook tool the model calls. Dispatches on `action` to the handlers
+ * above; they stay separate because they are the unit the existing tests
+ * exercise.
+ *
+ * There is no `reload` action — see the schema header for why.
+ */
+export async function handleHookManager(
+  args: HookManagerArgs,
   deps: HookToolDeps,
-): { ok: boolean; loaded: number; registered: number } {
-  const r = deps.lifecycle.reload();
-  return { ok: true, loaded: r.loaded, registered: r.registered };
+): Promise<unknown> {
+  // `reload_hooks` is gone, so the manager re-walks the install dirs itself
+  // before every action. `discover()` is idempotent — it re-reads each
+  // `<id>.json`, refreshes `records`, and registers any trusted hook that is
+  // not already subscribed — so a hook file dropped in by hand is live for
+  // `list` and `approve` without a separate reload step. `reload()` is
+  // deliberately not used here: it wipes and rebuilds the runner subscriptions,
+  // which would drop and re-add every hook on every call for no gain.
+  deps.lifecycle.discover();
+  switch (args.action) {
+    case "create": {
+      // `scope` stays in: it is a create field, and the manager's wider enum
+      // (`all` is the `list` filter) is what the strict re-parse narrows.
+      const parsed = CreateHookArgsSchema.safeParse(operationArgs(args));
+      if (!parsed.success) {
+        return { ok: false, action: args.action, error: `create requires the full hook definition: ${parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")}` };
+      }
+      return handleCreateHook(parsed.data, deps);
+    }
+    case "list": {
+      const scope = args.scope === "project" || args.scope === "user" ? args.scope : "all";
+      return handleListHooks({ scope }, deps);
+    }
+    case "update":
+      return handleUpdateHook(requireHookId(args, "update"), deps);
+    case "approve":
+      return handleApproveHook(requireHookId(args, "approve"), deps);
+    case "uninstall":
+      return handleUninstallHook(requireHookId(args, "uninstall"), deps);
+  }
+}
+
+function requireHookId(args: HookManagerArgs, action: string): UpdateHookArgs & ApproveHookArgs & UninstallHookArgs {
+  const id = typeof args.id === "string" ? args.id : "";
+  if (!id) throw new Error(`hook_manager action="${action}" requires "id"`);
+  return { id };
 }

@@ -7,12 +7,13 @@ import {
   createLoggedGatewayFromConfig,
 } from "../fixtures/live-gateway.js";
 import { getDefaultDeepSeekModel } from "../fixtures/live-models.js";
+import { liveSkipOption } from "../fixtures/live-gate.js";
 
-const deepSeekKeyPresent = process.env.RUN_LIVE_LLM_TESTS === "1" && Boolean(process.env.DEEPSEEK_API_KEY);
+const skip = liveSkipOption("DEEPSEEK_API_KEY");
 
 test(
   "live DeepSeek generate call works with config-only provider selection",
-  { skip: !deepSeekKeyPresent },
+  { skip },
   async () => {
     const { gateway } = createLiveDeepSeekGateway("live DeepSeek generate call works with config-only provider selection");
     const result = await gateway.generate({
@@ -28,7 +29,7 @@ test(
 
 test(
   "live DeepSeek streaming call emits normalized events",
-  { skip: !deepSeekKeyPresent },
+  { skip },
   async () => {
     const { gateway } = createLiveDeepSeekGateway("live DeepSeek streaming call emits normalized events");
     const events = [] as string[];
@@ -53,7 +54,7 @@ test(
 
 test(
   "live DeepSeek fallback works when primary model is invalid and fallback role is configured",
-  { skip: !deepSeekKeyPresent },
+  { skip },
   async () => {
     const config = createLiveDeepSeekConfig("definitely-not-a-real-model");
     config.models.default_model.fallbackProfile = "judge";

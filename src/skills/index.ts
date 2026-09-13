@@ -10,8 +10,8 @@
  *     registry.ts     — SkillRegistry (wraps SkillMemoryRegistry)
  *     lifecycle.ts    — install / uninstall / draft / test / trust
  *
- * The 17 built-in skills live under `./built-in/<name>/` and are
- * discovered by `discoverSkills` when the registry boots.
+ * `./built-in/` is an optional packaged-skill root. Reaper currently ships
+ * no built-in skill bodies; project, user, and extension skills remain active.
  *
  * (Note: the previous `validator.ts` was removed in the 2026-06
  * cleanup; manifest validation now happens inline in `manifest.ts`.)

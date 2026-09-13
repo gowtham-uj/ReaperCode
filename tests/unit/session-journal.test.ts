@@ -116,7 +116,10 @@ test("initJournal reserves the session log directory", async () => {
   assert.equal(header.name, "build-repo-mind");
   assert.equal(header.cwd, ws);
   assert.equal(header.title, "Build RepoMind");
-  assert.match(journalPath.replace(/\\/g, "/"), /logs\/build-repo-mind\/session\.jsonl$/);
+  // `sessions/`, not the pre-rename `logs/`. The directory a named session's
+  // journal lives in was renamed; this literal was asserting the old one and
+  // would have kept passing if the rename had gone the other way.
+  assert.match(journalPath.replace(/\\/g, "/"), /sessions\/build-repo-mind\/session\.jsonl$/);
 });
 
 test("initJournal is idempotent for an existing session name", async () => {

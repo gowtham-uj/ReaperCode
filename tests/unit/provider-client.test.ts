@@ -90,3 +90,35 @@ test("provider multiplexer dispatches Anthropic to official Anthropic client", a
   assert.equal(anthropic.calls, 1);
   assert.equal(openAiCompatible.calls, 0);
 });
+
+test("provider multiplexer routes catalog providers through the AI SDK client", async () => {
+  const aiSdk = new RecordingClient("ai-sdk");
+  const openAiCompatible = new RecordingClient("openai-compatible");
+  const client = new ProviderMultiplexerClient({ aiSdk: aiSdk as any, openAiCompatible: openAiCompatible as any });
+
+  for (const provider of ["groq", "mistral", "google", "amazon-bedrock"] as const) {
+    const result = await client.generate({ role: "secondary_model", messages: [] }, { ...baseProfile, provider });
+    assert.equal(result.provider, "ai-sdk", `${provider} did not route through the AI SDK client`);
+  }
+
+  assert.equal(aiSdk.calls, 4);
+  assert.equal(openAiCompatible.calls, 0);
+});
+
+test("legacy provider bindings still win over the catalog-wide AI SDK binding", async () => {
+  const aiSdk = new RecordingClient("ai-sdk");
+  const anthropic = new RecordingClient("anthropic");
+  const deepseek = new RecordingClient("deepseek");
+  const client = new ProviderMultiplexerClient({
+    aiSdk: aiSdk as any,
+    anthropic: anthropic as any,
+    deepseek: deepseek as any,
+  });
+
+  await client.generate({ role: "secondary_model", messages: [] }, { ...baseProfile, provider: "anthropic" });
+  await client.generate({ role: "secondary_model", messages: [] }, { ...baseProfile, provider: "deepseek" });
+
+  assert.equal(anthropic.calls, 1);
+  assert.equal(deepseek.calls, 1);
+  assert.equal(aiSdk.calls, 0);
+});

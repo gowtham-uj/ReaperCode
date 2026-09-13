@@ -4,7 +4,7 @@
  * The runtime has two related allowlists: the set of valid tool
  * names (consumed by `isKnownToolName`) and the per-tool arg shape
  * (consumed by `stripUnknownToolArgs`). They were duplicated and
- * drifted (e.g. `view_file` was in the args list but missing from
+ * drifted (e.g. a viewer name was in the args list but missing from
  * the name set). This module unifies them.
  *
  * Adding a tool: append an entry to `TOOL_ALLOWED_ARGS` with the
@@ -13,9 +13,7 @@
  */
 
 const TOOL_ALLOWED_ARGS: Record<string, readonly string[]> = {
-  view_file: ["path", "startLine", "endLine"],
   file_view: ["path", "start_line", "window"],
-  file_scroll: ["path", "direction", "lines"],
   file_find: ["path", "pattern", "start_line"],
   file_edit: ["path", "start_line", "end_line", "new_content", "reason"],
   list_directory: ["path", "includeHidden"],
@@ -27,11 +25,14 @@ const TOOL_ALLOWED_ARGS: Record<string, readonly string[]> = {
   edit_file: ["path", "edits"],
   delete_file: ["path"],
   bash: ["cmd", "description", "timeout", "run_in_background"],
-  read_background_output: ["pid", "lines", "waitForMatch", "minWaitMs"],
-  signal_process: ["pid", "signal"],
-  write_to_process: ["pid", "input"],
+  /*
+   * Code Mode. One argument, and it is the whole of what a model sends: every
+   * inner call the script makes is authorized separately, through the same
+   * executor an ordinary call goes through — so there is nothing here to
+   * enumerate beyond the source itself.
+   */
+  eval: ["code"],
   activate_skill: ["name"],
-  get_tool_output: ["artifactId"],
   web_fetch: ["url", "extractText"],
   diagnostics: ["path", "kind"],
 };

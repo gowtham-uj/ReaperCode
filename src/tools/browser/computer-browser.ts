@@ -21,7 +21,7 @@ async function loadChromium(): Promise<typeof import("playwright")["chromium"]> 
   }
 }
 
-import type { BrowserControlArgs, ComputerControlArgs } from "../types.js";
+import type { BrowserControlArgs } from "../types.js";
 import { getBrowserTunables } from "../../config/config-tunables.js";
 
 
@@ -203,71 +203,6 @@ export class ComputerBrowserController {
           await this.wheel(page, args.deltaX ?? 0, args.deltaY ?? 600, args.humanize ?? false);
         }
         return this.describePage(page, args, runtime);
-      }
-    }
-  }
-
-  async computerControl(args: ComputerControlArgs, runtime: ToolRuntimeMetadata): Promise<BrowserOutput> {
-    const page = await this.ensurePage(args);
-    const mouseButton = args.button ?? "left";
-
-    switch (args.action) {
-      case "screenshot":
-        return this.describePage(page, { action: "snapshot", screenshot: true, fullPage: args.fullPage }, runtime);
-      case "move": {
-        requireCoordinate(args.x, "x");
-        requireCoordinate(args.y, "y");
-        await this.moveMouse(page, args.x, args.y, args.humanize ?? false, args.steps);
-        return this.describePage(page, { action: "snapshot" }, runtime);
-      }
-      case "click": {
-        requireCoordinate(args.x, "x");
-        requireCoordinate(args.y, "y");
-        await this.clickPoint(page, args.x, args.y, mouseButton, args.humanize ?? false);
-        return this.describePage(page, { action: "snapshot" }, runtime);
-      }
-      case "double_click": {
-        requireCoordinate(args.x, "x");
-        requireCoordinate(args.y, "y");
-        if (args.humanize) {
-          await this.moveMouse(page, args.x, args.y, true, args.steps);
-          await page.mouse.down({ button: mouseButton });
-          await sleep(randomBetween(45, 130));
-          await page.mouse.up({ button: mouseButton });
-          await sleep(randomBetween(75, 180));
-          await page.mouse.down({ button: mouseButton });
-          await sleep(randomBetween(45, 130));
-          await page.mouse.up({ button: mouseButton });
-        } else {
-          await page.mouse.dblclick(args.x, args.y, { button: mouseButton });
-          this.lastMouse = { x: args.x, y: args.y };
-        }
-        return this.describePage(page, { action: "snapshot" }, runtime);
-      }
-      case "drag": {
-        requireCoordinate(args.x, "x");
-        requireCoordinate(args.y, "y");
-        requireCoordinate(args.endX, "endX");
-        requireCoordinate(args.endY, "endY");
-        await this.moveMouse(page, args.x, args.y, args.humanize ?? false, args.steps);
-        await page.mouse.down({ button: mouseButton });
-        await this.moveMouse(page, args.endX, args.endY, args.humanize ?? false, args.steps);
-        await page.mouse.up({ button: mouseButton });
-        return this.describePage(page, { action: "snapshot" }, runtime);
-      }
-      case "type": {
-        if (args.text === undefined) throw new Error("computer_control type requires args.text");
-        await this.keyboardType(page, args.text, args.humanize ?? false);
-        return this.describePage(page, { action: "snapshot" }, runtime);
-      }
-      case "press": {
-        if (!args.key) throw new Error("computer_control press requires args.key");
-        await page.keyboard.press(args.key);
-        return this.describePage(page, { action: "snapshot" }, runtime);
-      }
-      case "scroll": {
-        await this.wheel(page, args.deltaX ?? 0, args.deltaY ?? 600, args.humanize ?? false);
-        return this.describePage(page, { action: "snapshot" }, runtime);
       }
     }
   }
@@ -514,12 +449,6 @@ function normalizeUrl(url: string): string {
   const trimmed = url.trim();
   if (/^(?:https?|file|data|about):/i.test(trimmed)) return trimmed;
   return `https://${trimmed}`;
-}
-
-function requireCoordinate(value: number | undefined, name: string): asserts value is number {
-  if (typeof value !== "number") {
-    throw new Error(`computer_control requires numeric args.${name}`);
-  }
 }
 
 function sanitizeFilename(value: string): string {

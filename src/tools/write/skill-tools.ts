@@ -1,13 +1,11 @@
 /**
- * Skill authoring tool handlers — the 5 model-callable tools that
- * exercise the SkillLifecycle (createDraft / approveDraft /
- * testSkill / uninstall / reload).
+ * Skill authoring handlers — one model-callable tool, `skill_manager`, over
+ * the SkillLifecycle (createDraft / approveDraft / testSkill / uninstall).
  *
- *   create_skill      → lifecycle.createDraft
- *   test_skill        → lifecycle.testSkill
- *   approve_skill     → approval gate + lifecycle.approveDraft
- *   uninstall_skill   → approval gate + lifecycle.uninstall
- *   reload_skills     → registry discover + memory sync
+ *   skill_manager action="create"    → lifecycle.createDraft
+ *   skill_manager action="test"      → lifecycle.testSkill
+ *   skill_manager action="approve"   → approval gate + lifecycle.approveDraft
+ *   skill_manager action="uninstall" → approval gate + lifecycle.uninstall
  *
  * Approval gate: the runtime injects an `ApprovalRequester` callback.
  * On a true return the operation proceeds; on a false return it
@@ -22,17 +20,19 @@
 import type { SkillLifecycle } from "../../skills/lifecycle.js";
 import type { SkillManifest } from "../../skills/types.js";
 import type { SkillRegistry } from "../../skills/registry.js";
+import { CreateSkillArgsSchema } from "../types/skill-tools.schema.js";
+import { operationArgs } from "../types/manager-args.js";
 import type {
   CreateSkillArgs,
   TestSkillArgs,
   ApproveSkillArgs,
   UninstallSkillArgs,
-  ReloadSkillsArgs,
+  SkillManagerArgs,
 } from "../types/skill-tools.schema.js";
 
 /**
  * The runtime supplies this so the handlers can route the
- * approval decision through `request_human_approval`.
+ * approval decision through the app-server approval flow.
  *
  * Returns true → proceed, false → abort. The handler reports the
  * denial back to the model as the tool result so the model can
@@ -163,14 +163,52 @@ export async function handleUninstallSkill(
   return deps.lifecycle.uninstall(args.name, args.scope);
 }
 
-export function handleReloadSkills(
-  _args: ReloadSkillsArgs,
+/**
+ * The one skill tool the model calls. Dispatches on `action` to the handlers
+ * above; they stay separate because they are the unit the existing tests
+ * exercise, and folding them together would only move the switch.
+ *
+ * There is no `reload` action — see the schema header for why.
+ */
+export async function handleSkillManager(
+  args: SkillManagerArgs,
   deps: SkillToolDeps,
-): { ok: boolean; loaded: number } {
-  // The registry already tracks every record in memory; the router
-  // is stateless and reads the current records on each selectTopN
-  // call, so there's nothing to invalidate. A no-op for symmetry
-  // with the extension/hook reload handlers.
-  const all = deps.registry.list({ includeUntrusted: true });
-  return { ok: true, loaded: all.length };
+): Promise<unknown> {
+  switch (args.action) {
+    case "create": {
+      // Re-parse through the create schema so `scope: "builtin"` is rejected
+      // with the message it always carried. Only `action` comes out first;
+      // `scope` stays in because it *is* a create field, and it is the strict
+      // re-parse that refuses the `builtin` value the manager allows for
+      // `uninstall`.
+      const parsed = CreateSkillArgsSchema.safeParse(operationArgs(args));
+      if (!parsed.success) {
+        return { ok: false, action: args.action, error: `create requires the full skill definition: ${parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")}` };
+      }
+      return handleCreateSkill(parsed.data, deps);
+    }
+    case "test":
+      return handleTestSkill(requireName(args, "test"), deps);
+    case "approve":
+      return handleApproveSkill(requireName(args, "approve"), deps);
+    case "uninstall": {
+      const name = requireName(args, "uninstall");
+      return handleUninstallSkill(
+        { name: name.name, scope: args.scope === "builtin" || args.scope === "project" ? args.scope : "user" },
+        deps,
+      );
+    }
+  }
+}
+
+/**
+ * `name` is required by every action except `create`, where it comes from the
+ * definition. The cast is safe: the handler rejects the empty name with the
+ * same "not found" path it would use for a typo, which is a better message than
+ * a schema violation naming a field the model did not think it was setting.
+ */
+function requireName(args: SkillManagerArgs, action: string): TestSkillArgs & ApproveSkillArgs {
+  const name = typeof args.name === "string" ? args.name : "";
+  if (!name) throw new Error(`skill_manager action="${action}" requires "name"`);
+  return { name };
 }

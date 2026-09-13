@@ -154,6 +154,21 @@ export type ModelProfile = z.infer<typeof ModelProfileSchema>;
 export interface ResolvedModelProfile extends ModelProfile {
   profileName: ModelRole;
   role: ModelRole;
+  /**
+   * The API key for this call, when it came from configured credentials rather
+   * than the environment.
+   *
+   * Provider clients read `process.env[apiKeyEnv]` by default, which is fine
+   * for a single-provider CLI run and unsafe for a long-lived server: the
+   * environment is process-global, so two threads on different providers race
+   * to overwrite the same variable between the write and the request that
+   * reads it. Carrying the key on the profile makes credential selection
+   * per-call and removes the race entirely.
+   *
+   * `apiKeyEnv` remains the fallback, so nothing that works today stops
+   * working. Clients must prefer this field when it is present.
+   */
+  apiKey?: string;
 }
 
 export interface GenerateRequest {
@@ -241,8 +256,8 @@ export interface StreamEvent {
      *   - `tool_execution_start`  as soon as the executor begins
      *     dispatch (name + args + toolCallId)
      *   - `tool_execution_delta`  partial-output chunks for tools
-     *     that opt in to streaming (currently bash and eval). Other
-     *     tools emit zero of these.
+     *     that opt in to streaming. No tool opts in today, so this is
+     *     declared vocabulary rather than a live event.
      *   - `tool_execution_complete` with the final `ToolResult` once
      *     the dispatch resolves (success or failure).
      * Callers that do not consume these (existing mock gateways, the

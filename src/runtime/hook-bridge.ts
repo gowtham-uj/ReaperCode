@@ -23,7 +23,7 @@
 
 import type { Hooks } from "../adaptive/hooks.js";
 import { getExtensionBus, type ExtensionEvent } from "../extension/bus.js";
-import type { HookEventName } from "../adaptive/types.js";
+import type { HookEvent, HookEventName, HookResult } from "../adaptive/types.js";
 import { HookRunner, type HookRunnerHandler } from "../extensions/hook-runner.js";
 
 export interface BridgeOptions {
@@ -130,6 +130,46 @@ function schedule(fn: () => void | Promise<void>, microtask: boolean): void {
   } else {
     setImmediate(() => { void fn(); });
   }
+}
+
+/**
+ * A `Hooks`-shaped forwarder to a `HookRunner`, preserving vetoes.
+ *
+ * `installHookBridge` above fans engine events *out* to the runner on a
+ * microtask and throws the result away. That is right when the runner holds
+ * extension handlers — an extension must never stall a turn — but wrong for
+ * user-authored hooks, where `enforce: true` means "stop this call". A hook
+ * that is approved and then silently ignored is worse than one that is
+ * refused: the user believes it is protecting them.
+ *
+ * So the two directions are separate objects rather than two behaviours in
+ * one. The executor's gates take the blocking surface, the extension bus keeps
+ * the fire-and-forget one, and neither has to know about the other's policy.
+ *
+ * Returns `undefined` when there is no runner, so a caller can pass the result
+ * straight through as an optional option.
+ */
+export function runnerAsHooks(runner: HookRunner | undefined): Hooks | undefined {
+  if (!runner) return undefined;
+  // `Hooks` carries private fields, so a structurally-compatible object is not
+  // assignable to it. The returned type is the part the gates actually use —
+  // `emit` — which is honest about the contract: nothing that receives this
+  // may register a handler on it, and saying so in the type is better than a
+  // cast that would let them try.
+  const forwarder: Pick<Hooks, "emit"> = {
+    emit: async (event: HookEvent): Promise<HookResult> => {
+      const outcome = await runner.dispatch(event.name, event.payload ?? {});
+      if (outcome.allow) {
+        return {
+          allow: true,
+          ...(outcome.firstDenyReason ? { message: outcome.firstDenyReason } : {}),
+        };
+      }
+      const reason = outcome.firstDenyReason ?? "blocked by hook";
+      return { allow: false, message: reason, reason };
+    },
+  };
+  return forwarder as Hooks;
 }
 
 /**

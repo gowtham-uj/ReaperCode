@@ -1,12 +1,15 @@
 /**
- * Zod schemas for the 6 model-callable hook authoring tools.
+ * Zod schemas for hook authoring, now a single model-callable tool.
  *
- *   create_hook     author a new hook as a draft
- *   list_hooks      read-only inventory
- *   update_hook     re-compile and re-register
- *   approve_hook    compile + register (gated for enforce: true)
- *   uninstall_hook  remove (gated)
- *   reload_hooks    re-walk the disk
+ *   hook_manager(action="create")     author a new hook as a draft
+ *   hook_manager(action="list")       read-only inventory
+ *   hook_manager(action="update")     re-compile and re-register
+ *   hook_manager(action="approve")    compile + register, gated when enforce
+ *   hook_manager(action="uninstall")  remove (gated)
+ *
+ * There is no `reload` action. `HookLifecycle.reload()` re-walks the hook
+ * install dirs; the manager calls it after every mutation instead, so the live
+ * runner is always consistent with disk without the model having to remember.
  */
 
 import { z } from "zod";
@@ -91,15 +94,31 @@ export const UninstallHookArgsSchema = z
   })
   .strict();
 
-export const ReloadHooksArgsSchema = z
-  .object({
-    from_dirs: z.array(z.enum(["user", "project"])).optional(),
-  })
-  .strict();
-
 export type CreateHookArgs = z.infer<typeof CreateHookArgsSchema>;
 export type ListHooksArgs = z.infer<typeof ListHooksArgsSchema>;
 export type UpdateHookArgs = z.infer<typeof UpdateHookArgsSchema>;
 export type ApproveHookArgs = z.infer<typeof ApproveHookArgsSchema>;
 export type UninstallHookArgs = z.infer<typeof UninstallHookArgsSchema>;
-export type ReloadHooksArgs = z.infer<typeof ReloadHooksArgsSchema>;
+
+/**
+ * The consolidated manager. Flat `action` enum with the union of the per-action
+ * fields, validated per action in the handler — the same shape `scratchpad` and
+ * `job` use. `scope` is shared: `create` uses it as the install scope and
+ * `list` uses it as a filter, and the two ranges agree on "project"/"user".
+ *
+ * The create fields are spread through `omit` + `partial()`: `scope` is
+ * re-declared below with the wider range `list` needs, and the rest are
+ * optional because only `create` sets them. Defaults are applied by the strict
+ * re-parse inside `create`, not here.
+ */
+export const HookManagerArgsSchema = z
+  .object({
+    action: z
+      .enum(["create", "list", "update", "approve", "uninstall"])
+      .describe("author, inventory, re-register, approve, or remove a hook"),
+    ...CreateHookArgsSchema.omit({ scope: true }).partial().shape,
+    scope: z.enum(["project", "user", "all"]).optional(),
+  })
+  .strict();
+
+export type HookManagerArgs = z.infer<typeof HookManagerArgsSchema>;

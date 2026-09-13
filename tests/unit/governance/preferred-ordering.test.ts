@@ -1,8 +1,7 @@
 /**
  * Tests for src/governance/preferred-ordering.ts:
  *  - write tools warn when no read has been done in the run
- *  - browser_control is preferred over computer_control
- *  - mouse/keyboard tools suggest a prior screenshot
+ *  - metadata-driven advisories (read before write, etc.)
  *  - Empty history returns no advisories
  *  - hasOrderingRules is accurate
  */
@@ -42,32 +41,17 @@ test("delete_file without prior read returns a warning", () => {
   assert.ok(adv.some((a) => a.ruleId === "ordering.delete_without_read"));
 });
 
-test("browser_control after computer_control triggers the browser-over-computer advisory", () => {
-  const adv = getOrderingAdvisories({
-    currentTool: "browser_control",
-    recentTools: ["computer_control"],
-    isSubagentCall: false,
-  });
-  assert.ok(adv.some((a) => a.ruleId === "ordering.computer_preferred_over_browser"));
-});
-
-test("computer_control as the first computer call gets a browser-preferred hint", () => {
-  const adv = getOrderingAdvisories({
-    currentTool: "computer_control",
-    recentTools: [],
-    isSubagentCall: false,
-  });
-  assert.ok(adv.some((a) => a.ruleId === "ordering.browser_preferred_over_computer"));
-});
-
-test("mouse_click without screenshot gets an advisory", () => {
-  const adv = getOrderingAdvisories({ currentTool: "mouse_click", recentTools: [], isSubagentCall: false });
-  assert.ok(adv.some((a) => a.ruleId === "ordering.click_no_screenshot"));
-});
-
-test("keyboard_type without screenshot gets an advisory", () => {
-  const adv = getOrderingAdvisories({ currentTool: "keyboard_type", recentTools: [], isSubagentCall: false });
-  assert.ok(adv.some((a) => a.ruleId === "ordering.type_no_screenshot"));
+test("the native-computer advisories are gone with the tools they described", () => {
+  // "take a screenshot before you click" is advice about a desktop tool that
+  // no longer exists. Leaving the rule in would fire advisories telling the
+  // model to use a tool it cannot call.
+  for (const currentTool of ["computer_control", "mouse_click", "keyboard_type"]) {
+    assert.equal(hasOrderingRules(currentTool), false, `${currentTool} should have no rules`);
+    assert.deepEqual(
+      getOrderingAdvisories({ currentTool, recentTools: ["screenshot"], isSubagentCall: false }),
+      [],
+    );
+  }
 });
 
 test("empty history returns no advisories for tools that don't have rules", () => {
@@ -83,7 +67,7 @@ test("hasOrderingRules returns false for unordered tools", () => {
 test("hasOrderingRules returns true for ordered tools", () => {
   assert.equal(hasOrderingRules("write_file"), true);
   assert.equal(hasOrderingRules("edit_file"), true);
-  assert.equal(hasOrderingRules("computer_control"), true);
+  assert.equal(hasOrderingRules("delete_file"), true);
 });
 
 test("metadata-driven advisories look at preferred_before", () => {
@@ -97,7 +81,7 @@ test("metadata-driven advisories look at preferred_before", () => {
 });
 
 test("metadata-driven advisories do not fire for satisfied preferences", () => {
-  const adv = getMetadataDrivenAdvisories("write_file", ["file_view", "view_file"]);
-  // file_view / view_file are in preferred_before, so no advisories.
+  const adv = getMetadataDrivenAdvisories("write_file", ["file_view", "grep_search"]);
+  // file_view and grep_search are both in preferred_before, so no advisories.
   assert.equal(adv.length, 0);
 });

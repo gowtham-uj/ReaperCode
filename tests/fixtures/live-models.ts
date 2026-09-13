@@ -1,8 +1,8 @@
 export const DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro";
 export const DEFAULT_DEEPSEEK_FAST_MODEL = "deepseek-v4-flash";
 
-export const DEFAULT_DEEPINFRA_MODEL = "Qwen/Qwen3.6-35B-A3B";
-export const DEFAULT_DEEPINFRA_FAST_MODEL = "Qwen/Qwen3.6-35B-A3B";
+export const DEFAULT_DEEPINFRA_MODEL = "zai-org/GLM-5.3-Flash";
+export const DEFAULT_DEEPINFRA_FAST_MODEL = "zai-org/GLM-5.3-Flash";
 
 export const DEFAULT_OPENROUTER_MODEL = "claude-sonnet-4-6";
 export const DEFAULT_OPENROUTER_FAST_MODEL = "deepseek/deepseek-v4-flash";

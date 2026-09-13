@@ -11,8 +11,8 @@
  *
  * Trust gate: every hook lands as `draft` and is NOT registered on
  * the live HookRunner until `approve()` is called. The `approve()`
- * call is gated by the `ApprovalRequester` callback (typically
- * `request_human_approval` from the tool surface). On approval the
+ * call is gated by the `ApprovalRequester` callback — the app-server
+ * approval flow, not a tool the agent can call itself. On approval the
  * compiled handler is registered; on denial the hook stays a draft.
  *
  * Enforce flag: even when approved, an `enforce: false` hook cannot

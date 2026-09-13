@@ -4,7 +4,7 @@ Reaper is a coding agent you run from the terminal. Point it at a repo, give it 
 
 It is built for long jobs. When the conversation gets large, Reaper trims old tool output and file reads, then summarizes only if the context budget is actually blown. The system prompt stays put. That is the whole point of the project.
 
-This is a CLI. There is no chat UI in the repo. It is experimental. Use it on a copy of a project, or in a git repo you can revert.
+Reaper can run as a CLI or through its React web interface. It is experimental. Use it on a copy of a project, or in a git repo you can revert.
 
 ## Install
 
@@ -64,6 +64,29 @@ node bin/reaper exec run \
   --workspace /path/to/your/project \
   --prompt "Find flaky tests and tell me which ones"
 ```
+
+## Web interface
+
+The repository includes a React + Vite interface for threads, streaming turns, approvals, provider credentials, model selection, routed settings, and thread-scoped files, diffs, process output, previews, and browser surfaces.
+
+Run the browser gateway and Vite server in separate terminals:
+
+```bash
+npm run web
+REAPER_WEB_HOST=0.0.0.0 npm run web:ui
+```
+
+Open `http://localhost:5273`. Each new thread gets a fresh git-backed workspace under `~/.reaper/workspaces/<threadId>` unless you point it at an existing project folder. Provider credentials entered in Settings are write-only: stored keys are never returned to the browser.
+
+### UI source credit
+
+The web interface is based on and adapted from the React web UI in [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), primarily its theme, layout, sidebar, conversation, chat, approval, model-selection, workspace, and settings packages. Reaper adds its own persistent application provider, JSON-RPC app-server integration, thread/workspace model, routed settings, and agent surfaces. DeepSeek Harness is Copyright (c) 2026 DeepSeek and licensed under the MIT License; the vendored source and original license are preserved under `web/ui/upstream/deepseek-harness`, with an adaptation notice under `web/ui/src/deepseek`.
+
+### Provider layer source credit
+
+Reaper's provider onboarding and model-catalog architecture is adapted from [OpenCode](https://github.com/anomalyco/opencode/) at commit [`82b665075b0c89e36938931087920e1b36b1c49e`](https://github.com/anomalyco/opencode/tree/82b665075b0c89e36938931087920e1b36b1c49e), including its Models.dev schema and cache flow, provider loader and authentication architecture, request transformations, Vercel AI SDK transports, and agent-loop model resolution. These are adapted to Reaper's own app-server, `ProviderModelClient`, and write-only credential store. OpenCode is licensed under the MIT License and is not affiliated with Reaper.
+
+The catalog itself is a checked-in snapshot of [Models.dev](https://models.dev). Reaper does not copy service credentials and does not imply vendor endorsement; every provider is configured by the user, and a model is offered for a turn only when its transport is present in this build.
 
 ## WebSocket app server
 
@@ -125,7 +148,24 @@ A timeout, interrupt, thread closure, or reviewer disconnect never auto-approves
 
 ## Providers
 
-`--provider` accepts:
+Reaper has two provider paths, and they have different scopes.
+
+The **web UI and app-server** route everything through a Models.dev catalog: 213
+providers and roughly 7,500 models, resolved at turn time to one of 29 installed
+Vercel AI SDK transport packages. Which providers you can actually run is decided
+by authentication and transport coverage, not by a hardcoded list, and the
+generated coverage table lives in `src/model/provider/TRANSPORTS.md`. A catalog
+entry with no installed loader is listed but not offered for turns.
+
+A thread that has never had a model chosen runs on the first provider you
+connected, at that provider's catalog default — so a new chat works as soon as
+a key is stored, without pinning a model first. The composer shows that model,
+because it is the one that will answer. An expired credential and a provider
+this build cannot send to are both skipped rather than selected, and a thread
+you have pinned keeps its own choice.
+
+The **CLI** (`reaper exec run`) is the narrower path, and this is the list it
+accepts:
 
 | Provider | Put this in `.env` | Example model |
 |---|---|---|
@@ -172,11 +212,200 @@ node bin/reaper exec run --prompt "..." \
 
 ## What it can do
 
-On every turn the model gets file and shell tools: look at a file, search, edit a range, write or delete a file, list a directory, grep, and run bash. Extra tools exist behind `search_tools`, including git checkpoints. Browser and desktop-control tools exist but stay off unless you turn them on.
+On every turn the model gets file and shell tools: look at a file, search, edit a range, write or delete a file, list a directory, grep, and run bash. Extra tools exist behind `search_tools`, including git checkpoints. Browser and desktop-control tools exist but stay off unless you turn them on. The model can also write and run a program instead of making calls one at a time — see [Code Mode](#code-mode).
 
 It will install packages, run tests, and change your working tree. That is the product. Keep git clean enough that you can undo it.
 
-Long runs stay inside a 270,000-token context budget. Old reads get dropped. Old shell output gets trimmed. If that is not enough, Reaper pays for a summary and keeps going.
+Long runs stay inside a 270,000-token context budget. How that works is
+[below](#context-management).
+
+## Context management
+
+A session can run for days, so the window has to be managed deliberately. Reaper
+runs fifteen techniques, cheapest first, and each one reports what it did.
+
+| technique | what it does | default |
+| --- | --- | --- |
+| `bash_head_tail` | A command's output beyond a few KB never enters the conversation; the complete output goes to disk and the model is told the path | on |
+| `supersede` | Drops an earlier read of a file once the same file has been re-read unchanged | on |
+| `tool_output_prune` | Truncates aged tool output outside a recent-protection window | on |
+| `shake` | Replaces stale tool results with placeholders, keeping file reads unless a later read proves them stale | on |
+| `microcompact` | Clears repeated identical shell output after an idle gap | on |
+| `tool_history` | Summarizes a run of middle tool results, keeping the newest in full | on |
+| `full_summary` | Calls a model to rewrite the middle of the conversation | on |
+| `handoff_summary` | The same, with a prompt tuned for smaller-context models | off |
+| `snapcompact` | Collapses consecutive image blocks | off |
+| `idle_compaction` | Compacts proactively while the session is idle | off |
+| `incomplete_recovery` | Compacts after a turn stopped on `max_output_tokens` | on |
+| `ptl_recovery` | Drops the oldest turns when the provider rejects a request as too long | on |
+| `model_promotion` | Switches to a sibling profile with a larger window instead of compacting | on |
+
+Each one appears in the transcript as it runs, with what it reclaimed:
+
+In the web transcript:
+
+```
+● Trimmed stale output    −1.0MB    52 aged tool outputs truncated
+● Moved output to disk    −28k      read it at /…/artifacts/processes/call-9.log
+● Summarized conversation −940k     40 → 6 messages
+```
+
+In the terminal, the same events with the same words:
+
+```
+  ◆ Summarized conversation — saved 940k characters · 40 → 6 messages
+  ◆ Moved output to disk — saved 28k characters · read it at /…/artifacts/processes/call-9.log
+  ◆ Trimmed stale output — saved 1.0MB · 52 aged tool outputs truncated
+  ◆ Switched to a larger model — glm-5.3-flash → glm-5.3-long (270k → 1M window)
+```
+
+Reproduce the terminal output with
+`node --import=tsx scripts/cli-context-print.mts`.
+
+The CLI prints the same lines with the same words, because both read one label
+vocabulary (`web/shared/src/summarize.ts`). Every completed reclamation is also
+appended to `.reaper/compaction-savings.jsonl`, so a session's context history is
+readable after the fact.
+
+Turn the off-by-default ones on in `.reaper/config.json`:
+
+```json
+{ "contextManagement": { "handoffEnabled": true, "idleEnabled": true } }
+```
+
+### What a large file does
+
+A file far bigger than the window is handled by never letting it in. Measured on
+a 94MB log analysed by a live model through the real engine: 10 tool calls, the
+largest thing that entered the conversation was 2,194 characters, and the answer
+was correct. `cat` on that file returns a 2.7KB preview and writes the rest to
+disk — 42,734,826 bytes in the process log — with a notice naming the complete
+path so the model can `grep_search` it if it needs more.
+
+```bash
+# both drives: one scripted, one where the model chooses the commands
+node --import=tsx scripts/context-management-drive.mts
+REAPER_LIVE_TESTS=1 node --import=tsx scripts/big-log-live-drive.mts
+```
+
+## Code Mode
+
+Code Mode is a tool called `eval`. It hands the model a real Node.js runtime and
+lets it write a program instead of making one tool call at a time.
+
+```js
+const { matches } = await tools.grep_search({ pattern: "TODO", include: "*.ts" });
+const byFile = {};
+for (const match of matches) (byFile[match.path] ??= []).push(match.line);
+Object.entries(byFile).map(([path, lines]) => ({ path, count: lines.length }));
+```
+
+The last expression is the result. `await` works at the top level. The forty file
+bodies never leave the script — the model gets the count and the paths that
+mattered.
+
+### It is real Node, not a sandbox
+
+`fs`, `child_process`, `fetch`, `node:*` builtins, npm packages, and genuine
+parallelism all work. That is deliberate: the model kept writing
+`await import('node:fs')` because that is what JavaScript that does real work
+looks like, and a runtime that refuses it is a runtime the model works around.
+The cost is stated plainly — a script that reads a file through `node:fs` does
+not pass through Reaper's permission checks, approval prompts, or audit log.
+`tools.*` does, which is why the description tells the model to prefer it when a
+tool does the job.
+
+Two things are refused, and only these: writing to system directories and
+reading credential stores like `~/.ssh` or `~/.aws`, and commands like
+`rm -rf /`, `mkfs`, `dd of=/dev/sda`, and fork bombs. A refusal comes back as a
+catchable `REAPER_REFUSED` error naming the operation, not the model's code.
+
+Liveness is what a worker thread buys: `while (true) {}` is killed instantly,
+memory is capped by V8, a synchronous child process cannot outrun the deadline,
+and a script that starts a background process has it collected when the turn
+ends — the same lifetime a `bash` child gets.
+
+### Every tool, without the context cost
+
+A script can call **every tool the agent can call**, all 29 of them, including
+the 19 whose schemas are not in the model's context:
+
+```js
+const found = await tools.search_tools({ query: "find files matching a pattern" });
+const { input } = await tools.describe("glob");   // -> { pattern, path }
+const { files } = await tools.glob({ pattern: "src/**/*.ts" });
+```
+
+`eval` itself is the one exception, because a script calling itself nests one
+timeout budget inside a runtime the level above cannot interrupt.
+
+The tool catalogue is not in the prompt. It travels into the worker, and the
+model reaches into it on demand, so `eval`'s cost is the same whether Reaper has
+thirty tools or three thousand:
+
+| | tokens |
+| --- | --- |
+| `eval` tool description (fixed) | ~484 |
+| full catalogue, inside the sandbox | ~2,549 |
+| the deferred-tools list in the system prompt | ~706, at ~35 per tool per turn |
+
+That last row is why the list is capped: extensions register into the same
+registry, so it grows without bound otherwise. Past 24 names the rest are
+summarised as `… and N more`, with a pointer at both ways to search. The elision
+is stated rather than silent, because a truncated list that reads as complete is
+worse than the long one it replaced.
+
+### In the web interface
+
+When the model writes a program, it renders as its own block in the transcript —
+the script with line numbers, and the Reaper tools it called underneath:
+
+![Code Mode in the web transcript](docs/screenshots/code-mode-expanded.png)
+
+While it runs, output streams into the block live rather than showing a spinner,
+so a loop over sixty files is visible as it happens.
+
+### The `codemode` skill
+
+`eval`'s description is the routing logic and stays short. The worked detail —
+return semantics, the `tools.*` API, the refusal codes, and seven example shapes
+— lives in the `codemode` skill, which the model loads with `activate_skill`
+when it wants it. A skill is a document: loading it costs context only in the
+turns it is used.
+
+```bash
+/skills                     # list installed skills
+/skills show codemode       # read the body
+/skills pin codemode        # always-on: its body rides in every turn
+/skills unpin codemode
+```
+
+![The skills panel, with codemode pinned always-on](docs/screenshots/skills-panel.png)
+
+`/skills` works in the CLI and in the web UI, both accept a filter, and both show
+what is pinned. Pinning is per user, not per thread: a skill marked always-on
+rides in every turn of every conversation until it is switched off.
+
+### In the terminal
+
+Code Mode renders as its own block — the script with line numbers, the inner
+Reaper tool calls as they happen, and the value that came back:
+
+```text
+  → Eval — const { matches } = await tools.grep_search({ pattern: 'TODO' }); (+1 lines)
+      const { matches } = await tools.grep_search({ pattern: 'TODO' });
+      matches.length;
+    Grep search · → 3 · 412ms
+```
+
+The inner tools are named rather than counted. "3 tool calls" says how busy the
+script was; "Grep search, File view ×2" says what it did, which is the question
+the line is there to answer. Both this line and the web row read their labels
+from `web/shared/src/summarize.ts`, so a terminal and a browser describe one call
+with the same words.
+
+The web transcript shows the same thing with live streaming output while the
+script runs, so a long loop is visible rather than a spinner.
 
 ## Architecture
 
@@ -225,11 +454,13 @@ When context gets tight, Reaper compresses history. It does not touch the system
 
 Dumping whole files into the model is how long runs die. The default file tools are bounded:
 
-- `file_view` / `file_scroll` give line-numbered windows
-- `file_find` searches inside a file
+- `file_view` gives a line-numbered window of a file
+- `file_find` searches inside one file
 - `file_edit` replaces an exact range
 
-`write_file`, `delete_file`, `list_directory`, `grep_search`, and `bash` stay on every turn because the agent cannot work without them. Everything else, including git checkpoints, is hidden behind `search_tools`, which is BM25 over the tool catalog. The model asks for a capability when it needs one instead of carrying fifty schemas forever.
+Ten tools carry a full schema on every call: `bash`, `file_view`, `file_edit`, `write_file`, `grep_search`, `list_directory`, `glob`, `git_status`, `git_diff`, and `search_tools`. The other nineteen ship as one line each — name and description — and are hidden behind `search_tools`, which is BM25 over the tool catalog. The model asks for a capability when it needs one instead of carrying every schema forever.
+
+`search_tools` is in the core set because it is the escape hatch the other nineteen depend on. `delete_file` and `file_find` are not: deleting is rare and irreversible enough to deserve a discovery step, and `file_view` with an explicit range already covers what `file_find`'s viewport did. The full list is generated into `tools.md`.
 
 Independent reads and shells run at the same time. The scheduler keys each tool by the resource it touches, so two reads of different files proceed and two writes to the same file do not.
 
@@ -249,9 +480,11 @@ The design bias is: do not summarize until you have to. Summaries lose detail. P
 
 ### Providers
 
-The loop does not speak Anthropic or OpenAI. It speaks one gateway. Streams come back as the same tool-call events. A stuck stream dies on an idle timeout instead of hanging the run.
+The loop does not speak Anthropic or OpenAI. It speaks one gateway — `ProviderModelClient` — and every wire format is normalized behind it. Streams come back as the same tool-call events regardless of who produced them, and a stuck stream dies on an idle timeout instead of hanging the run.
 
-Two wire families exist: Anthropic `/v1/messages` and OpenAI-compatible `/chat/completions`. MiniMax, DeepSeek, NeuralWatt, and Codex hang off the second family with different base URLs and keys. Adding a vendor is a catalog entry unless they need a custom client.
+Behind that boundary sit two things. The AI SDK transports carry the catalog: 29 pinned provider packages covering the 213 providers in the Models.dev snapshot, each resolved from the selected model's npm identity, with per-call credentials so two threads on different providers never race each other's keys. In front of them sits provider authentication — API keys, environment variables, and the OAuth and device flows that some vendors require — plus the request transformations each vendor needs for reasoning, caching, and tool calling.
+
+A model the catalog advertises but this build has no package for fails with a sentence naming the package and the model you picked, rather than a module error from inside the loader. `TRANSPORTS.md` is generated from the pinned snapshot and CI fails if it drifts.
 
 ### Recovery and the things that are not shipped
 
@@ -276,15 +509,34 @@ Skills are extra instructions Reaper can load for things like debugging or repo 
 ## Tests
 
 ```bash
-npm test
-npm run typecheck
+npm test                # the whole server suite
+npm run test:web        # the React UI
+npm run typecheck       # server + web
 ```
+
+Two suites drive Code Mode directly: `tests/unit/code-mode.test.ts` covers
+execution, the resource limits, and the guard, and
+`tests/unit/code-mode-surface.test.ts` covers what a script can reach — the whole
+registry, the discovery flow, and plain-Node execution beside `tools.*`.
+
+Two live harnesses sit outside CI, because they need a real model and the tool
+choice they measure is a decision rather than a fact:
+
+```bash
+REAPER_LIVE_TESTS=1 node --import=tsx scripts/browser-codemode-skills.mts
+REAPER_LIVE_TESTS=1 ROUTING_REPEATS=3 node --import=tsx scripts/code-mode-routing.mts
+```
+
+The first drives the whole UI in a real browser and screenshots every step. The
+second puts five task shapes in front of the model and records whether it
+reached for a program or a tool, which is the only way to check the wording of
+`eval`'s description — there is no router or classifier behind it.
 
 `npm run reaper:dev` watches the CLI while you hack on it. `npm run stress` is a context-budget harness, not a user command.
 
 ## What to expect
 
-- No interactive TUI and no web app. You start a run, it works, it exits.
+- No interactive TUI. Use the CLI for one-shot runs or the React web interface for persistent threads.
 - No MCP servers. That path was removed.
 - No multi-agent swarm you can invoke. Parallel tool calls exist. A user-facing delegate tool does not.
 - Several scripts under `scripts/` are old eval harnesses. Use `bin/reaper` or `npm run reaper:exec`.

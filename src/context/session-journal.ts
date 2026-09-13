@@ -34,6 +34,11 @@ import { appendFile, mkdir, readFile, writeFile, rename } from "node:fs/promises
 import path from "node:path";
 import { redactSecrets } from "../logging/redaction.js";
 import {
+  getLegacyReaperSessionRoot,
+  getNewReaperSessionRoot,
+  getReaperLogDir,
+} from "../workspace/scratchpad.js";
+import {
   buildCompactionCheckpoint,
   COMPACTION_CHECKPOINT_MESSAGE_NAME,
   COMPACTION_SUMMARY_MESSAGE_NAME,
@@ -208,12 +213,29 @@ export const TITLE_SLOT_TYPE = "title_slot";
 // Storage
 // ─────────────────────────────────────────────────────────────────────────
 
-function sessionsDir(workspaceRoot: string): string {
-  return path.join(workspaceRoot, ".reaper", "logs");
+/**
+ * Every root that may hold session directories, newest first.
+ *
+ * Listings and orphan recovery iterate this instead of one directory, so a
+ * workspace that predates the rename still shows its threads. A name present in
+ * both roots is reported once, from the new root, because that is the one a
+ * resumed run will append to.
+ */
+function sessionsRoots(workspaceRoot: string): string[] {
+  return [getNewReaperSessionRoot(workspaceRoot), getLegacyReaperSessionRoot(workspaceRoot)];
 }
 
+/**
+ * The journal file for a named session.
+ *
+ * Resolves through `getReaperLogDir`, so an existing `.reaper/logs/<name>` is
+ * still found and used. That matters beyond reading: if a legacy thread is
+ * resumed and this returned the new path, the run would append its continuation
+ * to a second journal while the old one sat beside it, splitting one
+ * conversation in two.
+ */
 function journalPath(workspaceRoot: string, name: string): string {
-  return path.join(sessionsDir(workspaceRoot), name, "session.jsonl");
+  return path.join(getReaperLogDir(workspaceRoot, name), "session.jsonl");
 }
 
 function titleSlotLine(title: string, source: "auto" | "user" | undefined, updatedAt: string): string {
@@ -298,9 +320,11 @@ export async function initJournal(input: JournalInit): Promise<{ header: Session
 }
 
 export function journalExists(workspaceRoot: string, name: string): boolean {
-  // Directory reserved by initJournal, or an existing session.jsonl.
-  const dir = path.join(sessionsDir(workspaceRoot), name);
-  return existsSync(dir) || existsSync(journalPath(workspaceRoot, name));
+  // A directory reserved by `initJournal`, or an existing `session.jsonl`. Both
+  // checks go through `getReaperLogDir`, so a thread whose directory lives at
+  // the legacy path still reports as present rather than as a thread that never
+  // ran — which the UI renders as an empty conversation.
+  return existsSync(getReaperLogDir(workspaceRoot, name)) || existsSync(journalPath(workspaceRoot, name));
 }
 
 /** Append a legacy typed entry row into session.jsonl (tests / compaction write-back). */
@@ -343,32 +367,35 @@ export async function setTitle(
  * primary is absent.
  */
 export function recoverOrphanedBackups(workspaceRoot: string): number {
-  const dir = sessionsDir(workspaceRoot);
-  if (!existsSync(dir)) return 0;
   let recovered = 0;
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const sessionDir = path.join(dir, entry.name);
-    let files: string[] = [];
-    try {
-      files = readdirSync(sessionDir);
-    } catch {
-      continue;
-    }
-    const baks = files.filter((f) => /^session\.jsonl\.\d+\.bak$/.test(f) || /^journal\.jsonl\.\d+\.bak$/.test(f));
-    if (baks.length === 0) continue;
-    const primaryPath = path.join(sessionDir, "session.jsonl");
-    if (existsSync(primaryPath)) continue;
-    baks.sort((a, b) => statSync(path.join(sessionDir, b)).mtimeMs - statSync(path.join(sessionDir, a)).mtimeMs);
-    const newest = baks[0]!;
-    const from = path.join(sessionDir, newest);
-    try {
-      const data = readFileSync(from);
-      writeFileSync(primaryPath, data);
-      unlinkSync(from);
-      recovered += 1;
-    } catch {
-      /* leave the bak for next time */
+  // Both roots: a crash can leave a `.bak` under either, and recovery that
+  // skipped the legacy one would leave an old thread permanently unopenable.
+  for (const dir of sessionsRoots(workspaceRoot)) {
+    if (!existsSync(dir)) continue;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const sessionDir = path.join(dir, entry.name);
+      let files: string[] = [];
+      try {
+        files = readdirSync(sessionDir);
+      } catch {
+        continue;
+      }
+      const baks = files.filter((f) => /^session\.jsonl\.\d+\.bak$/.test(f) || /^journal\.jsonl\.\d+\.bak$/.test(f));
+      if (baks.length === 0) continue;
+      const primaryPath = path.join(sessionDir, "session.jsonl");
+      if (existsSync(primaryPath)) continue;
+      baks.sort((a, b) => statSync(path.join(sessionDir, b)).mtimeMs - statSync(path.join(sessionDir, a)).mtimeMs);
+      const newest = baks[0]!;
+      const from = path.join(sessionDir, newest);
+      try {
+        const data = readFileSync(from);
+        writeFileSync(primaryPath, data);
+        unlinkSync(from);
+        recovered += 1;
+      } catch {
+        /* leave the bak for next time */
+      }
     }
   }
   return recovered;
@@ -721,14 +748,26 @@ export interface SessionSummary {
 }
 
 export function listJournals(workspaceRoot: string): SessionSummary[] {
-  const dir = sessionsDir(workspaceRoot);
-  if (!existsSync(dir)) return [];
-  const names = readdirSync(dir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name)
-    .filter((name) => isValidSessionName(name) && (existsSync(journalPath(workspaceRoot, name)) || existsSync(path.join(dir, name))));
+  /*
+   * Union of both roots, new first. A name in both roots resolves to the new
+   * one: that is where a resumed run appends, so it is the directory whose
+   * size and mtime the listing should report. Iterating only `.reaper/sessions`
+   * would hide every thread written before the rename, which reads to a user as
+   * "my old conversations are gone".
+   */
+  const dirOf = new Map<string, string>();
+  for (const dir of sessionsRoots(workspaceRoot)) {
+    if (!existsSync(dir)) continue;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !isValidSessionName(entry.name)) continue;
+      if (dirOf.has(entry.name)) continue;
+      const candidate = path.join(dir, entry.name);
+      if (!existsSync(journalPath(workspaceRoot, entry.name)) && !existsSync(candidate)) continue;
+      dirOf.set(entry.name, dir);
+    }
+  }
   const out: SessionSummary[] = [];
-  for (const name of names) {
+  for (const [name, dir] of dirOf) {
     try {
       const jp = journalPath(workspaceRoot, name);
       const statPath = existsSync(jp) ? jp : path.join(dir, name);
@@ -815,13 +854,53 @@ function savingsJournalPath(workspaceRoot: string): string {
 export interface SavingsRecord {
   ts: number;
   session: string;
-  kind: "shake" | "time_microcompact" | "full_summary" | "spillover";
+  /**
+   * Which technique reclaimed the context.
+   *
+   * Widened from the original four to every technique Reaper runs, because the
+   * four were the only ones anyone had thought to log and the file was, in
+   * practice, empty: `recordCompactionSavings` had no caller anywhere in the
+   * tree. The point of this journal is that a session's context history is
+   * readable after the fact, and that requires the writer to exist.
+   */
+  kind:
+    | "supersede"
+    | "tool_output_prune"
+    | "bash_head_tail"
+    | "shake"
+    | "microcompact"
+    | "time_microcompact"
+    | "tool_history"
+    | "snapcompact"
+    | "full_summary"
+    | "handoff_summary"
+    | "idle_compaction"
+    | "incomplete_recovery"
+    | "ptl_recovery"
+    | "model_promotion"
+    | "spillover";
+  /** Messages removed or results cleared, when the technique counts them. */
   cleared?: number;
   savedChars: number;
+  savedTokens?: number;
   contextWindow?: number;
   ratio?: number;
+  /** Human-readable note, the same one the transcript row shows. */
+  detail?: string;
 }
 
+/**
+ * Append one context-management operation to the session's savings journal.
+ *
+ * Append-only, like every other journal Reaper keeps: a line is never rewritten
+ * or removed, so the file is a chronological record of how a long session
+ * managed its window. It lives beside the session journal under `.reaper/`, and
+ * both the web transcript and the CLI read their numbers from the same event
+ * that writes this line, so the two never disagree about what happened.
+ *
+ * Failures are swallowed by the caller: a session that cannot write its
+ * accounting journal must still be able to compact and continue.
+ */
 export async function recordCompactionSavings(workspaceRoot: string, rec: SavingsRecord): Promise<void> {
   const dir = path.join(workspaceRoot, ".reaper");
   await mkdir(dir, { recursive: true });

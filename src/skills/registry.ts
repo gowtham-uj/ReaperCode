@@ -57,9 +57,9 @@ export class SkillRegistry {
 
   /**
    * Enable a skill — clears `disabled` in memory, removes the on-disk
-   * marker, and re-persists via the memory registry so the change
-   * survives a reload. The trust value is preserved; only the
-   * invocation gate flips.
+   * marker when the skill is one the user owns, and re-persists via the
+   * memory registry so the change survives a reload. The trust value is
+   * preserved; only the invocation gate flips.
    */
   enable(name: string): boolean {
     const r = this.records.get(name);
@@ -67,7 +67,7 @@ export class SkillRegistry {
     const { disabledReason: _drop, ...rest } = r;
     const next: InstalledSkillRecord = { ...rest, disabled: false };
     this.records.set(name, next);
-    if (r.skillDir) {
+    if (this.ownsSkillDir(r)) {
       try { rmSync(join(r.skillDir, DISABLED_MARKER), { force: true }); } catch { /* best effort */ }
     }
     this.syncToMemory();
@@ -76,16 +76,29 @@ export class SkillRegistry {
 
   /**
    * Disable a skill — sets the runtime gate so `activate_skill`
-   * refuses to load the body, even for trusted skills. Persisted both
-   * as a `disabled` marker next to the manifest (read back by
-   * discovery on the next boot) and via the memory registry.
+   * refuses to load the body, even for trusted skills.
+   *
+   * The durable state is the user's `runtimeTunables.disabledSkills` list, which
+   * the callers write; what this method owns is the in-process record, so a
+   * command that just disabled something reports it correctly without waiting
+   * for a rediscovery. It also maintains the marker file, but *only* for a
+   * skill the user owns.
+   *
+   * That condition is the whole point. The marker used to be written
+   * unconditionally, and `skillDir` for a built-in is the shipped source tree
+   * in a checkout or a temp directory the bundle regenerates at startup — so
+   * "disable the codemode skill" wrote a file into Reaper's own installation,
+   * which in a source checkout is a file that gets committed and ships the
+   * skill switched off to everybody. The marker remains meaningful as a way for
+   * a skill *author* to ship a skill pre-disabled; it was never a reasonable
+   * way for a *user* to switch off a skill they did not write.
    */
   disable(name: string, reason?: string): boolean {
     const r = this.records.get(name);
     if (!r) return false;
     const next: InstalledSkillRecord = { ...r, disabled: true, ...(reason !== undefined ? { disabledReason: reason } : {}) };
     this.records.set(name, next);
-    if (r.skillDir) {
+    if (this.ownsSkillDir(r)) {
       try {
         mkdirSync(r.skillDir, { recursive: true });
         writeFileSync(join(r.skillDir, DISABLED_MARKER), next.disabledReason ?? "disabled", "utf8");
@@ -93,6 +106,19 @@ export class SkillRegistry {
     }
     this.syncToMemory();
     return true;
+  }
+
+  /**
+   * May Reaper write a state file inside this skill's own directory?
+   *
+   * Only for the two scopes that live under the user's own trees — `~/.reaper`
+   * and the project's `.reaper`. `builtin` is the installation and `extension`
+   * belongs to a package, and neither is a place a user-level preference may be
+   * recorded.
+   */
+  private ownsSkillDir(r: InstalledSkillRecord): r is InstalledSkillRecord & { skillDir: string } {
+    if (r.skillDir === undefined || r.skillDir === "") return false;
+    return r.scope === "user" || r.scope === "project";
   }
 
   private syncToMemory(): void {

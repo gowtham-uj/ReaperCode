@@ -24,7 +24,7 @@ test("integration: scheduler deduplicates identical reads in the pool", async ()
   // the same file twice; we only want one underlying read.
   // Use a manual test by mocking execute.
   (executor as any).execute = async (c: any) => {
-    if (c.name === "view_file") {
+    if (c.name === "file_view") {
       readCount += 1;
       return {
         toolCallId: c.id,
@@ -45,9 +45,9 @@ test("integration: scheduler deduplicates identical reads in the pool", async ()
     flushFinal: async () => undefined,
   } as any;
   const calls = [
-    call("view_file", { path: "a.ts" }, "1"),
-    call("view_file", { path: "a.ts" }, "2"),
-    call("view_file", { path: "b.ts" }, "3"),
+    call("file_view", { path: "a.ts" }, "1"),
+    call("file_view", { path: "a.ts" }, "2"),
+    call("file_view", { path: "b.ts" }, "3"),
   ];
   const result = await executeToolCalls(calls, executor, recovery);
   assert.equal(result.results.length, 3);

@@ -61,7 +61,7 @@ export async function logModelCall(payload: ModelCallLogPayload): Promise<void> 
   const active = currentModelCallLogContext() ?? (observed ? { workspaceRoot: observed.workspaceRoot, runId: observed.runId } : undefined);
   if (!active) return;
   const callId = payload.callId ?? nextCallId(active.runId, payload.kind);
-  const dir = path.join(getReaperScratchpadPaths(active.workspaceRoot).logs, active.runId, "model-calls");
+  const dir = path.join(getReaperScratchpadPaths(active.workspaceRoot).sessions, active.runId, "model-calls");
   await mkdir(dir, { recursive: true });
   const safe = redactSecrets(toJsonSafe({
     schema_version: 1,
@@ -206,7 +206,7 @@ export async function collectModelCallTranscripts(
   destPath: string,
 ): Promise<{ calls: number; destPath: string }> {
   const paths = getReaperScratchpadPaths(workspaceRoot);
-  const dir = path.join(paths.logs, runId, "model-calls");
+  const dir = path.join(paths.sessions, runId, "model-calls");
   let files: string[] = [];
   try {
     files = (await readdir(dir)).filter((f) => f.endsWith(".txt") && f !== "TRANSCRIPT.md").sort();

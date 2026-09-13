@@ -35,7 +35,9 @@ test("rejects invalid trajectory kinds", () => {
         kind: "unknown_kind",
         level: "info",
       }),
-    /Invalid discriminator value/,
+    // Match the structured issue, not the prose: zod's wording changes between
+    // majors and these assertions silently stopped testing anything when it did.
+    (error: unknown) => String(error).includes('"discriminator": "kind"'),
   );
 });
 
@@ -49,7 +51,7 @@ test("rejects wrong log schema version", () => {
         user_intent_summary: "Fix the tests",
         log_schema_version: 2,
       }),
-    /Invalid literal value/,
+    (error: unknown) => String(error).includes('"log_schema_version"'),
   );
 });
 
@@ -62,7 +64,7 @@ test("rejects malformed audit entries", () => {
         severity: "warn",
         message: "",
       }),
-    /String must contain at least 1 character/,
+    (error: unknown) => String(error).includes('"code": "too_small"'),
   );
 });
 

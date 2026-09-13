@@ -5,8 +5,9 @@ import { RuntimeEngine } from "../../src/runtime/engine.js";
 import { createValidRequestEnvelope } from "../fixtures/phase0.js";
 import { createLiveDeepSeekGateway } from "../fixtures/live-gateway.js";
 import { createTempWorkspace } from "../fixtures/workspace.js";
+import { liveSkipOption } from "../fixtures/live-gate.js";
 
-test("live Reaper solves a complex coding task with LLM planning", { skip: !(process.env.RUN_LIVE_LLM_TESTS === "1" && process.env.DEEPSEEK_API_KEY), timeout: 10 * 60_000 }, async () => {
+test("live Reaper solves a complex coding task with LLM planning", { skip: liveSkipOption("DEEPSEEK_API_KEY"), timeout: 10 * 60_000 }, async () => {
   const workspaceRoot = await createTempWorkspace();
   const request = createValidRequestEnvelope();
   request.payload = {

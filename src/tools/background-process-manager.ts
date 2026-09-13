@@ -14,7 +14,7 @@
  *  - `terminateAll(reason)` for the cleanup-registry hook: SIGTERM,
  *    wait, SIGKILL the holdouts, plus a `cleanupDescendantProcesses`
  *    safety net for grandchildren the parent didn't own.
- *  - `killTree(pid, signal)` for the `signal_process` tool.
+ *  - `killTree(pid, signal)` for the `job` tool's cancel action.
  *
  * The manager does NOT spawn children — that's still the `bash` tool.
  * It only owns what happens after a pid exists.
@@ -25,6 +25,7 @@ import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import treeKill from "tree-kill";
 
+import { detectServerUrls, type DetectedServer } from "./dev-server-url.js";
 import { getReaperScratchpadPaths } from "../workspace/scratchpad.js";
 import { getBgTunables } from "../config/config-tunables.js";
 
@@ -47,6 +48,26 @@ export interface ManagedBackgroundProcess {
   cwd: string;
   notified: boolean;
 }
+
+/**
+ * One chunk of output from one background process, as it happens.
+ *
+ * Background processes previously reached the outside world only through the
+ * bounded ring buffer and the JSONL log, so anything watching a dev server had
+ * to poll `recentOutput` and diff. That makes "live" output arrive a poll
+ * interval late and re-sends whatever the poller already had. Pushing instead
+ * means a build log streams at the rate the process produces it.
+ */
+export interface BackgroundOutputEvent {
+  pid: number;
+  stream: "stdout" | "stderr" | "system";
+  text: string;
+  cmd: string;
+  /** Loopback origins announced in this chunk, if any. */
+  servers: DetectedServer[];
+}
+
+export type BackgroundOutputListener = (event: BackgroundOutputEvent) => void;
 
 export interface BackgroundProcessSnapshot {
   pid: number;
@@ -91,6 +112,9 @@ function getMaxOutputLines(): number {
 export class BackgroundProcessManager {
   private readonly processes = new Map<number, ManagedBackgroundProcess>();
   private readonly runDir: string;
+  private readonly outputListeners = new Set<BackgroundOutputListener>();
+  /** Loopback origins seen so far, keyed by url so a restart re-announces. */
+  private readonly detectedServers = new Map<string, DetectedServer & { pid: number }>();
 
   constructor(private readonly options: { runId: string; workspaceRoot: string }) {
     this.runDir = path.join(
@@ -146,6 +170,39 @@ export class BackgroundProcessManager {
   // Output buffer
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // Live output
+  // -------------------------------------------------------------------------
+
+  /**
+   * Subscribe to output from every background process. Returns an unsubscribe
+   * function; callers must call it, or a finished turn's sink stays reachable
+   * from a manager that outlives it.
+   *
+   * A listener that throws is dropped rather than allowed to break the child's
+   * `data` handler — a broken UI subscriber must not stop the log from being
+   * written or the ring buffer from being filled.
+   */
+  onOutput(listener: BackgroundOutputListener): () => void {
+    this.outputListeners.add(listener);
+    return () => this.outputListeners.delete(listener);
+  }
+
+  /** Loopback dev-server origins announced by any background process so far. */
+  servers(): Array<DetectedServer & { pid: number }> {
+    return [...this.detectedServers.values()];
+  }
+
+  private emitOutput(event: BackgroundOutputEvent): void {
+    for (const listener of this.outputListeners) {
+      try {
+        listener(event);
+      } catch {
+        this.outputListeners.delete(listener);
+      }
+    }
+  }
+
   /**
    * Return the last `lines` lines from the bounded ring buffer.
    * Bounded by `getMaxOutputLines()` so a chatty long-running process
@@ -173,22 +230,29 @@ export class BackgroundProcessManager {
   // -------------------------------------------------------------------------
 
   private attach(entry: ManagedBackgroundProcess): void {
-    entry.child.stdout?.on("data", (data) => {
+    const pid = entry.child.pid ?? -1;
+    const handle = (stream: "stdout" | "stderr", data: unknown): void => {
       const text = String(data);
       this.pushBoundedOutput(entry.output, text);
-      void this.appendLog(entry, "stdout", text);
-    });
-    entry.child.stderr?.on("data", (data) => {
-      const text = String(data);
-      this.pushBoundedOutput(entry.output, text);
-      void this.appendLog(entry, "stderr", text);
-    });
+      void this.appendLog(entry, stream, text);
+
+      const servers = detectServerUrls(text);
+      for (const server of servers) this.detectedServers.set(server.url, { ...server, pid });
+      this.emitOutput({ pid, stream, text, cmd: entry.cmd, servers });
+    };
+
+    entry.child.stdout?.on("data", (data) => handle("stdout", data));
+    entry.child.stderr?.on("data", (data) => handle("stderr", data));
     entry.child.on("exit", (code, signal) => {
-      void this.appendLog(
-        entry,
-        "system",
-        `Process exited code=${code ?? "null"} signal=${signal ?? "null"}`,
-      );
+      const text = `Process exited code=${code ?? "null"} signal=${signal ?? "null"}`;
+      void this.appendLog(entry, "system", text);
+      // A server whose process died must stop being offered as a preview
+      // target; otherwise the iframe shows a connection error with no
+      // explanation of which process went away.
+      for (const [url, server] of this.detectedServers) {
+        if (server.pid === pid) this.detectedServers.delete(url);
+      }
+      this.emitOutput({ pid, stream: "system", text, cmd: entry.cmd, servers: [] });
       if (!entry.notified) {
         entry.notified = true;
       }

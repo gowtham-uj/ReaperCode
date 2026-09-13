@@ -326,7 +326,25 @@ test("mega dev task: add stats module with full test coverage", async () => {
   assert.equal(mainRequests.length, 7, `expected exactly 7 main_agent turns, got ${mainRequests.length}`);
 
   const sys0 = mainRequests[0]!.system;
-  assert.equal(sys0, MAIN_AGENT_SYSTEM_PROMPT_TEXT, "main agent receives canonical stable system prompt");
+  assert.ok(typeof sys0 === "string" && sys0.length > 0, "every main-agent turn must send a system prompt");
+
+  // The role prompt is the byte-exact *prefix*; the tool inventory is appended
+  // after it. Appending is what keeps a provider's prefix cache hitting while
+  // still letting discovery change the tail — a tool unlocked on turn 3 must
+  // drop out of the "unlock this" list on turn 3. Full equality would forbid
+  // that; a bare `startsWith` would let the prompt be rewritten in place, so
+  // the tail is pinned to the inventory exactly. `e2e-live-validation` asserts
+  // the same thing from the other side.
+  assert.ok(
+    sys0.startsWith(MAIN_AGENT_SYSTEM_PROMPT_TEXT),
+    "the canonical prompt must be the exact prefix of the system message",
+  );
+  const tail = sys0.slice(MAIN_AGENT_SYSTEM_PROMPT_TEXT.length);
+  assert.ok(
+    tail === "" || tail.startsWith("\n# Available tools\n"),
+    `only the tool inventory may follow the canonical prompt, got: ${JSON.stringify(tail.slice(0, 80))}`,
+  );
+  assert.match(tail, /# Available tools/, "the model must be told which tools exist beyond its schemas");
   for (const req of mainRequests) {
     assert.equal(req.system, sys0, "system bytes are byte-identical across all 7 turns");
   }

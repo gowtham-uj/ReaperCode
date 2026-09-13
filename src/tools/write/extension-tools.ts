@@ -33,13 +33,15 @@ import type {
 } from "../../extensions/types.js";
 import type { HookEventName } from "../../extensions/types.js";
 import { writeExtensionManifest } from "../../extensions/manifest.js";
+import { CreateExtensionArgsSchema } from "../types/extension-tools.schema.js";
+import { operationArgs } from "../types/manager-args.js";
 import type {
   CreateExtensionArgs,
   ValidateExtensionArgs,
   EnableExtensionArgs,
   TrustExtensionArgs,
   UninstallExtensionArgs,
-  ReloadExtensionsArgs,
+  ExtensionManagerArgs,
 } from "../types/extension-tools.schema.js";
 
 export type ExtensionApprovalRequester = (input: {
@@ -233,10 +235,48 @@ export async function handleUninstallExtension(
   return { ok: true, id: args.id };
 }
 
-export function handleReloadExtensions(
-  _args: ReloadExtensionsArgs,
+/**
+ * The one extension tool the model calls. Dispatches on `action` to the
+ * handlers above; they stay separate because they are the unit the existing
+ * tests exercise.
+ *
+ * There is no `reload` action — see the schema header for why.
+ */
+export async function handleExtensionManager(
+  args: ExtensionManagerArgs,
   deps: ExtensionToolDeps,
-): { ok: boolean; loaded: number } {
-  const loaded = deps.registry.discover();
-  return { ok: true, loaded: loaded.length };
+): Promise<unknown> {
+  // `reload_extensions` is gone, so the manager re-walks the install dirs
+  // itself before every action. The walk is a directory read plus a JSON parse
+  // per manifest, it is idempotent, and it is the difference between acting on
+  // what is on disk and acting on what this process happened to load at boot —
+  // an extension copied in by hand must be visible to `enable` without the
+  // model first remembering a separate reload step.
+  deps.registry.discover();
+  switch (args.action) {
+    case "create": {
+      // `action` and `note` come out first — `note` belongs to `trust`, and a
+      // `create` that carried one would otherwise be rejected as an
+      // unrecognized key by the strict re-parse below.
+      const parsed = CreateExtensionArgsSchema.safeParse(operationArgs(args, ["action", "note"]));
+      if (!parsed.success) {
+        return { ok: false, action: args.action, error: `create requires the full extension definition: ${parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")}` };
+      }
+      return handleCreateExtension(parsed.data, deps);
+    }
+    case "validate":
+      return handleValidateExtension(requireId(args, "validate"), deps);
+    case "enable":
+      return handleEnableExtension(requireId(args, "enable"), deps);
+    case "trust":
+      return handleTrustExtension({ id: requireId(args, "trust").id, ...(args.note !== undefined ? { note: args.note } : {}) }, deps);
+    case "uninstall":
+      return handleUninstallExtension(requireId(args, "uninstall"), deps);
+  }
+}
+
+function requireId(args: ExtensionManagerArgs, action: string): ValidateExtensionArgs & EnableExtensionArgs & UninstallExtensionArgs {
+  const id = typeof args.id === "string" ? args.id : "";
+  if (!id) throw new Error(`extension_manager action="${action}" requires "id"`);
+  return { id };
 }

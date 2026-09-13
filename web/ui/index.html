@@ -4,10 +4,29 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#000000" />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%2322c55e'/%3E%3Cpath d='M5 8.5l2 2 4-4.5' stroke='%23052e16' stroke-width='1.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
     <title>Reaper</title>
   </head>
+  <!-- The DeepSeek token sheet keeps light values on bare `body` and gates the
+       whole dark palette behind `data-ds-dark-theme`; Reaper's black theme adds
+       `data-ds-black-theme` on top. Both are applied by this inline script
+       rather than by the bundle, so the first paint is already the chosen theme
+       instead of flashing dark and then switching. Kept in sync with
+       src/theme.ts (storage key `reaper.theme`, values "dark" / "black"). -->
   <body>
+    <script>
+      (function () {
+        var theme = "dark";
+        try {
+          if (localStorage.getItem("reaper.theme") === "black") theme = "black";
+        } catch (error) {
+          /* storage blocked — the default theme is still correct */
+        }
+        document.body.setAttribute("data-ds-dark-theme", "");
+        if (theme === "black") document.body.setAttribute("data-ds-black-theme", "");
+      })();
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/index.tsx"></script>
   </body>

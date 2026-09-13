@@ -3,7 +3,7 @@
  *
  * The scheduler in `src/execution/scheduler.ts` already parallelizes
  * reads and non-barrier shell commands in a single pool. This module
- * adds three Codex/Claude/OpenCode-style optimizations on top of
+ * adds three agent-loop optimizations on top of
  * that pool:
  *
  * 1. **Deduplication** — multiple `file_view` calls for the same path
@@ -134,12 +134,19 @@ function dedupKey(call: ToolCall): string | undefined {
   const args = (call.args ?? {}) as Record<string, unknown>;
   const argPath = (): string | undefined => (typeof args.path === "string" ? normalizeDedupPath(args.path) : undefined);
   switch (call.name) {
-    case "view_file":
+    case "file_view": {
+      // `file_view` is a start plus a length, not a start/end pair. The window
+      // is what distinguishes one read of a path from another, so it replaces
+      // the old end-line component in the key.
+      const target = argPath();
+      const start = typeof args.start_line === "number" ? args.start_line : "";
+      const window = typeof args.window === "number" ? args.window : "";
+      return target ? `read:${call.name}:${target}:${start}:${window}` : undefined;
+    }
     case "skim_file": {
       const target = argPath();
-      const start = typeof args.startLine === "number" ? args.startLine : "";
-      const end = typeof args.endLine === "number" ? args.endLine : "";
-      return target ? `read:${call.name}:${target}:${start}:${end}` : undefined;
+      const goal = typeof args.goalHint === "string" ? args.goalHint : "";
+      return target ? `read:${call.name}:${target}:${goal}` : undefined;
     }
     case "list_directory": {
       const target = argPath();

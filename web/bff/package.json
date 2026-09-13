@@ -1,9 +1,0 @@
-{
-  "name": "@reaper/web-bff",
-  "private": true,
-  "version": "0.0.0",
-  "type": "module",
-  "exports": {
-    ".": "./src/server.ts"
-  }
-}

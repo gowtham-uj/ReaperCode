@@ -122,38 +122,8 @@ export interface ToolMetadata {
 
 export const TOOL_METADATA: Record<string, ToolMetadata> = {
   // ---- Read ----
-  view_file: {
-    name: "view_file",
-    category: "read",
-    risk_level: "low",
-    is_read_only: true,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: false,
-    can_affect_host: false,
-    requires_approval: false,
-    preferred_before: ["write_file", "edit_file", "file_edit", "delete_file", "bash"],
-    preferred_after: ["grep_search", "skim_file"],
-    forbidden_in_roles: [],
-    allowed_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser", "root"],
-  },
   file_view: {
     name: "file_view",
-    category: "read",
-    risk_level: "low",
-    is_read_only: true,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: false,
-    can_affect_host: false,
-    requires_approval: false,
-    preferred_before: ["write_file", "file_edit", "delete_file", "bash"],
-    preferred_after: ["file_find", "grep_search"],
-    forbidden_in_roles: [],
-    allowed_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser", "root"],
-  },
-  file_scroll: {
-    name: "file_scroll",
     category: "read",
     risk_level: "low",
     is_read_only: true,
@@ -177,7 +147,7 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     can_control_ui: false,
     can_affect_host: false,
     requires_approval: false,
-    preferred_before: ["file_view", "view_file"],
+    preferred_before: ["file_view"],
     preferred_after: [],
     forbidden_in_roles: [],
     allowed_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser", "root"],
@@ -192,7 +162,7 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     can_control_ui: false,
     can_affect_host: false,
     requires_approval: false,
-    preferred_before: ["file_view", "view_file"],
+    preferred_before: ["file_view"],
     preferred_after: [],
     forbidden_in_roles: [],
     allowed_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "root"],
@@ -224,7 +194,7 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     can_control_ui: false,
     can_affect_host: false,
     requires_approval: false,
-    preferred_before: ["file_view", "view_file", "write_file", "edit_file", "file_edit"],
+    preferred_before: ["file_view", "write_file", "edit_file", "file_edit"],
     preferred_after: ["list_directory"],
     forbidden_in_roles: [],
     allowed_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser", "root"],
@@ -307,6 +277,58 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     allowed_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser", "root"],
   },
 
+  /*
+   * `glob`, `git_status`, and `git_diff` are core — rendered with full schemas
+   * on every turn — so they must be evaluable. A tool the model can always see
+   * but the policy layer refuses with "add it to tool-metadata.ts" is a tool
+   * that fails only for subagent roles, which is the hardest place to see it.
+   */
+  glob: {
+    name: "glob",
+    category: "read",
+    risk_level: "low",
+    is_read_only: true,
+    can_modify_files: false,
+    can_execute_code: false,
+    can_control_ui: false,
+    can_affect_host: false,
+    requires_approval: false,
+    preferred_before: ["file_view", "grep_search"],
+    preferred_after: [],
+    forbidden_in_roles: [],
+    allowed_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser", "root"],
+  },
+  git_status: {
+    name: "git_status",
+    category: "read",
+    risk_level: "low",
+    is_read_only: true,
+    can_modify_files: false,
+    can_execute_code: false,
+    can_control_ui: false,
+    can_affect_host: false,
+    requires_approval: false,
+    preferred_before: ["write_file", "file_edit", "delete_file"],
+    preferred_after: [],
+    forbidden_in_roles: [],
+    allowed_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser", "root"],
+  },
+  git_diff: {
+    name: "git_diff",
+    category: "read",
+    risk_level: "low",
+    is_read_only: true,
+    can_modify_files: false,
+    can_execute_code: false,
+    can_control_ui: false,
+    can_affect_host: false,
+    requires_approval: false,
+    preferred_before: ["write_file", "file_edit", "delete_file"],
+    preferred_after: [],
+    forbidden_in_roles: [],
+    allowed_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser", "root"],
+  },
+
   // ---- Write ----
   write_file: {
     name: "write_file",
@@ -318,7 +340,7 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     can_control_ui: false,
     can_affect_host: false,
     requires_approval: false,
-    preferred_before: ["file_view", "view_file", "inspect_environment", "grep_search"],
+    preferred_before: ["file_view", "inspect_environment", "grep_search"],
     preferred_after: ["bash"], // for typecheck / build
     forbidden_in_roles: ["explorer", "architect", "reviewer", "critic", "browser"],
     allowed_in_roles: ["implementer", "test", "root"],
@@ -333,7 +355,7 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     can_control_ui: false,
     can_affect_host: false,
     requires_approval: false,
-    preferred_before: ["file_view", "view_file", "grep_search"],
+    preferred_before: ["file_view", "grep_search"],
     preferred_after: ["bash"],
     forbidden_in_roles: ["explorer", "architect", "reviewer", "critic", "browser"],
     allowed_in_roles: ["implementer", "test", "root"],
@@ -363,7 +385,7 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     can_control_ui: false,
     can_affect_host: false,
     requires_approval: false,
-    preferred_before: ["file_view", "view_file"],
+    preferred_before: ["file_view"],
     preferred_after: [],
     forbidden_in_roles: ["explorer", "architect", "reviewer", "critic", "browser"],
     allowed_in_roles: ["implementer", "test", "root"],
@@ -380,7 +402,48 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     can_control_ui: false,
     can_affect_host: true,
     requires_approval: false, // approval is driven by classifyCommandRisk
-    preferred_before: ["file_view", "view_file", "inspect_environment", "grep_search"],
+    preferred_before: ["file_view", "inspect_environment", "grep_search"],
+    preferred_after: [],
+    forbidden_in_roles: ["explorer", "architect", "reviewer", "critic", "browser"],
+    allowed_in_roles: ["implementer", "test", "root"],
+  },
+
+  /*
+   * Code Mode. Classified alongside `bash` because it is the same surface with
+   * a larger reach: a script can run `bash`'s equivalent through `child_process`,
+   * plus npm packages, network calls, and real parallelism, and can do it from
+   * a loop the model wrote.
+   *
+   * The role lists are deliberately identical to `bash`, and the reason is the
+   * one thing about eval a metadata table cannot express: `can_execute_code` and
+   * `can_affect_host` describe the *tool*, and eval's script is opaque to the
+   * policy engine. There is no `args.cmd` to classify, so there is no equivalent
+   * of `classifyCommandRisk` and no `shell_approval_required` path — a script
+   * that writes files and exfiltrates them looks exactly like one that sums an
+   * array. Handing eval to a read-only role would therefore not be a narrower
+   * grant than handing it to a writer, the way `file_view` is narrower than
+   * `write_file`; it would be the widest grant in the system, handed out under
+   * the name of a read tool. Roles that cannot be trusted with `bash` cannot be
+   * trusted with eval, so they are listed as forbidden.
+   *
+   * `requires_approval` is false for the same reason `bash`'s is: gating it here
+   * would put a human approval in front of every eval, including the read-many-
+   * files loop that is the feature's whole point. That is a real gap rather than
+   * a considered tradeoff — bash pays for `requires_approval: false` with a
+   * per-command classifier, and eval has no such check to pay with. It is called
+   * out here so it is not mistaken for a decision someone made deliberately.
+   */
+  eval: {
+    name: "eval",
+    category: "shell",
+    risk_level: "high",
+    is_read_only: false,
+    can_modify_files: true,
+    can_execute_code: true,
+    can_control_ui: false,
+    can_affect_host: true,
+    requires_approval: false,
+    preferred_before: [],
     preferred_after: [],
     forbidden_in_roles: ["explorer", "architect", "reviewer", "critic", "browser"],
     allowed_in_roles: ["implementer", "test", "root"],
@@ -403,264 +466,28 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     allowed_in_roles: ["browser"],
   },
 
-  // ---- Native computer control ----
-  // Root is allowed (with requires_approval) so the
-  // policy engine can route to the human-approval tool.
-  // Subagents are structurally forbidden.
-  computer_control: {
-    name: "computer_control",
-    category: "computer",
-    risk_level: "critical",
-    is_read_only: false,
-    can_modify_files: false,
-    can_execute_code: true,
-    can_control_ui: true,
-    can_affect_host: true,
-    requires_approval: true, // native OS control
-    preferred_before: ["browser_control"],
-    preferred_after: [],
-    forbidden_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser"],
-    allowed_in_roles: ["root"],
-  },
-  mouse_move: {
-    name: "mouse_move",
-    category: "computer",
-    risk_level: "high",
-    is_read_only: false,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: true,
-    can_affect_host: true,
-    requires_approval: true,
-    preferred_before: ["screenshot", "get_screen_size"],
-    preferred_after: [],
-    forbidden_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser"],
-    allowed_in_roles: ["root"],
-  },
-  mouse_click: {
-    name: "mouse_click",
-    category: "computer",
-    risk_level: "high",
-    is_read_only: false,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: true,
-    can_affect_host: true,
-    requires_approval: true,
-    preferred_before: ["screenshot", "get_screen_size", "mouse_move"],
-    preferred_after: [],
-    forbidden_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser"],
-    allowed_in_roles: ["root"],
-  },
-  mouse_scroll: {
-    name: "mouse_scroll",
-    category: "computer",
-    risk_level: "high",
-    is_read_only: false,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: true,
-    can_affect_host: true,
-    requires_approval: true,
-    preferred_before: ["screenshot", "get_screen_size"],
-    preferred_after: [],
-    forbidden_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser"],
-    allowed_in_roles: ["root"],
-  },
-  keyboard_type: {
-    name: "keyboard_type",
-    category: "computer",
-    risk_level: "high",
-    is_read_only: false,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: true,
-    can_affect_host: true,
-    requires_approval: true,
-    preferred_before: ["screenshot", "mouse_click"],
-    preferred_after: [],
-    forbidden_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser"],
-    allowed_in_roles: ["root"],
-  },
-  keyboard_press: {
-    name: "keyboard_press",
-    category: "computer",
-    risk_level: "high",
-    is_read_only: false,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: true,
-    can_affect_host: true,
-    requires_approval: true,
-    preferred_before: ["screenshot"],
-    preferred_after: [],
-    forbidden_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser"],
-    allowed_in_roles: ["root"],
-  },
-  screenshot: {
-    name: "screenshot",
-    category: "computer",
-    risk_level: "medium",
-    is_read_only: true,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: false,
-    can_affect_host: true,
-    requires_approval: false,
-    preferred_before: ["mouse_click", "mouse_move", "keyboard_type", "keyboard_press"],
-    preferred_after: [],
-    forbidden_in_roles: [],
-    allowed_in_roles: ["browser", "root"],
-  },
-  get_screen_size: {
-    name: "get_screen_size",
-    category: "computer",
-    risk_level: "low",
-    is_read_only: true,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: false,
-    can_affect_host: true,
-    requires_approval: false,
-    preferred_before: ["mouse_move", "mouse_click", "mouse_scroll"],
-    preferred_after: [],
-    forbidden_in_roles: [],
-    allowed_in_roles: ["browser", "root"],
-  },
-  get_mouse_position: {
-    name: "get_mouse_position",
-    category: "computer",
-    risk_level: "low",
-    is_read_only: true,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: false,
-    can_affect_host: true,
-    requires_approval: false,
-    preferred_before: ["mouse_click"],
-    preferred_after: [],
-    forbidden_in_roles: [],
-    allowed_in_roles: ["browser", "root"],
-  },
-  wait: {
-    name: "wait",
-    category: "computer",
-    risk_level: "low",
-    is_read_only: true,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: false,
-    can_affect_host: false,
-    requires_approval: false,
-    preferred_before: [],
-    preferred_after: [],
-    forbidden_in_roles: [],
-    allowed_in_roles: ["browser", "root"],
-  },
-  start_live_view: {
-    name: "start_live_view",
-    category: "computer",
-    risk_level: "medium",
-    is_read_only: false,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: false,
-    can_affect_host: true,
-    requires_approval: false,
-    preferred_before: ["screenshot"],
-    preferred_after: ["stop_live_view"],
-    forbidden_in_roles: [],
-    allowed_in_roles: ["browser", "root"],
-  },
-  stop_live_view: {
-    name: "stop_live_view",
-    category: "computer",
-    risk_level: "low",
-    is_read_only: false,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: false,
-    can_affect_host: true,
-    requires_approval: false,
-    preferred_before: [],
-    preferred_after: [],
-    forbidden_in_roles: [],
-    allowed_in_roles: ["browser", "root"],
-  },
-  request_human_approval: {
-    name: "request_human_approval",
-    category: "human",
-    risk_level: "medium",
-    is_read_only: true,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: false,
-    can_affect_host: true,
-    requires_approval: false,
-    preferred_before: [],
-    preferred_after: [],
-    forbidden_in_roles: [],
-    allowed_in_roles: ["browser", "root"],
-  },
-  is_human_intervening: {
-    name: "is_human_intervening",
-    category: "human",
-    risk_level: "low",
-    is_read_only: true,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: false,
-    can_affect_host: false,
-    requires_approval: false,
-    preferred_before: [],
-    preferred_after: [],
-    forbidden_in_roles: [],
-    allowed_in_roles: ["browser", "root"],
-  },
-
   // ---- Process ----
-  read_background_output: {
-    name: "read_background_output",
+  /*
+   * `job` is the process verb for *reading* a background process you already
+   * started. Its risk is `medium`, not `high`, because its three actions are
+   * not one risk: `list` and `poll` observe, `cancel` and `write` mutate the
+   * running process. The executor narrows on the action at dispatch time; the
+   * metadata has to describe the whole tool, so it takes the higher of the
+   * two. `bash` remains the only way to *start* a process, and it is where
+   * the spawn decision is gated.
+   */
+  job: {
+    name: "job",
     category: "process",
-    risk_level: "low",
-    is_read_only: true,
+    risk_level: "medium",
+    is_read_only: false,
     can_modify_files: false,
     can_execute_code: false,
     can_control_ui: false,
     can_affect_host: true,
     requires_approval: false,
     preferred_before: [],
-    preferred_after: [],
-    forbidden_in_roles: ["explorer", "architect", "reviewer", "critic", "browser"],
-    allowed_in_roles: ["implementer", "test", "root"],
-  },
-  signal_process: {
-    name: "signal_process",
-    category: "process",
-    risk_level: "high",
-    is_read_only: false,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: false,
-    can_affect_host: true,
-    requires_approval: false,
-    preferred_before: ["read_background_output"],
-    preferred_after: [],
-    forbidden_in_roles: ["explorer", "architect", "reviewer", "critic", "browser"],
-    allowed_in_roles: ["implementer", "test", "root"],
-  },
-  write_to_process: {
-    name: "write_to_process",
-    category: "process",
-    risk_level: "high",
-    is_read_only: false,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: false,
-    can_affect_host: true,
-    requires_approval: false,
-    preferred_before: ["read_background_output"],
-    preferred_after: [],
+    preferred_after: ["bash"],
     forbidden_in_roles: ["explorer", "architect", "reviewer", "critic", "browser"],
     allowed_in_roles: ["implementer", "test", "root"],
   },
@@ -681,23 +508,7 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     forbidden_in_roles: [],
     allowed_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser", "root"],
   },
-  get_tool_output: {
-    name: "get_tool_output",
-    category: "read",
-    risk_level: "low",
-    is_read_only: true,
-    can_modify_files: false,
-    can_execute_code: false,
-    can_control_ui: false,
-    can_affect_host: false,
-    requires_approval: false,
-    preferred_before: [],
-    preferred_after: [],
-    forbidden_in_roles: [],
-    allowed_in_roles: ["explorer", "architect", "implementer", "test", "reviewer", "critic", "browser", "root"],
-  },
-
-  // ---- Plan / task control ----
+// ---- Plan / task control ----
   advance_step: {
     name: "advance_step",
     category: "plan",
@@ -786,7 +597,7 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     can_execute_code: false,
     can_control_ui: false,
     can_affect_host: false,
-    requires_approval: true, // gated by request_human_approval
+    requires_approval: true, // gated by the approval flow
     preferred_before: ["create_skill", "test_skill"],
     preferred_after: ["activate_skill"],
     forbidden_in_roles: ["explorer", "architect", "test", "reviewer", "critic", "browser", "implementer"],
@@ -878,7 +689,7 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     can_execute_code: false,
     can_control_ui: false,
     can_affect_host: true, // trust change can authorize future code execution
-    requires_approval: true, // gated by request_human_approval — user must see the source
+    requires_approval: true, // gated by the approval flow — user must see the source
     preferred_before: ["create_extension", "validate_extension"],
     preferred_after: ["enable_extension"],
     forbidden_in_roles: ["explorer", "architect", "test", "reviewer", "critic", "browser", "implementer"],
@@ -970,7 +781,7 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
     can_execute_code: true, // compiles and registers a live handler
     can_control_ui: false,
     can_affect_host: true, // an enforce:true hook can block tool calls system-wide
-    requires_approval: true, // gated by request_human_approval — user must see the JS source
+    requires_approval: true, // gated by the approval flow — user must see the JS source
     preferred_before: ["create_hook"],
     preferred_after: [],
     forbidden_in_roles: ["explorer", "architect", "test", "reviewer", "critic", "browser", "implementer"],

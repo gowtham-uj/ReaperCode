@@ -10,11 +10,9 @@ test("file_view is registered in toolRegistry", () => {
   assert.ok("file_view" in toolRegistry);
 });
 
-test("file_scroll is registered in toolRegistry", () => {
-  assert.ok("file_scroll" in toolRegistry);
-});
-
 test("file_find is registered in toolRegistry", () => {
+  // Still registered — it moved out of Core, not out of existence. Deferred
+  // tools need a schema to render once `search_tools` promotes them.
   assert.ok("file_find" in toolRegistry);
 });
 

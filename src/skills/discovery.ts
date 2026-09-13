@@ -35,6 +35,15 @@ export interface DiscoveryInput {
   resolver: TrustResolver;
   /** Optional: extra skill directories owned by extensions. */
   extensionSkillsDirs?: Array<{ dir: string; extensionId: string; extensionTrust: ExtensionTrust }>;
+  /**
+   * Skills the user has switched off, from their global settings.
+   *
+   * OR'd with the on-disk marker rather than replacing it, so a skill author
+   * who ships a folder with a `disabled` marker still gets a skill that
+   * arrives switched off — while a user switching off a built-in no longer
+   * has to write into a directory they do not own.
+   */
+  disabledNames?: ReadonlySet<string>;
 }
 
 export interface DiscoveryResult {
@@ -129,14 +138,26 @@ function loadSkillFolder(
   if (existsSync(skillMdPath)) {
     const mdRaw = readFileSync(skillMdPath, "utf8");
     const parsed = parseFrontmatter(mdRaw);
-    if (parsed) body = parsed.body;
+    /*
+     * A `SKILL.md` with no `---` block is the normal shape, not a broken one.
+     *
+     * `parseFrontmatter` returns null when there is nothing to strip, and the
+     * old fallthrough left `body` as the empty string — so a skill described
+     * entirely by its `skill.json` and written as plain markdown loaded with
+     * no body at all, was listed everywhere, and served nothing when
+     * activated. Falling back to the whole file is what "no frontmatter"
+     * means: there is no wrapper to remove.
+     */
+    body = parsed ? parsed.body : mdRaw.trim();
   }
   const decision = input.resolver.resolve({
     skillPath: folder,
     declaredTrust: manifest.trust,
     ...(extension ? { extensionTrust: extension.extensionTrust } : {}),
   });
-  const disabled = readDisabledMarker(folder);
+  const marker = readDisabledMarker(folder);
+  const switchedOff = input.disabledNames?.has(manifest.name) === true;
+  const disabled = switchedOff ? (marker ?? "disabled in settings") : marker;
   const record: InstalledSkillRecord = {
     manifest,
     body,

@@ -9,6 +9,7 @@ import { maybeTimeBasedMicrocompact } from "../context/time-microcompact.js";
 import { compactToolHistory } from "../context/history-compaction.js";
 import { pruneSupersededToolResults } from "../context/supersede-prune.js";
 import { pruneToolOutputs } from "../context/tool-output-prune.js";
+import type { ContextTechnique } from "./events.js";
 import { compactionContextTokens } from "../config/context-budget.js";
 import { getContextTunables } from "../config/config-tunables.js";
 import { TokenBudgetTracker, tokenUsageFromResponse } from "../context/token-budget.js";
@@ -44,6 +45,51 @@ export interface ContextEngineeringHooksOptions {
   config?: {
     models?: { [k: string]: { capabilities?: { maxContextTokens?: number }; model?: string } | undefined };
   };
+  /**
+   * Observer for context-management activity.
+   *
+   * Emitted from here rather than from the engine because this is the only
+   * place that knows which technique ran. The engine sees an aggregate return
+   * value (`shaken`, `savedChars`, `fullSummarized`) and cannot tell a 40-message
+   * tool-history compaction from a shake that dropped three stale reads, which
+   * are very different events to a person reading the transcript.
+   *
+   * Delivery is fail-open, like every other runtime observer: a disconnected UI
+   * must not be able to fail a run that is otherwise compacting correctly.
+   */
+  onContextEvent?: (event: ContextEventPayload) => void | Promise<void>;
+}
+
+/**
+ * A context window as a person would say it: "1M", "270k".
+ *
+ * Local to this file rather than shared with the UI because the two have
+ * different jobs here: this one is producing a sentence for the transcript, and
+ * the UI formats its own tokens from numbers it receives.
+ */
+function formatContextWindow(tokens: number): string {
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(tokens % 1_000_000 === 0 ? 0 : 1)}M`;
+  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}k`;
+  return String(tokens);
+}
+
+/** The body of a `context.updated` runtime event, minus its `type`. */
+export interface ContextEventPayload {
+  phase: "started" | "completed" | "failed";
+  technique: ContextTechnique;
+  savedChars?: number;
+  savedTokens?: number;
+  messagesBefore?: number;
+  messagesAfter?: number;
+  usedTokens?: number;
+  softCap?: number;
+  /**
+   * A short human-readable note for the transcript, e.g. "3 superseded tool
+   * results dropped". Kept out of `reason`, which means failure.
+   */
+  detail?: string;
+  /** Why it failed. Present only on `phase: "failed"`. */
+  reason?: string;
 }
 
 export interface ContextEngineeringHooks {
@@ -76,6 +122,13 @@ export interface ContextEngineeringHooks {
     output: string;
     trajectoryLogger?: unknown;
     persistedOutputSize?: number;
+    /**
+     * Where the *complete* output lives, when it exceeded the in-memory buffer
+     * and was spilled to disk. The model is told this path in the tool result,
+     * so the transcript row should name the same file rather than describing
+     * the move in the abstract.
+     */
+    fullOutputPath?: string;
   }): Promise<{ savedChars: number }>;
   onAfterModelCall(p: {
     workspaceRoot: string;
@@ -184,6 +237,24 @@ export function createContextEngineeringHooks(
   const config = options.config;
   const countTokens = options.countTokens ?? ((msgs) => Math.ceil(estimateLiveConversationChars(msgs) / 4));
   const tokenBudgetTracker = new TokenBudgetTracker();
+
+  /**
+   * Report one technique's activity without ever letting the report fail the run.
+   *
+   * `void` on the result: an observer that returns a promise is not awaited, so
+   * a slow UI transport cannot add latency to the compaction path it is merely
+   * describing. A rejection is swallowed for the same reason.
+   */
+  const noteContext = (payload: ContextEventPayload): void => {
+    const sink = options.onContextEvent;
+    if (!sink) return;
+    try {
+      void Promise.resolve(sink(payload)).catch(() => undefined);
+    } catch {
+      /* an observer is never part of runtime correctness */
+    }
+  };
+
 
   return {
     async onBoot({ workspaceRoot, runId, sessionId, namedSession }) {
@@ -398,6 +469,19 @@ export function createContextEngineeringHooks(
               } catch {
                 /* best-effort */
               }
+              /*
+               * Promotion is a context-management technique even though it
+               * removes nothing: it is the alternative to compacting, chosen
+               * because a bigger window is available. Without this the user
+               * sees the model change with no explanation.
+               */
+              noteContext({
+                phase: "completed",
+                technique: "model_promotion",
+                usedTokens: tokensAfterShakeForPromote,
+                softCap,
+                detail: `${activeProfile.model ?? "current model"} → ${promotedProfile.model ?? promotedRoleName} (${formatContextWindow(activeCtx)} → ${formatContextWindow(promotedProfile.capabilities.maxContextTokens as number)} window)`,
+              });
             }
           }
         }
@@ -412,6 +496,15 @@ export function createContextEngineeringHooks(
         });
         superseded = pruneResult.pruned;
         supersedeSaved = pruneResult.savedChars;
+        if (superseded > 0) {
+          noteContext({
+            phase: "completed",
+            technique: "supersede",
+            savedChars: supersedeSaved,
+            softCap,
+            detail: `${superseded} superseded tool result${superseded === 1 ? "" : "s"} dropped`,
+          });
+        }
       } catch {
         /* best-effort */
       }
@@ -426,6 +519,15 @@ export function createContextEngineeringHooks(
         });
         toolOutputsPruned = out.pruned;
         toolOutputSaved = out.savedChars;
+        if (toolOutputsPruned > 0) {
+          noteContext({
+            phase: "completed",
+            technique: "tool_output_prune",
+            savedChars: toolOutputSaved,
+            softCap,
+            detail: `${toolOutputsPruned} aged tool output${toolOutputsPruned === 1 ? "" : "s"} truncated`,
+          });
+        }
       } catch {
         /* best-effort */
       }
@@ -446,6 +548,17 @@ export function createContextEngineeringHooks(
           if (result.performed && result.shaken > 0) {
             shaken = result.shaken;
             savedChars = result.savedChars;
+            noteContext({
+              phase: "completed",
+              technique: "shake",
+              savedChars,
+              savedTokens: Math.max(0, tokensBeforeShake - countTokens(working)),
+              softCap,
+              // The count only. "Shook out stale results" beside "7 results
+              // shaken out" said one thing twice; the label states the action
+              // and the number is the new information.
+              detail: `${shaken} result${shaken === 1 ? "" : "s"}`,
+            });
           }
         } catch {
           breaker.consecutiveFailures += 1;
@@ -540,6 +653,26 @@ export function createContextEngineeringHooks(
       if (fireFullSummary && infer) {
         const inflightKey = "fullSummary" as const;
         const ptlConsumedKey = "fullSummaryPtlConsumed" as const;
+        /*
+         * Which label this compaction reports under. A handoff summary is a
+         * different prompt chosen for smaller-context models and a forced
+         * compaction triggered by a pending idle/recovery slot is different
+         * again; all three land here, so the label is resolved once and reused
+         * by both the failure and success branches rather than being restated.
+         */
+        const technique: ContextTechnique =
+          forceCompactFromIdleOrIncomplete
+            ? (idleSlot ? "idle_compaction" : "incomplete_recovery")
+            : useHandoff
+              ? "handoff_summary"
+              : "full_summary";
+        const preMessageCount = Array.isArray(working) ? working.length : 0;
+        noteContext({
+          phase: "started",
+          technique,
+          softCap,
+          ...(providerInputTokens > 0 ? { usedTokens: providerInputTokens } : {}),
+        });
         const armSummaryCooldown = (): void => {
           runState.fullSummaryCooldown = {
             baselineTokens: countTokens(working),
@@ -597,12 +730,32 @@ export function createContextEngineeringHooks(
           if (savedChars <= 0) {
             // A verbose summarizer can produce more context than it consumes.
             // Keep the source conversation and cool down before retrying.
+            noteContext({
+              phase: "failed",
+              technique: technique,
+              messagesBefore: (working as unknown[]).length,
+              softCap,
+              reason: "summary was larger than the conversation it replaced",
+            });
             armSummaryCooldown();
             return;
           }
           working = newMsgs as unknown[];
           fullSummarized = true;
           const postTokens = countTokens(working);
+          noteContext({
+            phase: "completed",
+            technique,
+            savedChars,
+            savedTokens: Math.max(0, tokensForCompactGate - postTokens),
+            messagesBefore: preMessageCount,
+            messagesAfter: (newMsgs as unknown[]).length,
+            softCap,
+            ...(providerInputTokens > 0 ? { usedTokens: providerInputTokens } : {}),
+            ...(checkpoint.goldenFacts.length > 0
+              ? { detail: `${checkpoint.goldenFacts.length} facts carried through the rewrite` }
+              : {}),
+          });
           // Blocking compaction is already returned to the engine in this
           // call. Only async compaction needs a one-shot next-call handoff;
           // replaying a blocking result would discard newer tool messages.
@@ -689,7 +842,24 @@ export function createContextEngineeringHooks(
             if (typeof summaryText === "string" && summaryText.length > 0) {
               await applySummary(summaryText);
             }
-          } catch {
+          } catch (error) {
+            /*
+             * Reported, not swallowed.
+             *
+             * The `started` event already told the user this technique was
+             * running, so a silent catch here leaves a row that says
+             * "Summarizing conversation…" and then never resolves — the worst
+             * of the three outcomes, because it looks like a hang rather than a
+             * decision. `tryFullSummarization` rejects a summary that costs more
+             * than it saves, and that is information worth showing.
+             */
+            noteContext({
+              phase: "failed",
+              technique,
+              messagesBefore: preMessageCount,
+              softCap,
+              reason: error instanceof Error ? error.message : "summarization failed",
+            });
             armSummaryCooldown();
             /* best-effort — fall through with unshaken working set */
           }
@@ -765,8 +935,28 @@ export function createContextEngineeringHooks(
           });
           toolHistoryCompacted = toolResults.length - compact.retained.length;
           if (toolHistoryCompacted > 0) {
+            const beforeReplaceChars = estimateLiveConversationChars(working);
+            /*
+             * `content` must be a string, and the compactor does not always
+             * return one.
+             *
+             * `renderCompactOutputForModel` returns a *record* for the tool
+             * families it knows how to summarize (`file_view`, `bash`), because
+             * that shape is what the tool-result renderer wants. Assigning it
+             * here put a bare object where the provider expects text — measured,
+             * a 15-character tool message became a 229KB JSON object with
+             * character-indexed keys (`{"0":"R","1":"E",…}`), which both
+             * invalidates the request and *grows* the conversation the pass was
+             * supposed to shrink. A compacted conversation ended up 53% larger
+             * than the original.
+             *
+             * Strings pass through untouched; anything structured is serialized,
+             * which is what the model would have read anyway.
+             */
+            const asContent = (value: unknown): string =>
+              typeof value === "string" ? value : JSON.stringify(value ?? "");
             const compactMap = new Map(
-              compact.retained.map((r: any) => [r.toolCallId, r.output ?? ""]),
+              compact.retained.map((r: any) => [r.toolCallId, asContent(r.output ?? "")]),
             );
             working = (working as Array<Record<string, unknown>>).map((m) => {
               if (
@@ -787,6 +977,28 @@ export function createContextEngineeringHooks(
                 name: "reaper_tool_compaction",
                 content: `[Context Memory: compacted tool history]\n${summaryBlock}`,
               }];
+            }
+            /*
+             * Reported only when the pass actually reclaimed something.
+             *
+             * `toolHistoryCompacted` counts results the compactor *chose* to
+             * summarize, which is not the same as characters removed: on an
+             * already-compacted conversation the summaries it produces can be
+             * the same size as what they replace. Measured on the second pass of
+             * a 12,977-character conversation, this reported "18 of 38 tool
+             * results summarized — saved 0 characters", which tells a user the
+             * agent rewrote their history to no effect. The honest outcome is
+             * silence.
+             */
+            const toolHistorySavedChars = Math.max(0, beforeReplaceChars - estimateLiveConversationChars(working));
+            if (toolHistorySavedChars > 0) {
+              noteContext({
+                phase: "completed",
+                technique: "tool_history",
+                savedChars: toolHistorySavedChars,
+                softCap,
+                detail: `${toolHistoryCompacted} of ${toolResults.length} tool results summarized`,
+              });
             }
           }
         }
@@ -812,6 +1024,15 @@ export function createContextEngineeringHooks(
           if (snapResult.performed) {
             snapcompactedImages = snapResult.collapsedImages;
             snapcompactSavedChars = snapResult.savedChars;
+            noteContext({
+              phase: "completed",
+              technique: "snapcompact",
+              savedChars: snapResult.savedChars,
+              messagesBefore: beforeCount,
+              messagesAfter: Array.isArray(working) ? working.length : 0,
+              softCap,
+              detail: `${snapResult.collapsedImages} image cluster${snapResult.collapsedImages === 1 ? "" : "s"} collapsed`,
+            });
             await (trajectoryLogger as TrajectoryLogger).write({
               event_id: randomUUID(),
               run_id: runId,
@@ -845,7 +1066,7 @@ export function createContextEngineeringHooks(
     },
 
     async onAfterToolResult({
-      workspaceRoot: _w, runId, sessionId, traceId, toolCallId: _tcid, toolName, output, trajectoryLogger, persistedOutputSize,
+      workspaceRoot: _w, runId, sessionId, traceId, toolCallId: _tcid, toolName, output, trajectoryLogger, persistedOutputSize, fullOutputPath,
     }) {
       // Advance full-summary cooldown with every tool result so the
       // model can do real work before another expensive compact.
@@ -871,6 +1092,39 @@ export function createContextEngineeringHooks(
         return { savedChars: 0 };
       }
       const savedChars = Math.max(0, originalChars - (wireHead + wireTail));
+      /*
+       * Reported, because for a large-file workload this is the technique that
+       * matters most and it leaves no other trace.
+       *
+       * A 100MB log read by `bash` never enters the conversation at all: the
+       * full output goes to a file in the run's artifacts directory and only a
+       * head/tail preview of a few thousand characters crosses the wire. That is
+       * the difference between analysing a 100MB log within a 270k window and
+       * never getting started, and without this the transcript would show the
+       * preview appear from nowhere with no explanation of where the other
+       * 99.99MB went.
+       */
+      /*
+       * The detail line names the file, and nothing else.
+       *
+       * It has said two wrong things. First "30k of command output kept out of
+       * context" beside a badge reading "−28k" — two numbers for one event,
+       * measuring different things (raw output size vs characters the model
+       * avoided), which invites the reader to work out which is true. Then
+       * "large command output written to disk instead of context", which
+       * restated the label "Moved output to disk" in longer words.
+       *
+       * What a reader actually wants from this row is the pointer: the output
+       * is still there, and here is where. The saved figure is on the badge and
+       * the fact of the move is in the label, so the path is what is left to
+       * say.
+       */
+      noteContext({
+        phase: "completed",
+        technique: "bash_head_tail",
+        savedChars,
+        ...(fullOutputPath ? { detail: `read it at ${fullOutputPath}` } : {}),
+      });
       try {
         await (trajectoryLogger as TrajectoryLogger)
           .write({
@@ -1013,6 +1267,14 @@ export function createContextEngineeringHooks(
           if (tm && tm.clearedResults > 0) {
             timeCompacted = tm.clearedResults;
             const beforeCount = Array.isArray(messages) ? messages.length : 0;
+            noteContext({
+              phase: "completed",
+              technique: "microcompact",
+              savedChars: tm.savedChars,
+              messagesBefore: beforeCount,
+              messagesAfter: beforeCount,
+              detail: `${tm.clearedResults} stale tool result${tm.clearedResults === 1 ? "" : "s"} cleared after the idle gap`,
+            });
             await (trajectoryLogger as TrajectoryLogger).write({
               event_id: randomUUID(),
               run_id: runId,
@@ -1128,6 +1390,24 @@ export function createContextEngineeringHooks(
       });
       const messagesArr = (truncated.messages as unknown[]) ?? messages;
       const ptlsaved = truncated.savedChars ?? 0;
+      /*
+       * Reported always, even at zero saved characters. This path runs because
+       * the provider already rejected the request for being too long, so the
+       * user needs to see that Reaper responded to it — including when the
+       * recovery had nothing left to drop, which is the case that ends in a
+       * hard failure and would otherwise look like the turn simply died.
+       */
+      noteContext({
+        phase: ptlsaved > 0 ? "completed" : "failed",
+        technique: "ptl_recovery",
+        savedChars: ptlsaved,
+        messagesBefore: Array.isArray(messages) ? messages.length : 0,
+        messagesAfter: Array.isArray(messagesArr) ? messagesArr.length : 0,
+        softCap,
+        ...(ptlsaved > 0
+          ? { detail: "oldest turns dropped after the provider rejected the request" }
+          : { reason: "nothing left to drop after the provider rejected the request" }),
+      });
       return { messages: messagesArr, savedChars: ptlsaved };
     },
 

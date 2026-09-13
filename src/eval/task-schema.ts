@@ -109,7 +109,7 @@ export const EvalTaskSchema = z
     /** Optional softCap override for context stress. */
     softCap: z.number().int().positive().optional(),
     /** Embedded project files staged into a temp workspace. */
-    projectFiles: z.record(z.string()).default({}),
+    projectFiles: z.record(z.string(), z.string()).default({}),
     /** Optional path under benchmarks/ to copy as the workspace payload. */
     fixtureDir: z.string().optional(),
     /** Primary verification shell command (also used by verification_exit_0 gate). */

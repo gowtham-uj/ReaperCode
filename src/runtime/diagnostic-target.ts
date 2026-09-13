@@ -345,7 +345,7 @@ export function shellCommandCreatesOrChecksDirectory(command: string, relativeDi
 }
 
 export function isCheapDiagnosticInspection(call: ToolCall): boolean {
-  return ["file_view", "file_scroll", "file_find", "view_file", "grep_search", "skim_file", "list_directory", "inspect_environment", "get_tool_output"].includes(call.name);
+  return ["file_view", "file_find", "grep_search", "skim_file", "list_directory", "inspect_environment"].includes(call.name);
 }
 
 export function isExpensiveOrMutatingFollowup(call: ToolCall): boolean {

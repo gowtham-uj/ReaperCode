@@ -95,7 +95,7 @@ function successfulWrite(id: string, filePath: string): ToolResult {
 function readResult(id: string, filePath: string): ToolResult {
   return {
     toolCallId: id,
-    name: "view_file",
+    name: "file_view",
     ok: true,
     durationMs: 1,
     args: { path: filePath },

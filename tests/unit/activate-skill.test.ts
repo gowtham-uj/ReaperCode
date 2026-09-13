@@ -231,3 +231,49 @@ test("S1: registered skill with no on-disk file gives a clear error", async () =
     rmSync(ws, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Built-in skills: discovered, not indexed
+// ---------------------------------------------------------------------------
+
+test("S1: the packaged `codemode` skill activates with no registry entry", async () => {
+  /*
+   * The case that motivated reading through discovery.
+   *
+   * A built-in skill is on disk the moment the process starts and can never be
+   * absent from an empty workspace — but `SkillMemoryRegistry` only learns
+   * about it when something syncs the index, and in a long-lived app-server
+   * nothing does. So this runs against a workspace with no `.reaper/skills`
+   * directory at all and no index, which is exactly the state a fresh app-server
+   * is in, and the skill must still come back.
+   */
+  const ws = makeWorkspace();
+  try {
+    const out = await activateSkillTool(ws, { name: "codemode" });
+    assert.match(out, /^<activated_skill>/);
+    // The body is the instructions, not a placeholder.
+    assert.match(out, /last expression is the result/i);
+    assert.match(out, /tools\.list\(\)/);
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test("S1: discovery does not widen the allowlist to arbitrary on-disk markdown", async () => {
+  /*
+   * The gate this fallback must not open. A folder of markdown with no
+   * `skill.json` is not a skill; discovery never reports it, so the name is
+   * refused even though a file with that name exists on disk.
+   */
+  const ws = makeWorkspace();
+  try {
+    mkdirSync(path.join(ws, ".reaper", "skills", "not-a-skill"), { recursive: true });
+    writeFileSync(path.join(ws, ".reaper", "skills", "not-a-skill", "SKILL.md"), "# secrets\n");
+    await assert.rejects(
+      () => activateSkillTool(ws, { name: "not-a-skill" }),
+      /not registered in the SkillMemoryRegistry/,
+    );
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});

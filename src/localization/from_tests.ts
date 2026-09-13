@@ -82,7 +82,7 @@ export function formatLocalizationHintsForFeedback(hints: LocalizationHint[], ma
     const symbolPart = hint.symbol ? `, symbol ${hint.symbol}` : "";
     return (
       `Localization hint: inspect ${hint.path} ${linePart}${symbolPart}. ` +
-      `Use view_file with startLine=${hint.contextStart}, endLine=${hint.contextEnd}, then patch the smallest relevant region.`
+      `Use file_view with start_line=${hint.contextStart} to read that region, then patch the smallest relevant region.`
     );
   });
 }

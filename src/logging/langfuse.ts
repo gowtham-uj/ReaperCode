@@ -33,7 +33,7 @@ export async function logLangfuseEvent(event: ReaperLangfuseEvent): Promise<void
   const scratchpad = getReaperScratchpadPaths(event.workspaceRoot);
   const safeEvent = redactSecrets(event) as ReaperLangfuseEvent;
   const runId = event.trace?.runId;
-  const logPath = path.join(runId ? path.join(scratchpad.logs, runId) : scratchpad.logs, "langfuse-events.jsonl");
+  const logPath = path.join(runId ? path.join(scratchpad.sessions, runId) : scratchpad.sessions, "langfuse-events.jsonl");
   await mkdir(path.dirname(logPath), { recursive: true });
   await appendFile(
     logPath,

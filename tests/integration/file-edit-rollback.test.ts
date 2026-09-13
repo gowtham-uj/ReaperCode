@@ -1,16 +1,16 @@
 /**
- * Phase 3: end-to-end test of the four viewer tools through ToolExecutor.
+ * Phase 3: end-to-end test of the viewer tools through ToolExecutor.
  *
  * Verifies:
  *   1. file_view returns a numbered window
- *   2. file_scroll moves the viewport
+ *   2. reading further is an explicit start_line, not a cursor
  *   3. file_find recenters on the matched line
  *   4. file_edit on a clean file persists and post-edit lint ok=true
  *   5. file_edit on a malformed file FAILS lint, returns rolledBack=true,
  *      and the on-disk file is BYTE-IDENTICAL to the pre-edit version.
  *
- * This is the phase-3 integration gate. If it passes, the four viewer
- * tools are correctly wired into the executor's dispatch.
+ * This is the phase-3 integration gate. If it passes, the viewer tools are
+ * correctly wired into the executor's dispatch.
  */
 import { strict as assert } from "node:assert";
 import { randomUUID } from "node:crypto";
@@ -21,6 +21,7 @@ import test from "node:test";
 
 import { ToolExecutor } from "../../src/tools/executor.js";
 import type { ToolCall } from "../../src/tools/types.js";
+import { outputOf } from "../helpers/tool-output.js";
 
 async function withWorkspace<T>(fn: (workspaceRoot: string) => Promise<T>): Promise<T> {
   const root = await mkdtemp(path.join(tmpdir(), "reaper-viewer-"));
@@ -37,7 +38,12 @@ function makeCall(name: string, args: unknown): ToolCall {
 
 interface ExecuteReturnShape {
   ok: boolean;
-  output: string;
+  /*
+   * `unknown`, matching `ToolResult.output`. It was `string` here and the
+   * viewer tools really did hand back JSON text, so the cast held — but that
+   * was the defect, not the contract: see `tests/helpers/tool-output.ts`.
+   */
+  output: unknown;
   durationMs: number;
   error?: { code: string; message: string; details?: unknown };
   name: string;
@@ -64,23 +70,45 @@ test("file_view returns a numbered window", async () => {
     const e = buildExecutor(workspaceRoot);
     const r = await execute(e, makeCall("file_view", { path: "a.txt", start_line: 1, window: 3 }));
     assert.equal(r.ok, true);
-    const obj = JSON.parse(r.output) as { kind: string; window: string[] };
+    const obj = outputOf<{ kind: string; window: string[] }>(r);
     assert.equal(obj.kind, "file_view");
     assert.equal(obj.window.length, 3);
     assert.match(obj.window[0] ?? "", /^1: alpha$/);
   });
 });
 
-test("file_scroll moves the viewport", async () => {
+test("reading further is an explicit window, not a cursor", async () => {
   await withWorkspace(async (workspaceRoot) => {
     const file = path.join(workspaceRoot, "b.txt");
     await writeFile(file, Array.from({ length: 20 }, (_, i) => `line${i + 1}`).join("\n") + "\n", "utf8");
     const e = buildExecutor(workspaceRoot);
-    await execute(e, makeCall("file_view", { path: "b.txt", start_line: 1, window: 5 }));
-    const r = await execute(e, makeCall("file_scroll", { path: "b.txt", direction: "down", lines: 5 }));
-    assert.equal(r.ok, true);
-    const obj = JSON.parse(r.output) as { startLine: number; window: string[] };
-    assert.ok(obj.startLine > 1);
+
+    // The retired `file_scroll` name still resolves — it is aliased onto
+    // `file_view` — but its `direction`/`lines` describe a cursor that no longer
+    // exists. Honouring them would mean keeping a per-run viewport this
+    // consolidation removed, so they are dropped and the call reads from the
+    // top. A second identical call returns the same window: nothing is carried
+    // between calls, which is the property the old tool could not offer.
+    const scrolled = await execute(e, makeCall("file_scroll", { path: "b.txt", direction: "down", lines: 5 }));
+    assert.equal(scrolled.ok, true);
+    const scrollObj = outputOf<{ startLine: number }>(scrolled);
+    assert.equal(scrollObj.startLine, 1);
+
+    // Reading further is the caller saying where.
+    const next = await execute(e, makeCall("file_view", { path: "b.txt", start_line: 6, window: 5 }));
+    assert.equal(next.ok, true);
+    const nextObj = outputOf<{ startLine: number; window: string[] }>(next);
+    assert.equal(nextObj.startLine, 6);
+    assert.match(nextObj.window[0] ?? "", /^6: line6$/);
+
+    // And `end_line` is translated into a window size, so a model that says
+    // "lines 10 to 12" gets three lines rather than an error.
+    const ranged = await execute(e, makeCall("file_view", { path: "b.txt", start_line: 10, end_line: 12 }));
+    assert.equal(ranged.ok, true);
+    const rangedObj = outputOf<{ startLine: number; window: string[] }>(ranged);
+    assert.equal(rangedObj.startLine, 10);
+    assert.equal(rangedObj.window.length, 3);
+    assert.match(rangedObj.window[2] ?? "", /^12: line12$/);
   });
 });
 
@@ -95,7 +123,7 @@ test("file_find recenters on the matched line", async () => {
     const e = buildExecutor(workspaceRoot);
     const r = await execute(e, makeCall("file_find", { path: "c.txt", pattern: "needle" }));
     assert.equal(r.ok, true);
-    const obj = JSON.parse(r.output) as { matchedLine: number; matchCount: number };
+    const obj = outputOf<{ matchedLine: number; matchCount: number }>(r);
     assert.equal(obj.matchedLine, 18);
     assert.equal(obj.matchCount, 1);
   });
@@ -108,7 +136,7 @@ test("file_edit on a clean file persists and lints ok", async () => {
     const e = buildExecutor(workspaceRoot);
     const r = await execute(e, makeCall("file_edit", { path: "d.json", start_line: 2, end_line: 2, new_content: '  "version": 1,' }));
     assert.equal(r.ok, true);
-    const obj = JSON.parse(r.output) as { kind: string; lintVerdict?: { ok: boolean } };
+    const obj = outputOf<{ kind: string; lintVerdict?: { ok: boolean } }>(r);
     assert.equal(obj.kind, "file_edit");
     assert.equal(obj.lintVerdict?.ok, true);
     const after = await readFile(file, "utf8");
@@ -133,10 +161,10 @@ test("file_edit on a malformed TypeScript file FAILS lint, rolls back, byte-iden
       }),
     );
     assert.equal(r.ok, true);
-    const obj = JSON.parse(r.output) as {
+    const obj = outputOf<{
       rolledBack?: boolean;
       lintVerdict?: { ok: boolean; source: string; language: string };
-    };
+    }>(r);
     assert.equal(obj.lintVerdict?.source, "manifest_pinned");
     assert.equal(obj.lintVerdict?.ok, false);
     assert.equal(obj.rolledBack, true);
@@ -163,7 +191,7 @@ test("file_edit on a file with no linter (not in manifest) permits the edit (cur
       }),
     );
     assert.equal(r.ok, true);
-    const obj = JSON.parse(r.output) as { lintVerdict?: { source: string } };
+    const obj = outputOf<{ lintVerdict?: { source: string } }>(r);
     assert.equal(obj.lintVerdict?.source, "fallback_permissive");
     const after = await readFile(file, "utf8");
     assert.match(after, /world/);

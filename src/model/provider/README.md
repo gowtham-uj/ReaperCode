@@ -1,30 +1,56 @@
-# Model API standardization
+# Provider and model architecture
 
-Reaper only supports two standard API shapes: **OpenAI Chat Completions** and **Anthropic Messages**. Every provider in the catalog must map to one of these families.
+Reaper resolves providers and models from a pinned Models.dev catalog snapshot and runs turns through AI SDK transports. The agent loop never sees any of this: it calls `ModelGateway.generate/stream/embed` with a vendor-agnostic request and receives vendor-agnostic `GenerateResult`/`StreamEvent` values.
 
-## Supported request/response families
+## Layers
 
-| Family | SDK file | Wire path | Response schema |
-|---|---|---|---|
-| `openai-chat` | `src/model/provider/families/openai-chat.ts` | `POST /chat/completions` | `OpenAIChatResponseSchema` |
-| `anthropic-messages` | `src/model/provider/families/anthropic-messages.ts` | `POST /v1/messages` | `AnthropicMessagesResponseSchema` |
+| Layer | File | Responsibility |
+|---|---|---|
+| Catalog | `models-dev-catalog.ts`, `models-dev.json` | Provider/model metadata, snapshot + user cache + background refresh |
+| Auth | `integration-registry.ts`, `auth-integrations.ts`, `../../config/provider-credentials.ts` | API-key, OAuth, and prompted auth; write-only secret storage |
+| Loader table | `transports.ts` | npm identity → AI SDK provider factory (lazy dynamic import) |
+| Provider quirks | `transport-options.ts` | Per-provider option shaping, endpoint construction, model selection |
+| Client | `../providers/ai-sdk-client.ts` | Reaper ↔ AI SDK translation, streaming normalization |
+| Dispatch | `../provider-registry.ts`, `../providers/provider-client.ts` | provider id → family → client |
 
-## Why only two shapes
+## Dispatch order
 
-* The entire agent loop calls `ModelGateway.generate/stream` with a single vendor-agnostic request and receives a single vendor-agnostic `GenerateResult`/`StreamEvent`.
-* Translation into vendor-specific JSON happens inside the family adapters, not in the engine.
-* Providers that expose their own quirks (DeepSeek SSE `include_usage`, Cerebras retry/backoff, MiniMax structured JSON buffering, Anthropic-compatible auth headers) are still **responses in the OpenAI Chat Completions or Anthropic Messages shape**, so they are handled by the shared `src/model/provider-quirks.ts` helpers plus family post-processing, not by declaring extra families.
+`ProviderMultiplexerClient` binds families in this order, last write winning:
 
-## Adding a new provider
+1. A broad `openai-chat` binding for the legacy hard-coded provider list.
+2. Purpose-built overrides: `deepseek-direct`, `cerebras-direct`, `anthropic-messages`, `codex-responses`.
+3. `ai-sdk` for every remaining catalog provider.
 
-1. Open `src/model/provider/catalog.ts`.
-2. Add a `ProviderDescriptor` with `sdkFamily: "openai-chat"` or `sdkFamily: "anthropic-messages"`.
-3. Set `envVar`, `baseUrl`, `defaultModel`, `models`, and `capabilities`.
-4. Add a test in `tests/unit/model/provider-standardization.test.ts` asserting the provider is one of the two supported families.
-5. No code changes in `src/runtime/`, `src/model/gateway.ts`, or `src/model/provider-registry.ts` are required.
+Legacy clients keep serving the providers they were tested against; everything else in the catalog routes through the AI SDK. An unknown provider with no API base URL is an error — it is never silently pointed at a local LiteLLM proxy.
 
-## What is *not* supported
+## Legacy families
 
-* Custom per-provider request/response bodies declared outside the two families.
-* Ad-hoc clients that bypass `ProviderCallInput`/`ProviderCallResult`.
-* Legacy `generate(request, profile)` callers are gradually migrated to the family adapters; new code should use `buildProvider` from `src/model/provider/registry.js`.
+The two hand-written wire families remain for the legacy clients:
+
+| Family | SDK file | Wire path |
+|---|---|---|
+| `openai-chat` | `families/openai-chat.ts` | `POST /chat/completions` |
+| `anthropic-messages` | `families/anthropic-messages.ts` | `POST /v1/messages` |
+
+## Credentials
+
+Keys and OAuth tokens are stored write-only in `~/.reaper/providers.json` (`0600`) and never returned to the browser. They reach a transport per call on `ResolvedModelProfile.apiKey`; the process environment is never mutated, so concurrent threads on different providers cannot race. Non-secret endpoint settings (region, project, resource name, account id) travel separately through `ProviderCredentialStore.metadataFor`.
+
+## Adding a provider or transport
+
+Catalog providers need no code. To support a new npm transport identity:
+
+1. Install the package and add a loader to `TRANSPORT_LOADERS` in `transports.ts`.
+2. Add a case to `resolveTransport` in `transport-options.ts` if the provider needs option shaping.
+3. Run `npm run sync:transports` to regenerate `TRANSPORTS.md`.
+
+`TRANSPORTS.md` is the checked-in coverage table; `tests/unit/model/transport-coverage.test.ts` fails if any catalog identity lacks a loader or the table is stale.
+
+## Refreshing the catalog
+
+```
+npm run sync:models      # refresh models-dev.json + snapshot metadata
+npm run sync:transports  # regenerate TRANSPORTS.md, exits non-zero on a missing loader
+```
+
+A refresh may introduce an unknown transport identity. Those models stay listed but unavailable until a loader exists; they are never advertised as runnable.

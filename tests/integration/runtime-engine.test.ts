@@ -17,6 +17,7 @@ import type {
 } from "../../src/model/types.js";
 import { createValidConfig, createValidRequestEnvelope } from "../fixtures/phase0.js";
 import { createLiveDeepSeekGateway } from "../fixtures/live-gateway.js";
+import { liveSkipOption } from "../fixtures/live-gate.js";
 import { createTempWorkspace } from "../fixtures/workspace.js";
 
 const AUTO_APPENDED_TOOL_NAMES = new Set(["create_checkpoint", "git_status", "git_diff"]);
@@ -97,9 +98,9 @@ test("runtime engine creates isolated run-local artifacts for placeholder trace 
 
     assert.match(result.state.runId, /^run-\d{14}-[a-f0-9]{8}$/);
     assert.notEqual(result.state.runId, "trace-1");
-    assert.equal(path.normalize(result.trajectoryPath), path.join(workspaceRoot, ".reaper", "logs", result.state.runId, "session.jsonl"));
+    assert.equal(path.normalize(result.trajectoryPath), path.join(workspaceRoot, ".reaper", "sessions", result.state.runId, "session.jsonl"));
 
-    const runResult = JSON.parse(await readFile(path.join(workspaceRoot, ".reaper", "logs", result.state.runId, "result.json"), "utf8")) as {
+    const runResult = JSON.parse(await readFile(path.join(workspaceRoot, ".reaper", "sessions", result.state.runId, "result.json"), "utf8")) as {
       status: string;
       toolResultCount: number;
     };
@@ -757,7 +758,7 @@ test("autonomous runtime completes the final output check with a natural stop", 
   assert.equal(result.assistantMessage, "output.txt verified");
 });
 
-test("runtime engine can summarize with a live model when available", { skip: !(process.env.RUN_LIVE_LLM_TESTS === "1" && process.env.DEEPSEEK_API_KEY) }, async () => {
+test("runtime engine can summarize with a live model when available", { skip: liveSkipOption("DEEPSEEK_API_KEY") }, async () => {
   const workspaceRoot = await createTempWorkspace();
   const request = createValidRequestEnvelope();
   request.payload = {

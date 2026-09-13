@@ -67,10 +67,49 @@ export async function buildBashResultOutput(
   if (stderr) {
     text += `\n\nstderr:\n${stderr}`;
   }
-  // Only show the "Full output written to" notice if the output was
-  // actually persisted due to size (not just process logging).
-  if (base.persisted_output_path && base.persisted_output_size && base.persisted_output_size > BASH_INPUT_DEFAULTS.PERSIST_THRESHOLD_CHARS) {
-    text += `\n\n[Full output written to ${base.persisted_output_path}]`;
+  /*
+   * The pointer the model is given must name the file that holds everything.
+   *
+   * It used to name `persisted_output_path`, and to call it "full output". That
+   * file is written from an in-memory buffer capped at 256KB, so on a large
+   * command it holds a fraction of the output — 0.62% of a 42MB `cat` — while
+   * the complete stream sits in the run's process log. A model that believed
+   * the notice would analyse the tail of a log and draw conclusions about all
+   * of it.
+   *
+   * `full_output_path` is that process log, set by `execute.ts` from the shell
+   * result. When it is absent the output never exceeded the buffer and
+   * `persisted_output_path` really is the whole thing, so each branch names the
+   * file it can honestly claim.
+   */
+  /*
+   * Both spellings are read, and that is not defensive programming.
+   *
+   * The tool's own schema names these fields in snake_case, while the executor's
+   * bash case returns a `ForegroundShellResult` in camelCase and never runs the
+   * snake_case conversion. The result therefore carries `fullOutputPath` on one
+   * path and `full_output_path` on the other, and a reader that only checked one
+   * spelling would silently fall back to the bounded artifact — the exact bug
+   * this field exists to fix. Which casing arrives depends on the caller, so
+   * both are accepted.
+   */
+  const extended = base as BashOutput & { fullOutputPath?: string; fullOutputSize?: number };
+  const completePath = base.full_output_path ?? extended.fullOutputPath ?? base.persisted_output_path;
+  const completeSize = base.full_output_size ?? extended.fullOutputSize ?? base.persisted_output_size;
+  const completeIsFullOutput =
+    Boolean(base.full_output_path ?? extended.fullOutputPath);
+  if (
+    completePath &&
+    completeSize &&
+    completeSize > BASH_INPUT_DEFAULTS.PERSIST_THRESHOLD_CHARS
+  ) {
+    const sizeNote =
+      completeIsFullOutput && base.persisted_output_path && completePath !== base.persisted_output_path
+        // Both exist and differ, so say which is which rather than leaving the
+        // reader to guess why there are two paths.
+        ? ` (complete; the inline preview above and ${base.persisted_output_path} hold only the newest part)`
+        : "";
+    text += `\n\n[Full output written to ${completePath}${sizeNote}]`;
   }
 
   const trust = classifyToolResultTrust({ name: "bash", args: { cmd: input.command } });

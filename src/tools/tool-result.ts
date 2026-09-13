@@ -101,7 +101,7 @@ function summaryFor(name: string, ok: boolean, output: unknown, args: unknown, e
   const parsed = tryParseJson(output);
   const record = parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : undefined;
   const path = typeof record?.path === "string" ? record.path : pathFromArgs(args);
-  if (path && ["file_view", "file_scroll", "file_find", "view_file", "write_file", "file_edit"].includes(name)) {
+  if (path && ["file_view", "file_find", "write_file", "file_edit"].includes(name)) {
     return `${name} ok: ${path}`;
   }
   if (name === "bash") {
@@ -114,8 +114,8 @@ function summaryFor(name: string, ok: boolean, output: unknown, args: unknown, e
 function detailsKind(name: string, output: unknown): NormalizedToolResultDetails["kind"] {
   if (output === undefined || output === null || output === "") return "none";
   if (tryParseJson(output) !== undefined) return "json";
-  if (["file_view", "file_scroll", "file_find", "view_file", "skim_file"].includes(name)) return "file";
-  if (["bash", "read_background_output", "job"].includes(name)) return "process";
+  if (["file_view", "file_find", "skim_file"].includes(name)) return "file";
+  if (["bash", "job"].includes(name)) return "process";
   return "text";
 }
 
@@ -123,9 +123,7 @@ function safeToPrune(name: string, ok: boolean): boolean {
   if (!ok) return false;
   return [
     "file_view",
-    "file_scroll",
     "file_find",
-    "view_file",
     "write_file",
     "file_edit",
     "edit_file",

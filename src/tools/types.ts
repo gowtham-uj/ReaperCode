@@ -2,15 +2,15 @@ import { z } from "zod";
 
 import { ApplyPatchArgsSchema } from "./apply-patch.js";
 import { GlobArgsSchema } from "./glob.js";
-import { EvalArgsSchema } from "./eval.js";
 import { JobArgsSchema } from "./job.js";
 import { DiagnosticsArgsSchema } from "./diagnostics.js";
+import { EvalArgsSchema } from "./eval.js";
 import {
   CreateSkillArgsSchema,
   TestSkillArgsSchema,
   ApproveSkillArgsSchema,
   UninstallSkillArgsSchema,
-  ReloadSkillsArgsSchema,
+  SkillManagerArgsSchema,
 } from "./types/skill-tools.schema.js";
 import {
   CreateExtensionArgsSchema,
@@ -18,7 +18,7 @@ import {
   EnableExtensionArgsSchema,
   TrustExtensionArgsSchema,
   UninstallExtensionArgsSchema,
-  ReloadExtensionsArgsSchema,
+  ExtensionManagerArgsSchema,
 } from "./types/extension-tools.schema.js";
 import {
   CreateHookArgsSchema,
@@ -26,17 +26,16 @@ import {
   UpdateHookArgsSchema,
   ApproveHookArgsSchema,
   UninstallHookArgsSchema,
-  ReloadHooksArgsSchema,
+  HookManagerArgsSchema,
 } from "./types/hook-tools.schema.js";
 import {
   FileEditArgsSchema,
   FileFindArgsSchema,
-  FileScrollArgsSchema,
   FileViewArgsSchema,
 } from "./viewer/types.js";
 
 export const SearchToolsArgsSchema = z.object({
-  query: z.string().min(1).describe("Keywords describing the capability you need, or select:tool_name for direct selection (e.g. 'background process', 'web search', 'symbol rename', 'select:read_background_output')"),
+  query: z.string().min(1).describe("Keywords describing the capability you need, or select:tool_name for direct selection (e.g. 'background process', 'web search', 'symbol rename', 'select:job')"),
 }).strict();
 
 export const SearchMemoryArgsSchema = z.object({
@@ -72,14 +71,6 @@ export const ReadFileArgsSchema = z
     path: z.string().min(1),
     startLine: z.number().int().positive().optional(),
     endLine: z.number().int().positive().optional(),
-  })
-  .strict();
-
-export const ViewFileArgsSchema = z
-  .object({
-    path: z.string().min(1),
-    startLine: z.number().int().positive(),
-    endLine: z.number().int().positive(),
   })
   .strict();
 
@@ -217,139 +208,6 @@ export const BrowserControlArgsSchema = z
   })
   .strict();
 
-export const ComputerControlArgsSchema = z
-  .object({
-    action: z.enum(["screenshot", "move", "click", "double_click", "drag", "type", "press", "scroll"]),
-    x: z.number().finite().optional(),
-    y: z.number().finite().optional(),
-    endX: z.number().finite().optional(),
-    endY: z.number().finite().optional(),
-    steps: z.number().int().positive().max(100).optional(),
-    text: z.string().optional(),
-    key: z.string().min(1).optional(),
-    deltaX: z.number().finite().optional(),
-    deltaY: z.number().finite().optional(),
-    button: z.enum(["left", "right", "middle"]).optional(),
-    humanize: z.boolean().optional(),
-    headless: z.boolean().optional(),
-    width: z.number().int().positive().max(10000).optional(),
-    height: z.number().int().positive().max(10000).optional(),
-    fullPage: z.boolean().optional(),
-  })
-  .strict();
-
-const ScreenRegionSchema = z.union([
-  z.tuple([z.number().int().nonnegative(), z.number().int().nonnegative(), z.number().int().positive(), z.number().int().positive()]),
-  z
-    .object({
-      x: z.number().int().nonnegative(),
-      y: z.number().int().nonnegative(),
-      width: z.number().int().positive(),
-      height: z.number().int().positive(),
-    })
-    .strict(),
-]);
-
-export const MouseMoveArgsSchema = z
-  .object({
-    x: z.number().int().nonnegative(),
-    y: z.number().int().nonnegative(),
-    duration: z.number().nonnegative().max(30).optional(),
-  })
-  .strict();
-
-export const MouseClickArgsSchema = z
-  .object({
-    x: z.number().int().nonnegative(),
-    y: z.number().int().nonnegative(),
-    button: z.enum(["left", "right", "middle"]).optional(),
-    clicks: z.number().int().positive().max(5).optional(),
-    duration: z.number().nonnegative().max(30).optional(),
-    jitterPx: z.number().nonnegative().max(50).optional(),
-  })
-  .strict();
-
-export const MouseScrollArgsSchema = z
-  .object({
-    deltaX: z.number().int().optional(),
-    deltaY: z.number().int().optional(),
-    inertia: z.boolean().optional(),
-  })
-  .strict();
-
-export const KeyboardTypeArgsSchema = z
-  .object({
-    text: z.string(),
-    minDelay: z.number().nonnegative().max(10).optional(),
-    maxDelay: z.number().nonnegative().max(10).optional(),
-    typoProbability: z.number().min(0).max(0.15).optional(),
-  })
-  .strict();
-
-export const KeyboardPressArgsSchema = z
-  .object({
-    keys: z.array(z.string().min(1)).min(1).max(8),
-    duration: z.number().nonnegative().max(30).optional(),
-    authorized: z.boolean().optional(),
-  })
-  .strict();
-
-export const ScreenshotArgsSchema = z
-  .object({
-    region: ScreenRegionSchema.optional(),
-    returnFormat: z.enum(["base64", "path"]).optional(),
-  })
-  .strict();
-
-export const EmptyArgsSchema = z.object({}).strict();
-
-export const WaitArgsSchema = z
-  .object({
-    seconds: z.number().nonnegative().max(300),
-    jitter: z.number().nonnegative().max(60).optional(),
-  })
-  .strict();
-
-export const StartLiveViewArgsSchema = z
-  .object({
-    host: z.string().min(1).optional(),
-    port: z.number().int().positive().max(65535).optional(),
-    fps: z.number().int().positive().max(20).optional(),
-  })
-  .strict();
-
-export const RequestHumanApprovalArgsSchema = z
-  .object({
-    reason: z.string().min(1),
-    contextScreenshot: z.string().optional(),
-    timeoutSeconds: z.number().positive().max(3600).optional(),
-    timeoutMs: z.number().positive().max(3_600_000).optional(),
-  })
-  .strict();
-
-export const ReadBackgroundOutputArgsSchema = z
-  .object({
-    pid: z.number().int().positive(),
-    lines: z.number().int().positive().optional(),
-    waitForMatch: z.string().optional(),
-    minWaitMs: z.number().int().positive().optional(),
-  })
-  .strict();
-
-export const SignalProcessArgsSchema = z
-  .object({
-    pid: z.number().int().positive(),
-    signal: z.enum(["SIGINT", "SIGTERM", "SIGKILL", "SIGHUP"]),
-  })
-  .strict();
-
-export const WriteToProcessArgsSchema = z
-  .object({
-    pid: z.number().int().positive(),
-    input: z.string(),
-  })
-  .strict();
-
 export const ActivateSkillArgsSchema = z
   .object({
     name: z.string().min(1),
@@ -368,27 +226,6 @@ export const WebFetchArgsSchema = z
 
 
 
-
-export const GetToolOutputArgsSchema = z
-  .object({
-    artifactId: z.string().min(1),
-    /** Optional 1-indexed inclusive line range, e.g. { startLine: 100, endLine: 200 }. */
-    startLine: z.number().int().positive().optional(),
-    endLine: z.number().int().positive().optional(),
-    /**
-     * Optional regex to search across the artifact. When set, the returned
-     * content is the list of matching lines (no body), plus totalMatches.
-     */
-    pattern: z.string().min(1).optional(),
-    /**
-     * Optional dot/bracket JSON path. When set, the artifact content is parsed
-     * as JSON and only the selected node is returned.
-     */
-    jsonPath: z.string().min(1).optional(),
-    /** Cap the number of bytes returned; default 50KB to keep prompts bounded. */
-    maxBytes: z.number().int().positive().optional(),
-  })
-  .strict();
 
 export const DelegateSubTaskSchema = z
   .object({
@@ -440,7 +277,6 @@ export const UpdateTodoArgsSchema = z.object({
 });
 
 export const ToolCallSchema = z.discriminatedUnion("name", [
-  z.object({ id: z.string().min(1), name: z.literal("view_file"), args: ViewFileArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("list_directory"), args: ListDirectoryArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("grep_search"), args: GrepSearchArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("skim_file"), args: SkimFileArgsSchema }).strict(),
@@ -452,58 +288,26 @@ export const ToolCallSchema = z.discriminatedUnion("name", [
   z.object({ id: z.string().min(1), name: z.literal("web_search"), args: WebSearchArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("write_file"), args: WriteFileArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("file_view"), args: FileViewArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("file_scroll"), args: FileScrollArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("file_find"), args: FileFindArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("file_edit"), args: FileEditArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("edit_file"), args: EditFileArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("delete_file"), args: DeleteFileArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("bash"), args: BashArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("browser_control"), args: BrowserControlArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("computer_control"), args: ComputerControlArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("mouse_move"), args: MouseMoveArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("mouse_click"), args: MouseClickArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("mouse_scroll"), args: MouseScrollArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("keyboard_type"), args: KeyboardTypeArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("keyboard_press"), args: KeyboardPressArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("screenshot"), args: ScreenshotArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("get_screen_size"), args: EmptyArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("get_mouse_position"), args: EmptyArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("wait"), args: WaitArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("start_live_view"), args: StartLiveViewArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("stop_live_view"), args: EmptyArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("request_human_approval"), args: RequestHumanApprovalArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("is_human_intervening"), args: EmptyArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("read_background_output"), args: ReadBackgroundOutputArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("signal_process"), args: SignalProcessArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("write_to_process"), args: WriteToProcessArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("activate_skill"), args: ActivateSkillArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("get_tool_output"), args: GetToolOutputArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("web_fetch"), args: WebFetchArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("search_tools"), args: SearchToolsArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("search_memory"), args: SearchMemoryArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("scratchpad"), args: ScratchpadArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("create_skill"), args: CreateSkillArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("test_skill"), args: TestSkillArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("approve_skill"), args: ApproveSkillArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("uninstall_skill"), args: UninstallSkillArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("reload_skills"), args: ReloadSkillsArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("create_extension"), args: CreateExtensionArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("validate_extension"), args: ValidateExtensionArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("enable_extension"), args: EnableExtensionArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("trust_extension"), args: TrustExtensionArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("uninstall_extension"), args: UninstallExtensionArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("reload_extensions"), args: ReloadExtensionsArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("create_hook"), args: CreateHookArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("list_hooks"), args: ListHooksArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("update_hook"), args: UpdateHookArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("approve_hook"), args: ApproveHookArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("uninstall_hook"), args: UninstallHookArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("reload_hooks"), args: ReloadHooksArgsSchema }).strict(),
+  // Authoring: one entry per family, each dispatching on `action`.
+  z.object({ id: z.string().min(1), name: z.literal("skill_manager"), args: SkillManagerArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("extension_manager"), args: ExtensionManagerArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("hook_manager"), args: HookManagerArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("apply_patch_edit"), args: ApplyPatchArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("glob"), args: GlobArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("eval"), args: EvalArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("job"), args: JobArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("diagnostics"), args: DiagnosticsArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("eval"), args: EvalArgsSchema }).strict(),
   // Control-plane signals (advisory; see schemas above).
   z.object({ id: z.string().min(1), name: z.literal("advance_step"), args: AdvanceStepArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("update_plan"), args: UpdatePlanArgsSchema }).strict(),
@@ -538,8 +342,11 @@ export type ToolResult = z.infer<typeof ToolResultSchema>;
  * for the full buffered result.
  *
  *   - `tool_execution_start`   — dispatch has begun
- *   - `tool_execution_delta`   — partial output chunk (bash/eval only;
- *                                other tools do not emit these)
+ *   - `tool_execution_delta`   — partial output chunk. Part of the
+ *                                vocabulary, but nothing emits it today:
+ *                                `executeStream` yields start, then the
+ *                                complete or failed event, with no
+ *                                interim chunks for any tool.
  *   - `tool_execution_complete` — the final buffered `ToolResult`
  *   - `tool_execution_failed`  — a non-recoverable error surfaced from
  *                                the executor; the loop should stop
@@ -569,4 +376,3 @@ export interface ResourceKeys {
 
 export const EMPTY_RESOURCE_KEYS: ResourceKeys = Object.freeze({});
 export type BrowserControlArgs = z.infer<typeof BrowserControlArgsSchema>;
-export type ComputerControlArgs = z.infer<typeof ComputerControlArgsSchema>;

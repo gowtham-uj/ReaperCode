@@ -5,7 +5,7 @@
  * `AgentToolDescriptor[]` from `tools/registry.ts`. Tool descriptions
  * and argument schemas live in `toolRegistry[name] = { description,
  * argsSchema }`. We convert each core tool to an `AgentToolDescriptor`
- * via `zodToJsonSchema`. If a tool's schema or description changes,
+ * via zod's JSON Schema conversion. If a tool's schema or description changes,
  * the model-facing surface updates automatically.
  *
  * No duplication. No "layered drift" between the registry and the
@@ -15,7 +15,7 @@
  * description, edit `toolRegistry[name].description`.
  */
 
-import { zodToJsonSchema } from "zod-to-json-schema";
+import { z } from "zod";
 
 import { toolRegistry, CORE_TOOL_NAMES, type ToolName } from "../tools/registry.js";
 
@@ -29,9 +29,10 @@ function descriptorFor(name: string): AgentToolDescriptor | undefined {
   if (!Object.prototype.hasOwnProperty.call(toolRegistry, name)) return undefined;
   const entry = toolRegistry[name as ToolName];
   if (!entry) return undefined;
-  const inputSchema = zodToJsonSchema(entry.argsSchema, {
-    $refStrategy: "none",
-    target: "jsonSchema7",
+  const inputSchema = z.toJSONSchema(entry.argsSchema, {
+    io: "input",
+    target: "draft-7",
+    unrepresentable: "any",
   }) as Record<string, unknown>;
   return {
     name,
@@ -40,11 +41,25 @@ function descriptorFor(name: string): AgentToolDescriptor | undefined {
   };
 }
 
-export function buildGeneralAgentTools(additionalNames: Iterable<string> = []): AgentToolDescriptor[] {
+/**
+ * Model-facing tool list for the general agent.
+ *
+ * `disabledTools` removes names from the surface entirely — including from
+ * `search_tools` discovery, since `ON_DEMAND_TOOL_NAMES` is derived from the
+ * same set and `executeSearchTools` matches against it. Filtering here (rather
+ * than only at execution) is what keeps a disabled tool from being *offered*
+ * and then refused, which reads to the model as a malfunction rather than a
+ * policy.
+ */
+export function buildGeneralAgentTools(
+  additionalNames: Iterable<string> = [],
+  disabledTools: ReadonlySet<string> = EMPTY_TOOL_SET,
+): AgentToolDescriptor[] {
   const out: AgentToolDescriptor[] = [];
   const included = new Set<string>();
   const add = (name: string) => {
     if (included.has(name)) return;
+    if (disabledTools.has(name)) return;
     const descriptor = descriptorFor(name);
     if (!descriptor) return;
     included.add(name);
@@ -55,6 +70,9 @@ export function buildGeneralAgentTools(additionalNames: Iterable<string> = []): 
   for (const name of additionalNames) add(name);
   return out;
 }
+
+/** Shared empty set, so the common no-tools-disabled path allocates nothing. */
+export const EMPTY_TOOL_SET: ReadonlySet<string> = new Set<string>();
 
 /** Build a single tool descriptor from the registry (for on-demand promotion). */
 export function buildAgentToolDescriptor(name: string): AgentToolDescriptor | undefined {

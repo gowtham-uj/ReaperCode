@@ -5,7 +5,6 @@ import os from "node:os";
 import path from "node:path";
 
 import { executeGlob } from "../../src/tools/glob.js";
-import { executeEval } from "../../src/tools/eval.js";
 
 /** Phase 4: glob finds .ts files */
 test("Phase 4: glob finds TypeScript files", async () => {
@@ -41,25 +40,6 @@ test("Phase 4: glob finds markdown files recursively", async () => {
   }
 });
 
-/** Phase 4: eval runs JavaScript */
-test("Phase 4: eval runs JavaScript and returns output", async () => {
-  const result = await executeEval("console.log(2 + 3)", "javascript", 5);
-  assert.equal(result.exitCode, 0);
-  assert.match(result.output, /5/);
-  assert.equal(result.language, "javascript");
-});
-
-/** Phase 4: eval runs Python */
-test("Phase 4: eval runs Python and returns output", async () => {
-  const result = await executeEval("print(2 + 3)", "python", 5);
-  assert.equal(result.exitCode, 0);
-  assert.match(result.output, /5/);
-  assert.equal(result.language, "python");
-});
-
-/** Phase 4: eval handles errors gracefully */
-test("Phase 4: eval handles syntax errors", async () => {
-  const result = await executeEval("syntax error here", "javascript", 5);
-  assert.notEqual(result.exitCode, 0);
-  assert.ok(result.error !== null);
-});
+// The three `eval` cases that lived here tested the old `node -e` / `python -c`
+// implementation, which no longer exists. Code Mode's coverage lives in
+// `tests/unit/code-mode.test.ts`; `glob` keeps its cases here.

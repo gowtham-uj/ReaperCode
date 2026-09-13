@@ -2,7 +2,7 @@
  * Named-session continuity — the `exec run --session <name>` contract.
  *
  * 1. A run with `namedSession` journals its user/assistant turns under
- *    `.reaper/logs/<name>/session.jsonl`.
+ *    `.reaper/sessions/<name>/session.jsonl`.
  * 2. The next run with the same name rehydrates the prior conversation:
  *    the model's first call sees the earlier turns before the new prompt.
  * 3. runExec rejects invalid session names before touching the engine.
@@ -10,7 +10,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import http from "node:http";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -115,8 +115,8 @@ test("named session journals turns and rehydrates them on the next run", async (
   });
   await engine1.run();
 
-  const journalPath = path.join(workspaceRoot, ".reaper", "logs", sessionName, "session.jsonl");
-  assert.ok(existsSync(journalPath), "named run must create the session journal");
+  const journalPath = path.join(workspaceRoot, ".reaper", "sessions", sessionName, "session.jsonl");
+  assert.ok(existsSync(journalPath), "named run must create the session journal under sessions/");
   const afterRun1 = buildActiveBranchMessages(workspaceRoot, sessionName);
   assert.equal(afterRun1.length, 2, "run 1 must journal exactly user + assistant turns");
   assert.equal(afterRun1[0]?.role, "user");
@@ -185,10 +185,47 @@ test("unnamed runs do not create session journals", async () => {
     JSON.stringify(gateway.capturedMessages[0]),
     /REAPER_COCKPIT v1|Main Agent Cockpit|Repo Snapshot|Prepared Context/,
   );
+  /*
+   * An anonymous run still writes a journal, and that is on purpose: the same
+   * file is the run's trajectory log, whether or not anyone will resume it. So
+   * the contract is not "no file" — it is that the file is unreachable from the
+   * next anonymous run, which gets a fresh `run-<timestamp>-<hash>` id and has
+   * no way to name this one.
+   *
+   * The previous version of this assertion checked that `.reaper/sessions` did
+   * not exist at all. It passed for the wrong reason: at the time, runs wrote
+   * to `.reaper/logs/<id>/`, so the path it inspected was never created by
+   * anything. Renaming the directory made the assertion real and it failed,
+   * which is the only reason this test now says what it means.
+   */
+  const sessionsRoot = path.join(workspaceRoot, ".reaper", "sessions");
+  const runs = readdirSync(sessionsRoot, { withFileTypes: true }).filter((e) => e.isDirectory());
+  assert.equal(runs.length, 1, "the run reserves exactly one directory, under its generated id");
+  assert.match(runs[0]!.name, /^run-/, "an anonymous run's id is generated, not user-supplied");
+
+  // The rehydration check is the part that matters, and it has to run against
+  // the *generated* id: a second anonymous run must not see the first one's
+  // turns. Reusing the engine's own session name would prove nothing.
+  const nextRequest = createValidRequestEnvelope();
+  nextRequest.payload = { prompt: "Do you remember anything?" };
+  const nextGateway = new CapturingJsonGateway([{ assistant_message: "No.", tool_calls: [] }]);
+  const nextEngine = new RuntimeEngine({
+    config: createValidConfig(),
+    workspaceRoot,
+    requestEnvelope: nextRequest,
+    modelGateway: nextGateway,
+  });
+  await nextEngine.run();
+  const secondRunCall = JSON.stringify(nextGateway.capturedMessages[0] ?? []);
+  assert.doesNotMatch(
+    secondRunCall,
+    /No session here\./,
+    "an anonymous run must not rehydrate a previous anonymous run's prompt",
+  );
   assert.equal(
-    existsSync(path.join(workspaceRoot, ".reaper", "sessions")),
-    false,
-    "no journal directory without --session",
+    readdirSync(sessionsRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).length,
+    2,
+    "and it reserves its own directory rather than reusing the first one",
   );
 });
 
@@ -280,7 +317,7 @@ test("grown session context triggers full summary and writes compaction back to 
     await engine1.run();
 
     // Journal must now hold a compaction entry with the stub summary.
-    const journalPath = path.join(workspaceRoot, ".reaper", "logs", sessionName, "session.jsonl");
+    const journalPath = path.join(workspaceRoot, ".reaper", "sessions", sessionName, "session.jsonl");
     const entries = readFileSync(journalPath, "utf8")
       .split("\n")
       .filter(Boolean)

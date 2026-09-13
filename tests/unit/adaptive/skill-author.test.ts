@@ -74,7 +74,7 @@ test("createSkill writes SKILL.md to disk", () => {
       type: "prompt",
       scope: "project",
       body: "Hello $ARGUMENTS",
-      allowedTools: ["view_file"],
+      allowedTools: ["file_view"],
       arguments: ["x"],
       workspaceRoot: dir,
     });
@@ -144,14 +144,14 @@ test("serializeSkill round-trips a complete spec", () => {
       type: "prompt",
       scope: "project",
       body: "body",
-      allowedTools: ["view_file", "edit_file"],
+      allowedTools: ["file_view", "edit_file"],
       arguments: ["a", "b"],
       workspaceRoot: dir,
     });
     const text = serializeSkill(skill);
     assert.match(text, /name: demo/);
     assert.match(text, /scope: project/);
-    assert.match(text, /allowedTools: \[view_file, edit_file\]/);
+    assert.match(text, /allowedTools: \[file_view, edit_file\]/);
     assert.match(text, /arguments: \[a, b\]/);
   } finally {
     rmSync(dir, { recursive: true, force: true });

@@ -6,6 +6,7 @@ import {
   parseAgentRequestEnvelope,
 } from "../../src/connection/schemas.js";
 import { createValidRequestEnvelope } from "../fixtures/phase0.js";
+import { assertZodIssue } from "../fixtures/zod-issues.js";
 
 test("parses a valid agent request envelope", () => {
   const envelope = parseAgentRequestEnvelope(createValidRequestEnvelope());
@@ -19,21 +20,31 @@ test("rejects request envelopes with event-only message types", () => {
     message_type: "assistant_message",
   };
 
-  assert.throws(() => parseAgentRequestEnvelope(envelope), /Invalid enum value/);
+  assertZodIssue(() => parseAgentRequestEnvelope(envelope), {
+    code: "invalid_value",
+    path: "message_type",
+  });
 });
 
 test("rejects missing identifiers in request envelopes", () => {
   const envelope = createValidRequestEnvelope();
   envelope.request_id = "";
 
-  assert.throws(() => parseAgentRequestEnvelope(envelope), /String must contain at least 1 character/);
+  assertZodIssue(() => parseAgentRequestEnvelope(envelope), {
+    code: "too_small",
+    path: "request_id",
+  });
 });
 
 test("rejects invalid timestamps in request envelopes", () => {
   const envelope = createValidRequestEnvelope();
   envelope.timestamp = "not-a-date";
 
-  assert.throws(() => parseAgentRequestEnvelope(envelope), /Invalid datetime/);
+  assertZodIssue(() => parseAgentRequestEnvelope(envelope), {
+    code: "invalid_format",
+    path: "timestamp",
+    format: "datetime",
+  });
 });
 
 test("parses a valid agent event envelope", () => {
@@ -50,13 +61,13 @@ test("parses a valid agent event envelope", () => {
 });
 
 test("rejects event envelopes with request-only message types", () => {
-  assert.throws(
+  assertZodIssue(
     () =>
       parseAgentEventEnvelope({
         ...createValidRequestEnvelope(),
         message_type: "cancel_request",
       }),
-    /Invalid enum value/,
+    { code: "invalid_value", path: "message_type" },
   );
 });
 

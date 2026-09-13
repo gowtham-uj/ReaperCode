@@ -22,8 +22,24 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 
 import { buildChildEnv, isSensitiveEnvName } from "../../../src/tools/child-env.js";
-import { executeEval } from "../../../src/tools/eval.js";
+import { evaluateScript } from "../../../src/tools/eval.js";
+import type { CodeToolHost } from "../../../src/tools/code/types.js";
 import { createTempWorkspace } from "../../fixtures/workspace.js";
+
+/**
+ * A host with no tools.
+ *
+ * These cases only care that the sandbox itself exposes nothing of the host,
+ * so an empty surface is the honest fixture: if a secret could be read here, it
+ * would be readable with no tool calls at all.
+ */
+function emptyCodeHost(): CodeToolHost {
+  return {
+    names: () => [],
+    describe: () => undefined,
+    invoke: async () => ({ ok: false, error: { code: "NO_TOOLS", message: "no tools" }, durationMs: 0 }),
+  };
+}
 
 const FAKE_SECRETS = {
   ANTHROPIC_API_KEY: "sk-ant-fake-1234567890",
@@ -241,48 +257,80 @@ test("background bash child receives sanitized environment at spawn", async () =
   }
 });
 
-test("JavaScript eval child does not see stripped secrets", async () => {
-  const workspaceRoot = await createTempWorkspace();
-  const result = await executeEval(
-    "console.log(JSON.stringify({anthropic: process.env.ANTHROPIC_API_KEY, github: process.env.GITHUB_TOKEN, lang: process.env.LANG, path: process.env.PATH}))",
-    "javascript",
-    10,
-    {
-      workspaceRoot,
-      sourceEnv: buildFakeSourceEnv(workspaceRoot),
-    },
-  );
+/*
+ * The two tests that stood here ran a JavaScript snippet and a Python snippet
+ * through `executeEval` and asserted the child process had been handed a
+ * sanitized environment.
+ *
+ * `eval` is Code Mode now, and Code Mode is real Node: `process`, `require`,
+ * `fs`, and `fetch` are all present, because "full platform, no limitations"
+ * is the contract. So the property is no longer "there is nothing to read the
+ * secrets from". It is the one `bash` has always had, applied to the newest
+ * way of running code: the environment the script sees is the sanitized one.
+ *
+ * Asserted the only way that means anything — by putting a real secret into
+ * the real parent environment and then asking the script to find it. A test
+ * that only checks the fake fixture would pass whether or not the worker was
+ * ever given a sanitized env at all.
+ */
+test("Code Mode reaches the platform, but not Reaper's environment", async () => {
+  const secretName = "ANTHROPIC_API_KEY";
+  const secretValue = "canary-value-that-must-not-reach-the-worker";
+  const benignName = "REAPER_TEST_BENIGN_MARKER";
+  const benignValue = "present-on-purpose";
 
-  assert.equal(result.exitCode, 0, result.error ?? "eval failed");
-  const payload = JSON.parse(result.output);
-  assert.equal(payload.anthropic, undefined, "ANTHROPIC_API_KEY must be stripped from JS eval");
-  assert.equal(payload.github, undefined, "GITHUB_TOKEN must be stripped from JS eval");
-  assert.match(payload.lang ?? "", /en_US/);
-});
+  /*
+   * The expected leak set is computed from Reaper's own classifier rather than
+   * hardcoded, so this test cannot drift out of agreement with the thing it is
+   * checking. Whatever the parent process is holding that Reaper would call a
+   * credential is exactly what must be missing on the other side.
+   */
+  process.env[secretName] = secretValue;
+  process.env[benignName] = benignValue;
+  const mustBeAbsent = Object.keys(process.env).filter((name) => isSensitiveEnvName(name, new Set()));
+  assert.ok(mustBeAbsent.includes(secretName), "the canary must actually be classified as sensitive for this to prove anything");
 
-test("Python eval child does not see stripped secrets", async () => {
-  const workspaceRoot = await createTempWorkspace();
-  const result = await executeEval(
-    "import os, json; print(json.dumps({'anthropic': os.environ.get('ANTHROPIC_API_KEY'), 'github': os.environ.get('GITHUB_TOKEN'), 'lang': os.environ.get('LANG'), 'path': os.environ.get('PATH')}))",
-    "python",
-    10,
-    {
-      workspaceRoot,
-      sourceEnv: buildFakeSourceEnv(workspaceRoot),
-    },
-  );
+  try {
+    const probe = await evaluateScript({
+      args: {
+        code: [
+          "report = {};",
+          "report.hasProcess = typeof process;",
+          "report.hasRequire = typeof require;",
+          "report.hasFetch = typeof fetch;",
+          "report.visible = Object.keys(process.env);",
+          `report.canSeeCanary = typeof process.env[${JSON.stringify(secretName)}];`,
+          `report.canSeeBenign = process.env[${JSON.stringify(benignName)}];`,
+          "report;",
+        ].join("\n"),
+      },
+      toolCallId: "eval-child-env",
+      runId: `child-env-${Math.random().toString(36).slice(2)}`,
+      host: emptyCodeHost(),
+    });
 
-  if (result.exitCode !== 0) {
-    // Python may be unavailable in some test envs; skip gracefully.
-    if (/No such file or directory|python3.*not found/i.test(result.error ?? "")) return;
+    const output = probe as { status: string; value: Record<string, unknown> };
+    assert.equal(output.status, "completed", JSON.stringify(probe));
+
+    // Full platform. This is the whole point of Code Mode and must not quietly
+    // regress back into a sandbox.
+    assert.equal(output.value.hasProcess, "object", "`process` must exist — this is real Node");
+    assert.equal(output.value.hasRequire, "function", "`require` must exist");
+    assert.equal(output.value.hasFetch, "function", "`fetch` must exist");
+
+    // ...and the environment is still Reaper's to control.
+    const visible = output.value.visible as string[];
+    assert.equal(output.value.canSeeCanary, "undefined", "the host secret reached the worker");
+    assert.equal(output.value.canSeeBenign, benignValue, "sanitizing must not empty the environment");
+    assert.deepEqual(
+      visible.filter((name) => mustBeAbsent.includes(name)),
+      [],
+      "sensitive variables from the parent environment survived into the worker",
+    );
+  } finally {
+    delete process.env[secretName];
+    delete process.env[benignName];
   }
-  assert.equal(result.exitCode, 0, result.error ?? "python eval failed");
-  const payload = JSON.parse(result.output);
-  // Both `null` (Python's os.environ.get) and `undefined` (Node's)
-  // are acceptable signals that the variable was stripped.
-  assert.ok(payload.anthropic == null, `ANTHROPIC_API_KEY leaked: ${payload.anthropic}`);
-  assert.ok(payload.github == null, `GITHUB_TOKEN leaked: ${payload.github}`);
-  assert.match(payload.lang ?? "", /en_US/);
 });
 
 test("diagnostic output never prints secret values", () => {

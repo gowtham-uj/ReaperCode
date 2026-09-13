@@ -1,12 +1,16 @@
 /**
- * Zod schemas for the 6 model-callable extension authoring tools.
+ * Zod schemas for extension authoring, now a single model-callable tool.
  *
- *   create_extension      author a new extension (JS only)
- *   validate_extension    run validation.commands
- *   enable_extension      activate the extension
- *   trust_extension       promote to user-trusted (gated)
- *   uninstall_extension   remove (gated)
- *   reload_extensions     re-walk the disk
+ *   extension_manager(action="create")     author a new extension (JS only)
+ *   extension_manager(action="validate")   run validation.commands
+ *   extension_manager(action="enable")     activate the extension
+ *   extension_manager(action="trust")      promote to user-trusted (gated)
+ *   extension_manager(action="uninstall")  remove (gated)
+ *
+ * There is no `reload` action. The registry re-walks the disk on every
+ * state-changing call and after an install that lands files outside this
+ * tool, so a separate reload step was a step the model could forget and
+ * whose absence looked like a bug.
  */
 
 import { z } from "zod";
@@ -49,7 +53,7 @@ export const CreateExtensionArgsSchema = z
         z.object({
           name: z.string().min(1),
           description: z.string().min(1),
-          schema: z.record(z.unknown()).optional(),
+          schema: z.record(z.string(), z.unknown()).optional(),
         }),
       )
       .optional(),
@@ -86,15 +90,31 @@ export const UninstallExtensionArgsSchema = z
   })
   .strict();
 
-export const ReloadExtensionsArgsSchema = z
-  .object({
-    from_dirs: z.array(z.enum(["user", "project", "builtin"])).optional(),
-  })
-  .strict();
-
 export type CreateExtensionArgs = z.infer<typeof CreateExtensionArgsSchema>;
 export type ValidateExtensionArgs = z.infer<typeof ValidateExtensionArgsSchema>;
 export type EnableExtensionArgs = z.infer<typeof EnableExtensionArgsSchema>;
 export type TrustExtensionArgs = z.infer<typeof TrustExtensionArgsSchema>;
 export type UninstallExtensionArgs = z.infer<typeof UninstallExtensionArgsSchema>;
-export type ReloadExtensionsArgs = z.infer<typeof ReloadExtensionsArgsSchema>;
+
+/**
+ * The consolidated manager. Flat `action` enum with the union of the per-action
+ * fields, validated per action in the handler — the same shape `scratchpad` and
+ * `job` use. `id` is shared by every action that names an extension, and
+ * `note` is trust-only.
+ *
+ * The create fields are spread through `partial()`: only `create` sets them, so
+ * requiring them here would make `{action: "trust", id}` a schema violation.
+ * Their defaults are applied by the strict re-parse inside `create`, not here.
+ */
+export const ExtensionManagerArgsSchema = z
+  .object({
+    action: z
+      .enum(["create", "validate", "enable", "trust", "uninstall"])
+      .describe("author, validate, activate, trust, or remove an extension"),
+    ...CreateExtensionArgsSchema.partial().shape,
+    /** Free-text reason recorded with `action="trust"`. */
+    note: z.string().optional(),
+  })
+  .strict();
+
+export type ExtensionManagerArgs = z.infer<typeof ExtensionManagerArgsSchema>;

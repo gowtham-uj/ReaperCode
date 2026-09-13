@@ -2,6 +2,44 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import WebSocket, { type RawData } from "ws";
 
+/**
+ * The minimal surface the message processor and outgoing router need from a
+ * "connection".
+ *
+ * A real client is an `AppServerConnection` over a socket. The browser gateway
+ * is not — it is many tabs multiplexed in-process — so it presents one
+ * *virtual* connection (implementing this interface) that the processor treats
+ * as the single reviewer, while the gateway fans out envelopes to the right tab
+ * behind it. Extracting the interface is what makes that possible without the
+ * processor ever knowing whether it is talking to a socket or a multiplexer.
+ */
+export interface AppServerClientConnection {
+  readonly id: string;
+  /**
+   * Per-thread unsubscribe callbacks, keyed by thread id. The processor stores
+   * each live subscription here so `thread/unsubscribe` and connection teardown
+   * can release them. A virtual multiplexing connection (the browser gateway)
+   * shares one map across all of its tabs, which is exactly the old BFF's
+   * behavior over its single upstream connection.
+   */
+  readonly subscriptions: Map<string, () => void>;
+  sendJson(value: unknown): boolean;
+  close(code?: number, reason?: string): void;
+  heartbeat(): void;
+}
+
+/**
+ * The largest JSON-RPC message a client may send, unless the server is
+ * constructed with `maxMessageBytes`.
+ *
+ * Exported because it is a contract, not an implementation detail: the
+ * bounded provider RPCs (`provider/list`, `provider/models/list`) exist
+ * precisely to stay under it, and their tests assert against this value
+ * rather than a magic number that could drift away from the enforcement
+ * point below.
+ */
+export const DEFAULT_MAX_MESSAGE_BYTES = 1024 * 1024;
+
 export interface AppServerConnectionOptions {
   maxMessageBytes?: number;
   maxInboundMessages?: number;
@@ -18,7 +56,7 @@ interface OutboundEntry {
   bytes: number;
 }
 
-export class AppServerConnection {
+export class AppServerConnection implements AppServerClientConnection {
   readonly id = randomUUID();
   readonly subscriptions = new Map<string, () => void>();
   private readonly inbound: unknown[] = [];
@@ -92,7 +130,7 @@ export class AppServerConnection {
       return;
     }
     const bytes = rawDataLength(data);
-    if (bytes > (this.options.maxMessageBytes ?? 1024 * 1024)) {
+    if (bytes > (this.options.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES)) {
       this.sendJson(rpcError("oversized-message", -32600, "WebSocket message exceeds the configured limit", {
         retryable: false,
       }));

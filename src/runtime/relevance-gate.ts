@@ -44,7 +44,7 @@ export function classifyActionRelevance(
     negativeConstraints: string[];
   },
 ): { relevance: "DIRECTLY_RELEVANT" | "INDIRECTLY_RELEVANT" | "IRRELEVANT"; reason: string } {
-  if (["file_view", "file_scroll", "file_find", "view_file", "list_directory", "grep_search", "skim_file", "inspect_environment", "get_tool_output"].includes(call.name)) {
+  if (["file_view", "file_find", "list_directory", "grep_search", "skim_file", "inspect_environment"].includes(call.name)) {
     return { relevance: "DIRECTLY_RELEVANT", reason: "cheap inspection is allowed" };
   }
   const contractText = buildProblemContractText(input);
@@ -557,8 +557,10 @@ export async function persistExecutionPlanProgress(
   progress: { currentStepIndex: number; completedStepIds: string[]; failed: boolean },
 ): Promise<void> {
   if (!isReaperDevMode()) return;
+  // Same mode as the run directory it writes into — `recursive` means this
+  // call can be the one that creates the workspace root.
   const runDir = path.join(getReaperScratchpadPaths(workspaceRoot).logs, runId);
-  await mkdir(runDir, { recursive: true });
+  await mkdir(runDir, { recursive: true, mode: 0o700 });
   await writeFile(
     path.join(runDir, "progress.json"),
     JSON.stringify({ runId, ...progress, updatedAt: new Date().toISOString() }, null, 2),

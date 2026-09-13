@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { parseRuntimeState } from "../../src/runtime/state.js";
+import { assertZodIssue } from "../fixtures/zod-issues.js";
 
 function createRuntimeState() {
   return {
@@ -36,12 +37,18 @@ test("rejects negative token counts", () => {
   const state = createRuntimeState();
   state.tokenBudget.inputTokens = -1;
 
-  assert.throws(() => parseRuntimeState(state), /greater than or equal to 0/);
+  assertZodIssue(() => parseRuntimeState(state), {
+    code: "too_small",
+    path: "tokenBudget.inputTokens",
+  });
 });
 
 test("rejects wrong session protocol versions", () => {
   const state = createRuntimeState();
   state.sessionProtocolVersion = 2 as 1;
 
-  assert.throws(() => parseRuntimeState(state), /Invalid literal value/);
+  assertZodIssue(() => parseRuntimeState(state), {
+    code: "invalid_value",
+    path: "sessionProtocolVersion",
+  });
 });

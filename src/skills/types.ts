@@ -18,8 +18,9 @@
  *                            `SkillAuthor.createSkillFromRunTrace`;
  *                            cannot be activated until promoted
  *
- * Categories are exactly the 17 built-in skill names defined in the
- * Skills/Extensions plan. The validator rejects unknown categories.
+ * Categories are the stable task taxonomy accepted by skill manifests.
+ * They remain available to user, project, extension, and any future explicitly
+ * approved packaged skills. The validator rejects unknown categories.
  */
 
 export type SkillTrust =
@@ -97,7 +98,29 @@ export interface SkillManifest {
   triggers?: string[];
   /** Path globs for activateConditionalSkillsForPaths. */
   pathPatterns?: string[];
-  /** Tools the model may call while this skill is active. */
+  /**
+   * The tools this skill is *about* — what it teaches, or what its examples
+   * call. Surfaced by `/skills show` and checked for plausibility by
+   * `skill doctor`.
+   *
+   * **Not a permission.** This field has no enforcement behind it: activating a
+   * skill does not narrow the tool surface, and a tool absent from this list is
+   * still callable while the skill is active. What actually decides which tools
+   * a turn may use is `CORE_TOOL_NAMES`, the role profile, the thread's
+   * disabled-tools list, and the sandbox policy — all of which are applied by
+   * the executor, which never reads a skill manifest.
+   *
+   * It read "Tools the model may call while this skill is active" until that
+   * was checked against the code, and the difference matters: a reader who
+   * trusts this field would believe a skill can be handed read-only reach by
+   * listing read-only tools, and it cannot. A skill is a document. Documents do
+   * not grant or withhold capability.
+   *
+   * `codemode` is the case that exposed it — its list said `["eval"]` while its
+   * body is entirely about calling `tools.file_view`, `tools.grep_search` and
+   * the rest. Under the old reading that was a contradiction; under this one it
+   * is simply a description of the entry point.
+   */
   allowedTools: string[];
   /** Declared positional arguments; surfaced in `skill show`. */
   arguments?: SkillArgumentSpec[];

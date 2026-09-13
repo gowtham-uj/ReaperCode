@@ -87,29 +87,15 @@ test("shell risk: explorer is denied any shell command", () => {
   assert.equal(d.verdict, "deny");
 });
 
-test("computer_control requires approval unless in trusted sandbox", () => {
-  const d = evaluateToolCall({ toolName: "computer_control", args: {}, callerRole: "root", trustedSandbox: false });
-  assert.equal(d.verdict, "require_approval");
-  assert.equal(d.code, "approval_required");
-});
-
-test("computer_control allows when trustedSandbox=true (root only)", () => {
-  const d = evaluateToolCall({ toolName: "computer_control", args: {}, callerRole: "root", trustedSandbox: true });
-  assert.equal(d.verdict, "allow");
-});
-
-test("computer_control is denied for any non-root role even in trusted sandbox", () => {
-  // Per metadata, computer_control has empty allowed_in_roles.
-  // Even a browser role (which is allowed to call screenshot
-  // and get_screen_size) is not allowed to call computer_control.
-  const d = evaluateToolCall({ toolName: "computer_control", args: {}, callerRole: "browser", trustedSandbox: true });
-  assert.equal(d.verdict, "deny");
-});
-
-test("mouse_click requires approval", () => {
-  const d = evaluateToolCall({ toolName: "mouse_click", args: {}, callerRole: "root", trustedSandbox: false });
-  assert.equal(d.verdict, "require_approval");
-  assert.equal(d.code, "approval_required");
+test("a tool with no metadata is denied rather than waved through", () => {
+  // Every native computer tool is now in this category. The policy engine must
+  // fail closed on a name it does not know: if a stale transcript or a model
+  // that learned the name elsewhere produces `computer_control`, the answer is
+  // a denial, not an allow because no rule matched.
+  for (const toolName of ["computer_control", "mouse_click", "screenshot", "request_human_approval"]) {
+    const d = evaluateToolCall({ toolName, args: {}, callerRole: "root", trustedSandbox: true });
+    assert.equal(d.verdict, "deny", `${toolName} should be denied`);
+  }
 });
 
 test("browser_control is browser-only; other roles are denied", () => {
@@ -154,7 +140,7 @@ test("ordering advisories are not surfaced when preferences are met", () => {
     args: { path: "/tmp/x", content: "hi" },
     callerRole: "root",
     trustedSandbox: false,
-    recentTools: ["view_file"],
+    recentTools: ["file_view"],
   });
   // The "write_without_read" warning should not fire.
   assert.ok(!d.advisories.some((a) => a.ruleId === "ordering.write_without_read"), `unexpected: ${d.advisories.map(a => a.ruleId).join(",")}`);
@@ -163,7 +149,7 @@ test("ordering advisories are not surfaced when preferences are met", () => {
 test("isPolicyDenial and isPolicyApprovalRequired are accurate", () => {
   const allow = evaluateToolCall({ toolName: "file_view", args: { path: "/tmp/x" }, callerRole: "root", trustedSandbox: false });
   const deny = evaluateToolCall({ toolName: "__nope__", args: {}, callerRole: "root", trustedSandbox: false });
-  const approval = evaluateToolCall({ toolName: "computer_control", args: {}, callerRole: "root", trustedSandbox: false });
+  const approval = evaluateToolCall({ toolName: "bash", args: { cmd: "rm -rf /" }, callerRole: "implementer", trustedSandbox: false });
   assert.equal(isPolicyDenial(allow), false);
   assert.equal(isPolicyApprovalRequired(allow), false);
   assert.equal(isPolicyDenial(deny), true);

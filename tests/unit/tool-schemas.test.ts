@@ -3,17 +3,23 @@ import assert from "node:assert/strict";
 
 import { ToolCallSchema } from "../../src/tools/types.js";
 
-test("accepts a valid view_file tool call", () => {
+test("accepts a valid file_view tool call", () => {
   const toolCall = ToolCallSchema.parse({
     id: "view-1",
-    name: "view_file",
-    args: { path: "README.md", startLine: 2, endLine: 5 },
+    name: "file_view",
+    args: { path: "README.md", start_line: 2, window: 4 },
   });
 
-  assert.equal(toolCall.name, "view_file");
+  assert.equal(toolCall.name, "file_view");
 });
 
 test("rejects unknown tool names", () => {
+  /*
+   * Asserted on the issue code, not the message text. This used to match the
+   * zod v3 string "Invalid discriminator value", which stopped being emitted
+   * when the dependency moved to v4 — so the assertion silently became a test
+   * of the wrong thing and then started failing. The code is the stable part.
+   */
   assert.throws(
     () =>
       ToolCallSchema.parse({
@@ -21,7 +27,9 @@ test("rejects unknown tool names", () => {
         name: "unknown_tool",
         args: {},
       }),
-    /Invalid discriminator value/,
+    (error: unknown) =>
+      typeof (error as { issues?: Array<{ code?: string }> }).issues?.[0]?.code === "string"
+      && (error as { issues: Array<{ code: string }> }).issues[0]!.code === "invalid_union",
   );
 });
 
@@ -81,42 +89,34 @@ test("accepts web search with minimum ten-page scrape", () => {
   assert.equal(toolCall.name, "web_search");
 });
 
-test("accepts browser and computer control tool calls", () => {
+test("accepts browser control tool calls", () => {
   const browserCall = ToolCallSchema.parse({
     id: "browser-1",
     name: "browser_control",
     args: { action: "click", ref: "e0", screenshot: true, humanize: true, headless: true, maxInteractive: 20 },
   });
-  const computerCall = ToolCallSchema.parse({
-    id: "computer-1",
-    name: "computer_control",
-    args: { action: "click", x: 100, y: 200, humanize: true, headless: true },
-  });
 
   assert.equal(browserCall.name, "browser_control");
-  assert.equal(computerCall.name, "computer_control");
 });
 
-test("accepts native computer-use tool calls", () => {
-  const mouseCall = ToolCallSchema.parse({
-    id: "mouse-1",
-    name: "mouse_click",
-    args: { x: 500, y: 400, button: "left", clicks: 1 },
-  });
-  const keyboardCall = ToolCallSchema.parse({
-    id: "keyboard-1",
-    name: "keyboard_press",
-    args: { keys: ["ctrl", "c"], duration: 0.1 },
-  });
-  const approvalCall = ToolCallSchema.parse({
-    id: "approval-1",
-    name: "request_human_approval",
-    args: { reason: "Confirm destructive action", timeoutSeconds: 30 },
-  });
-
-  assert.equal(mouseCall.name, "mouse_click");
-  assert.equal(keyboardCall.name, "keyboard_press");
-  assert.equal(approvalCall.name, "request_human_approval");
+/*
+ * Native-desktop control was removed as a product decision, and the schemas
+ * went with it. Pinning the rejection here is the point: a model that has
+ * learned these names from elsewhere will still try them, and it must get a
+ * parse error rather than a silently-accepted call that reaches a controller
+ * that no longer exists.
+ */
+test("rejects the removed native computer-control tools", () => {
+  for (const call of [
+    { id: "computer-1", name: "computer_control", args: { action: "click", x: 100, y: 200 } },
+    { id: "mouse-1", name: "mouse_click", args: { x: 500, y: 400, button: "left" } },
+    { id: "keyboard-1", name: "keyboard_press", args: { keys: ["ctrl", "c"] } },
+    { id: "shot-1", name: "screenshot", args: {} },
+    { id: "approval-1", name: "request_human_approval", args: { reason: "Confirm" } },
+    { id: "live-1", name: "start_live_view", args: {} },
+  ]) {
+    assert.throws(() => ToolCallSchema.parse(call), `${call.name} must not parse`);
+  }
 });
 
 test("rejects removed request_patch legacy signal", () => {

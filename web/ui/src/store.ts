@@ -1,84 +1,92 @@
-/**
- * The Solid application layer over the shared reducer.
- *
- * `web/shared` stays framework-agnostic — it is consumed by the BFF, the mock
- * fixture, and the parity test, none of which run a framework. This module is
- * the only place that knows Solid exists.
- *
- * Why not just hold `ThreadsState` in a signal: a token delta would replace the
- * root object, and every consumer would re-read. `createStore` diffs by path,
- * so writing the same state through `reconcile` updates exactly the leaves
- * that actually changed — one text node per token. The shared reducer stays
- * the definition of *what* a notification means; this decides *how* it lands.
- *
- * `tests/unit/solid-store-parity.test.ts` asserts the two agree.
- */
-
-import { batch, createSignal } from "solid-js";
-import { createStore, reconcile, type SetStoreFunction } from "solid-js/store";
+import { useSyncExternalStore } from "react";
 
 import {
   applyNotification,
   emptyThreads,
+  seedThread,
   type AppThread,
-  type ApprovalRequest,
   type ThreadsState,
 } from "@reaper/web-shared";
 
+type Listener = () => void;
+type Schedule = (flush: () => void) => void;
+
+/**
+ * React-facing external store for the framework-neutral notification reducer.
+ *
+ * The reducer folds every message synchronously so reconnect cursors and
+ * backfill always see the latest state. React subscribers are notified at most
+ * once per animation frame: token streams can arrive hundreds of times per
+ * second, and rendering every WebSocket frame would make React the bottleneck.
+ */
 export interface TranscriptStore {
-  threads: ThreadsState;
-  setThreads: SetStoreFunction<ThreadsState>;
-  /** Fold one notification in, updating only the paths that changed. */
   ingest(method: string, params: Record<string, unknown>): void;
-  /** Replace state wholesale — the reconnect/hydrate path. */
   hydrate(next: ThreadsState): void;
+  seedThread(raw: Record<string, unknown>): void;
+  snapshot(): ThreadsState;
+  getSnapshot(): ThreadsState;
+  subscribe(listener: Listener): () => void;
   thread(id: string): AppThread | undefined;
 }
 
-export function createTranscriptStore(initial: ThreadsState = emptyThreads()): TranscriptStore {
-  const [threads, setThreads] = createStore<ThreadsState>(initial);
-  // The pure reducer needs an immutable snapshot to fold against; the store is
-  // a proxy. This mirror is that snapshot, and never handed to the view.
-  let mirror: ThreadsState = initial;
+export function createTranscriptStore(
+  initial: ThreadsState = emptyThreads(),
+  schedule: Schedule = defaultSchedule,
+): TranscriptStore {
+  let current = initial;
+  let notificationScheduled = false;
+  const listeners = new Set<Listener>();
+
+  const publish = (): void => {
+    if (notificationScheduled) return;
+    notificationScheduled = true;
+    schedule(() => {
+      notificationScheduled = false;
+      for (const listener of [...listeners]) listener();
+    });
+  };
 
   return {
-    threads,
-    setThreads,
     ingest(method, params) {
-      const next = applyNotification(mirror, method, params);
-      if (next === mirror) return; // Nothing changed — skip the reconcile.
-      mirror = next;
-      // `reconcile` walks the tree and writes only differing leaves, so a
-      // token delta touches one string and leaves sibling items untouched.
-      setThreads(reconcile(next, { key: "id", merge: false }));
+      const next = applyNotification(current, method, params);
+      if (next === current) return;
+      current = next;
+      publish();
     },
     hydrate(next) {
-      mirror = next;
-      setThreads(reconcile(next, { key: "id", merge: false }));
+      if (next === current) return;
+      current = next;
+      publish();
     },
-    thread: (id) => threads[id],
+    // `thread/start` and `thread/resume` both reply with the full thread, which
+    // is the only place the app learns a thread's model until the next
+    // `thread/model/updated` notification. Folding it in needs `mergeThread`
+    // rather than `ingest`: the notification path looks up a `params.threadId`,
+    // and a reply nests the thread under `thread` with its id inside.
+    seedThread(raw) {
+      const next = seedThread(current, raw);
+      if (next === current) return;
+      current = next;
+      publish();
+    },
+    snapshot: () => current,
+    getSnapshot: () => current,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    thread: (id) => current[id],
   };
 }
 
-/** Approvals live outside the transcript: they are UI state, not thread state. */
-export function createApprovalQueue() {
-  const [pending, setPending] = createSignal<ApprovalRequest[]>([]);
+export function useTranscriptState(store: TranscriptStore): ThreadsState {
+  return useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+}
 
-  return {
-    pending,
-    add(request: ApprovalRequest): void {
-      setPending((current) =>
-        current.some((entry) => entry.approvalId === request.approvalId)
-          ? current
-          : [...current, request],
-      );
-    },
-    /** Remove by approvalId — the identifier stable across both id spaces. */
-    remove(approvalId: string): void {
-      setPending((current) => current.filter((entry) => entry.approvalId !== approvalId));
-    },
-    clear(): void {
-      batch(() => setPending([]));
-    },
-  };
+function defaultSchedule(flush: () => void): void {
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(() => flush());
+    return;
+  }
+  queueMicrotask(flush);
 }

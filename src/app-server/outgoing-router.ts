@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { JsonRpcResponse } from "../connection/json-rpc.js";
-import type { AppServerConnection } from "./connection.js";
+import type { AppServerClientConnection } from "./connection.js";
 import type { JsonRpcId } from "./protocol.js";
 
 interface PendingServerRequest {
@@ -12,10 +12,10 @@ interface PendingServerRequest {
 }
 
 export class AppServerOutgoingRouter {
-  private readonly connections = new Map<string, AppServerConnection>();
+  private readonly connections = new Map<string, AppServerClientConnection>();
   private readonly pending = new Map<JsonRpcId, PendingServerRequest>();
 
-  addConnection(connection: AppServerConnection): void {
+  addConnection(connection: AppServerClientConnection): void {
     this.connections.set(connection.id, connection);
   }
 
@@ -101,11 +101,11 @@ export class AppServerOutgoingRouter {
     this.connections.clear();
   }
 
-  getConnection(connectionId: string): AppServerConnection | undefined {
+  getConnection(connectionId: string): AppServerClientConnection | undefined {
     return this.connections.get(connectionId);
   }
 
-  listConnections(): AppServerConnection[] {
+  listConnections(): AppServerClientConnection[] {
     return [...this.connections.values()];
   }
 

@@ -20,15 +20,14 @@
  * a JS module path that exports a `ProviderModelClient`. The agent
  * loop never sees the difference.
  *
- * Adding a new provider:
- *   1. Add an entry to `src/model/provider/catalog.json`.
- *   2. If its SDK family is `custom`, also create
- *      `src/model/providers/<id>-client.ts` exporting a
- *      `ProviderModelClient`.
- *   3. Done. No engine changes.
+ * Providers now come from the pinned Models.dev catalog snapshot and
+ * run through AI SDK transports; see `README.md` in this directory for
+ * how to add a transport identity. These descriptors remain for the
+ * legacy hand-written clients.
  */
 
 import type { ModelCapabilities, ModelRole } from "../types.js";
+import type { ModelCost, ModelReasoningOption } from "./models-dev-types.js";
 
 /**
  * The SDK family. Each id corresponds to a built-in wire-format
@@ -44,6 +43,108 @@ export type SdkFamilyId =
  * it's used for routing + telemetry only.
  */
 export type ProviderId = string;
+
+/** Public model metadata used by Settings and the composer. The runtime keeps
+ * using `ResolvedModelProfile`; this is the provider-catalog side of the same
+ * model, keeping providers and their models separate. */
+export interface ProviderModelDescriptor {
+  id: string;
+  name?: string;
+  description?: string;
+  family?: string;
+  status?: "active" | "alpha" | "beta" | "deprecated";
+  releaseDate?: string;
+  lastUpdated?: string;
+  contextTokens?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  supportsReasoning?: boolean;
+  reasoningOptions?: ModelReasoningOption[];
+  supportsAttachments?: boolean;
+  supportsToolCalls?: boolean;
+  supportsTemperature?: boolean;
+  supportsStructuredOutput?: boolean;
+  modalities?: {
+    input: Array<"text" | "audio" | "image" | "video" | "pdf">;
+    output: Array<"text" | "audio" | "image" | "video" | "pdf">;
+  };
+  cost?: ModelCost;
+  npm?: string;
+  api?: string;
+}
+
+export type ProviderAuthPrompt =
+  | {
+      type: "text";
+      key: string;
+      message: string;
+      placeholder?: string;
+      secret?: boolean;
+      optional?: boolean;
+      when?: { key: string; op: "eq" | "neq"; value: string };
+    }
+  | {
+      type: "select";
+      key: string;
+      message: string;
+      options: Array<{ label: string; value: string; hint?: string }>;
+      when?: { key: string; op: "eq" | "neq"; value: string };
+    };
+
+export interface ProviderApiAuthMethod {
+  id: string;
+  type: "api";
+  label: string;
+  /** Optional non-secret account fields stored beside the key. */
+  prompts?: ProviderAuthPrompt[];
+}
+
+export interface ProviderOAuthSuccess {
+  type: "oauth";
+  access: string;
+  refresh: string;
+  expires: number;
+  accountId?: string;
+  enterpriseUrl?: string;
+}
+
+export type ProviderAuthSuccess =
+  | { type: "api"; key: string; metadata?: Record<string, string> }
+  | ProviderOAuthSuccess;
+
+export type ProviderOAuthPollResult =
+  | { type: "pending" }
+  | { type: "success"; auth: ProviderAuthSuccess }
+  | { type: "failed"; message: string };
+
+export interface ProviderOAuthAuthorization {
+  url: string;
+  mode: "auto" | "code";
+  instructions: string;
+  /** Complete a code flow, or poll an automatic/device flow. Server-only. */
+  complete(code?: string): Promise<ProviderOAuthPollResult>;
+}
+
+export interface ProviderOAuthAuthMethod {
+  id: string;
+  type: "oauth";
+  label: string;
+  prompts?: ProviderAuthPrompt[];
+  authorize(inputs?: Record<string, string>): Promise<ProviderOAuthAuthorization>;
+}
+
+export type ProviderAuthMethod = ProviderApiAuthMethod | ProviderOAuthAuthMethod;
+
+/** One deliberately supported provider integration. Provider definitions,
+ * authentication and post-auth model discovery stay together, while secret
+ * state lives in the user-global credential store. */
+export interface ProviderIntegration {
+  descriptor: ProviderDescriptor;
+  authMethods: ProviderAuthMethod[];
+  discoverModels?: (auth: ProviderAuthSuccess) => Promise<ProviderModelDescriptor[]>;
+  /** Refresh an expiring OAuth record. Runs server-side and may rotate refresh tokens. */
+  refreshOAuth?: (auth: ProviderOAuthSuccess) => Promise<ProviderOAuthSuccess>;
+}
 
 /**
  * Catalogue entry. Static data — no closures, no per-process state.
@@ -67,6 +168,12 @@ export interface ProviderDescriptor {
    * reads this.
    */
   envVar: string;
+  /** All environment variables recognized for this provider. */
+  envVars?: string[];
+  /** AI SDK package and API metadata supplied by Models.dev. */
+  npm?: string;
+  api?: string;
+  doc?: string;
   /**
    * Hint shown beneath the API-key prompt in the TUI. e.g. "Get a key
    * at https://...".
@@ -83,6 +190,9 @@ export interface ProviderDescriptor {
    * `defaultModel` must be in this list.
    */
   models: string[];
+  /** Rich per-model metadata for Settings. If omitted, `models` plus the
+   * provider-level capabilities remain the source of truth. */
+  modelDetails?: Record<string, ProviderModelDescriptor>;
   /**
    * Capability defaults. Per-model overrides can be added later; for
    * now every model in the catalogue shares the same caps.

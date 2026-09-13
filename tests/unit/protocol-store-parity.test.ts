@@ -65,11 +65,61 @@ function eventSequence(): Array<{ event: ThreadEventRecord["event"]; turnId?: st
       }),
       turnId: TURN_ID,
     },
+    /*
+     * A context-management operation, in the fixture, because both reducers
+     * implement it and the point of this test is that they agree on every
+     * branch. Without it here the client could drop `context.updated` entirely
+     * — which it did, before this item existed — and the parity comparison
+     * would still pass on the branches the fixture happened to cover.
+     */
+    { event: withTs({ type: "context.updated", phase: "started", technique: "full_summary" }), turnId: TURN_ID },
+    {
+      event: withTs({
+        type: "context.updated",
+        phase: "completed",
+        technique: "full_summary",
+        savedChars: 512_000,
+        savedTokens: 128_000,
+        messagesBefore: 40,
+        messagesAfter: 6,
+        detail: "12 facts carried through the rewrite",
+      }),
+      turnId: TURN_ID,
+    },
     { event: withTs({ type: "assistant.message.completed", text: "I'll inspect it." }), turnId: TURN_ID },
     { event: withTs({ type: "token.usage", inputTokens: 100, outputTokens: 20 }), turnId: TURN_ID },
     {
       event: withTs({ type: "turn.completed", runId: TURN_ID, sessionId: THREAD_ID, assistantMessage: "I'll inspect it." }),
       turnId: TURN_ID,
+    },
+    // Thread-level checklist events, emitted after the turn completes. They
+    // land in `thread.plan` / `thread.todo` on both sides.
+    {
+      event: withTs({
+        type: "plan.updated",
+        steps: [
+          { id: "p1", title: "Map the auth module", status: "completed", evidence: "auth.ts read" },
+          { id: "p2", title: "Fix the race", status: "in_progress" },
+        ],
+      }),
+    },
+    {
+      event: withTs({
+        type: "todo.updated",
+        items: [{ id: "t1", content: "Add a regression test", status: "pending", priority: "high" }],
+      }),
+    },
+    // The verification verdict: `verified` distinguishes a grounded pass from
+    // an exit-0 echo. Both reducers must fold the same typed surface.
+    {
+      event: withTs({
+        type: "verification.completed",
+        ok: true,
+        command: "node --test",
+        verified: true,
+        groundedSignal: { kind: "test", command: "node --test", grounded: true },
+        attemptCount: 1,
+      }),
     },
   ];
 }
@@ -139,6 +189,28 @@ test("client reducer lands on the same items as the server projection", () => {
     serverItems.map((item) => ({ id: item.id, type: item.type })),
   );
   assert.equal(clientTurn.status, "completed");
+
+  // The typed plan and todo checklists must land identically on both sides.
+  assert.deepEqual(clientThread.plan, [
+    { id: "p1", title: "Map the auth module", status: "completed", evidence: "auth.ts read" },
+    { id: "p2", title: "Fix the race", status: "in_progress" },
+  ]);
+  assert.deepEqual(clientThread.todo, [
+    { id: "t1", content: "Add a regression test", status: "pending", priority: "high" },
+  ]);
+  assert.ok(methods.includes("plan/updated"), "projection never emitted plan/updated");
+  assert.ok(methods.includes("todo/updated"), "projection never emitted todo/updated");
+
+  // The verification surface must fold identically: ok, verified, grounded
+  // signal, and attempt count.
+  assert.ok(methods.includes("item/verification/updated"), "projection never emitted item/verification/updated");
+  assert.deepEqual(clientThread.verification, {
+    ok: true,
+    verified: true,
+    command: "node --test",
+    groundedSignal: { kind: "test", command: "node --test", grounded: true },
+    attemptCount: 1,
+  });
 });
 
 test("a message steered mid-turn appends instead of replacing the prompt", () => {
@@ -310,18 +382,18 @@ test("deriveSteps keeps a tool-free turn as a single step", () => {
 });
 
 test("exploration tool names all exist in the real tool registry", async () => {
-  // The collapse rule keys off tool names. When I first wrote it I invented
-  // names ("read_file", "grep", "ls") that no longer exist — read_file was
-  // removed outright. This test fails if any classified name leaves the
-  // registry, rather than letting the UI silently stop collapsing.
+  // The collapse rule keys off tool names, and a name that stops existing fails
+  // silently: the set simply stops matching and the UI stops collapsing. This
+  // test fails if any classified name leaves the registry, rather than letting
+  // that happen quietly. Retired names are not merely absent — every name here
+  // has to be a registered tool *and* still classify as exploration.
   const { toolRegistry } = await import("../../src/tools/registry.js");
   const known = new Set(Object.keys(toolRegistry));
 
   const classified = [
-    "file_view", "file_scroll", "file_find", "view_file", "skim_file",
+    "file_view", "file_find", "skim_file",
     "list_directory", "grep_search", "glob", "git_status", "git_diff",
-    "search_memory", "search_tools", "get_tool_output",
-    "read_background_output", "inspect_environment", "diagnostics",
+    "search_memory", "search_tools", "inspect_environment", "diagnostics",
   ];
   for (const tool of classified) {
     assert.ok(known.has(tool), `"${tool}" is classified as exploration but is not a registered tool`);
@@ -371,7 +443,9 @@ test("item summaries name a call by its identifying argument", () => {
       arguments: { pattern: "TODO", path: "src" },
       status: "completed",
     }),
-    { label: "grep_search", detail: "TODO in src" },
+    // The tool's own name, beautified. The raw registry key was the old label,
+    // and a transcript reading `grep_search` is the registry talking to itself.
+    { label: "Grep search", detail: "TODO in src" },
   );
 });
 

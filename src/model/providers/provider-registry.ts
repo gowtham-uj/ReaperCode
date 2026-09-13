@@ -1,4 +1,5 @@
 import type { ResolvedModelProfile } from "../types.js";
+import { getModelsDevCatalog } from "../provider/models-dev-catalog.js";
 
 interface ProviderDefaults {
   apiBase: string;
@@ -117,7 +118,30 @@ export function resolveProviderDefaults(profile: ResolvedModelProfile): Provider
     };
   }
 
-  return liteLlmProxyDefaults;
+  // The catalog is the authority for any provider we did not hard-code.
+  // Silently pointing an unknown provider at a local LiteLLM proxy sent
+  // real credentials to 127.0.0.1:4000 for anyone who typed a provider id
+  // slightly wrong, so catalog resolution comes first and a miss is an error.
+  const catalog = getModelsDevCatalog();
+  const catalogBase = catalog.model(providerKey, profile.model)?.provider?.api
+    ?? catalog.provider(providerKey)?.api;
+  if (catalogBase) {
+    return {
+      apiBase: catalogBase,
+      authHeader: "authorization",
+      pathStyle: "openai",
+      modelTransform: (model) => model,
+    };
+  }
+
+  if (providerKey === "litellm" || providerKey.startsWith("litellm-")) {
+    return liteLlmProxyDefaults;
+  }
+
+  throw new Error(
+    `Provider "${profile.provider}" has no API base URL. Set one on the model profile `
+    + `or pick a provider from the catalog.`,
+  );
 }
 
 export function resolveProviderBaseUrl(profile: ResolvedModelProfile): string {

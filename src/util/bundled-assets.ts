@@ -14,6 +14,7 @@
 
 declare const __REAPER_BUNDLED_SKILLS__: Record<string, string> | undefined;
 declare const __REAPER_BUNDLED_LINTERS__: string | undefined;
+declare const __REAPER_BUNDLED_MODELS_DEV__: string | undefined;
 
 /** Built-in skills manifest (relpath → file contents), only present in the bundle. */
 export function bundledSkills(): Record<string, string> | undefined {
@@ -23,4 +24,11 @@ export function bundledSkills(): Record<string, string> | undefined {
 /** Linter `manifest.json` contents, only present in the bundle. */
 export function bundledLinterManifest(): string | undefined {
   return typeof __REAPER_BUNDLED_LINTERS__ !== "undefined" ? __REAPER_BUNDLED_LINTERS__ : undefined;
+}
+
+/** Pinned Models.dev catalog JSON, only present in the single-file bundle. */
+export function bundledModelsDevCatalog(): string | undefined {
+  return typeof __REAPER_BUNDLED_MODELS_DEV__ !== "undefined"
+    ? __REAPER_BUNDLED_MODELS_DEV__
+    : undefined;
 }

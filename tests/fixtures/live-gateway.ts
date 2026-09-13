@@ -434,6 +434,7 @@ function getProviderDefaults(provider: string, model?: string): LiveProviderDefa
         provider,
         model: model ?? getDefaultDeepInfraModel(),
         apiKeyEnv: getFirstConfiguredEnvName(["DEEPINFRA_API_KEY", "DEEP_INFRA_API_KEY", "DEEPINFRA_PROVIDER_KEY"]) ?? "DEEPINFRA_API_KEY",
+        apiBase: process.env.DEEPINFRA_BASE_URL ?? "https://api.deepinfra.com/v1/openai",
         maxContextTokens: 131000,
         maxTokens: 32768,
       };
