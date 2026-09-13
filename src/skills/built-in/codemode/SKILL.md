@@ -6,8 +6,26 @@ loop, a filter, a fan-out, a chain. Do not reach for it to wrap one call.
 
 ## The five rules
 
-1. **The last expression is the result.** No `return`, no `console.log`, no
-   `JSON.stringify` — the completion value comes back as data.
+1. **The last *expression* is the result — and a statement is not an
+   expression.** No `return`, no `console.log`, no `JSON.stringify`; the
+   completion value comes back as data. The trap is what you end on:
+
+   ```js
+   const { matches } = await tools.grep_search({ pattern: "TODO", include: "*.ts" });
+   // ✗ nothing comes back — a declaration has no value
+   ```
+
+   ```js
+   const { matches } = await tools.grep_search({ pattern: "TODO", include: "*.ts" });
+   matches.length;
+   // ✓ 3 — the trailing expression is the result
+   ```
+
+   A trailing `if`, `for`, `while`, `try`, or `console.log` behaves the same
+   way: the script ran, the work is done, and the caller gets nothing back. When
+   you get `The script produced no value`, this is why — add a final expression.
+   Assigning to a variable instead of returning it is the single most common
+   way to lose a result.
 2. **`await` works at the top level.** Every `tools.*` call returns a promise.
 3. **Each eval starts fresh.** A `const` you declared in the previous call is
    not here. Keep a pipeline inside one script, or persist with

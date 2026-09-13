@@ -269,11 +269,28 @@ function OutputPane({ background }: { background: BackgroundState }) {
 
 function ProcessOutput({ process }: { process: BackgroundProcess }) {
   const element = useRef<HTMLPreElement>(null);
+  /*
+   * Same fix as the transcript's, for the same reason: deciding "am I at the
+   * bottom?" when content changes cannot survive a jump larger than the
+   * threshold, and a process's first burst of output is exactly that. Tracking
+   * it from scroll events means only the user's own scrolling turns following
+   * off. See the longer note in App.tsx.
+   */
+  const follow = useRef(true);
   useEffect(() => {
     const node = element.current;
     if (!node) return;
-    const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 40;
-    if (atBottom) queueMicrotask(() => node.scrollTo({ top: node.scrollHeight }));
+    const onScroll = (): void => {
+      follow.current = node.scrollHeight - node.scrollTop - node.clientHeight < 40;
+    };
+    node.addEventListener("scroll", onScroll, { passive: true });
+    return () => node.removeEventListener("scroll", onScroll);
+  }, []);
+  useEffect(() => {
+    const node = element.current;
+    if (!node) return;
+    if (!follow.current) return;
+    queueMicrotask(() => { node.scrollTop = node.scrollHeight; });
   }, [process.lines.length]);
   return (
     <section className="process">

@@ -556,7 +556,7 @@ export class ConfiguredModelGateway implements ModelGateway {
       // Preflight the fallback BEFORE recursing. A misconfigured fallback
       // (missing model, bad API key) should fail fast on the preflight
       // hook rather than 404 inside the request — that was the cause of
-      // the 3d-post-generic-stuck eval failures where Cerebras returned
+      // the 3d-post-generic-stuck eval failures where a provider returned
       // 404 for a model the account didn't have, after the primary had
       // already failed and burned a turn.
       assertProviderProfileReady(fallback);

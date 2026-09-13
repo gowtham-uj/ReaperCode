@@ -127,6 +127,7 @@ import { buildSessionMetricsSummary, countVerificationAttempts, hasPassingVerify
 import { collectWorkspaceDiff, runFreshContextDiffReview } from "../verify/diff-review.js";
 import { buildRescueHypothesisLedger, renderRescueHypothesisLedger } from "./hypothesis-ledger.js";
 import { printContextEvent, printToolCalls, printToolResult, printTurnHeader } from "./session-printer.js";
+import { installExtensionTools } from "./extension-wiring.js";
 import { validateToolCallBatch, type ToolValidationBlocker } from "./tool-validation.js";
 import { getRuntimeDeadlinePressure, type RuntimeDeadlinePressure } from "./deadline-pressure.js";
 import { hasRecentIncompleteGeneratedArtifact, hasRecentStructuredResponseFallbackFeedback } from "./generated-artifact-feedback.js";
@@ -1095,6 +1096,39 @@ export class RuntimeEngine {
         // they were added. Nothing caught it earlier because each layer was
         // correct in isolation and no test stood at the join.
         authoringTools: this.getAuthoringRuntime().build(),
+        /*
+         * The registry extension tools are dispatched from, and the callback
+         * that refills it.
+         *
+         * Both were missing, which made `enable_extension` a dead end: the
+         * extension's tools were registered on the manager's own registry and
+         * activated, and the executor — the only thing that dispatches a tool
+         * call — never learned they existed. `installExtensionTools` then tried
+         * to copy them across by reading a field `ToolExecutor` does not have,
+         * so it copied zero and reported success.
+         *
+         * `extensionToolRegistry()` builds the registry lazily, so this costs
+         * nothing until an extension actually exists. The refresh callback is
+         * what `enable` calls to push a newly activated extension's tools in
+         * without waiting for the next run.
+         */
+        ...(this.getAuthoringRuntime().extensionToolRegistry()
+          ? { extensionTools: this.getAuthoringRuntime().extensionToolRegistry()! }
+          : {}),
+        refreshExtensionTools: () => {
+          /*
+           * `executor` is assigned from this very constructor call, so by the
+           * time anything can invoke this callback it is set. The guard is not
+           * defensive padding: it is what makes that reasoning legible to the
+           * type checker and to the next reader, rather than an assertion that
+           * happens to hold.
+           */
+          if (!executor) return;
+          const runtime = this.getAuthoringRuntime();
+          const manager = runtime.extensionRegistry();
+          if (!manager || !runtime.extensionToolRegistry()) return;
+          installExtensionTools({ executor, registry: manager });
+        },
         /*
          * The models a Code Mode script may call.
          *

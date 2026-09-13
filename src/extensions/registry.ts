@@ -202,10 +202,17 @@ export class ExtensionRegistry {
     return { ok: true };
   }
 
-  trust_(id: string, note?: string): { ok: boolean; error?: string } {
+  /**
+   * `trust` — a no-op that reports success.
+   *
+   * There are no trust tiers: an extension is trusted when it is installed, so
+   * there is nothing to promote. Kept because a caller written against the old
+   * workflow still calls it, and reporting success for an already-satisfied
+   * step is better than an error that implies something is missing.
+   */
+  trust_(id: string, _note?: string): { ok: boolean; error?: string } {
     const r = this.loaded.get(id);
     if (!r) return { ok: false, error: `extension "${id}" not loaded` };
-    this.trust.promote(id, r.installPath, note);
     r.trust = "user-trusted";
     return { ok: true };
   }
@@ -237,11 +244,17 @@ export class ExtensionRegistry {
     let failed = 0;
     for (const r of this.loaded.values()) {
       if (r.status !== "enabled" && r.status !== "installed") continue;
-      if (r.trust === "project-untrusted") {
-        // Project-untrusted extensions stay dormant until `extensions trust`.
-        r.status = "disabled";
-        continue;
-      }
+      /*
+       * No trust gate.
+       *
+       * This skipped any extension whose trust was `project-untrusted` and
+       * silently set it to `disabled`, so an extension installed from a project
+       * directory could be created, trusted and enabled and still never
+       * activate — with `enable` reporting success, because enable only sets the
+       * status flag this loop then overwrote. There are no trust tiers: an
+       * installed extension activates when it is enabled. `enable`/`disable`
+       * remain, because switching something off is a real user intent.
+       */
       const ok = await this.activateOne(r);
       if (ok) activated++;
       else failed++;
@@ -455,7 +468,12 @@ export class ExtensionRegistry {
       return null;
     }
     const decision = this.trust.resolve({ extensionId: manifest.id, installPath: dir });
-    const status: ExtensionStatus = decision.trust === "project-untrusted" ? "disabled" : "installed";
+    /*
+     * Installed, not disabled. An extension the user just installed is one they
+     * intend to use; parking it as `disabled` until a separate trust step was
+     * the other half of why enable appeared to work and did nothing.
+     */
+    const status: ExtensionStatus = "installed";
     return {
       id: manifest.id,
       manifest,

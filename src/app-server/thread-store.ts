@@ -114,7 +114,7 @@ export class ThreadStore {
       ...(input.provider ? { provider: input.provider } : {}),
       ...(input.model ? { model: input.model } : {}),
       ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
-      permissionMode: input.permissionMode ?? "accept_edits",
+      permissionMode: input.permissionMode ?? "yolo",
       ...(input.title ? { title: input.title } : {}),
       status: "idle",
       createdAt: now,

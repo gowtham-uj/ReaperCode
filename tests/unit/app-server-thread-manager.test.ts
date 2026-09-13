@@ -54,7 +54,7 @@ test("managed threads persist identity and reuse the named session after restart
   assert.equal(firstInputs[0]?.sessionName, "app-persistent-thread");
   assert.equal(secondInputs[0]?.sessionName, "app-persistent-thread");
   assert.equal(secondInputs[0]?.threadId, "persistent-thread");
-  assert.equal(resumed.metadata.permissionMode, "accept_edits");
+  assert.equal(resumed.metadata.permissionMode, "yolo");
   assert.equal((await second.listThreads()).length, 1);
 });
 

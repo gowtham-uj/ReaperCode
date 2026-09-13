@@ -15,8 +15,6 @@ export const DEFAULT_NURALWATT_MODEL = "kimi-k2.7-code";
 
 export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
 export const DEFAULT_ANTHROPIC_FAST_MODEL = "claude-haiku-4-5";
-export const DEFAULT_CEREBRAS_MODEL = "qwen-3-235b-a22b-instruct-2507";
-export const DEFAULT_CEREBRAS_FAST_MODEL = "llama3.1-8b";
 
 export const DEFAULT_MIMO_MODEL = "mimo-v2.5";
 export const DEFAULT_MIMO_FAST_MODEL = "mimo-v2.5";
@@ -76,14 +74,6 @@ export function getDefaultAnthropicModel(): string {
 
 export function getDefaultAnthropicLatencyFallbackModel(): string {
   return process.env.ANTHROPIC_LATENCY_FALLBACK_MODEL ?? DEFAULT_ANTHROPIC_FAST_MODEL;
-}
-
-export function getDefaultCerebrasModel(): string {
-  return process.env.CEREBRAS_MODEL ?? DEFAULT_CEREBRAS_MODEL;
-}
-
-export function getDefaultCerebrasLatencyFallbackModel(): string {
-  return process.env.CEREBRAS_LATENCY_FALLBACK_MODEL ?? DEFAULT_CEREBRAS_FAST_MODEL;
 }
 
 export function getDefaultMimoModel(): string {

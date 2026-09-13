@@ -62,15 +62,75 @@ export async function loadExtensionMain(extensionDir: string, manifest: Extensio
   if (!mod || typeof mod !== "object") {
     return { ok: false, mainPath, error: `extension main did not export a module object (got ${typeof mod})` };
   }
-  const def = (mod as { default?: unknown }).default;
-  if (!def || typeof def !== "object") {
-    return { ok: false, mainPath, error: "extension main must export `default` (the activate/deactivate object)" };
-  }
-  const activated = def as ActivatedModule["default"];
-  if (typeof activated.activate !== "function") {
-    return { ok: false, mainPath, error: "extension main.default.activate must be a function" };
+  const activated = resolveActivation(mod as Record<string, unknown>);
+  if (!activated) {
+    return {
+      ok: false,
+      mainPath,
+      error:
+        "extension main must export an object with an `activate` function — "
+        + "either `module.exports = { activate, deactivate }` or "
+        + "`module.exports = { default: { activate, deactivate } }`",
+    };
   }
   return { ok: true, module: { default: activated }, mainPath };
+}
+
+/**
+ * Find the activate/deactivate pair in a loaded entry point, whatever shape the
+ * author used.
+ *
+ * `await import()` of a CommonJS module does not hand back `module.exports` as
+ * `mod`; it hands back a namespace whose `default` *is* `module.exports`. So an
+ * author who writes the documented shape —
+ * `module.exports = { default: { activate } }` — is read as
+ * `mod.default.default.activate`, and the loader's `mod.default.activate` is
+ * `undefined`. The diagnostic was reported as "extension main.default.activate
+ * must be a function" for every export shape an author could reasonably try,
+ * because each one put the real function one level below where it was looked
+ * for.
+ *
+ * Measured against the file the loader reads:
+ *
+ *   typeof mod.default                       -> "object"
+ *   mod.default.activate                     -> undefined     (what it checked)
+ *   mod.default.default.activate             -> function      (where it lived)
+ *
+ * Two shapes are accepted rather than one, because both are legitimate: the
+ * documented `{ default: {...} }` and the more natural
+ * `module.exports = { activate, deactivate }`, which the loader's own error
+ * message had been (incorrectly) implying was wrong. Unwrapping is bounded to
+ * two levels — deep enough for the CJS double-wrap, shallow enough that a
+ * genuinely malformed module is still refused rather than searched.
+ */
+function resolveActivation(mod: Record<string, unknown>): ActivatedModule["default"] | undefined {
+  /*
+   * A bare function export is accepted as the activation itself.
+   *
+   * `module.exports = async function activate() {}` is a shape an author
+   * reaches for, and it is unambiguous: there is exactly one thing exported and
+   * it is callable. Rejecting it would be pedantry about a wrapper that carries
+   * no information. `deactivate` is simply absent, which the interface already
+   * allows.
+   */
+  const asFunction = (value: unknown): ActivatedModule["default"] | undefined =>
+    typeof value === "function"
+      ? { activate: value as (ctx: unknown) => unknown }
+      : undefined;
+
+  const candidates = [
+    mod.default,
+    mod,
+    (mod.default as Record<string, unknown> | undefined)?.default,
+  ];
+  for (const candidate of candidates) {
+    if (candidate && typeof candidate === "object" && typeof (candidate as { activate?: unknown }).activate === "function") {
+      return candidate as ActivatedModule["default"];
+    }
+    const fn = asFunction(candidate);
+    if (fn) return fn;
+  }
+  return undefined;
 }
 
 

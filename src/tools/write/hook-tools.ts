@@ -2,23 +2,22 @@
  * Hook authoring tool handlers — the 6 model-callable tools that
  * exercise HookLifecycle.
  *
- *   create_hook      → lifecycle.create (draft on disk; not registered)
+ *   create_hook      → lifecycle.create (persisted and live)
  *   list_hooks       → lifecycle.list (read-only inventory)
  *   update_hook      → lifecycle.update (re-compile, re-register)
- *   approve_hook     → approval gate + lifecycle.approve (compile + register)
- *   uninstall_hook   → approval gate + lifecycle.uninstall
+ *   approve_hook     → lifecycle.approve (a no-op; already live)
+ *   uninstall_hook   → lifecycle.uninstall (remove from disk and runner)
  *   reload_hooks     → lifecycle.reload (re-walk the disk)
  *
- * The lifecycle already routes through the approval requester
- * configured on `HookLifecycleOptions.approvalRequester`. The
- * handlers pass no extra gate; the wiring step injects the runtime
- * approval requester into the lifecycle at construction time.
+ * No approval gate. Hooks have no trust tiers: a hook is live the
+ * moment it is written, and `approve_hook` is kept only so a caller
+ * written against the old workflow still gets a success answer.
  *
  * Enforce flag: `enforce: false` (default) makes the hook
  * observation-only — `allow: false` is ignored at dispatch time
  * and only `message` is surfaced as a hint to the model. `enforce:
- * true` lets the hook block tool calls (still requires the
- * approval gate).
+ * true` lets the hook block tool calls. This is a capability flag,
+ * not a trust one.
  */
 
 import type {
@@ -80,11 +79,19 @@ export function handleListHooks(
     description: r.description,
     matcher: r.matcher,
     enforce: r.enforce,
-    trust: r.trust,
     scope: r.scope,
     timeout_ms: r.timeout_ms,
-    compiled: r.trust !== "draft",
-    registered: r.trust !== "draft",
+    /*
+     * Reported from the runner, not from the `trust` label.
+     *
+     * `compiled` and `registered` were both `r.trust !== "draft"`, which is a
+     * copy of one field printed twice. It said a hook was live because a string
+     * in its JSON said so. This asks the subscription map instead, so the
+     * inventory cannot disagree with what will actually run. A hook whose
+     * source fails to compile reads `registered: false`, which is true and
+     * worth knowing.
+     */
+    registered: deps.lifecycle.isRegistered(r.id),
     sourceBytes: r.source.length,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,

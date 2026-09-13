@@ -15,6 +15,7 @@ import { evaluateToolCall, isPolicyDenial } from "../governance/policy-engine.js
 import { SandboxPolicy, sandboxToClassification, type SandboxMode } from "../policy/sandbox.js";
 import { resolveEffectivePermissionMode } from "../policy/mode.js";
 import type { RecoverySession } from "../recovery/session.js";
+import type { ExtensionToolRegistry } from "../extensions/tool-registry.js";
 import { classifyToolCall } from "../execution/planner.js";
 import { ArtifactStore } from "../artifacts/store.js";
 import { executeBashCommand, bashCommandToModelOutput, isBackgroundBashResult, toForegroundShellResult } from "./bash/index.js";
@@ -167,9 +168,27 @@ export interface ToolExecutorOptions {
    */
   hooks?: Hooks;
   /**
-   * Forwarder used by `enable_extension` to push newly activated
-   * extension tools into the executor's `ExtensionToolRegistry`.
-   * The runtime wires this to `installExtensionTools`.
+   * The registry of extension tools this executor can dispatch.
+   *
+   * Supplied at construction rather than reached for through a cast. The
+   * previous arrangement had `installExtensionTools` read
+   * `(executor as { extensionToolRegistry? }).extensionToolRegistry` — a field
+   * `ToolExecutor` has never had — so the cast produced `undefined`, the copy
+   * loop was skipped, and *zero* tools were installed on every run while every
+   * layer reported success. An extension could be created, trusted, enabled and
+   * activated, and none of its tools could be called, because the one step that
+   * moved them into the executor silently did nothing.
+   *
+   * Passing the registry in makes that failure impossible to express: if it is
+   * absent there is no dispatch path and the code says so, rather than
+   * discovering a missing field at runtime through a cast the type checker
+   * cannot see through.
+   */
+  extensionTools?: ExtensionToolRegistry;
+  /**
+   * Forwarder used by `enable_extension` to push newly activated extension
+   * tools into `extensionTools`. The runtime wires this to
+   * `installExtensionTools`.
    */
   refreshExtensionTools?: () => Promise<void> | void;
   /**
@@ -711,8 +730,18 @@ export class ToolExecutor {
     const start = Date.now();
     const decisionId = normalizedCall.id || call.id || randomUUID();
 
-    // Unknown-tool loop guard
-    const isKnownTool = normalizedCall.name in toolRegistry;
+    /*
+     * Unknown-tool loop guard.
+     *
+     * An extension tool is known even though it is not in the static registry:
+     * it was contributed at runtime by an activated extension. Checking only
+     * `toolRegistry` meant such a call was rejected here — before dispatch —
+     * with a message listing the static tools, so an extension whose tools were
+     * installed correctly still could not be called. The registry is the second
+     * source of truth for "is this a real tool", and both are consulted.
+     */
+    const isKnownTool = normalizedCall.name in toolRegistry
+      || Boolean(this.options.extensionTools?.hasTool(normalizedCall.name));
     if (!isKnownTool) {
       this.consecutiveUnknownTools++;
       this.lastUnknownToolName = normalizedCall.name;
@@ -922,7 +951,22 @@ export class ToolExecutor {
     // was in no documented set. `invalid_argument` is a member of
     // `ToolErrorCode` in `src/tools/result.ts`, which is the envelope every
     // core tool documents, so it is the one worth keeping.
-    const parsed = ToolCallSchema.safeParse(normalizedCall);
+    /*
+     * `ToolCallSchema` is a discriminated union over the *static* tool names, so
+     * it has no branch for a tool an extension contributed at runtime and would
+     * reject every such call with "name: Invalid input" — the last of three
+     * separate gates that each had to know about extension tools.
+     *
+     * Skipping it here is not skipping validation: the extension registry
+     * validates the arguments against the schema the extension itself declared
+     * (`validateExtensionToolArgs`) before the handler runs, and rejects a
+     * mismatch with the offending property named. What is skipped is a schema
+     * that does not apply.
+     */
+    const isExtensionTool = Boolean(this.options.extensionTools?.hasTool(normalizedCall.name));
+    const parsed = isExtensionTool
+      ? { success: true as const, data: normalizedCall }
+      : ToolCallSchema.safeParse(normalizedCall);
     if (!parsed.success) {
       const errors = parsed.error.issues.map(i => `${i.path.join(".")}: ${i.message}`).join("; ");
       const toolName = typeof normalizedCall.name === "string" ? normalizedCall.name : call.name;
@@ -1934,8 +1978,45 @@ export class ToolExecutor {
         if (!h) throw new Error("hook_manager is not wired for this run");
         return await h(call.args);
       }
-      default:
+      default: {
+        /*
+         * Extension tools, which are not in the static registry.
+         *
+         * An enabled extension contributes tools at runtime, so their names
+         * cannot be cases in this switch — they are known only from the
+         * registry the runtime was given. Without this branch such a call fell
+         * through to `Unknown tool`, which is the failure a user sees at the
+         * very end of a path that reported success at every earlier step:
+         * create, trust, enable and activate all return ok, and then the tool
+         * the extension contributes cannot be called.
+         *
+         * The registry checks the tool's own permission and argument schema
+         * before running the handler, so this is a dispatch, not a bypass — an
+         * extension tool is subject to the same gating it declares.
+         */
+        const extensionTools = this.options.extensionTools;
+        if (extensionTools && extensionTools.getDefinition(call.name)) {
+          /*
+           * The context is what the registry needs to identify the call, not a
+           * general scratch pad: the extension id and tool name it already
+           * knows, plus the call id for correlation. The workspace, run and
+           * session live on the extension's own activation context, so
+           * repeating them here would be a second source of truth.
+           */
+          const outcome = await extensionTools.executeTool(
+            call.name,
+            (call.args ?? {}) as Record<string, unknown>,
+            { extensionId: "", toolName: call.name, ...(call.id ? { callId: call.id } : {}) },
+          );
+          if (!outcome.ok) {
+            // The registry's own code and message. Surfaced rather than
+            // reworded, so a permission denial reads as a permission denial.
+            throw new Error(`${outcome.code}: ${outcome.error}`);
+          }
+          return outcome.value;
+        }
         throw new Error(`Unknown tool: ${call.name}`);
+      }
     }
   }
 

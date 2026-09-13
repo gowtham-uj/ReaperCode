@@ -61,7 +61,7 @@ test("codemode activates from an empty workspace, with no index and no registry"
     assert.match(out, /^<activated_skill>/);
     // The body has to be the real instructions, not a stub: the point of the
     // skill is that it changes what the model writes.
-    assert.match(out, /last expression is the result/i);
+    assert.match(out, /last \*?expression\*? is the result/i);
     assert.match(out, /tools\.list\(\)/);
     assert.match(out, /When eval is the right tool/);
   } finally {
@@ -91,7 +91,7 @@ test("a human typing /codemode loads the body into the cockpit as an instruction
   assert.match(cockpit, /<<<SKILL: codemode>>>/);
   assert.match(cockpit, /authority=user_instruction/);
   assert.match(cockpit, /<<<END_SKILL>>>/);
-  assert.match(cockpit, /last expression is the result/i);
+  assert.match(cockpit, /last \*?expression\*? is the result/i);
 });
 
 test("a SKILL.md without YAML frontmatter still loads a body", () => {

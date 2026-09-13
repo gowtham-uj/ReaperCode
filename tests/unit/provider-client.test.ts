@@ -55,16 +55,44 @@ test("provider multiplexer dispatches official DeepSeek to DeepSeek client", asy
   assert.equal(openAiCompatible.calls, 0);
 });
 
-test("provider multiplexer dispatches Cerebras to Cerebras client", async () => {
-  const cerebras = new RecordingClient("cerebras");
+test("cerebras is not offered, even though the catalog lists it", async () => {
+  /*
+   * The removal, pinned rather than trusted.
+   *
+   * `cerebras` is one of 213 providers in the vendored models.dev snapshot, and
+   * any catalog provider no legacy client claims is bound to the generic AI SDK
+   * transport. Deleting the dedicated client therefore was not enough on its
+   * own: the provider would have kept working through the fallback, silently,
+   * with the AI SDK client answering in its place. This test fails if the
+   * catalog exclusion is ever dropped — which is exactly how the removal would
+   * come back.
+   */
   const openAiCompatible = new RecordingClient("openai-compatible");
-  const client = new ProviderMultiplexerClient({ cerebras: cerebras as any, openAiCompatible: openAiCompatible as any });
+  const client = new ProviderMultiplexerClient({ openAiCompatible: openAiCompatible as any });
 
-  const result = await client.generate({ role: "secondary_model", messages: [] }, { ...baseProfile, provider: "cerebras" });
-
-  assert.equal(result.provider, "cerebras");
-  assert.equal(cerebras.calls, 1);
-  assert.equal(openAiCompatible.calls, 0);
+  await assert.rejects(
+    // Wrapped in an async thunk: `resolveProviderClient` refuses synchronously,
+    // so the bare call would throw before `assert.rejects` could observe it.
+    async () => await client.generate({ role: "secondary_model", messages: [] }, { ...baseProfile, provider: "cerebras" }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error, "expected a resolution error");
+      /*
+       * Asserting the provider is named, not the exact message.
+       *
+       * Two independent mechanisms refuse this and either may speak first: the
+       * registry entry that supplied its base URL is gone, and the catalog
+       * exclusion stops it being bound to the generic AI SDK family. Measured,
+       * the base-URL check throws first with "Provider \"cerebras\" has no API
+       * base URL". Pinning that sentence would make this test fail if the
+       * mechanisms were reordered, which is not a behaviour change worth
+       * failing over. What matters is that it is refused and the error says
+       * which provider.
+       */
+      assert.match(error.message, /cerebras/i);
+      return true;
+    },
+  );
+  assert.equal(openAiCompatible.calls, 0, "the generic transport must not pick it up");
 });
 
 test("provider multiplexer dispatches OpenAI-compatible providers to generic client", async () => {

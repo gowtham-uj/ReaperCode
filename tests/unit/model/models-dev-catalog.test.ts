@@ -9,6 +9,7 @@ import {
   ModelsDevCatalogService,
 } from "../../../src/model/provider/models-dev-catalog.js";
 import { ProviderCredentialStore } from "../../../src/config/provider-credentials.js";
+import { UNSUPPORTED_PROVIDERS } from "../../../src/model/provider-registry.js";
 import { ProviderIntegrationRegistry } from "../../../src/model/provider/integration-registry.js";
 import { DEFAULT_MAX_MESSAGE_BYTES } from "../../../src/app-server/connection.js";
 
@@ -149,11 +150,29 @@ test("every listed model carries a transport verdict", () => {
     );
     const providers = registry.list();
     assert.ok(providers.every((provider) => typeof provider.runnable === "boolean"));
-    // Every transport identity in the pinned snapshot has a loader, so this
-    // build should be able to serve all of it. A false here means a catalog
-    // entry outran the loader table.
-    const unrunnable = providers.filter((provider) => !provider.runnable).map((p) => p.providerId);
+    /*
+     * Every transport identity in the pinned snapshot has a loader, so this
+     * build should be able to serve all of it. A false here means a catalog
+     * entry outran the loader table.
+     *
+     * Excluding the deliberately unsupported providers: they are absent from
+     * the catalog binding on purpose (see UNSUPPORTED_PROVIDERS in
+     * provider-registry.ts), so they have no transport and no runnable model,
+     * and this assertion would otherwise demand that a provider the build
+     * removed be served.
+     */
+    const unrunnable = providers
+      .filter((provider) => !UNSUPPORTED_PROVIDERS.has(provider.providerId))
+      .filter((provider) => !provider.runnable)
+      .map((p) => p.providerId);
     assert.deepEqual(unrunnable, [], `providers with no servable model: ${unrunnable.join(", ")}`);
+
+    // And the excluded ones really are excluded, rather than merely unrunnable.
+    for (const provider of providers) {
+      if (UNSUPPORTED_PROVIDERS.has(provider.providerId)) {
+        assert.equal(provider.runnable, false, `${provider.providerId} is excluded and must not report as runnable`);
+      }
+    }
 
     const page = registry.listModels({ providerId: "deepinfra", limit: 5 });
     assert.ok(page.data.length > 0);

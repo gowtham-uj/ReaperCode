@@ -118,6 +118,23 @@ export class HookRunner {
     return () => this.unregisterOne(extensionId, event, handler);
   }
 
+  /**
+   * Whether a handler is currently attached under this id.
+   *
+   * Exposed so a caller can assert that a hook really is — or really is not —
+   * registered. The hook lifecycle's whole trust gate comes down to "was this
+   * attached to the runner", and without a way to ask, a test can only observe
+   * the lifecycle's own bookkeeping, which agrees with itself by construction.
+   */
+  hasHandler(extensionId: string): boolean {
+    return this.handlers.some((h) => h.extensionId === extensionId);
+  }
+
+  /** Every attached handler id, for diagnostics and tests. */
+  handlerIds(): string[] {
+    return this.handlers.map((h) => h.extensionId);
+  }
+
   /** Drop every handler for `extensionId`. */
   unregisterAll(extensionId: string): number {
     let removed = 0;

@@ -23,7 +23,7 @@
 
 import type { ToolExecutor } from "../tools/executor.js";
 import { ExtensionRegistry } from "../extensions/registry.js";
-import { ExtensionToolRegistry } from "../extensions/tool-registry.js";
+import { ExtensionToolRegistry, type ExtensionToolHandler } from "../extensions/tool-registry.js";
 import { installHookBridge } from "./hook-bridge.js";
 import type { Hooks } from "../adaptive/hooks.js";
 import { HookRunner } from "../extensions/hook-runner.js";
@@ -34,65 +34,96 @@ export interface WireOptions {
 }
 
 /**
- * Copy every registered tool from the source registry into the
- * executor's ExtensionToolRegistry. The executor may have received
- * its ExtensionToolRegistry from the constructor (`extensionToolRegistry`);
- * if not, this function creates one and patches it onto the executor's
- * options map (a runtime fallback for callers that don't pass it at
- * construction time).
+ * Copy every enabled extension's tools into the executor's own registry.
+ *
+ * The executor's registry is a constructor option (`extensionTools`). It is not
+ * created here and not patched onto the executor afterwards: an earlier version
+ * of this function did exactly that, reading a field through a cast, and
+ * because the field never existed the copy loop was skipped on every run while
+ * every caller reported success. A missing registry is now an error the caller
+ * sees, which is the only way a broken wiring step stays visible.
  *
  * Returns the count of tools installed.
  */
 export function installExtensionTools(opts: WireOptions): number {
+  /*
+   * Copy enabled extensions' tools into the executor's own registry.
+   *
+   * This used to reach for `(executor as { extensionToolRegistry? })` — a field
+   * `ToolExecutor` has never had. The cast defeated the type checker, produced
+   * `undefined`, and the whole loop was skipped: `installed` stayed 0 on every
+   * run while `enable` reported `activated: true` and the registry really did
+   * hold the tool. The user's experience was an extension that created,
+   * trusted, enabled and activated successfully, and a tool that could not be
+   * called and did not appear in `tools.list()`.
+   *
+   * The registry is now a declared option, so the target is either present or
+   * the wiring is being called wrong — and that case is reported rather than
+   * silently doing nothing.
+   */
+  const target = opts.executor.getOptions().extensionTools;
+  if (!target) {
+    if (opts.registry.list().some((r) => r.status === "enabled")) {
+      // Only a problem when there is something to install, so a run with no
+      // extensions stays quiet instead of warning about a capability it is not
+      // using.
+      throw new Error(
+        "installExtensionTools: the executor has no `extensionTools` registry, "
+        + "so enabled extensions' tools cannot be dispatched. Pass one when constructing ToolExecutor.",
+      );
+    }
+    return 0;
+  }
+
   let installed = 0;
-  // The executor does not expose its internal ExtensionToolRegistry
-  // field by default; we install via the executor's own
-  // registerExtensionTool (added in executor.ts) instead.
   for (const r of opts.registry.list()) {
-    if (r.status !== "enabled") continue;
-    if (r.trust === "project-untrusted") continue;
+    /*
+     * Enabled, not "trusted". There are no trust tiers, and this filter — which
+     * skipped anything `project-untrusted` — meant an extension from a project
+     * directory had its tools dropped here even when it had activated. The
+     * `disable` action still withholds tools, because switching something off is
+     * a real intent rather than a trust judgement.
+     */
+    if (r.status !== "enabled" && r.status !== "installed") continue;
     const registry = opts.registry.getToolRegistry();
     for (const toolName of registry.listTools()) {
       const meta = registry.getMetadata(toolName);
       const def = registry.getDefinition(toolName);
+      /*
+       * A tool without metadata is dropped by the registry's own invariant, and
+       * dropping it here silently is how a first-time author loses a tool with
+       * no diagnostic. `enable` reports it instead — see the count check in the
+       * caller — so this `continue` is the last quiet step, not the last step.
+       */
       if (!meta || !def) continue;
-      // Hand off to the executor's per-instance registry, which
-      // requires ToolMetadata by invariant.
-      const executorExt = (opts.executor as unknown as {
-        extensionToolRegistry?: ExtensionToolRegistry;
-      }).extensionToolRegistry;
-      const target = executorExt ?? null;
-      if (target && !target.hasTool(toolName)) {
-        // Re-register by reading the inner record's handler. We
-        // only need metadata + handler; permission granting is
-        // carried over from the source registry.
-        const srcRecord = readRecord(registry, toolName);
-        if (srcRecord) {
-          target.register({
-            extensionId: r.id,
-            definition: def,
-            metadata: meta,
-            handler: srcRecord.handler,
-            grantedPermissions: r.manifest.permissions ?? [],
-          });
-          installed++;
-        }
-      }
+      if (target.hasTool(toolName)) continue;
+      const srcRecord = readRecord(registry, toolName);
+      if (!srcRecord) continue;
+      target.register({
+        extensionId: r.id,
+        definition: def,
+        metadata: meta,
+        handler: srcRecord.handler,
+        grantedPermissions: r.manifest.permissions ?? [],
+      });
+      installed++;
     }
   }
   return installed;
 }
 
-/** Read a tool record's handler. Internal helper. */
-function readRecord(reg: ExtensionToolRegistry, name: string): { handler: import("../extensions/tool-registry.js").ExtensionToolHandler } | null {
-  // The records map is private; we re-export through getDefinition
-  // and executeTool. To copy the handler, callers usually use the
-  // registry's own `executeTool` indirection. For wiring we expose
-  // a backdoor only when the registry is in the same process — no
-  // IPC. The ExtensionToolRegistry exposes a getHandler() through
-  // a debug surface.
-  const h = (reg as unknown as { records?: Map<string, { handler: import("../extensions/tool-registry.js").ExtensionToolHandler }> }).records?.get(name)?.handler;
-  return h ? { handler: h } : null;
+/**
+ * Read a tool record's handler, through the registry's own accessor.
+ *
+ * This used to index a private `records` map through a cast. It worked, but it
+ * depended on a field name that no type checker would notice changing — the
+ * same class of coupling that had already made `installExtensionTools` a silent
+ * no-op. `getRecord` is the supported way to ask, and a rename now fails to
+ * compile instead of failing at runtime in a way nothing reports.
+ */
+function readRecord(reg: ExtensionToolRegistry, name: string): { handler: ExtensionToolHandler } | null {
+  const record = reg.getRecord(name);
+  return record ? { handler: record.handler } : null;
 }
 
 /**

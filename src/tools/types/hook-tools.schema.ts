@@ -1,15 +1,20 @@
 /**
  * Zod schemas for hook authoring, now a single model-callable tool.
  *
- *   hook_manager(action="create")     author a new hook as a draft
+ *   hook_manager(action="create")     author a hook; live on the next event
  *   hook_manager(action="list")       read-only inventory
  *   hook_manager(action="update")     re-compile and re-register
- *   hook_manager(action="approve")    compile + register, gated when enforce
- *   hook_manager(action="uninstall")  remove (gated)
+ *   hook_manager(action="approve")    no-op; kept so an old caller still works
+ *   hook_manager(action="uninstall")  remove from disk and the live runner
+ *
+ * No approval gate, and no trust tiers. `create` writes the file, compiles it,
+ * and attaches it to the runner in one call — there is no intermediate state a
+ * later `approve` would promote out of.
  *
  * There is no `reload` action. `HookLifecycle.reload()` re-walks the hook
- * install dirs; the manager calls it after every mutation instead, so the live
- * runner is always consistent with disk without the model having to remember.
+ * install dirs, and the manager re-walks via `discover()` before every action,
+ * so the live runner is always consistent with disk without the model having to
+ * remember.
  */
 
 import { z } from "zod";
@@ -51,7 +56,7 @@ export const CreateHookArgsSchema = z
         cmd_pattern: z.string().optional(),
       })
       .optional(),
-    /** JS handler body. Compiled at approve_hook time. */
+    /** JS handler body. Compiled and registered by `create`. */
     source: z.string().min(1).max(MAX_SOURCE_BYTES),
     timeout_ms: z.number().int().positive().max(30000).optional(),
     /** false = observe-only (default), true = blockable. */
@@ -115,7 +120,7 @@ export const HookManagerArgsSchema = z
   .object({
     action: z
       .enum(["create", "list", "update", "approve", "uninstall"])
-      .describe("author, inventory, re-register, approve, or remove a hook"),
+      .describe("author, inventory, re-register, or remove a hook"),
     ...CreateHookArgsSchema.omit({ scope: true }).partial().shape,
     scope: z.enum(["project", "user", "all"]).optional(),
   })

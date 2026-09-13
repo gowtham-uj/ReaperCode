@@ -19,7 +19,7 @@
  *      pre-register at module load.
  *
  *   2. **Provider-name layer** (`registerProvider`): a friendly name
- *      (e.g. `"anthropic"`, `"openrouter"`, `"cerebras"`) maps to
+ *      (e.g. `"anthropic"`, `"openrouter"`, `"deepinfra"`) maps to
  *      a family. The multiplexer used to hard-code this in a
  *      switch; the registry makes it data-driven so new providers
  *      can register without modifying the multiplexer.
@@ -37,6 +37,30 @@
 
 import type { ProviderModelClient } from "./gateway.js";
 import type { ResolvedModelProfile } from "./types.js";
+
+/**
+ * Providers this build deliberately does not offer.
+ *
+ * Checked in two places, because there are two ways a removed provider comes
+ * back:
+ *
+ *   1. `resolveProviderClient` below falls back to the `openai-chat` family for
+ *      any provider it does not recognize, so an unknown id still resolves to a
+ *      working client. A catalog-only removal leaves that fallback open.
+ *   2. `resolveProviderDefaults` in `providers/provider-registry.ts` reads a
+ *      base URL straight out of the vendored models.dev snapshot, which still
+ *      lists the provider.
+ *
+ * Both are needed. The first attempt at removing `cerebras` deleted its client
+ * and its family binding and left these two paths alone; the provider kept
+ * resolving and only failed later, on a missing base URL — which a user-supplied
+ * `apiBase` would have papered over. A test asserting the refusal is what
+ * surfaced that, so the assertion is part of the fix rather than a formality.
+ *
+ * The snapshot is not edited: it lists 213 providers and is refreshed wholesale
+ * by a sync script, so a deletion there would not survive the next refresh.
+ */
+export const UNSUPPORTED_PROVIDERS: ReadonlySet<string> = new Set(["cerebras"]);
 
 /**
  * A provider family is a function that, given a profile, returns
@@ -82,6 +106,19 @@ export function resolveProviderClient(
   fallbackFamily: string = "openai-chat",
 ): ProviderModelClient {
   const providerKey = profile.provider.trim().toLowerCase();
+  /*
+   * Refuse before the fallback, not after.
+   *
+   * `?? fallbackFamily` is what made the first attempt at this removal look
+   * successful while leaving the provider usable: an unbound id still resolves,
+   * to the generic OpenAI-compatible client. Throwing here means the exclusion
+   * cannot be defeated by the very fallback designed to be forgiving.
+   */
+  if (UNSUPPORTED_PROVIDERS.has(providerKey)) {
+    throw new Error(
+      `Provider "${profile.provider}" is not supported by this build. Pick another provider.`,
+    );
+  }
   const familyId = providerToFamily.get(providerKey) ?? fallbackFamily;
   const resolver = familyRegistry.get(familyId);
   if (!resolver) {

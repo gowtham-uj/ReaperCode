@@ -651,7 +651,7 @@ export class ReaperCLI {
     if (wantStreamEvents) process.env.REAPER_STREAM_EVENTS = "1";
     const providerRaw = flags["provider"];
     const isExecProvider = (value: string | undefined): value is NonNullable<ExecRunnerOptions["provider"]> =>
-      value === "openai" || value === "openai-codex" || value === "anthropic" || value === "minimax" || value === "deepseek" || value === "nuralwatt" || value === "nuralwatt2";
+      value === "openai" || value === "anthropic" || value === "minimax" || value === "deepseek" || value === "nuralwatt" || value === "nuralwatt2";
     let provider: ExecRunnerOptions["provider"] | undefined = isExecProvider(providerRaw) ? providerRaw : undefined;
     let selectedModel = model;
     if (this.opts.userHome === undefined) {
@@ -760,7 +760,7 @@ export class ReaperCLI {
       "  visual      list | analyze | bridge",
       "  capability  show | probe",
       "  redact      <file|->",
-      "  exec        run --prompt <text> [--session <name>] [--workspace <dir>] [--model <id>] [--provider anthropic|openai|openai-codex|minimax|deepseek|nuralwatt|nuralwatt2] [--reasoning-effort low|medium|high] [--thinking on|off] [--max-tokens N] [--timeout-ms N] [--json] [--stream-events]",
+      "  exec        run --prompt <text> [--session <name>] [--workspace <dir>] [--model <id>] [--provider anthropic|openai|minimax|deepseek|nuralwatt|nuralwatt2] [--reasoning-effort low|medium|high] [--thinking on|off] [--max-tokens N] [--timeout-ms N] [--json] [--stream-events]",
       "  app-server  [--listen ws://127.0.0.1:0] [--workspace <dir>] [--auth-token <token>|--auth-token-file <path>] [--max-concurrent-turns N]",
     ].join("\n");
     return { exitCode: 0, stdout: usage + "\n", stderr: "" };

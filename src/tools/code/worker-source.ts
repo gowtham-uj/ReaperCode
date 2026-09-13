@@ -311,6 +311,7 @@ function guardPath(spec) {
       const reason = isDangerousPath(
         typeof args[index] === 'string' ? args[index] : '',
         operation === 'open' ? openOperation(args[1]) : operation,
+        workerData.workspace,
       );
       if (reason) throw new CodeModeRefusal(reason);
     }
@@ -470,6 +471,28 @@ function guardCommand(original, spawnFamily, sync) {
     const { index, insert } = optionsSlot(args, baseIndex);
     const existing = insert ? undefined : args[index];
     const base = existing && typeof existing === 'object' ? existing : {};
+    /*
+     * A cwd the model supplied is checked, not trusted. This mirrored bash's
+     * rule for a cwd the model supplies: a command may run anywhere the
+     * workspace reaches, and not outside it. Without this the confinement above
+     * would be one argument deep — \`spawn(cmd, { cwd: '/etc' })\` is the same
+     * escape as a \`cd\` out, spelled in the options object.
+     *
+     * Reads elsewhere in the tree are unaffected and stay allowed: this bounds
+     * where a process runs, which is what bash bounds, not what it can open.
+     */
+    if (typeof base.cwd === 'string' && base.cwd.length > 0) {
+      const path = require('node:path');
+      const target = path.resolve(base.cwd);
+      const root = path.resolve(workerData.workspace);
+      const inWorkspace = target === root || target.startsWith(root + path.sep);
+      const inTemp = ['/tmp', '/var/tmp'].some((dir) => target === dir || target.startsWith(dir + '/'));
+      if (!inWorkspace && !inTemp) {
+        throw new CodeModeRefusal(
+          'Code Mode will not run a process with cwd ' + target + ': it is outside the workspace (' + root + '). Run it inside the workspace or a temporary directory.',
+        );
+      }
+    }
     const next = Object.assign({}, base, { cwd: base.cwd ?? workerData.workspace });
     /*
      * Only the synchronous calls. An async \`spawn\` returns immediately, so the

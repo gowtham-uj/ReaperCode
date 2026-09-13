@@ -159,7 +159,7 @@ async function streamStructuredJsonInQueue<T>(input: {
             if (typeof finish === "string") finishReason = finish;
             truncated = finishReason === "length";
             // Phase T2.7: pull usage out of the stream-end envelope
-            // (Anthropic / Cerebras / OpenRouter / DeepSeek providers
+            // (Anthropic / OpenRouter / DeepSeek providers
             // attach `usage` to the message_end.data). Best-effort.
             if (input.onUsage) {
               try {

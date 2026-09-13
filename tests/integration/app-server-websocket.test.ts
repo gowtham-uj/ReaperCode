@@ -55,7 +55,7 @@ test("WebSocket app server requires initialize and streams separate JSON-RPC not
     assert.equal(initialized.result?.capabilities?.streaming, true);
 
     const started = await client.request("thread/start", { threadId: "ws-thread" });
-    assert.equal(started.result?.approvalPolicy, "accept_edits");
+    assert.equal(started.result?.approvalPolicy, "yolo");
     const accepted = await client.request("turn/start", {
       threadId: "ws-thread",
       prompt: "say hello",
@@ -335,7 +335,7 @@ test("Codex-shaped thread, turn, and item objects stream and persist", async () 
     });
     assert.equal(started.result.thread.id, "codex-thread");
     assert.equal(started.result.thread.sessionId, "app-codex-thread");
-    assert.equal(started.result.approvalPolicy, "accept_edits");
+    assert.equal(started.result.approvalPolicy, "yolo");
     assert.equal(started.result.cwd, workspaceRoot);
 
     await client.request("turn/start", {

@@ -136,7 +136,6 @@ function sdkFamily(npm: string | undefined): SdkFamilyId {
     npm === "@ai-sdk/openai-compatible"
     || npm === "@ai-sdk/openai"
     || npm === "@ai-sdk/azure"
-    || npm === "@ai-sdk/cerebras"
     || npm === "@ai-sdk/deepinfra"
     || npm === "@ai-sdk/groq"
     || npm === "@ai-sdk/perplexity"

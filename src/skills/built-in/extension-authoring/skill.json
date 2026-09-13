@@ -1,0 +1,33 @@
+{
+  "name": "extension-authoring",
+  "version": "1.0.0",
+  "description": "Write an extension that activates, whose registered tools are actually callable, and whose metadata matches what it does.",
+  "category": "prompt-enhancement",
+  "whenToUse": "When the user asks you to create, write, or fix an extension, or when a capability needs to exist as a first-class tool rather than a skill document. Load before calling extension_manager create.",
+  "triggers": [
+    "create an extension",
+    "write an extension",
+    "new extension",
+    "extension_manager",
+    "extension authoring",
+    "extension.json",
+    "main.js",
+    "plugin"
+  ],
+  "allowedTools": [
+    "extension_manager",
+    "write_file",
+    "file_view",
+    "read_file",
+    "search_tools"
+  ],
+  "trust": "builtin",
+  "author": "Reaper",
+  "license": "MIT",
+  "memoryPolicy": {
+    "mayReadProjectMemory": false,
+    "mayWriteProjectMemory": false,
+    "mayReadUserMemory": false,
+    "mayWriteUserMemory": false
+  }
+}

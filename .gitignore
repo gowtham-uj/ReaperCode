@@ -67,6 +67,11 @@ scratchpad/
 *.docx
 # ...except the screenshots the README embeds, which are part of the repo
 !docs/screenshots/*.png
+# ...and the app icons, which the browser fetches at runtime and which the
+# build copies into the bundle. Ignoring these would ship a build whose tab
+# icon 404s.
+!web/ui/public/*.png
+!web/ui/public/*.ico
 
 # Local reference checkouts (never push)
 source_codes/

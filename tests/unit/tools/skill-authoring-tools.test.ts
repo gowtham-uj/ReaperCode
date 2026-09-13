@@ -71,15 +71,23 @@ const BASE_CREATE: CreateSkillArgs = {
   scope: "project",
 };
 
-test("create_skill happy path lands as draft", () => {
+test("create_skill happy path lands trusted, in the directory discovery walks", () => {
+  /*
+   * Not `drafts/`, and not `trust: "draft"`. That combination was the reason a
+   * created skill could never be activated or uninstalled: `drafts/` is not a
+   * directory discovery scans, and `draft` was the flag that locked the skill
+   * out of both paths.
+   */
   const ctx = setup();
   try {
     const r = handleCreateSkill(BASE_CREATE, ctx.deps);
     return r.then((out) => {
       assert.equal(out.ok, true);
       assert.equal(out.name, "python-pytest-runner");
-      assert.equal(out.trust, "draft");
-      assert.ok(out.skillDir?.split(sep).join("/").includes(".reaper/skills/drafts"));
+      assert.equal(out.trust, "user-trusted");
+      const dir = out.skillDir?.split(sep).join("/") ?? "";
+      assert.ok(dir.includes(".reaper/skills/python-pytest-runner"), `unexpected skillDir: ${dir}`);
+      assert.ok(!dir.includes("/drafts/"), "a created skill must not land in drafts/");
     });
   } finally {
     ctx.cleanup();
@@ -92,7 +100,10 @@ test("create_skill rejects duplicate name", async () => {
     await handleCreateSkill(BASE_CREATE, ctx.deps);
     const r2 = await handleCreateSkill(BASE_CREATE, ctx.deps);
     assert.equal(r2.ok, false);
-    assert.match(r2.error ?? "", /draft already exists/);
+    assert.match(String(r2.error), /already exists/i);
+    // The message names the real location now, because a created skill is a
+    // real skill rather than a draft.
+    assert.match(r2.error ?? "", /already exists at/);
   } finally {
     ctx.cleanup();
   }
@@ -190,49 +201,47 @@ test("test_skill fails-fast on first non-zero exit", async () => {
   }
 });
 
-test("approve_skill calls request_human_approval before promoting", async () => {
+/**
+ * There are no trust tiers, so there is nothing to approve.
+ *
+ * `create` used to write a draft that `approve` promoted, and both had to
+ * happen before the skill could be activated. That chain is gone: a created
+ * skill is trusted and usable. `approve` is kept as a no-op that reports
+ * success, because a model that learned the old workflow will still call it and
+ * "already usable, go ahead" is a better answer than a refusal implying
+ * something is missing.
+ */
+test("approve_skill is a no-op that reports the skill is already usable", async () => {
   const ctx = setup();
   try {
-    await handleCreateSkill(BASE_CREATE, ctx.deps);
-    let approveCalled = false;
-    const approver: SkillApprovalRequester = async () => {
-      approveCalled = true;
-      return true;
-    };
-    const r = await handleApproveSkill({ name: "python-pytest-runner" }, { ...ctx.deps, approvalRequester: approver });
-    assert.equal(approveCalled, true);
+    const created = await handleCreateSkill(BASE_CREATE, ctx.deps);
+    assert.equal(created.ok, true);
+    assert.equal(created.trust, "user-trusted", "creation must produce a usable skill");
+
+    // No approval requester is involved, and none is needed.
+    const r = await handleApproveSkill({ name: "python-pytest-runner" }, ctx.deps);
     assert.equal(r.ok, true);
     assert.equal(r.trust, "user-trusted");
+    assert.equal(r.error, undefined);
   } finally {
     ctx.cleanup();
   }
 });
 
-test("approve_skill denial keeps skill as draft", async () => {
+test("uninstall removes a created skill without an approval gate", async () => {
   const ctx = setup();
   try {
-    await handleCreateSkill(BASE_CREATE, ctx.deps);
-    const approver: SkillApprovalRequester = async () => false;
-    const r = await handleApproveSkill({ name: "python-pytest-runner" }, { ...ctx.deps, approvalRequester: approver });
-    assert.equal(r.ok, false);
-    assert.match(r.error ?? "", /denied by approval gate/);
-    const rec = ctx.deps.registry.get("python-pytest-runner");
-    assert.equal(rec?.trust, "draft");
-  } finally {
-    ctx.cleanup();
-  }
-});
+    const created = await handleCreateSkill(BASE_CREATE, ctx.deps);
+    assert.equal(created.ok, true);
+    assert.ok(existsSync(join(created.skillDir!, "SKILL.md")));
 
-test("approve_skill approval promotes to user-trusted", async () => {
-  const ctx = setup();
-  try {
-    await handleCreateSkill(BASE_CREATE, ctx.deps);
-    const approver: SkillApprovalRequester = async () => true;
-    const r = await handleApproveSkill({ name: "python-pytest-runner" }, { ...ctx.deps, approvalRequester: approver });
-    assert.equal(r.ok, true);
-    assert.equal(r.trust, "user-trusted");
-    const rec = ctx.deps.registry.get("python-pytest-runner");
-    assert.equal(rec?.trust, "user-trusted");
+    const removed = await handleUninstallSkill({ name: "python-pytest-runner", scope: "user" }, ctx.deps);
+    assert.equal(removed.ok, true, `uninstall failed: ${removed.error ?? ""}`);
+    assert.equal(
+      existsSync(created.skillDir!),
+      false,
+      "the skill directory must be gone — create without remove is a one-way door",
+    );
   } finally {
     ctx.cleanup();
   }
@@ -242,10 +251,8 @@ test("uninstall_skill removes skill from registry", async () => {
   const ctx = setup();
   try {
     await handleCreateSkill(BASE_CREATE, ctx.deps);
-    const approver: SkillApprovalRequester = async () => true;
-    await handleApproveSkill({ name: "python-pytest-runner" }, { ...ctx.deps, approvalRequester: approver });
-    const r = handleUninstallSkill({ name: "python-pytest-runner", scope: "user" }, { ...ctx.deps, approvalRequester: approver });
-    await r;
+    // No approval step: creation produces a usable skill and removal is ungated.
+    await handleUninstallSkill({ name: "python-pytest-runner", scope: "user" }, ctx.deps);
     assert.equal(ctx.deps.registry.get("python-pytest-runner"), null);
   } finally {
     ctx.cleanup();

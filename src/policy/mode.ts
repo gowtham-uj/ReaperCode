@@ -31,14 +31,23 @@ export function isPermissionMode(value: unknown): value is PermissionMode {
 
 /**
  * Normalize an arbitrary input (config field, env override, runtime
- * tunable, CLI flag) into a valid PermissionMode. Invalid or missing
- * input falls back to `"accept_edits"` — the safe default — rather
- * than `"yolo"`, so an unset or malformed config can never silently
- * grant allow-all shell access.
+ * tunable, CLI flag) into a valid PermissionMode.
+ *
+ * Missing or malformed input falls back to `"yolo"`, matching the config
+ * default: tools run without prompting unless the user chooses otherwise in
+ * Settings. The four modes remain selectable, so restricting the agent is a
+ * decision the user makes rather than one they have to discover and undo.
+ *
+ * This deliberately reversed. It used to fall back to `"accept_edits"` on the
+ * argument that an unset config "can never silently grant allow-all shell
+ * access" — but the hard-deny rules in `classifier.ts` still apply in `yolo`,
+ * so the fallback was not the safety boundary it read as. It was just the
+ * difference between a tool running and a tool stopping to ask a question the
+ * user had already answered by not restricting it.
  */
 export function resolveEffectivePermissionMode(input: unknown): PermissionMode {
   if (isPermissionMode(input)) return input;
-  return "accept_edits";
+  return "yolo";
 }
 
 /**

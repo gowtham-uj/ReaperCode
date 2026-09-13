@@ -204,7 +204,23 @@ export async function activateSkillTool(workspaceRoot: string, args: { name: str
    * the persisted disable/trust state; discovery is the fallback for a skill
    * that exists on disk but predates the last index sync.
    */
-  const registry = new SkillMemoryRegistry({ workspaceRoot });
+  /*
+   * Both index roots, not just the project one.
+   *
+   * `SkillMemoryRegistry.load()` returns the *first* index it finds and
+   * `skill_manager create` writes to the **user** index (`~/.reaper/skills/`).
+   * Constructing this without `userHome` meant the registry read only
+   * `<workspace>/.reaper/skills/index.json` — so a skill created a moment
+   * earlier was absent from the very registry activation consults, and the
+   * model got "not registered in the SkillMemoryRegistry" for something it had
+   * just successfully created.
+   *
+   * Passing `userHome` puts both writers and this reader on the same two files.
+   */
+  const registry = new SkillMemoryRegistry({
+    workspaceRoot,
+    ...(process.env.HOME ? { userHome: process.env.HOME } : {}),
+  });
 
   /*
    * The user's own switch, checked first and independently of both paths below.

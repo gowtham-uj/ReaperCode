@@ -10,7 +10,6 @@
  *   - DeepSeek      (api.deepseek.com — but DeepSeekClient is the
  *                    native impl; this family is the fallback for
  *                    vendors that don't ship their own client)
- *   - Cerebras      (api.cerebras.ai)
  *   - OpenRouter    (openrouter.ai)
  *   - DeepInfra     (api.deepinfra.com)
  *   - OpenAI-compatible proxies (vLLM, LiteLLM proxy, etc.)

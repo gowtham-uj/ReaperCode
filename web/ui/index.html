@@ -5,26 +5,36 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#000000" />
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%2322c55e'/%3E%3Cpath d='M5 8.5l2 2 4-4.5' stroke='%23052e16' stroke-width='1.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+    <!-- The brand mark cropped from the source artwork. The favicon is an .ico
+         carrying 16/32/48 so the tab picks a real size rather than scaling a
+         bitmap down; the PNG is for everything that asks for a larger icon. -->
+    <link rel="icon" href="/favicon.ico" sizes="48x48 32x32 16x16" />
+    <link rel="icon" href="/reaper-icon.png" type="image/png" sizes="512x512" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <title>Reaper</title>
   </head>
   <!-- The DeepSeek token sheet keeps light values on bare `body` and gates the
-       whole dark palette behind `data-ds-dark-theme`; Reaper's black theme adds
-       `data-ds-black-theme` on top. Both are applied by this inline script
-       rather than by the bundle, so the first paint is already the chosen theme
-       instead of flashing dark and then switching. Kept in sync with
-       src/theme.ts (storage key `reaper.theme`, values "dark" / "black"). -->
+       whole dark palette behind `data-ds-dark-theme`; Reaper's accent themes add
+       `data-ds-black-theme` or `data-ds-reaper-theme` on top. All are applied by
+       this inline script rather than by the bundle, so the first paint is
+       already the chosen theme instead of flashing dark and then switching.
+       Kept in sync with src/theme.ts (storage key `reaper.theme`, values
+       "dark" / "black" / "reaper"). The values are listed here rather than
+       derived, because this script runs before any module loads and must not
+       wait on the bundle to know what a valid theme is. -->
   <body>
     <script>
       (function () {
         var theme = "dark";
         try {
-          if (localStorage.getItem("reaper.theme") === "black") theme = "black";
+          var stored = localStorage.getItem("reaper.theme");
+          if (stored === "black" || stored === "reaper") theme = stored;
         } catch (error) {
           /* storage blocked — the default theme is still correct */
         }
         document.body.setAttribute("data-ds-dark-theme", "");
         if (theme === "black") document.body.setAttribute("data-ds-black-theme", "");
+        if (theme === "reaper") document.body.setAttribute("data-ds-reaper-theme", "");
       })();
     </script>
     <div id="root"></div>

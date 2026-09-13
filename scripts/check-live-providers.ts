@@ -6,7 +6,7 @@ process.env.REAPER_LIVE_FALLBACK_PROVIDERS = "";
 process.env.REAPER_LIVE_MODEL_TIMEOUT_MS = "20000";
 process.env.REAPER_MODEL_CALL_TIMEOUT_MS = "20000";
 
-const providers = ["minimax", "mimo", "deepseek", "openrouter", "crazyrouter", "cerebras", "deepinfra", "openai", "anthropic", "azure"];
+const providers = ["minimax", "mimo", "deepseek", "openrouter", "crazyrouter", "deepinfra", "openai", "anthropic", "azure"];
 
 function summarizeError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);

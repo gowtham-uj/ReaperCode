@@ -44,7 +44,7 @@ test("a stored key round-trips server-side but is masked for clients", () => {
 test("a short key is masked entirely rather than mostly revealed", () => {
   const { store, home } = storeInTempHome();
   try {
-    const summary = store.set({ providerId: "cerebras", apiKey: "abc12345" });
+    const summary = store.set({ providerId: "groq", apiKey: "abc12345" });
     assert.equal(summary.keyHint, "••••");
   } finally {
     rmSync(home, { recursive: true, force: true });

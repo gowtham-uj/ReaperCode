@@ -11,7 +11,7 @@
  *   - `anthropic-messages` — Anthropic's native /v1/messages wire.
  *   - `openai-chat`        — the OpenAI /v1/chat/completions wire.
  *
- * MiniMax, DeepSeek, OpenAI, OpenRouter, Cerebras, etc. all speak
+ * MiniMax, DeepSeek, OpenAI, OpenRouter, etc. all speak
  * `openai-chat`; the differences between them are the base URL, the
  * env var, and capability flags, not the wire format itself.
  *

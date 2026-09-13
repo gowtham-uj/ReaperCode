@@ -45,7 +45,6 @@ export interface ProviderHealthProbe {
  */
 const PACKAGE_DEFAULT_BASE: Record<string, string> = {
   "@ai-sdk/anthropic": "https://api.anthropic.com/v1",
-  "@ai-sdk/cerebras": "https://api.cerebras.ai/v1",
   "@ai-sdk/cohere": "https://api.cohere.com/v2",
   "@ai-sdk/deepinfra": "https://api.deepinfra.com/v1/openai",
   "@ai-sdk/groq": "https://api.groq.com/openai/v1",

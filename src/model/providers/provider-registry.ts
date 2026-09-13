@@ -1,5 +1,6 @@
 import type { ResolvedModelProfile } from "../types.js";
 import { getModelsDevCatalog } from "../provider/models-dev-catalog.js";
+import { UNSUPPORTED_PROVIDERS } from "../provider-registry.js";
 
 interface ProviderDefaults {
   apiBase: string;
@@ -47,12 +48,6 @@ const providerDefaults: Record<string, ProviderDefaults> = {
   },
   deepseek: {
     apiBase: "https://api.deepseek.com",
-    authHeader: "authorization",
-    pathStyle: "openai",
-    modelTransform: (model) => model,
-  },
-  cerebras: {
-    apiBase: "https://api.cerebras.ai/v1",
     authHeader: "authorization",
     pathStyle: "openai",
     modelTransform: (model) => model,
@@ -122,6 +117,19 @@ export function resolveProviderDefaults(profile: ResolvedModelProfile): Provider
   // Silently pointing an unknown provider at a local LiteLLM proxy sent
   // real credentials to 127.0.0.1:4000 for anyone who typed a provider id
   // slightly wrong, so catalog resolution comes first and a miss is an error.
+  //
+  // Providers this build does not offer are refused *before* the lookup. The
+  // catalog still lists them — it is a vendored snapshot refreshed wholesale, so
+  // a provider cannot be deleted from the data — and resolving from it here
+  // would hand a removed provider a working base URL and keep it running. One
+  // exclusion, checked on every path that consults the catalog, is what makes
+  // the removal hold; a second path is how `cerebras` came back the first time.
+  if (UNSUPPORTED_PROVIDERS.has(providerKey)) {
+    throw new Error(
+      `Provider "${profile.provider}" is not supported by this build. `
+      + `Pick another provider, or configure a model profile with an explicit apiBase.`,
+    );
+  }
   const catalog = getModelsDevCatalog();
   const catalogBase = catalog.model(providerKey, profile.model)?.provider?.api
     ?? catalog.provider(providerKey)?.api;

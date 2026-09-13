@@ -252,7 +252,7 @@ test("S1: the packaged `codemode` skill activates with no registry entry", async
     const out = await activateSkillTool(ws, { name: "codemode" });
     assert.match(out, /^<activated_skill>/);
     // The body is the instructions, not a placeholder.
-    assert.match(out, /last expression is the result/i);
+    assert.match(out, /last \*?expression\*? is the result/i);
     assert.match(out, /tools\.list\(\)/);
   } finally {
     rmSync(ws, { recursive: true, force: true });

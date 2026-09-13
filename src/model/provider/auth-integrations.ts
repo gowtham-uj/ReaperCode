@@ -81,8 +81,6 @@ function specializedMethods(
       return { methods: [apiMethod("api-key", "GitLab personal access token", [textPrompt("instanceUrl", "GitLab instance URL", "https://gitlab.com", false)])] };
     case "poe":
       return { methods: [apiMethod("api-key", "Poe API key")] };
-    case "cerebras":
-      return { methods: [apiMethod("api-key", "Cerebras API key")] };
     default:
       return undefined;
   }

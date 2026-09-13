@@ -359,3 +359,53 @@ body[data-ds-black-theme] {
   --dsw-static-neutral-bluish-850: rgb(29, 29, 31);
   --dsw-static-neutral-bluish-800: rgb(38, 38, 40);
 }
+
+/*
+ * The reaper theme, from the brand image.
+ *
+ * Same shape as `black`: `data-ds-dark-theme` stays on, so this inherits the
+ * whole alias sheet and overrides only what it changes. Adding a token to the
+ * dark sheet cannot leave this one missing it.
+ *
+ * The ramp is not neutral grey. Sampling the image gives a near-black ground
+ * with a blue cast (#080010, #100020) and a violet body climbing through
+ * #180828 → #281848 → #402878, so each elevation step here carries the same
+ * violet shift rather than only getting lighter. The steps stay ~9 points
+ * apart, which is what `black` uses and what the elevation shadows were
+ * tuned against — a theme that changed the *spacing* as well as the hue
+ * would need the shadows re-tuned with it.
+ *
+ * Contrast is the constraint. Body text sits on the label tokens from the dark
+ * sheet, which are unchanged, so text contrast is whatever it was; the sampled
+ * mid-violets are far too dark to carry text and appear only as fills,
+ * borders, and the accent ramp.
+ */
+body[data-ds-reaper-theme] {
+  --dsw-static-neutral-bluish-950: rgb(6, 4, 12);
+  --dsw-static-neutral-bluish-900: rgb(15, 11, 24);
+  --dsw-static-neutral-bluish-875: rgb(24, 18, 36);
+  --dsw-static-neutral-bluish-850: rgb(33, 25, 48);
+  --dsw-static-neutral-bluish-800: rgb(43, 33, 61);
+  --dsw-static-neutral-bluish-750: rgb(58, 46, 80);
+  --dsw-static-neutral-bluish-700: rgb(84, 70, 108);
+
+  /*
+   * The aura, for the accent ramp.
+   *
+   * `-400` is the working accent (the violet the image's energy reads as at
+   * full strength) and `-450` its hover neighbour. The pale lavender from the
+   * hot core of the glow — sampled at #f0d8f8 — is reserved for `-100`/`-50`,
+   * which is what the sheet uses for text and icons *on* the accent, so the
+   * brightest part of the image lands on the "this is active" state.
+   */
+  --dsw-static-deepseek-50: rgb(250, 244, 254);
+  --dsw-static-deepseek-100: rgb(240, 224, 250);
+  --dsw-static-deepseek-200: rgb(224, 196, 246);
+  --dsw-static-deepseek-300: rgb(196, 156, 238);
+  --dsw-static-deepseek-400: rgb(168, 118, 232);
+  --dsw-static-deepseek-450: rgb(150, 100, 222);
+  --dsw-static-deepseek-500: rgb(132, 84, 208);
+  --dsw-static-deepseek-600: rgb(108, 64, 178);
+  --dsw-static-deepseek-800: rgb(64, 40, 112);
+  --dsw-static-deepseek-900: rgb(40, 24, 72);
+}

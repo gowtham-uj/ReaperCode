@@ -12,6 +12,7 @@ import {
   supportedTransports,
 } from "../../../src/model/provider/transports.js";
 import { resolveTransport } from "../../../src/model/provider/transport-options.js";
+import { UNSUPPORTED_PROVIDERS } from "../../../src/model/provider-registry.js";
 
 const catalog = new ModelsDevCatalogService({ home: "/nonexistent-reaper-transport-coverage" });
 
@@ -34,8 +35,16 @@ function catalogTransports(): Map<string, string[]> {
 }
 
 test("every catalog transport identity has an installed loader", () => {
+  /*
+   * Excluding a provider is deliberate and has to be excluded here too, or this
+   * test demands a loader for a transport the build intentionally dropped.
+   * `UNSUPPORTED_PROVIDERS` is the same set the catalog binding reads, so the
+   * two cannot drift: removing a provider there fails this test until the
+   * provider is named in the set.
+   */
   const missing: string[] = [];
   for (const [npm, providers] of catalogTransports()) {
+    if (providers.every((id) => UNSUPPORTED_PROVIDERS.has(id))) continue;
     if (!hasTransport(npm)) missing.push(`${npm} (${providers.slice(0, 3).join(", ")})`);
   }
   assert.deepEqual(missing, [], `Catalog transports without a loader:\n${missing.join("\n")}`);
@@ -189,6 +198,9 @@ test("every model in the pinned snapshot is marked runnable", () => {
   let models = 0;
   const broken: string[] = [];
   for (const provider of catalog.providers()) {
+    // Deliberately unsupported providers are not required to be runnable; see
+    // the note in the transport-coverage test above.
+    if (UNSUPPORTED_PROVIDERS.has(provider.id)) continue;
     for (const model of Object.values(provider.models)) {
       models += 1;
       const context = { providerNpm: provider.npm, modelNpm: model.provider?.npm };

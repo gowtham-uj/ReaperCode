@@ -48,7 +48,7 @@ export const AnthropicMessagesResponseSchema = z.object({
 export type AnthropicMessagesResponse = z.infer<typeof AnthropicMessagesResponseSchema>;
 
 // ---------------------------------------------------------------------------
-// OpenAI Chat Completions (and OpenAI-compatible: Cerebras, DeepSeek,
+// OpenAI Chat Completions (and OpenAI-compatible: DeepSeek,
 // OpenRouter, LiteLLM-gateway)
 // ---------------------------------------------------------------------------
 

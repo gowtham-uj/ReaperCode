@@ -6,7 +6,6 @@ export type NormalizedProviderId =
   | "minimax"
   | "minimax-oauth"
   | "deepseek"
-  | "cerebras"
   | "openrouter"
   | "crazyrouter"
   | "deepinfra"
@@ -113,31 +112,8 @@ export function getEffectiveMaxOutputTokens(profile: ResolvedModelProfile, reque
   return Math.min(requested ?? profileDefault, providerCap);
 }
 
-export function shouldUseNonStreamingJson(profile: ProviderModelIdentity, request: Pick<GenerateRequest, "responseFormat">): boolean {
-  return request.responseFormat === "json" && isProvider(profile, "cerebras");
-}
-
-export function shouldUseBufferedProviderGenerate(profile: ProviderModelIdentity, request: Pick<GenerateRequest, "responseFormat">): boolean {
-  return isProvider(profile, "cerebras") || prefersBufferedJsonGenerate(profile, request);
-}
-
-export function providerSupportsStreamingJson(profile: ProviderModelIdentity, request: Pick<GenerateRequest, "responseFormat">): boolean {
-  return !shouldUseNonStreamingJson(profile, request);
-}
-
 export function getProviderRetryPolicy(profile: Pick<ResolvedModelProfile, "provider" | "maxRetries">): ProviderRetryPolicy {
   const baseRetries = profile.maxRetries ?? 3;
-  if (isProvider({ provider: profile.provider, model: "" }, "cerebras")) {
-    return {
-      maxRetries: profile.maxRetries ?? 2,
-      maxRateLimitRetries: Number(process.env.CEREBRAS_RATE_LIMIT_MAX_RETRIES ?? 12),
-      retryTimeouts: false,
-      rateLimitBaseMs: 2_000,
-      retryableBaseMs: 500,
-      rateLimitCapMs: 30_000,
-      retryableCapMs: 4_000,
-    };
-  }
   return {
     maxRetries: baseRetries,
     maxRateLimitRetries: baseRetries,

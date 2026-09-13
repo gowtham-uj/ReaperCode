@@ -25,6 +25,7 @@
  * gate.
  */
 
+import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -72,11 +73,25 @@ export interface InstallResult {
 }
 
 const DEFAULT_RUN_COMMAND: RunCommandFn = (cmd, cwd) => {
-  // Synchronous default. The CLI replaces this with a sandboxed
-  // async runner; tests can override to avoid actually executing.
+  /*
+   * Run the validation command in a real shell.
+   *
+   * This called `require("node:child_process")` inside the function body. The
+   * module is ESM — it imports with `import` at the top — so `require` does not
+   * exist, and the call threw before `spawnSync` ever ran. The catch turned
+   * that into `{ exitCode: 127, stderr: "require is not defined" }`, so *every*
+   * validation command failed regardless of what it was, and the failure read
+   * as the user's command being wrong rather than this one being broken:
+   *
+   *   skill_manager test -> exitCode 127, stderr: "require is not defined"
+   *
+   * `spawnSync` is now a normal import, which is what the CommonJS form was
+   * reaching for. `shell: true` is the other half of the contract — a
+   * validation command is a shell line (`echo`, `pytest -q`, `npm test`), not a
+   * JavaScript expression, and running it through any kind of evaluator would
+   * break every one of them.
+   */
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { spawnSync } = require("node:child_process") as typeof import("node:child_process");
     const r = spawnSync(cmd, { shell: true, cwd, encoding: "utf8" });
     return { exitCode: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   } catch (e) {
@@ -136,19 +151,39 @@ export class SkillLifecycle {
   }
 
   /**
-   * Author a new skill from a manifest + body. Lands in
-   * `~/.reaper/skills/drafts/<name>/` with `trust: "draft"`. The
-   * draft is NOT callable via `activate_skill` until `approveDraft`.
+   * Author a new skill from a manifest + body.
+   *
+   * It lands in the **user skills root** — `~/.reaper/skills/<name>/` — and is
+   * usable the moment this returns. It is not written to a `drafts/`
+   * subdirectory, and there is no approval step before it can be activated.
+   *
+   * That was the old shape, and it could not work. `drafts/` is not a directory
+   * discovery walks, so a skill created by the model was invisible to
+   * `activate_skill` by construction: `create` wrote to one place, activation
+   * looked in another, and the only error the model saw was "not registered in
+   * the SkillMemoryRegistry" — a statement about a registry it had never been
+   * told it needed to write to. Worse, `uninstall` looked for the name in the
+   * user root, so a draft could not be removed either. Create worked, and
+   * everything downstream of it silently did not.
+   *
+   * The name is kept for callers that use it, but it now means "create", not
+   * "create something that needs promoting". A skill the user asked for is a
+   * skill the user wants.
    */
   createDraft(manifest: SkillManifest, body: string): InstallResult {
     if (!manifest.name) throw new SkillValidationError("name", "EREQUIRED", "name is required");
-    const draftRoot = join(this.opts.userHome, ".reaper", "skills", "drafts");
-    const targetDir = join(draftRoot, manifest.name);
+    const targetDir = join(this.opts.userHome, ".reaper", "skills", manifest.name);
     if (existsSync(targetDir)) {
-      return { ok: false, name: manifest.name, skillDir: targetDir, trust: "draft", error: `draft already exists at ${targetDir}` };
+      return {
+        ok: false,
+        name: manifest.name,
+        skillDir: targetDir,
+        trust: "user-trusted",
+        error: `a skill named "${manifest.name}" already exists at ${targetDir}`,
+      };
     }
     mkdirSync(targetDir, { recursive: true });
-    const finalManifest: SkillManifest = { ...manifest, trust: "draft" };
+    const finalManifest: SkillManifest = { ...manifest, trust: "user-trusted" };
     writeSkillManifest(finalManifest, targetDir);
     writeFileSync(join(targetDir, "SKILL.md"), body);
     const record: InstalledSkillRecord = {
@@ -156,14 +191,14 @@ export class SkillLifecycle {
       body,
       sourcePath: join(targetDir, "SKILL.md"),
       skillDir: targetDir,
-      trust: "draft",
+      trust: "user-trusted",
       scope: "user",
       installedAt: Date.now(),
       manifestSha256: sha256OfManifest(finalManifest),
     };
     this.opts.registry.register(record);
     this.opts.registry.syncTo(this.opts.memory);
-    return { ok: true, name: manifest.name, skillDir: targetDir, trust: "draft" };
+    return { ok: true, name: manifest.name, skillDir: targetDir, trust: "user-trusted" };
   }
 
   /**

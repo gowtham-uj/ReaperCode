@@ -76,9 +76,8 @@ const SENSITIVE_EXACT: ReadonlySet<string> = new Set<string>([
   "GOOGLE_APPLICATION_CREDENTIALS",
   "GOOGLE_CLOUD_KEYFILE_JSON",
   "GCLOUD_SERVICE_KEY",
-  // DeepSeek / Cerebras / OpenRouter / MiniMax / LiteLLM
+  // DeepSeek / OpenRouter / MiniMax / LiteLLM
   "DEEPSEEK_API_KEY",
-  "CEREBRAS_API_KEY",
   "OPENROUTER_API_KEY",
   "LITELLM_API_KEY",
   "LITELLM_MASTER_KEY",
@@ -254,7 +253,6 @@ const SENSITIVE_PREFIXES: ReadonlyArray<string> = [
   "GOOGLE_API",
   "GEMINI_API",
   "DEEPSEEK_API",
-  "CEREBRAS_API",
   "OPENROUTER_API",
   "LITELLM_API",
   "MINIMAX_API",

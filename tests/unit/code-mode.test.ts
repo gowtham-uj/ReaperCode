@@ -1415,6 +1415,38 @@ test("16a. the guard refuses the paths whose every use is a disaster", () => {
   assert.equal(isDangerousPath("/usrlocal/bin/x", "write"), undefined);
 });
 
+test("16a-ii. with a workspace, writes outside it are refused and reads are not", () => {
+  /*
+   * The workspace bounds *writes*. Reads stay open on purpose: reading a system
+   * file or a package by absolute path is how a script learns what is on the
+   * machine, and nothing about that is damage.
+   *
+   * The boundary is a separator, not a prefix, and that is the case worth
+   * pinning: `/opt/proj-other` starts with `/opt/proj` and is a different
+   * directory. A `startsWith` on the raw string would wave the sibling through,
+   * which is the same class of mistake as resolving before matching — the path
+   * looks like it is inside and is not.
+   *
+   * `/opt/proj` rather than a temp directory because one level up from a
+   * temporary workspace is still `/tmp`, which is always writable, so a
+   * traversal case built there would pass without the workspace check running.
+   */
+  const workspace = "/opt/proj";
+
+  assert.equal(isDangerousPath("/opt/proj/src/a.ts", "write", workspace), undefined);
+  assert.equal(isDangerousPath("/opt/proj", "write", workspace), undefined, "the root itself is inside itself");
+  assert.equal(isDangerousPath("/tmp/scratch.txt", "write", workspace), undefined, "/tmp stays writable");
+  assert.equal(isDangerousPath("/var/tmp/scratch.txt", "write", workspace), undefined);
+  assert.equal(isDangerousPath("/opt/elsewhere/a.ts", "read", workspace), undefined, "reads are not bounded");
+
+  for (const refused of ["/opt/proj-other/a.ts", "/opt/proj2/a.ts", "/opt/elsewhere/a.ts", "/opt/proj/../other/a.ts"]) {
+    assert.ok(isDangerousPath(refused, "write", workspace), `${refused} is outside the workspace and must be refused`);
+  }
+
+  // No workspace means no opinion: the other rules still apply, this one cannot.
+  assert.equal(isDangerousPath("/opt/elsewhere/a.ts", "write", undefined), undefined);
+});
+
 test("16b. the guard refuses the commands whose every use is a disaster", () => {
   for (const command of [
     "rm -rf /",
@@ -1571,31 +1603,78 @@ const shell = JSON.parse(cp.execSync('cat src/data.json').toString());
   }
 });
 
-test("16f. an absolute path is still absolute", async () => {
+test("16f. an absolute path is honoured as written, and a write outside the workspace is refused", async () => {
   /*
-   * The counterweight to 16e. Resolving every path against the workspace would
-   * be simpler to write and would quietly break the model's ordinary ability to
-   * work outside it — writing a scratch file in /tmp, reading a package out of
-   * node_modules by absolute path, touching a file the user named by full path.
-   * Those are normal, `tools.*` allows them, and the guard's job is to judge an
-   * absolute path rather than to redirect it.
+   * This test used to assert the opposite of its second half: that a write to an
+   * absolute path outside the workspace succeeded, on the grounds that
+   * resolving every path against the workspace would break the model's ordinary
+   * ability to write a scratch file in /tmp or touch a file the user named by
+   * full path.
+   *
+   * The first half of that is still true and is asserted below — an absolute
+   * path is never silently redirected into the workspace. The second half
+   * changed, because `bash` was already confined to the workspace (see the cwd
+   * check in `tools/global/bash.ts`) and leaving eval open made the two routes
+   * disagree: a `cd` out through bash is refused, the same move through `fs` was
+   * not. The model takes the route that works, so an unconfined eval was the
+   * confinement of bash undone.
+   *
+   * The three cases that matter are all here: inside is allowed, a temp
+   * directory is allowed, and anywhere else is refused without creating
+   * anything.
    */
   const workspace = await mkdtemp(path.join(os.tmpdir(), "code-mode-abs-"));
-  const outside = await mkdtemp(path.join(os.tmpdir(), "code-mode-outside-"));
+  const outside = await mkdtemp(path.join(os.homedir(), ".code-mode-outside-"));
   try {
-    const target = path.join(outside, "absolute.txt");
-    const result = await runScript(
+    // Allowed: the workspace, and a temp directory.
+    const inside = await runScript(
       `
 const fs = require('node:fs');
-fs.writeFileSync(${JSON.stringify(target)}, 'absolute');
-fs.readFileSync(${JSON.stringify(target)}, 'utf8');
+fs.writeFileSync('inside.txt', 'inside');
+fs.readFileSync('inside.txt', 'utf8');
 `,
       { workspace },
     );
-    assert.equal(result.status, "completed", result.error?.message ?? "");
-    assert.equal(result.value, "absolute");
-    assert.equal(existsSync(target), true, "an absolute path must be honoured as written");
-    assert.equal(existsSync(path.join(workspace, "absolute.txt")), false, "and not silently redirected");
+    assert.equal(inside.status, "completed", inside.error?.message ?? "");
+    assert.equal(inside.value, "inside");
+    assert.equal(existsSync(path.join(workspace, "inside.txt")), true);
+
+    const temporary = await runScript(
+      `
+const os = require('node:os');
+const path = require('node:path');
+const target = path.join(os.tmpdir(), 'code-mode-scratch.txt');
+require('node:fs').writeFileSync(target, 'scratch');
+const read = require('node:fs').readFileSync(target, 'utf8');
+require('node:fs').unlinkSync(target);
+read;
+`,
+      { workspace },
+    );
+    assert.equal(temporary.status, "completed", temporary.error?.message ?? "");
+    assert.equal(temporary.value, "scratch", "a temp file is ordinary work and must still be writable");
+
+    // Refused: an absolute path outside the workspace, not redirected into it.
+    const target = path.join(outside, "absolute.txt");
+    const blocked = await runScript(
+      `
+require('node:fs').writeFileSync(${JSON.stringify(target)}, 'absolute');
+'wrote it';
+`,
+      { workspace },
+    );
+    assert.equal(blocked.status, "error", "a write outside the workspace must be refused");
+    assert.match(blocked.error?.message ?? "", /outside the workspace/);
+    assert.equal(existsSync(target), false, "and nothing may be created at the target");
+    assert.equal(
+      existsSync(path.join(workspace, "absolute.txt")),
+      false,
+      "and the path must not be silently redirected into the workspace either",
+    );
+
+    // Reads are not bounded by the workspace: reading a system file is not damage.
+    const readAnywhere = await runScript("require('node:fs').readFileSync('/etc/hostname', 'utf8').length;", { workspace });
+    assert.equal(readAnywhere.status, "completed", readAnywhere.error?.message ?? "");
   } finally {
     await rm(workspace, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
@@ -2018,11 +2097,14 @@ test("eval is registered, is core, and is described for routing", () => {
       "Use eval when the user asks for it, or when the task needs what a single call cannot express: the same operation over many items, a loop or fan-out, filtering or aggregating a large result to a small answer, or dependent steps that chain with no reasoning needed between them.",
       "It is a real Node runtime, and Reaper's own tools are available inside it through `tools.*` — every tool this agent can call, including any whose schema is not in your context, with nothing to unlock first. Use whichever fits each step; reading with `tools.file_view` and parsing with a package is one script, not two styles. `tools.search_tools({ query })` finds a tool by capability, `tools.describe(name)` gives its arguments, `tools.list()` gives the catalogue. `eval` itself is the one exception: a script cannot call eval.",
       "`await models.call({ messages: [...] })` reaches this thread's chat model, and `Promise.all` over several is real concurrency — for when one program needs several answers to compare or combine.",
-      "Keep intermediate data inside JavaScript when useful and return a compact final result.",
+      "End with the value: the result is the last *expression*'s value, and a trailing declaration, loop, or `console.log` returns nothing even when the work succeeded. `const r = await tools.grep_search(…); r.matches.length` works; stopping after the `const` does not. Keep intermediate data in JavaScript and return a compact final result.",
       "A `tools.*` call carries the workspace, the permission checks, and the audit log, so it is the better choice when one does the job — and when none does, write the code.",
       "Load the `codemode` skill with activate_skill before writing a script that loops or batches more than a couple of calls: it has the return semantics, the tools.* and models.* APIs, and worked examples.",
       "Pass `timeout_ms` if the script waits on something slow: the default is 2 minutes and a model call can take a minute.",
-      "Each eval starts with a fresh environment, so variables from an earlier eval are not visible here. The script runs with your access and its effects are real, so keep writes inside the workspace and treat destructive operations as irreversible.",
+      // The confinement is stated as a rule rather than as advice: it is
+      // enforced by the guard, and a model that reads it as a preference will
+      // spend a turn discovering that writes elsewhere fail.
+      "Each eval starts with a fresh environment, so variables from an earlier eval are not visible here. The script runs with your access and its effects are real, so writes outside the workspace are refused. Destructive operations are irreversible.",
     ].join("\n"),
     "the description is the routing mechanism; it is pinned so it cannot drift silently",
   );

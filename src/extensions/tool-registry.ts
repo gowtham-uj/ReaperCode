@@ -93,6 +93,15 @@ export interface ExtensionToolRegistryOptions {
 
 export class ExtensionToolRegistry {
   private readonly records = new Map<string, ExtensionToolRecord>();
+  /**
+   * Registrations that were refused, with the reason.
+   *
+   * Kept so a registration failure can be reported to the author instead of
+   * disappearing. `register` returns its error and the caller usually logs it to
+   * a sink that is undefined outside an interactive session, so the only durable
+   * record of "your tool was not registered, and here is why" is here.
+   */
+  private readonly refused = new Map<string, string>();
   /** Tool name → list of permission records the install pipeline
    *  recorded. Used by `registerMetadataFor` and `doctor`. */
   private readonly metadataIndex = new Map<string, ToolMetadata>();
@@ -108,8 +117,16 @@ export class ExtensionToolRegistry {
   }
 
   /**
-   * Register a tool. The `metadata` is REQUIRED — a tool without
+   * Register one extension tool. The `metadata` is REQUIRED — a tool without
    * metadata is rejected and the caller must fix the extension.
+   *
+   * Callers must surface a non-`ok` result. This returns `{ ok: false, error }`
+   * rather than throwing, which is right for a registry — one bad tool should
+   * not take down an activation — but it means a caller that ignores the return
+   * value drops the tool with no trace. That happened: `onRegisterTool` logged
+   * the failure to a sink that is `undefined` in most runs, so an author whose
+   * `metadata.name` did not match their tool's `name` saw `enable` report
+   * success, the tool absent from `tools.list()`, and no error anywhere.
    */
   register(input: {
     extensionId: string;
@@ -122,10 +139,14 @@ export class ExtensionToolRegistry {
       return { ok: false, error: "metadata is required (policy gate will deny `no_metadata`)" };
     }
     if (input.metadata.name !== input.definition.name) {
-      return { ok: false, error: `metadata.name ("${input.metadata.name}") must equal definition.name ("${input.definition.name}")` };
+      const error = `metadata.name ("${input.metadata.name}") must equal definition.name ("${input.definition.name}")`;
+      this.refused.set(input.definition.name, error);
+      return { ok: false, error };
     }
     if (this.records.has(input.definition.name)) {
-      return { ok: false, error: `tool "${input.definition.name}" is already registered` };
+      const error = `tool "${input.definition.name}" is already registered`;
+      this.refused.set(input.definition.name, error);
+      return { ok: false, error };
     }
     const required = deriveRequiredPermission(input.definition.name, input.metadata);
     this.records.set(input.definition.name, {
@@ -175,6 +196,17 @@ export class ExtensionToolRegistry {
     return this.records.has(name);
   }
 
+  /**
+   * Tools an extension tried to register and could not, with the reason.
+   *
+   * A caller that has just activated an extension reads this to tell the author
+   * the truth: "activated, but your tool was dropped because ...". Without it
+   * the activation reports success and the tool is simply missing.
+   */
+  refusedRegistrations(): Array<{ name: string; error: string }> {
+    return [...this.refused].map(([name, error]) => ({ name, error }));
+  }
+
   getMetadata(name: string): ToolMetadata | undefined {
     return this.metadataIndex.get(name);
   }
@@ -185,6 +217,21 @@ export class ExtensionToolRegistry {
 
   listTools(): string[] {
     return [...this.records.keys()];
+  }
+
+  /**
+   * The full record for a tool, for callers that need to copy it elsewhere.
+   *
+   * `installExtensionTools` has to move a tool from this registry into the
+   * executor's, and it needs the handler to do that. Without an accessor it
+   * reached into `records` through a cast — which works, and is exactly the
+   * kind of thing that stops working silently after a rename. The record is
+   * returned shallowly copied so a caller cannot mutate this registry's entry
+   * by accident.
+   */
+  getRecord(name: string): ExtensionToolRecord | undefined {
+    const record = this.records.get(name);
+    return record ? { ...record } : undefined;
   }
 
   getStats(): ExtensionToolStats {

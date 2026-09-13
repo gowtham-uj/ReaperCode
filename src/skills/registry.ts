@@ -219,6 +219,25 @@ export class SkillRegistry {
   }
 }
 
+/**
+ * An ISO timestamp from a record's `installedAt`, never throwing.
+ *
+ * `new Date(undefined).toISOString()` raises `RangeError: Invalid time value`,
+ * and `syncTo` calls this in a loop with no guard — so one record missing
+ * `installedAt` aborted the sync for every skill after it, leaving the index
+ * written and the in-memory registry not. The user-visible form of that was a
+ * skill present in `index.json` that refused to activate with "is not
+ * registered in the SkillMemoryRegistry", and nothing anywhere naming the real
+ * cause.
+ *
+ * Falling back to now confines the damage to a display timestamp. It is not a
+ * repair: a record without `installedAt` is still a bug in whatever produced
+ * it, but it should not be able to take the skill system down with it.
+ */
+function skillTimestamp(installedAt: number | undefined): string {
+  return (Number.isFinite(installedAt) ? new Date(installedAt as number) : new Date()).toISOString();
+}
+
 function recordToReaperSkill(r: InstalledSkillRecord): ReaperSkill {
   // Map the new InstalledSkillRecord → the legacy ReaperSkill shape
   // that SkillMemoryRegistry persists. Trust below user-trusted OR an
@@ -263,8 +282,8 @@ function recordToReaperSkill(r: InstalledSkillRecord): ReaperSkill {
     sourcePath: r.sourcePath,
     version: 1,
     createdBy: "skill-registry",
-    createdAt: new Date(r.installedAt).toISOString(),
-    updatedAt: new Date(r.installedAt).toISOString(),
+    createdAt: skillTimestamp(r.installedAt),
+    updatedAt: skillTimestamp(r.installedAt),
     skillDir: r.skillDir,
   };
 }

@@ -70,6 +70,13 @@ export function microcompact(input: MicrocompactInput): MicrocompactOutput {
     const r = results[i]!;
     if (!r.ok || r.name !== "bash") continue;
     const key = shellOutputKey(r);
+    /*
+     * An empty key means the result carries nothing to compare, and treating
+     * "nothing" as "the same as the last nothing" is how every bash result came
+     * to be replaced by "[same as earlier]". Skipped, so an unrecognised shape
+     * is left alone rather than silently rewritten.
+     */
+    if (!key) continue;
     if (seenShellOutputs.has(key)) {
       const originalChars = estimateChars(r);
       /*
@@ -114,11 +121,28 @@ function outputKey(result: ToolResult): string {
   return `${result.name}:${path}:${rendered.slice(0, 200)}`;
 }
 
+/**
+ * Identity of a shell result's output, for the repeated-command check.
+ *
+ * Returning `""` for an unrecognised shape was a false-positive generator: on
+ * the conversation path `output` is a plain string, so *every* bash result
+ * keyed to `""`, the first one added `""` to the seen-set, and every later one
+ * was rewritten to "[same as earlier]" — regardless of what it contained. The
+ * model then read "[same as earlier]" for a command it had never run, which is
+ * worse than the duplication this pass exists to remove: it silently replaces
+ * real output with a claim that the output was seen before.
+ *
+ * A string `output` is therefore keyed by its own text. Only a shape that
+ * carries neither text nor a stdout/stderr pair returns empty, and empty keys
+ * are skipped by the caller rather than treated as equal.
+ */
 function shellOutputKey(result: ToolResult): string {
+  if (typeof result.output === "string") return result.output.slice(0, 200);
   if (!result.output || typeof result.output !== "object") return "";
   const out = result.output as Record<string, unknown>;
   const stdout = typeof out.stdout === "string" ? out.stdout : "";
   const stderr = typeof out.stderr === "string" ? out.stderr : "";
+  if (!stdout && !stderr) return "";
   return `${stdout.slice(0, 200)}:${stderr.slice(0, 200)}`;
 }
 

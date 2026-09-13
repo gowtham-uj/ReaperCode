@@ -41,6 +41,7 @@ import { TOOL_METADATA } from "../../governance/tool-metadata.js";
 import type { AuthoringToolDeps } from "../executor.js";
 import { handleSkillManager } from "./skill-tools.js";
 import { handleExtensionManager } from "./extension-tools.js";
+import type { ExtensionToolRegistry } from "../../extensions/tool-registry.js";
 import { handleHookManager } from "./hook-tools.js";
 
 export interface AuthoringRuntimeInput {
@@ -100,6 +101,39 @@ export class AuthoringRuntime {
         return handleHookManager(args as never, deps.deps as never);
       },
     };
+  }
+
+  /**
+   * The extension registry this runtime built, for the executor to dispatch
+   * from.
+   *
+   * The registry is constructed lazily by `extensions()` and, until this
+   * existed, stayed private: the executor had no way to reach it, so an
+   * extension's tools could be registered and activated and never dispatched.
+   * Building it here — rather than having the engine construct a second one —
+   * is what keeps the tools the manager activates and the tools the executor
+   * calls the same set, which is the property that was missing.
+   *
+   * Returns `undefined` when the registry could not be built, so a workspace
+   * whose extensions directory is unreadable degrades to "no extension tools"
+   * instead of failing the run that asked for one.
+   */
+  extensionToolRegistry(): ExtensionToolRegistry | undefined {
+    return this.extensionRegistry()?.getToolRegistry();
+  }
+
+  /**
+   * The extension manager itself, for `installExtensionTools`.
+   *
+   * It needs the manager — not just the tool registry — because it walks each
+   * enabled extension's declared permissions and status to decide what may be
+   * copied. Handing it the tool registry alone would lose the trust check that
+   * keeps an untrusted project's tools out of dispatch.
+   */
+  extensionRegistry(): ExtensionRegistry | undefined {
+    const built = this.extensions();
+    if ("error" in built) return undefined;
+    return (built.deps as { registry?: ExtensionRegistry }).registry;
   }
 
   private skills(): { deps: unknown } | { error: Error } {

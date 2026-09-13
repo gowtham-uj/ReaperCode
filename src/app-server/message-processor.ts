@@ -993,7 +993,7 @@ function toWireRecord(record: MemoryRecord): MemoryRecord {
 }
 
 function supportsReasoningEffort(provider: string, model: string): boolean {
-  if (provider !== "openai" && provider !== "openai-codex") return false;
+  if (provider !== "openai") return false;
   const normalized = model.toLowerCase().replace(/^openai\//, "");
   return /^o\d/.test(normalized) || /^gpt-(?:5|[6-9])/.test(normalized);
 }

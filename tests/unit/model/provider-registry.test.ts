@@ -107,8 +107,8 @@ test("re-binding a provider name overrides the prior family", () => {
 test("bindProvidersToFamily registers multiple names in one call", () => {
   const client = makeStubClient("openai");
   registerFamily("openai-chat", () => client);
-  bindProvidersToFamily(["openai", "openrouter", "cerebras"], "openai-chat");
-  for (const provider of ["openai", "openrouter", "cerebras"]) {
+  bindProvidersToFamily(["openai", "openrouter", "groq"], "openai-chat");
+  for (const provider of ["openai", "openrouter", "groq"]) {
     assert.equal(
       resolveProviderClient(makeProfile(provider)),
       client,
@@ -163,12 +163,12 @@ test("resolveProviderClient returns the correct client for each built-in provide
   // We can't easily import the multiplexer here without spinning
   // up the full env, so we register a stub via the same APIs.
   const deepseek = makeStubClient("deepseek");
-  const cerebras = makeStubClient("cerebras");
+  const groq = makeStubClient("groq");
   const anthropic = makeStubClient("anthropic");
   const openai = makeStubClient("openai-compatible");
   registerFamily("anthropic-direct", () => anthropic);
   registerFamily("deepseek-direct", () => deepseek);
-  registerFamily("cerebras-direct", () => cerebras);
+  registerFamily("groq-direct", () => groq);
   registerFamily("openai-chat", () => openai);
   // Order matters: bind the broad openai-chat family FIRST so the
   // specific direct-override bindings land in the right slot.
@@ -177,11 +177,11 @@ test("resolveProviderClient returns the correct client for each built-in provide
     "openai-chat",
   );
   bindProvidersToFamily(["deepseek"], "deepseek-direct");
-  bindProvidersToFamily(["cerebras"], "cerebras-direct");
+  bindProvidersToFamily(["groq"], "groq-direct");
   bindProvidersToFamily(["anthropic"], "anthropic-direct");
   // Specific overrides win over the broad binding.
   assert.equal(resolveProviderClient(makeProfile("deepseek")), deepseek);
-  assert.equal(resolveProviderClient(makeProfile("cerebras")), cerebras);
+  assert.equal(resolveProviderClient(makeProfile("groq")), groq);
   assert.equal(resolveProviderClient(makeProfile("anthropic")), anthropic);
   assert.equal(resolveProviderClient(makeProfile("openrouter")), openai);
   assert.equal(resolveProviderClient(makeProfile("azure")), openai);

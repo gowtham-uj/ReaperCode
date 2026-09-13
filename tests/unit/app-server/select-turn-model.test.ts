@@ -47,8 +47,8 @@ test("a thread pinned to a provider keeps it", () => {
   withStore((store) => {
     // A different provider is configured; the thread's own choice must win.
     store.setApi({ providerId: "deepinfra", key: "test-key-not-real" });
-    const selected = selectTurnModel({ provider: "cerebras", model: "llama3.1-8b" }, store);
-    assert.deepEqual(selected, { provider: "cerebras", model: "llama3.1-8b" });
+    const selected = selectTurnModel({ provider: "groq", model: "llama-3.1-8b-instant" }, store);
+    assert.deepEqual(selected, { provider: "groq", model: "llama-3.1-8b-instant" });
   });
 });
 

@@ -228,9 +228,26 @@ code, pre, [data-diff], [data-read], [data-terminal] { font-family: var(--ds-fon
  * "✕" also inherited `.tool-row`'s caption colour and read as decoration
  * rather than failure. A fixed width stops the row content from shifting
  * between "⋯" and "✓". */
-.tool-status { flex: none; width: 13px; font-weight: 600; text-align: center; }
+.tool-status { flex: none; width: 13px; height: 13px; display: inline-flex; align-items: center; justify-content: center; font-weight: 600; text-align: center; }
 .tool-status[data-status="completed"] { color: var(--dsw-alias-state-success-primary); }
 .tool-status[data-status="failed"] { color: var(--dsw-alias-state-error-primary); }
+/*
+ * Running, and visibly so.
+ *
+ * The colour is the theme's business accent, so the spinner picks up the reaper
+ * theme's violet without a second rule. Rotation is on the SVG because
+ * `transform-box: fill-box` keeps the origin at the arc's own centre rather
+ * than the SVG's corner, which is what makes it spin in place instead of
+ * orbiting.
+ */
+.tool-status[data-status="inProgress"] { color: var(--dsw-alias-state-business-primary); }
+.tool-spinner { animation: tool-spin 900ms linear infinite; transform-origin: center; }
+@keyframes tool-spin { to { transform: rotate(360deg); } }
+/* A reader who has asked for less motion gets a still arc, which is still a
+   different shape from "✓" and so still carries the state. */
+@media (prefers-reduced-motion: reduce) {
+  .tool-spinner { animation: none; }
+}
 /* The reason a turn stopped, which `Transcript.tsx` renders behind a "✕".
  *
  * It carries `.tool-status` for the colour, but that class is a 13px glyph

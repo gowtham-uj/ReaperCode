@@ -32,7 +32,7 @@ import { TrajectoryLogger } from "../logging/trajectory.js";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
-type ExecProvider = "anthropic" | "openai" | "openai-codex" | "minimax" | "deepseek" | "nuralwatt" | "nuralwatt2";
+type ExecProvider = "anthropic" | "openai" | "minimax" | "deepseek" | "nuralwatt" | "nuralwatt2";
 
 export interface ExecRunnerOptions {
   workspaceRoot: string;
@@ -175,8 +175,8 @@ function pickAuthToken(provider: ExecProvider): string | undefined {
   if (provider === "deepseek") {
     return process.env.DEEPSEEK_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN ?? process.env.ANTHROPIC_API_KEY;
   }
-  if (provider === "openai" || provider === "openai-codex") {
-    return process.env[provider === "openai-codex" ? "OPENAI_CODEX_ACCESS_TOKEN" : "OPENAI_API_KEY"] ?? process.env.ANTHROPIC_AUTH_TOKEN ?? process.env.ANTHROPIC_API_KEY;
+  if (provider === "openai") {
+    return process.env.OPENAI_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN ?? process.env.ANTHROPIC_API_KEY;
   }
   return process.env.ANTHROPIC_AUTH_TOKEN ?? process.env.ANTHROPIC_API_KEY;
 }
@@ -214,14 +214,14 @@ export function buildConfig(opts: ExecRunnerOptions): unknown {
         ? "exec with --provider nuralwatt requires NURALWATT_API_KEY in the environment"
         : provider === "nuralwatt2"
         ? "exec with --provider nuralwatt2 requires NURALWATT_API_KEY2 in the environment"
-        : provider === "openai" || provider === "openai-codex"
-        ? `exec with --provider ${provider} requires ${provider === "openai-codex" ? "OPENAI_CODEX_ACCESS_TOKEN" : "OPENAI_API_KEY"} (or ANTHROPIC_AUTH_TOKEN) in the environment`
+        : provider === "openai"
+        ? `exec with --provider ${provider} requires OPENAI_API_KEY (or ANTHROPIC_AUTH_TOKEN) in the environment`
         : "exec requires ANTHROPIC_AUTH_TOKEN (or ANTHROPIC_API_KEY) in the environment",
     );
   }
   const model = opts.model ?? process.env.ANTHROPIC_MODEL ?? (provider === "minimax" ? "MiniMax-M3" : (provider === "nuralwatt" || provider === "nuralwatt2") ? "kimi-k2.7-code" : "claude-sonnet-4-6");
   const maxTokens = opts.maxTokens ?? 4096;
-  if (provider === "openai" || provider === "openai-codex" || provider === "minimax" || provider === "deepseek" || provider === "nuralwatt" || provider === "nuralwatt2") {
+  if (provider === "openai" || provider === "minimax" || provider === "deepseek" || provider === "nuralwatt" || provider === "nuralwatt2") {
     // OpenAI-compatible: the LiteLLM gateway client reads from
     // OPENAI_API_KEY + the apiBase on the profile. We forward
     // `reasoning_effort` from the configured effort. For `minimax`,
@@ -236,8 +236,6 @@ export function buildConfig(opts: ExecRunnerOptions): unknown {
       process.env.NURALWATT_API_KEY = authToken;
     } else if (provider === "nuralwatt2") {
       process.env.NURALWATT_API_KEY2 = authToken;
-    } else if (provider === "openai-codex") {
-      process.env.OPENAI_CODEX_ACCESS_TOKEN = authToken;
     } else {
       process.env.OPENAI_API_KEY = authToken;
     }
@@ -247,8 +245,6 @@ export function buildConfig(opts: ExecRunnerOptions): unknown {
         ? "https://api.neuralwatt.com/v1"
         : provider === "deepseek"
         ? "https://api.deepseek.com"
-        : provider === "openai-codex"
-        ? "https://chatgpt.com/backend-api/codex"
         : (process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/+$/, "");
     const reasoningEffort = opts.reasoningEffort ?? "medium";
     return {
@@ -262,12 +258,10 @@ export function buildConfig(opts: ExecRunnerOptions): unknown {
                 ? "nuralwatt"
                 : provider === "nuralwatt2"
                   ? "nuralwatt2"
-                  : provider === "openai-codex"
-                    ? "openai-codex"
-                    : "litellm",
+                  : "litellm",
           model,
           apiBase,
-          apiKeyEnv: provider === "deepseek" ? "DEEPSEEK_API_KEY" : provider === "nuralwatt" ? "NURALWATT_API_KEY" : provider === "nuralwatt2" ? "NURALWATT_API_KEY2" : provider === "openai-codex" ? "OPENAI_CODEX_ACCESS_TOKEN" : "OPENAI_API_KEY",
+          apiKeyEnv: provider === "deepseek" ? "DEEPSEEK_API_KEY" : provider === "nuralwatt" ? "NURALWATT_API_KEY" : provider === "nuralwatt2" ? "NURALWATT_API_KEY2" : "OPENAI_API_KEY",
           timeoutMs: 600_000,
           maxRetries: 2,
           capabilities: DEFAULT_CAPABILITIES,
@@ -289,9 +283,10 @@ export function buildConfig(opts: ExecRunnerOptions): unknown {
       // (model-config.ts:358). `ReaperConfigSchema` is strict, so putting it
       // under `runtime` made every config this builds fail to parse.
       //
-      // `reaper exec` is the explicit single-prompt, non-interactive runner —
-      // it is intentionally yolo. Every other entrypoint defaults to
-      // accept_edits.
+      // Explicit, though it now matches the default everywhere else.
+      // `reaper exec` is the non-interactive single-prompt runner: it has no
+      // way to surface an approval prompt, so anything other than yolo would
+      // turn "needs confirmation" into a hard refusal.
       runtimeTunables: { permissionMode: "yolo" },
     };
   }
@@ -421,7 +416,6 @@ const EXEC_MUTATED_ENV_KEYS = [
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_BASE_URL",
   "OPENAI_API_KEY",
-  "OPENAI_CODEX_ACCESS_TOKEN",
   "DEEPSEEK_API_KEY",
   "NURALWATT_API_KEY",
   "NURALWATT_API_KEY2",

@@ -304,6 +304,25 @@ describe("Code Mode transcript view", () => {
     expect(screen.getByText(/bad input \(line 3\)/)).toBeDefined();
   });
 
+  it("a running call is a spinner, not a static ellipsis", () => {
+    /*
+     * The report this addresses: a tool call that had been running for two
+     * minutes looked exactly like one that had finished. The glyph was "⋯" —
+     * a static character that is indistinguishable from a glyph that failed to
+     * render, and that never changes while the work continues.
+     *
+     * The assertion is on the shape, not the colour, because the shape is what
+     * has to survive a colourblind reader and a greyscale screenshot. A
+     * reduced-motion reader gets a still arc, which is still not "✓".
+     */
+    render(<CodeModeView item={item({ status: "inProgress" })} />);
+    const glyph = document.querySelector(".tool-status") as HTMLElement;
+    expect(glyph.dataset.status).toBe("inProgress");
+    expect(glyph.querySelector(".tool-spinner")).not.toBeNull();
+    expect(glyph.textContent).not.toContain("⋯");
+    expect(within(glyph).getByText("running")).toBeDefined();
+  });
+
   it("keeps the success glyph when the script returned normally", () => {
     render(<CodeModeView item={item({ status: "completed", result: result({ value: 42 }) })} />);
     const glyph = document.querySelector(".tool-status") as HTMLElement;

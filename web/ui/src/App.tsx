@@ -71,11 +71,55 @@ function WorkspacePage() {
   // Reasoning controls follow the selected model's catalog metadata.
   const selectedModel = useModelMetadata(app.catalog, app.client, app.thread?.modelProvider, app.thread?.model);
 
+  /**
+   * Whether the transcript should follow new output.
+   *
+   * A ref, not a computation, and that is the whole fix. This used to decide
+   * "am I at the bottom?" *at the moment content changed*, with a threshold:
+   *
+   *   const atBottom = scrollHeight - scrollTop - clientHeight < 80
+   *   if (atBottom) scrollTo(bottom)
+   *
+   * The transcript never followed the stream, and that line is why. The
+   * container starts with the hero, which fits exactly, so the gap is 0. The
+   * first reply then overflows the viewport in a single frame — measured at
+   * 131px, because the composer seat is inside this same scroll container —
+   * and 131 is not less than 80. So `atBottom` was false on the very first
+   * update, the scroll was skipped, and `scrollTop` stayed 0 for the rest of
+   * the turn while the content grew to 1377px in a 464px viewport. The
+   * threshold can never be satisfied by a jump larger than itself.
+   *
+   * Tracking it from scroll events instead asks a question that has a stable
+   * answer. The flag changes only when the user actually scrolls: up past the
+   * threshold and it stops following, back within it and following resumes.
+   * Content arriving is not a scroll, so it cannot turn following off by
+   * surprising the threshold — which is exactly the case that was broken.
+   */
+  const followTranscript = useRef(true);
+
   useEffect(() => {
     const element = transcriptRef.current;
     if (!element) return;
-    const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
-    if (atBottom) queueMicrotask(() => element.scrollTo({ top: element.scrollHeight }));
+    const onScroll = (): void => {
+      followTranscript.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+    };
+    // Passive: this listener only reads, and saying so keeps it off the
+    // scrolling critical path.
+    element.addEventListener("scroll", onScroll, { passive: true });
+    return () => element.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    const element = transcriptRef.current;
+    if (!element) return;
+    if (!followTranscript.current) return;
+    // Written after layout, so `scrollHeight` is the height the browser just
+    // computed rather than the previous frame's. A microtask runs before paint
+    // but after React's commit, which is the window where the new content is in
+    // the DOM and its height is known.
+    queueMicrotask(() => {
+      element.scrollTop = element.scrollHeight;
+    });
   }, [app.turns, app.queued, app.approvals]);
 
   useEffect(() => {

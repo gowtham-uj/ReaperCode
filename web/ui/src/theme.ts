@@ -1,35 +1,37 @@
 /**
- * The two themes Reaper ships.
+ * The three themes Reaper ships.
  *
- * Both are dark-family: `body[data-ds-dark-theme]` carries the whole token set
- * from the DeepSeek sheet, and `black` layers a true-black surface ramp on top
- * of it. Keeping `data-ds-dark-theme` on both means a black theme inherits every
- * alias token rather than restating ~60 of them, so a token added to the dark
- * sheet can never be missing from black.
+ * All are dark-family: `body[data-ds-dark-theme]` carries the whole token set
+ * from the DeepSeek sheet, and `black` and `reaper` each layer their own surface
+ * ramp on top of it. Keeping `data-ds-dark-theme` on all three means they
+ * inherit every alias token rather than restating ~60 of them, so a token added
+ * to the dark sheet can never be missing from one of these.
  *
  * This is a per-device display preference, not a user-global setting, so it
  * lives in localStorage rather than `~/.reaper/settings.json` — the same
  * account on a laptop and an OLED monitor wants different answers.
  */
 
-export type Theme = "dark" | "black";
+export type Theme = "dark" | "black" | "reaper";
 
-export const THEMES: readonly Theme[] = ["dark", "black"];
+export const THEMES: readonly Theme[] = ["dark", "black", "reaper"];
 
 export const THEME_LABELS: Record<Theme, string> = {
   dark: "Dark",
   black: "Black",
+  reaper: "Reaper",
 };
 
 export const THEME_DESCRIPTIONS: Record<Theme, string> = {
   dark: "Deep grey surfaces with layered elevation.",
   black: "True black surfaces for OLED displays, with the same layering.",
+  reaper: "Near-black with a violet cast, from the Reaper mark.",
 };
 
 const STORAGE_KEY = "reaper.theme";
 
 export function isTheme(value: unknown): value is Theme {
-  return value === "dark" || value === "black";
+  return value === "dark" || value === "black" || value === "reaper";
 }
 
 /**
@@ -52,11 +54,17 @@ export function readTheme(): Theme {
 
 export function applyTheme(theme: Theme): void {
   const { body } = document;
-  // Both themes are dark-family; `black` adds a second attribute rather than
-  // replacing this one, so the dark token sheet stays active underneath.
+  // All themes are dark-family; each accent theme adds a second attribute
+  // rather than replacing this one, so the dark token sheet stays active
+  // underneath. Clearing the other attribute matters as much as setting this
+  // one: without it, switching from `black` to `reaper` would leave both ramps
+  // applied and the winner would come down to stylesheet order.
   body.setAttribute("data-ds-dark-theme", "");
-  if (theme === "black") body.setAttribute("data-ds-black-theme", "");
-  else body.removeAttribute("data-ds-black-theme");
+  const accent = { black: "data-ds-black-theme", reaper: "data-ds-reaper-theme" } as const;
+  for (const [name, attribute] of Object.entries(accent)) {
+    if (theme === name) body.setAttribute(attribute, "");
+    else body.removeAttribute(attribute);
+  }
 }
 
 export function writeTheme(theme: Theme): void {

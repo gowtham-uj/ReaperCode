@@ -14,7 +14,7 @@
  *
  * Skip conditions (env already provides auth):
  *   - any catalog env var (ANTHROPIC_API_KEY, OPENAI_API_KEY,
- *     MINIMAX_API_KEY, DEEPSEEK_API_KEY, CEREBRAS_API_KEY,
+ *     MINIMAX_API_KEY, DEEPSEEK_API_KEY,
  *     OPENROUTER_API_KEY) is set in `process.env`, OR
  *   - `~/.reaper/onboarding.json` exists and has a non-empty
  *     `apiKey` (we re-use the saved one).

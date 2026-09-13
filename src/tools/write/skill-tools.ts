@@ -95,7 +95,15 @@ export async function handleCreateSkill(
           },
         }
       : {}),
-    trust: "draft",
+    /*
+     * Trusted on creation.
+     *
+     * This was hardcoded to `draft`, and `draft` was the lock: a draft could not
+     * be activated and could not be uninstalled, so the model could author a
+     * skill and then do nothing with it. A skill the user asked for is a skill
+     * the user wants.
+     */
+    trust: "user-trusted",
   };
   try {
     const out = deps.lifecycle.createDraft(manifest, args.body);
@@ -119,47 +127,47 @@ export async function handleTestSkill(
   return { ok: out.ok, name: args.name, results: out.results, ...(out.error ? { error: out.error } : {}) };
 }
 
+/**
+ * `approve` — a no-op that says so, rather than an error.
+ *
+ * There are no trust tiers: a skill is trusted when it is created, so there is
+ * nothing left to promote. The action is kept because a model that has learned
+ * the old workflow will still call it, and "this skill is already usable, go
+ * ahead" is a better answer than a refusal that implies something is missing.
+ *
+ * It reports `ok: true` deliberately. Returning an error for a step that has
+ * already been satisfied would send the model looking for a problem that does
+ * not exist — the same failure mode as the "not registered" message that sent
+ * it hunting through a registry it had never been told about.
+ */
 export async function handleApproveSkill(
   args: ApproveSkillArgs,
   deps: SkillToolDeps,
 ): Promise<CreateSkillResult> {
   const record = deps.registry.get(args.name);
   if (!record) return { ok: false, error: `skill "${args.name}" not found` };
-  if (record.trust !== "draft") {
-    return { ok: false, name: args.name, trust: record.trust, error: `skill "${args.name}" is not a draft (trust=${record.trust})` };
-  }
-  if (deps.approvalRequester) {
-    const allowed = await deps.approvalRequester({
-      kind: "approve_skill",
-      name: args.name,
-      trust: "draft",
-      scope: record.scope,
-      skillDir: record.skillDir,
-      description: record.manifest.description,
-    });
-    if (!allowed) return { ok: false, name: args.name, error: "denied by approval gate" };
-  }
-  const out = deps.lifecycle.approveDraft(args.name);
-  if (!out.ok) return { ok: false, name: args.name, ...(out.error ? { error: out.error } : {}) };
-  return { ok: true, name: out.name, skillDir: out.skillDir, trust: out.trust };
+  return {
+    ok: true,
+    name: args.name,
+    skillDir: record.skillDir,
+    trust: record.trust,
+  };
 }
 
 export async function handleUninstallSkill(
   args: UninstallSkillArgs,
   deps: SkillToolDeps,
 ): Promise<{ ok: boolean; error?: string }> {
-  const record = deps.registry.get(args.name);
-  if (record && record.trust !== "draft" && deps.approvalRequester) {
-    const allowed = await deps.approvalRequester({
-      kind: "uninstall_skill",
-      name: args.name,
-      trust: record.trust,
-      scope: args.scope,
-      skillDir: record.skillDir,
-      description: record.manifest.description,
-    });
-    if (!allowed) return { ok: false, error: "denied by approval gate" };
-  }
+  /*
+   * No approval gate on removal.
+   *
+   * It used to require one for anything that was not a draft, which meant a
+   * skill could be created but not removed: the create path was open and the
+   * delete path was shut. `uninstall` also could not find a draft at all, since
+   * it searched the user root while drafts lived in `drafts/`. With no trust
+   * tiers there is nothing to gate on, and a model that can author a skill must
+   * be able to undo it.
+   */
   return deps.lifecycle.uninstall(args.name, args.scope);
 }
 

@@ -127,7 +127,7 @@ test("the first configured provider wins, and stays winning", () => {
    */
   withStore((store) => {
     store.setApi({ providerId: "deepinfra", key: "first-key" });
-    store.setApi({ providerId: "cerebras", key: "second-key" });
+    store.setApi({ providerId: "groq", key: "second-key" });
     const first = resolveDefaultSelection(store);
     const second = resolveDefaultSelection(store);
     assert.deepEqual(first, second, "the same store must resolve to the same selection");

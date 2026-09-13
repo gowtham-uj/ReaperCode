@@ -76,12 +76,12 @@ export const toolRegistry = {
   },
   create_checkpoint: {
     description:
-      "Create a recoverable git-backed checkpoint under .reaper/checkpoints before a risky mutation batch. Stores metadata plus tracked staged/worktree patches; ignored files are not included.",
+      "Create a recoverable git-backed checkpoint under .reaper/checkpoints before a risky mutation batch. Stores metadata plus tracked staged/worktree patches; ignored files are not included. Requires a git repository: outside one this records metadata only and restore_checkpoint will have nothing to restore, which the result reports as restoreAvailable: false.",
     argsSchema: CreateCheckpointArgsSchema,
   },
   restore_checkpoint: {
     description:
-      "Explicitly restore a named Reaper checkpoint in the current git workspace. This resets tracked files to the checkpoint base, removes new untracked files, and reapplies the checkpoint's saved pre-existing patches.",
+      "Explicitly restore a named Reaper checkpoint in the current git workspace. This resets tracked files to the checkpoint base, removes new untracked files, and reapplies the checkpoint's saved pre-existing patches. Only a checkpoint created in a git repository can be restored; check that the create result did not report restoreAvailable: false.",
     argsSchema: RestoreCheckpointArgsSchema,
   },
   git_status: {
@@ -93,7 +93,7 @@ export const toolRegistry = {
     argsSchema: GitDiffArgsSchema,
   },
   web_search: {
-    description: "NATIVE RESEARCH: Search the web to solve complex problems, verify package versions before installation, or get clarity on unfamiliar frameworks. You MUST use this tool before 'npm install' for non-standard packages to avoid version hell. Synthesize results into actionable implementation or repair candidates.",
+    description: "Search the web for documentation, package versions, error messages, or unfamiliar frameworks. Use it when you need information that is not in the repository and not already in your knowledge, such as verifying that a package exists and which version is current before adding it. Results can be empty for narrow queries; if a search returns nothing, try broader terms or proceed with a tool that reads the source directly rather than treating the empty result as a blocker.",
     argsSchema: WebSearchArgsSchema,
   },
   write_file: {
@@ -134,6 +134,8 @@ export const toolRegistry = {
       "Use `run_in_background: true` only for a tracked process that must outlive the call, then stop it when finished. " +
       "Do not use bash for file reads, listings, searches, or edits when file_view, list_directory, grep_search, file_edit, or write_file can do the work. " +
       "Large output returns a bounded preview and persisted output path; inspect that path with file_view instead of rerunning. " +
+      "Commands run from the workspace root and cannot leave it: a `cd` outside the workspace is refused with path_escape. " +
+      "A command whose output is identical to an earlier one in the same turn may come back as `[same as earlier]`; if you need to confirm a state change, make the command produce distinguishing output (a timestamp, a count, a fresh `ls`) rather than repeating it verbatim. " +
       "After a failed broad build or test, inspect the focused failure before repeating the command.",
     argsSchema: BashArgsSchema,
   },
@@ -143,7 +145,20 @@ export const toolRegistry = {
     argsSchema: BrowserControlArgsSchema,
   },
   activate_skill: {
-    description: "Activates a specialized agent skill by name (Available: 'skill-creator', 'github', etc.). Returns the skill's instructions wrapped in <activated_skill> tags.",
+    /*
+     * No example names.
+     *
+     * This read "Available: 'skill-creator', 'github', etc." — neither of which
+     * is registered anywhere, so the description's only concrete guidance was
+     * two tools the model could not load. A model that trusts an example list
+     * spends calls on names that do not resolve.
+     *
+     * Naming the real skills here would be worse: the list is per-workspace and
+     * changes as skills are created, and a description is a static string that
+     * would go stale exactly the way this one did. `search_tools` is what
+     * answers "which skills exist", and the description points there instead.
+     */
+    description: "Activates a specialized agent skill by name. Returns the skill's instructions wrapped in <activated_skill> tags. Call search_tools with capability keywords to find a skill by what it does, or read the workspace skills list to see what is available.",
     argsSchema: ActivateSkillArgsSchema,
   },
   web_fetch: {
@@ -152,7 +167,7 @@ export const toolRegistry = {
   },
   search_tools: {
     description:
-      "Search available tools by keyword or direct select:<tool_name>. Call this when you need a capability not shown in the current tool list (e.g. background processes, web fetching, symbol rename). Returns matching tool names and descriptions, and promotes them to full-schema rendering on subsequent turns.",
+      "Search available tools by keyword or direct select:<tool_name>. Call this when you need a capability not shown in the current tool list, or when you know a tool by name and want its arguments. Returns matching tool names and descriptions, and promotes them to full-schema rendering on subsequent turns. Inside eval, `tools.<name>` reaches every tool with no promotion step — use this tool when you want to call one directly.",
     argsSchema: SearchToolsArgsSchema,
   },
   scratchpad: {
@@ -187,7 +202,7 @@ export const toolRegistry = {
    */
   skill_manager: {
     description:
-      "Author and manage skills. Actions: create (writes a draft `skill.json` + `SKILL.md` to `.reaper/skills/<name>/`, `trust: \"draft\"`), test (runs the skill's `validation.commands` in order, fails fast), approve (promotes a draft to `user-trusted`; gated by the approval flow), uninstall (removes it from the registry and disk; gated for any non-draft).",
+      "Author and manage skills. Actions: create (writes `skill.json` + `SKILL.md` to `~/.reaper/skills/<name>/`; the skill is registered and usable immediately), test (runs the skill's `validation.commands` in order, fails fast), approve (a no-op kept for compatibility — creation already makes the skill usable), uninstall (removes it from the registry and disk).",
     argsSchema: SkillManagerArgsSchema,
   },
   extension_manager: {
@@ -197,7 +212,7 @@ export const toolRegistry = {
   },
   hook_manager: {
     description:
-      "Author and manage event hooks. Actions: create (writes a draft `.reaper/hooks/<id>.json`; drafts are NOT registered on the live runner), list (read-only inventory: id, event, matcher, enforce, trust, compiled/registered flags), update (re-compile and re-register; re-approval required if `enforce` flips to true), approve (compiles with `new Function` and registers; gated — the user sees the description, matcher, enforce flag, and first 4KB of source), uninstall (removes from disk and the live runner; gated for non-drafts).",
+      "Author and manage event hooks. A hook is a `(event, matcher, JS handler)` triple that runs on a lifecycle event. Actions: create (writes `.reaper/hooks/<id>.json`, compiles the handler, and attaches it to the live runner in one call), list (read-only inventory: id, event, matcher, enforce, registered flag), update (re-compile and re-register), approve (a no-op kept for compatibility — creation already registers it), uninstall (removes it from disk and the live runner). The handler body is compiled with `new Function` and its result decides the outcome; `enforce: false` (the default) means the hook can only advise, and `enforce: true` lets it block the tool call.",
     argsSchema: HookManagerArgsSchema,
   },
   apply_patch_edit: {

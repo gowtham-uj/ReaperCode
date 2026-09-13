@@ -11,11 +11,14 @@ export type PermissionMode = "yolo" | "accept_edits" | "auto" | "strict";
  * permission picker and the thread settings dialog alike.
  */
 export const PERMISSION_MODES: Array<{ mode: PermissionMode; label: string; description: string }> = [
-  { mode: "yolo", label: "Unattended", description: "No approvals — every action runs immediately." },
+  { mode: "yolo", label: "Unattended", description: "Tools run without asking. The default — change it here to be asked." },
   { mode: "accept_edits", label: "Accept edits", description: "File edits run automatically; other actions need approval." },
   { mode: "auto", label: "Balanced", description: "Low-risk actions run automatically; risky ones need approval." },
   { mode: "strict", label: "Strict", description: "Every action needs approval." },
 ];
+
+/** The mode a fresh install runs in, and the one the picker marks as default. */
+export const DEFAULT_PERMISSION_MODE: PermissionMode = "yolo";
 
 /** The human label for a mode, falling back to the raw id for unknown values. */
 export function permissionLabel(mode: string | undefined): string {

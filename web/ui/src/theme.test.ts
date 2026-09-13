@@ -3,25 +3,29 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applyTheme, readTheme, THEMES, writeTheme } from "./theme.js";
 
 const BLACK = "data-ds-black-theme";
+const REAPER = "data-ds-reaper-theme";
 const DARK = "data-ds-dark-theme";
 
 beforeEach(() => {
   window.localStorage.clear();
   document.body.removeAttribute(DARK);
   document.body.removeAttribute(BLACK);
+  document.body.removeAttribute(REAPER);
 });
 
 afterEach(() => {
   window.localStorage.clear();
   document.body.removeAttribute(DARK);
   document.body.removeAttribute(BLACK);
+  document.body.removeAttribute(REAPER);
 });
 
 describe("theme", () => {
   it("offers only dark-family themes", () => {
-    // The product shows dark and black; a light theme reappearing here would be
-    // a regression against the stated requirement, not a harmless extra.
-    expect([...THEMES].sort()).toEqual(["black", "dark"]);
+    // A light theme reappearing here would be a regression against the stated
+    // requirement, not a harmless extra. Named rather than counted, so adding a
+    // theme is a reviewed change to this list.
+    expect([...THEMES].sort()).toEqual(["black", "dark", "reaper"]);
   });
 
   it("defaults to dark when nothing is stored", () => {
@@ -53,6 +57,33 @@ describe("theme", () => {
     applyTheme("dark");
     expect(document.body.hasAttribute(DARK)).toBe(true);
     expect(document.body.hasAttribute(BLACK)).toBe(false);
+  });
+
+  it("keeps the dark sheet under reaper, and clears the other accent", () => {
+    applyTheme("reaper");
+    expect(document.body.hasAttribute(DARK)).toBe(true);
+    expect(document.body.hasAttribute(REAPER)).toBe(true);
+    expect(document.body.hasAttribute(BLACK)).toBe(false);
+  });
+
+  it("switching between accent themes leaves exactly one applied", () => {
+    // Both ramps override the same neutral-bluish tokens, so leaving both
+    // attributes on would make the winner depend on stylesheet order rather
+    // than on which theme the user picked.
+    applyTheme("black");
+    applyTheme("reaper");
+    expect(document.body.hasAttribute(BLACK)).toBe(false);
+    expect(document.body.hasAttribute(REAPER)).toBe(true);
+    applyTheme("black");
+    expect(document.body.hasAttribute(REAPER)).toBe(false);
+    expect(document.body.hasAttribute(BLACK)).toBe(true);
+  });
+
+  it("round-trips every theme", () => {
+    for (const theme of THEMES) {
+      writeTheme(theme);
+      expect(readTheme()).toBe(theme);
+    }
   });
 
   it("round-trips a written theme", () => {

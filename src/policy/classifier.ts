@@ -1,10 +1,14 @@
 import type { ToolCall} from "../tools/types.js";
 
 // ── Permission modes ──
-// yolo: allow everything
-// accept_edits: auto-allow safe reads/writes, ask for dangerous ops (default)
-// auto: LLM-based classification
-// strict: always ask for confirmation
+// yolo: allow everything (default — tools run without prompting)
+// accept_edits: auto-allow safe reads/writes, ask for everything else
+// auto: same as accept_edits here; the LLM classification path this mode was
+//       named for is declared below and has no caller.
+// strict: ask for everything that is not a read
+//
+// The hard-deny patterns below apply in every mode, yolo included: `rm -rf /`
+// and its neighbours are refused whatever the user has selected.
 export type PermissionMode = "yolo" | "accept_edits" | "auto" | "strict";
 
 // ── Classification result ──
@@ -113,13 +117,25 @@ export class PermissionClassifier {
       }
     }
 
-    // 4. Auto mode — defer to LLM classifier (needs_confirmation)
+    // 4. Auto mode — ask, rather than guess
     if (this.mode === "auto") {
-      return { outcome: "needs_confirmation", reasoning: "Needs AI classification", confidence: 0.5 };
+      return { outcome: "needs_confirmation", reasoning: "Not on the safe fast path — needs confirmation", confidence: 0.5 };
     }
 
-    // 5. Strict — always ask
-    return { outcome: "needs_confirmation", reasoning: "Strict mode — needs confirmation", confidence: 0.0 };
+    /*
+     * 5. Strict, and the fallthrough for accept_edits.
+     *
+     * Both land here for anything the fast path did not clear, and both ask. The
+     * reasoning used to read "Strict mode — needs confirmation" for either one,
+     * so an `accept_edits` user was told they were in a mode they had not
+     * selected. The reason string is not decoration: it is what the approval
+     * prompt quotes back to the user.
+     */
+    return {
+      outcome: "needs_confirmation",
+      reasoning: this.mode === "strict" ? "Strict mode — needs confirmation" : "Not on the safe fast path — needs confirmation",
+      confidence: 0.0,
+    };
   }
 
   classifyToolCall(call: ToolCall): PermissionClassification {

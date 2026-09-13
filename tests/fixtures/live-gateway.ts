@@ -9,7 +9,6 @@ import { writeLiveLlmLog } from "./live-llm-log.js";
 import {
   getDefaultAnthropicModel,
   getDefaultAzureOpenAiModel,
-  getDefaultCerebrasModel,
   getDefaultCrazyRouterModel,
   getDefaultDeepInfraModel,
   getDefaultDeepSeekLatencyFallbackModel,
@@ -20,7 +19,7 @@ import {
   getDefaultOpenRouterModel,
 } from "./live-models.js";
 
-type SupportedLiveProvider = "deepinfra" | "deepseek" | "cerebras" | "openrouter" | "crazyrouter" | "openai" | "anthropic" | "minimax" | "minimax-oauth" | "mimo" | "nuralwatt" | "nuralwatt2" | "azure";
+type SupportedLiveProvider = "deepinfra" | "deepseek" | "openrouter" | "crazyrouter" | "openai" | "anthropic" | "minimax" | "minimax-oauth" | "mimo" | "nuralwatt" | "nuralwatt2" | "azure";
 
 interface LiveProviderDefaults {
   provider: SupportedLiveProvider;
@@ -49,15 +48,6 @@ export function createLiveDeepSeekConfig(model?: string) {
 
 export function createLiveDeepSeekGateway(testName: string, model?: string) {
   return createGatewayFromConfig(createLiveDeepSeekConfig(model), testName);
-}
-
-export function createLiveCerebrasConfig(model?: string) {
-  loadWorkspaceDotEnv();
-  return createLiveConfigFromDefaults(getProviderDefaults("cerebras", model));
-}
-
-export function createLiveCerebrasGateway(testName: string, model?: string) {
-  return createGatewayFromConfig(createLiveCerebrasConfig(model), testName);
 }
 
 export function createLiveOpenRouterConfig(model?: string) {
@@ -316,7 +306,7 @@ function getAvailableFallbackDefaultsChain(primaryProvider: SupportedLiveProvide
   ]
     .map((item) => item.trim().toLowerCase())
     .filter(Boolean);
-  const defaultOrder: SupportedLiveProvider[] = ["cerebras", "deepseek", "deepinfra", "crazyrouter", "openrouter", "openai", "anthropic"];
+  const defaultOrder: SupportedLiveProvider[] = ["deepseek", "deepinfra", "crazyrouter", "openrouter", "openai", "anthropic"];
   // When REAPER_LIVE_FALLBACK_PROVIDERS is explicitly set to empty, respect it
   // and disable fallbacks rather than falling back to the hardcoded defaultOrder.
   const providers = hasExplicitFallbacks && requested.length === 0
@@ -417,14 +407,14 @@ function getLiveProvider(): SupportedLiveProvider {
   ).trim().toLowerCase();
   if (isSupportedProvider(raw)) return raw;
   throw new Error(
-    `Unsupported REAPER_LIVE_PROVIDER '${raw}'. Supported providers: deepinfra, deepseek, cerebras, openrouter, crazyrouter, openai, anthropic, minimax, minimax-oauth, mimo, nuralwatt, nuralwatt2, azure`,
+    `Unsupported REAPER_LIVE_PROVIDER '${raw}'. Supported providers: deepinfra, deepseek, openrouter, crazyrouter, openai, anthropic, minimax, minimax-oauth, mimo, nuralwatt, nuralwatt2, azure`,
   );
 }
 
 function getProviderDefaults(provider: string, model?: string): LiveProviderDefaults {
   if (!isSupportedProvider(provider)) {
     throw new Error(
-      `Unsupported provider '${provider}'. Supported providers: deepinfra, deepseek, cerebras, openrouter, crazyrouter, openai, anthropic, minimax, minimax-oauth, mimo, nuralwatt, nuralwatt2, azure`,
+      `Unsupported provider '${provider}'. Supported providers: deepinfra, deepseek, openrouter, crazyrouter, openai, anthropic, minimax, minimax-oauth, mimo, nuralwatt, nuralwatt2, azure`,
     );
   }
 
@@ -437,14 +427,6 @@ function getProviderDefaults(provider: string, model?: string): LiveProviderDefa
         apiBase: process.env.DEEPINFRA_BASE_URL ?? "https://api.deepinfra.com/v1/openai",
         maxContextTokens: 131000,
         maxTokens: 32768,
-      };
-    case "cerebras":
-      return {
-        provider,
-        model: model ?? getDefaultCerebrasModel(),
-        apiKeyEnv: "CEREBRAS_PROVIDER_KEY",
-        maxContextTokens: 131000,
-        maxTokens: 8192,
       };
     case "deepseek":
       return {
@@ -551,7 +533,6 @@ function isSupportedProvider(provider: string): provider is SupportedLiveProvide
   return (
     provider === "deepinfra" ||
     provider === "deepseek" ||
-    provider === "cerebras" ||
     provider === "openrouter" ||
     provider === "crazyrouter" ||
     provider === "openai" ||

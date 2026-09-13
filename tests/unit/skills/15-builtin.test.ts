@@ -22,7 +22,7 @@ test("the packaged built-in skills are exactly the ones the product intends to s
    * set *changed* — a skill added to the bundle is a change to what every user
    * carries — so it names the set and fails when it drifts in either direction.
    */
-  assert.deepEqual(packaged, ["codemode"]);
+  assert.deepEqual(packaged, ["codemode", "extension-authoring", "skill-authoring"]);
 });
 
 test("activation searches project, user, then optional built-in roots", () => {

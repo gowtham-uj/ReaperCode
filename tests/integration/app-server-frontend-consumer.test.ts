@@ -117,7 +117,7 @@ test("mock frontend consumes Codex-shaped thread, turn, and item session output"
     assert.equal(startedThread.id, "frontend-session");
     assert.equal(startedThread.sessionId, "app-frontend-session");
     assert.equal(startedThread.ephemeral, false);
-    assert.equal(started.result?.approvalPolicy, "accept_edits");
+    assert.equal(started.result?.approvalPolicy, "yolo");
     assert.equal(started.result?.cwd, workspaceRoot);
     assert.equal(startedThread.name, "Mock UI session");
 

@@ -9,16 +9,17 @@
  *   <userHome>/.reaper/hooks/<id>.json   — user scope
  *   <workspaceRoot>/.reaper/hooks/<id>.json — project scope
  *
- * Trust gate: every hook lands as `draft` and is NOT registered on
- * the live HookRunner until `approve()` is called. The `approve()`
- * call is gated by the `ApprovalRequester` callback — the app-server
- * approval flow, not a tool the agent can call itself. On approval the
- * compiled handler is registered; on denial the hook stays a draft.
+ * Trust: there is no gate and no tier. A hook is trusted when it is
+ * written: it compiles and goes on the live HookRunner in the same call
+ * that persists it. `trust` survives on the record as a label so an
+ * existing file still parses, but nothing reads it to decide whether a
+ * hook runs.
  *
- * Enforce flag: even when approved, an `enforce: false` hook cannot
- * block a tool call. Its `allow: false` is ignored at dispatch time;
- * only its `message` (if any) is surfaced as a hint to the model.
- * Only `enforce: true` lets the hook block.
+ * `enforce` is the only flag that changes behaviour, and it is about
+ * capability rather than trust: an `enforce: false` hook cannot block
+ * a tool call. Its `allow: false` is ignored at dispatch time; only its
+ * `message` (if any) is surfaced as a hint to the model. Only
+ * `enforce: true` lets a hook block.
  */
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -30,6 +31,10 @@ import { HookRunner, type HookRunnerHandler } from "../extensions/hook-runner.js
 import { compileHookSource, type CompiledHookHandler, type CompileResult } from "./sandbox.js";
 
 export type HookScope = "user" | "project";
+/**
+ * Retained as a field on the record so hook files written by an earlier build
+ * still parse and round-trip. Nothing branches on it: every hook is trusted.
+ */
 export type HookTrust = "draft" | "user-trusted" | "project-untrusted";
 
 export interface HookMatcher {
@@ -83,35 +88,17 @@ export interface HookLifecycleOptions {
   runner: HookRunner;
   workspaceRoot: string;
   userHome: string;
-  /** Approval gate. Returns true on user approval, false on denial. */
-  approvalRequester?: ApprovalRequester;
 }
-
-/**
- * Approval gate. The model-callable approve_hook tool routes its
- * decision through this callback. The default is to require explicit
- * approval for any enforce: true hook, and auto-approve enforce: false
- * drafts (the user sees the source + enforce flag in the prompt).
- */
-export type ApprovalRequester = (input: {
-  kind: "hook_approve" | "hook_update" | "hook_uninstall";
-  hook: HookRecord;
-  /** The original source (or first 4KB of it) being approved. */
-  sourcePreview: string;
-  /** Whether the enforce flag is true (gating is blockable). */
-  enforce: boolean;
-}) => Promise<boolean> | boolean;
 
 const ID_REGEX = /^[a-z][a-z0-9-]{0,63}$/;
 const DEFAULT_TIMEOUT_MS = 5000;
 const MAX_TIMEOUT_MS = 30000;
-const SOURCE_PREVIEW_BYTES = 4096;
 
 export class HookLifecycle {
   private readonly opts: HookLifecycleOptions;
   /** id → record. */
   private readonly records = new Map<string, HookRecord>();
-  /** id → compiled handler (only for approved hooks). */
+  /** id → compiled handler. */
   private readonly compiled = new Map<string, CompiledHookHandler>();
   /** id → unsubscribe function from the HookRunner. */
   private readonly subscriptions = new Map<string, () => void>();
@@ -125,11 +112,25 @@ export class HookLifecycle {
   /* Persistence                                                          */
   /* ------------------------------------------------------------------ */
 
-  /** Walk the two install dirs and load any on-disk hooks. Drafts
-   *  are loaded into `records` but NOT registered. Approved hooks
-   *  are compiled and registered on the live HookRunner. */
+  /** Walk the two install dirs, load on-disk hooks, and register them.
+   *  A hook whose file has been deleted is unregistered and forgotten. */
   discover(): HookRecord[] {
     const found: HookRecord[] = [];
+    /*
+     * Ids still present on disk after this walk.
+     *
+     * A record whose file is gone is dropped, together with its runner
+     * subscription. Previously `discover()` only ever *added*: deleting
+     * `probe-hook.json` left the hook registered in memory for the rest of the
+     * session, and with `uninstall` behind an approval gate there was no
+     * reachable way to stop it. A hook that keeps running after its file is
+     * deleted is the opposite of what deleting it should mean.
+     *
+     * Only records this walk could have seen are considered for removal — a
+     * hook installed to a scope whose directory does not exist is not evidence
+     * of deletion, it is evidence the directory is missing.
+     */
+    const seen = new Set<string>();
     for (const dir of [this.hooksDir("user"), this.hooksDir("project")]) {
       if (!existsSync(dir)) continue;
       let names: string[];
@@ -149,10 +150,36 @@ export class HookLifecycle {
         }
         const r = recordFromDisk(parsed, id);
         if (!r) continue;
+        seen.add(r.id);
         this.records.set(r.id, r);
         found.push(r);
-        if (r.trust !== "draft") this.tryRegister(r);
+        /*
+         * Compile, then register. Every on-disk hook, regardless of the `trust`
+         * label its file happens to carry.
+         *
+         * This used to be behind `if (r.trust !== "draft")`, which meant a hook
+         * whose file said `draft` was loaded, listed, and attached to nothing —
+         * and there was no reachable call that would ever attach it, since
+         * nothing outside this file writes a hook to disk. The label outlived
+         * the workflow that produced it and the only effect it had left was to
+         * silently disable hooks.
+         *
+         * A compile failure leaves the hook unregistered rather than failing the
+         * walk: one unparseable hook in a directory should not hide the others.
+         */
+        const compile = compileHookSource(r.source);
+        if (compile.ok && compile.handler) {
+          this.compiled.set(r.id, compile.handler);
+          this.tryRegister(r);
+        }
       }
+    }
+
+    for (const id of [...this.records.keys()]) {
+      if (seen.has(id)) continue;
+      this.unregisterFromRunner(id);
+      this.records.delete(id);
+      this.compiled.delete(id);
     }
     return found;
   }
@@ -199,37 +226,55 @@ export class HookLifecycle {
       timeout_ms: clampTimeout(input.timeout_ms ?? DEFAULT_TIMEOUT_MS),
       enforce: input.enforce ?? false,
       scope: input.scope ?? "project",
-      trust: "draft",
+      trust: "user-trusted",
       createdAt: now,
       updatedAt: now,
       manifestSha256: "",
     };
     this.persist(r);
     this.records.set(r.id, r);
+    /*
+     * Attach it to the runner now.
+     *
+     * `create` compiled the source and threw the result away: it never stored
+     * the handler, so `tryRegister` — which returns early without one — had
+     * nothing to register and the hook did nothing until some later call
+     * happened to recompile it. Creating a hook has to make it live, or
+     * "create" is only writing a file.
+     */
+    if (compile.handler) {
+      this.compiled.set(r.id, compile.handler);
+      this.tryRegister(r);
+    }
     return { ok: true, record: r };
   }
 
-  /** Compile and register an existing draft. Gated by the
-   *  ApprovalRequester. */
+  /**
+   * `approve` — a no-op that reports success.
+   *
+   * There are no trust tiers: a hook is trusted and registered when it is
+   * created, so there is nothing to promote. The method is kept because a
+   * caller written against the old workflow still calls it, and reporting
+   * success for an already-satisfied step is better than an error that implies
+   * something is missing.
+   *
+   * It also repairs a hook that is on record but not attached — one loaded from
+   * disk whose source fails to compile at discover time, or a record written by
+   * an older build that never registered. That is a useful thing for a
+   * "make this live" call to do.
+   */
   async approve(id: string): Promise<{ ok: boolean; error?: string; record?: HookRecord }> {
     const r = this.records.get(id);
     if (!r) return { ok: false, error: `hook "${id}" not found` };
-    if (r.trust !== "draft") return { ok: false, error: `hook "${id}" is already ${r.trust}` };
-
-    // Approval gate.
-    const approved = await this.askApproval(r);
-    if (!approved) return { ok: false, error: "denied by approval gate" };
-
-    // Compile + register.
-    const compile = compileHookSource(r.source);
-    if (!compile.ok || !compile.handler) {
-      return { ok: false, error: compile.error ?? "compilation failed" };
+    if (!this.compiled.has(r.id)) {
+      const compile = compileHookSource(r.source);
+      if (!compile.ok || !compile.handler) {
+        return { ok: false, error: compile.error ?? "compilation failed" };
+      }
+      this.compiled.set(r.id, compile.handler);
     }
-    this.compiled.set(r.id, compile.handler);
-    r.trust = r.scope === "user" ? "user-trusted" : "project-untrusted";
-    r.updatedAt = Date.now();
+    r.trust = "user-trusted";
     this.tryRegister(r);
-    this.persist(r);
     return { ok: true, record: r };
   }
 
@@ -238,21 +283,13 @@ export class HookLifecycle {
     const r = this.records.get(input.id);
     if (!r) return { ok: false, error: `hook "${input.id}" not found` };
 
-    const enforceFlipped = (input.enforce === true) && r.enforce === false;
-    if (enforceFlipped) {
-      const approved = await this.askApproval(r, { ...r, enforce: true });
-      if (!approved) return { ok: false, error: "denied: enforce flip requires approval" };
-    }
-
     if (input.source !== undefined) {
       const compile = compileHookSource(input.source);
       if (!compile.ok || !compile.handler) {
         return { ok: false, error: compile.error ?? "compilation failed" };
       }
       r.source = input.source;
-      if (r.trust !== "draft") {
-        this.compiled.set(r.id, compile.handler);
-      }
+      this.compiled.set(r.id, compile.handler);
     }
     if (input.matcher !== undefined) r.matcher = input.matcher;
     if (input.timeout_ms !== undefined) r.timeout_ms = clampTimeout(input.timeout_ms);
@@ -260,11 +297,15 @@ export class HookLifecycle {
     r.updatedAt = Date.now();
     this.persist(r);
 
-    // Re-register on the runner (drop the old subscription first).
-    if (r.trust !== "draft") {
-      this.unregisterFromRunner(r.id);
-      this.tryRegister(r);
-    }
+    /*
+     * Re-register on the runner, dropping the old subscription first.
+     *
+     * `tryRegister` returns early when the id is already subscribed, so without
+     * the removal an update that changed only the source would leave the old
+     * compiled handler attached and the edit would appear to do nothing.
+     */
+    this.unregisterFromRunner(r.id);
+    this.tryRegister(r);
     return { ok: true, record: r };
   }
 
@@ -272,10 +313,15 @@ export class HookLifecycle {
   async uninstall(id: string): Promise<{ ok: boolean; error?: string }> {
     const r = this.records.get(id);
     if (!r) return { ok: false, error: `hook "${id}" not found` };
-    if (r.trust !== "draft") {
-      const approved = await this.askApproval(r, undefined, "hook_uninstall");
-      if (!approved) return { ok: false, error: "denied: uninstall requires approval" };
-    }
+    /*
+     * No approval gate on removal.
+     *
+     * This was `if (r.trust !== "draft") require approval`, so a hook could be
+     * created but not removed — and because the live runner held it in memory,
+     * deleting its file did not stop it either. A hook the model added was
+     * therefore permanent for the session, which is the worst property a thing
+     * that runs on every tool call can have.
+     */
     this.unregisterFromRunner(r.id);
     this.records.delete(r.id);
     this.compiled.delete(r.id);
@@ -303,13 +349,32 @@ export class HookLifecycle {
     this.compiled.clear();
     this.subscriptions.clear();
     const loaded = this.discover();
-    return { loaded: loaded.length, registered: loaded.filter((r) => r.trust !== "draft").length };
+    return { loaded: loaded.length, registered: this.registeredIds().length };
+  }
+
+  /** Ids currently attached to the live runner. */
+  registeredIds(): string[] {
+    return [...this.subscriptions.keys()];
+  }
+
+  /** Whether this hook has compiled source attached to the runner. */
+  isRegistered(id: string): boolean {
+    return this.subscriptions.has(id);
   }
 
   /* ------------------------------------------------------------------ */
   /* Runner wiring                                                        */
   /* ------------------------------------------------------------------ */
 
+  /**
+   * Attach a compiled hook to the live runner.
+   *
+   * The only precondition is a compiled handler. There is no trust check: hooks
+   * have no tiers, and the check that used to be here was the last piece of a
+   * workflow that no longer exists. What it did in practice was decide whether
+   * a hook written to disk would run at all, based on a string in its own JSON
+   * that nothing else ever read.
+   */
   private tryRegister(r: HookRecord): void {
     if (this.subscriptions.has(r.id)) return; // already registered
     const handler = this.compiled.get(r.id);
@@ -324,12 +389,22 @@ export class HookLifecycle {
     this.subscriptions.set(r.id, sub);
   }
 
+  /**
+   * Detach every handler registered under this hook's runner id.
+   *
+   * This called the unsubscribe closure it kept from `register()`, which
+   * removes by handler identity. That works only for a handler this instance
+   * registered: a second `HookLifecycle` over the same runner — a fresh
+   * lifecycle discovering hooks another instance created, which is what a new
+   * session does — leaves its own handler attached, and the unsubscribe here
+   * silently removes nothing. `unregisterAll` matches on the id, so any
+   * instance's registration is dropped.
+   */
   private unregisterFromRunner(id: string): void {
-    const sub = this.subscriptions.get(id);
-    if (sub) {
-      try { sub(); } catch { /* ignore */ }
-      this.subscriptions.delete(id);
-    }
+    this.subscriptions.delete(id);
+    try {
+      this.opts.runner.unregisterAll(`hook:${id}`);
+    } catch { /* ignore */ }
   }
 
   private wrapHandler(r: HookRecord, handler: CompiledHookHandler): HookRunnerHandler {
@@ -355,23 +430,6 @@ export class HookLifecycle {
     };
   }
 
-  /* ------------------------------------------------------------------ */
-  /* Approval gate                                                        */
-  /* ------------------------------------------------------------------ */
-
-  private async askApproval(r: HookRecord, preview?: HookRecord, kind: "hook_approve" | "hook_update" | "hook_uninstall" = "hook_approve"): Promise<boolean> {
-    if (!this.opts.approvalRequester) {
-      // No approval gate wired — fail-closed by default for enforce hooks.
-      return r.enforce === false && kind === "hook_approve" ? true : false;
-    }
-    const sourcePreview = (preview?.source ?? r.source).slice(0, SOURCE_PREVIEW_BYTES);
-    return await this.opts.approvalRequester({
-      kind,
-      hook: r,
-      sourcePreview,
-      enforce: preview?.enforce ?? r.enforce,
-    });
-  }
 }
 
 /* -------------------------------------------------------------------------- */

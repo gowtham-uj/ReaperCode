@@ -355,7 +355,7 @@ export const RuntimeTunablesConfigSchema = z
     mainAgentTransportRetryLimit: z.number().int().nonnegative().default(2),
     modelCallTimeoutMs: z.number().int().positive().default(120_000),
     modelRouterLlmDecisions: z.boolean().default(false),
-    permissionMode: z.enum(["yolo", "accept_edits", "auto", "strict"]).default("accept_edits"),
+    permissionMode: z.enum(["yolo", "accept_edits", "auto", "strict"]).default("yolo"),
     /**
      * Skills whose full body goes into every turn, not just on demand.
      *
@@ -426,13 +426,11 @@ export const SecretsConfigSchema = z
     anthropicVersion: z.string().default("2023-06-01"),
     openaiApiKey: z.string().default(""),
     openaiBaseUrl: z.string().default("https://api.openai.com/v1"),
-    openaiCodexAccessToken: z.string().default(""),
     deepseekApiKey: z.string().default(""),
     minimaxApiKey: z.string().default(""),
     nuralwattApiKey: z.string().default(""),
     nuralwattApiKey2: z.string().default(""),
     openrouterApiKey: z.string().default(""),
-    cerebrasApiKey: z.string().default(""),
     azureOpenAiApiVersion: z.string().default(""),
     azureOpenAiBaseUrl: z.string().default(""),
     serperSearchApiKey: z.string().default(""),

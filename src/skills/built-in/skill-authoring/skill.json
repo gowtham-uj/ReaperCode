@@ -1,0 +1,33 @@
+{
+  "name": "skill-authoring",
+  "version": "1.0.0",
+  "description": "Write a skill that actually loads, matches the right moments, and teaches something worth reading.",
+  "category": "prompt-enhancement",
+  "whenToUse": "When the user asks you to create, write, or improve a skill, or when you notice the same instructions being repeated across a conversation and a skill would encode them once. Load before calling skill_manager create.",
+  "triggers": [
+    "create a skill",
+    "write a skill",
+    "new skill",
+    "skill_manager",
+    "skill authoring",
+    "SKILL.md",
+    "add a skill"
+  ],
+  "allowedTools": [
+    "skill_manager",
+    "activate_skill",
+    "search_tools",
+    "write_file",
+    "file_view",
+    "read_file"
+  ],
+  "trust": "builtin",
+  "author": "Reaper",
+  "license": "MIT",
+  "memoryPolicy": {
+    "mayReadProjectMemory": false,
+    "mayWriteProjectMemory": false,
+    "mayReadUserMemory": false,
+    "mayWriteUserMemory": false
+  }
+}

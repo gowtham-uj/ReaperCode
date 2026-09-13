@@ -17,8 +17,22 @@
  * threat being addressed is a plausible mistake, not an adversary.
  *
  * The rule for adding to these lists: an entry has to be something whose
- * *every* use is a disaster. "Writes outside the workspace" is not that — it is
- * ordinary work for an agent editing a project. "Writes to /usr/bin" is.
+ * *every* use is a disaster. "Writes to /usr/bin" is.
+ *
+ * Writes outside the workspace are refused too, which is a narrower rule than
+ * that test and was a deliberate reversal. The argument against it was that
+ * editing a file elsewhere on disk is ordinary work for an agent — true in
+ * isolation, but `bash` is already confined this way (see the cwd check in
+ * `tools/global/bash.ts`), and leaving eval unconfined made the two routes
+ * disagree: a `cd` out of the workspace through `bash` is refused, while the
+ * same move through `fs` was not. A model that finds the second door is not
+ * doing anything wrong; it is taking the route that works. Whether the
+ * workspace is the right boundary for both is a policy question, and the answer
+ * here is that it is, because the agent's work is the workspace's contents.
+ *
+ * `/tmp` stays writable. Scratch files, sockets, and the odd `mktemp` are how
+ * ordinary programs work, and a rule that broke them would push the model back
+ * to `bash` for every temporary file.
  *
  * Both functions are self-contained on purpose, with their tables inline rather
  * than hoisted to module scope. They are stringified into the worker bootstrap
@@ -34,11 +48,16 @@ export type PathOperation = "read" | "write";
 /**
  * Whether this path is one no script should be touching.
  *
+ * `workspace` bounds writes: a write anywhere else is refused unless it is
+ * under a temporary directory. Pass it or leave it out — with no workspace the
+ * guard cannot make that judgement and skips it, which is what the tests that
+ * exercise the other rules rely on.
+ *
  * Returns the reason rather than a boolean so the refusal can say what it
  * objected to; a script told "denied" learns nothing, and a model told
- * "/etc is the operating system's, use the workspace" fixes its own code.
+ * "that is outside the workspace, work there instead" fixes its own code.
  */
-export function isDangerousPath(target: string, operation: "read" | "write"): string | undefined {
+export function isDangerousPath(target: string, operation: "read" | "write", workspace?: string): string | undefined {
   if (typeof target !== "string" || target.length === 0) return undefined;
 
   /*
@@ -107,6 +126,28 @@ export function isDangerousPath(target: string, operation: "read" | "write"): st
   }
   if (resolved === "/") {
     return "Code Mode will not write to the filesystem root.";
+  }
+
+  /*
+   * The workspace boundary, last so the more specific refusals above get to
+   * explain themselves first. A path under the workspace, or under a temp
+   * directory, is where work happens; anywhere else is not this agent's to
+   * change.
+   *
+   * `workspace` arrives already resolved by the caller, which knows the thread
+   * root; resolving it here would put `process.cwd()` in the answer, and the
+   * worker's cwd is the parent's, not the thread's.
+   */
+  if (typeof workspace === "string" && workspace.length > 0) {
+    const root = path.resolve(workspace);
+    const inWorkspace = resolved === root || resolved.startsWith(`${root}${path.sep}`);
+    // Inline rather than a module constant: this function is stringified into
+    // the worker, so anything it closes over outside its own body is undefined
+    // there. See the note at the top of the file.
+    const inTemp = ["/tmp", "/var/tmp"].some((dir) => resolved === dir || resolved.startsWith(`${dir}/`));
+    if (!inWorkspace && !inTemp) {
+      return `${resolved} is outside the workspace (${root}). Code Mode writes only inside the workspace or a temporary directory; write there instead.`;
+    }
   }
   return undefined;
 }

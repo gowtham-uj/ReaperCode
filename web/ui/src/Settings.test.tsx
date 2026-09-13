@@ -131,7 +131,7 @@ describe("routed Settings", () => {
     // regression this asserts against, so check the option set, not just that
     // the chosen one works.
     const options = (await screen.findAllByRole("radio")).map((el) => el.getAttribute("value"));
-    expect(options.sort()).toEqual(["black", "dark"]);
+    expect(options.sort()).toEqual(["black", "dark", "reaper"]);
 
     expect(screen.getByRole("radio", { name: /^Dark/ }).hasAttribute("checked")).toBe(true);
     await user.click(screen.getByRole("radio", { name: /^Black/ }));
@@ -139,6 +139,13 @@ describe("routed Settings", () => {
     // Black layers on the dark sheet; without this the alias tokens fall back
     // to their light values and the black surfaces get white text tokens.
     expect(document.body.hasAttribute("data-ds-dark-theme")).toBe(true);
+
+    await user.click(screen.getByRole("radio", { name: /^Reaper/ }));
+    expect(document.body.hasAttribute("data-ds-reaper-theme")).toBe(true);
+    expect(document.body.hasAttribute("data-ds-dark-theme")).toBe(true);
+    // Both accent ramps override the same neutral tokens, so picking one has to
+    // clear the other or the winner is whatever the stylesheet order says.
+    expect(document.body.hasAttribute("data-ds-black-theme")).toBe(false);
   });
 
   it("navigates between real pages without unmounting the Settings layout", async () => {

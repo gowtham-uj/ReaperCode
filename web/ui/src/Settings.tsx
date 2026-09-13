@@ -450,7 +450,7 @@ export function PermissionsSettings({ settings, client }: { settings: SettingsSt
   };
   return (
     <section className="settings-section">
-      <div className="settings-section-heading"><div><h2>Permissions</h2><p>Choose one user-wide approval mode for every conversation. Explicit policy denies still override it.</p></div></div>
+      <div className="settings-section-heading"><div><h2>Permissions</h2><p>Tools run without asking unless you pick otherwise here. One mode applies to every conversation; explicit policy denies still override it.</p></div></div>
       <div className="permission-grid" role="group" aria-label="User permission mode">{PERMISSION_MODES.map((entry) => { const selected = settings.settings?.permissionMode === entry.mode; return <button className="permission-option" data-selected={selected || undefined} aria-pressed={selected} disabled={busy} key={entry.mode} onClick={() => void saveDefault(entry.mode)}><span className="permission-check">{selected ? "✓" : ""}</span><strong>{entry.label}</strong><span>{entry.description}</span></button>; })}</div>
       <p className="settings-note">Changing this updates existing threads and becomes the default for new threads.</p>
       {applied && <p className="settings-note" role="status">{applied}</p>}{failure && <p className="field-error" role="alert">{failure}</p>}

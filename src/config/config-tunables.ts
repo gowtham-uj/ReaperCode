@@ -255,7 +255,7 @@ const DEFAULTS: TunablesCache = {
     mainAgentTransportRetryLimit: 2,
     modelCallTimeoutMs: 120_000,
     modelRouterLlmDecisions: false,
-    permissionMode: "accept_edits",
+    permissionMode: "yolo",
     printReasoning: false,
     progressGuardV2: true,
     rescueMaxAttemptsPerDiagnostic: 1,

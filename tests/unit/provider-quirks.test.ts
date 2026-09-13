@@ -14,7 +14,6 @@ import {
   providerBackoffMs,
   retryLimitForStatus,
   shouldRequestStreamUsage,
-  shouldUseBufferedProviderGenerate,
 } from "../../src/model/provider-quirks.js";
 import type { ResolvedModelProfile } from "../../src/model/types.js";
 
@@ -59,13 +58,23 @@ test("provider max-token helper applies provider caps", () => {
   assert.equal(getEffectiveMaxOutputTokens({ ...baseProfile, provider: "deepseek", model: "deepseek-chat" }, 20_000), 8192);
 });
 
-test("Cerebras direct client is marked as buffered and has extended rate-limit retries", () => {
-  assert.equal(shouldUseBufferedProviderGenerate({ provider: "cerebras", model: "qwen-3-coder" }, {}), true);
+test("cerebras keeps no bespoke retry policy now that it is unsupported", () => {
+  /*
+   * This test used to assert Cerebras's extended rate-limit backoff (12 retries
+   * at a 30s cap) and that its client was marked buffered. Both were real
+   * behaviours of a provider this build no longer offers, so the assertions are
+   * inverted rather than deleted: a provider that is supposedly gone must not
+   * still be getting special treatment somewhere in the retry layer, which is
+   * the kind of thing that survives a removal unnoticed.
+   */
   const policy = getProviderRetryPolicy({ provider: "cerebras", maxRetries: undefined });
-  assert.equal(policy.maxRetries, 2);
-  assert.ok(policy.maxRateLimitRetries >= 12);
-  assert.equal(retryLimitForStatus(policy, 429), policy.maxRateLimitRetries);
-  assert.equal(retryLimitForStatus(policy, 500), policy.maxRetries);
+  const generic = getProviderRetryPolicy({ provider: "some-unknown-provider", maxRetries: undefined });
+  assert.deepEqual(policy, generic, "cerebras must fall through to the default policy");
+
+  // The generic policy still works for the statuses that matter, so this is a
+  // removal of a special case and not of the retry logic itself.
+  assert.equal(retryLimitForStatus(generic, 429), generic.maxRateLimitRetries);
+  assert.equal(retryLimitForStatus(generic, 500), generic.maxRetries);
 });
 
 test("Anthropic-compatible provider quirks pick the correct API-key header", () => {

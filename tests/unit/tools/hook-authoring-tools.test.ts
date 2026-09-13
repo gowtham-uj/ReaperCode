@@ -6,7 +6,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync,  mkdirSync,  rmSync,  existsSync} from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -48,8 +48,10 @@ function setup(): { tmp: string; userHome: string; workspaceRoot: string; runner
 
 const VALID_OBSERVE_SOURCE = `return { allow: true, message: "ok" };`;
 const VALID_BLOCK_SOURCE = `return { allow: false, reason: "blocked by hook" };`;
+/** Blocks, and carries a hint. Used to check the enforce adapter keeps one and drops the other. */
+const VALID_BLOCK_WITH_HINT = `return { allow: false, reason: "blocked by hook", message: "careful with rm -rf" };`;
 
-test("create_hook happy path lands as draft JSON on disk", async () => {
+test("create_hook lands as trusted JSON on disk, registered immediately", async () => {
   const ctx = setup();
   try {
     const r = await handleCreateHook(
@@ -65,7 +67,17 @@ test("create_hook happy path lands as draft JSON on disk", async () => {
     );
     assert.equal(r.ok, true);
     assert.ok(r.record, "missing record");
-    assert.equal(r.record?.trust, "draft");
+    /*
+     * Trusted on creation, and already attached to the runner. There is no
+     * draft state: a hook the model was asked to write is a hook that should
+     * run, and the draft tier existed only to gate it behind an approval step
+     * the agent could not reach.
+     */
+    assert.equal(r.record?.trust, "user-trusted");
+    assert.ok(
+      ctx.runner.handlerIds().includes("hook:warn-on-rm"),
+      "a created hook must be registered, or creating it does nothing",
+    );
     const filePath = join(ctx.workspaceRoot, ".reaper", "hooks", "warn-on-rm.json");
     assert.ok(existsSync(filePath), `expected file at ${filePath}`);
   } finally {
@@ -131,7 +143,7 @@ test("create_hook rejects source that fails new Function compilation", async () 
   }
 });
 
-test("list_hooks returns the live + draft registry with correct fields", async () => {
+test("list_hooks returns the registry with correct fields", async () => {
   const ctx = setup();
   try {
     await handleCreateHook(
@@ -146,96 +158,84 @@ test("list_hooks returns the live + draft registry with correct fields", async (
     assert.equal(r.ok, true);
     assert.equal(r.hooks.length, 2);
     assert.equal(r.hooks[0]?.event, "PreToolUse");
-    assert.equal(r.hooks[0]?.trust, "draft");
+    // `registered` reports the runner's actual subscription, not a copy of the
+    // `trust` label — there are no trust tiers, so there is nothing for the
+    // inventory to report about them.
+    assert.equal(r.hooks[0]?.registered, true);
   } finally {
     ctx.cleanup();
   }
 });
 
-test("approve_hook calls request_human_approval", async () => {
+test("approve_hook reports success for a hook that is already live", async () => {
+  /*
+   * There are no trust tiers. A hook is live when it is created, so there is
+   * nothing to approve and nothing that can deny it. `approve_hook` stays as a
+   * success answer because a caller written against the old workflow will still
+   * call it, and "already live, go ahead" beats a refusal that implies
+   * something is missing.
+   */
   const ctx = setup();
   try {
-    const autoApprover = async () => true;
-    const autoLifecycle = new HookLifecycle({
-      runner: ctx.runner,
-      workspaceRoot: ctx.workspaceRoot,
-      userHome: ctx.userHome,
-      approvalRequester: autoApprover,
-    });
-    await handleCreateHook(
-      { id: "needs-approval", event: "PreToolUse", description: "x", source: VALID_OBSERVE_SOURCE, enforce: false, scope: "project" },
-      { lifecycle: autoLifecycle },
+    const created = await handleCreateHook(
+      { id: "created", event: "PreToolUse", description: "x", source: VALID_OBSERVE_SOURCE, enforce: false, scope: "project" },
+      ctx.deps,
     );
-    const r = await handleApproveHook({ id: "needs-approval" }, { lifecycle: autoLifecycle });
-    assert.equal(r.ok, true);
+    assert.equal(created.ok, true);
+    assert.ok(ctx.runner.handlerIds().includes("hook:created"), "the hook must be live without any approval step");
+
+    const r = await handleApproveHook({ id: "created" }, ctx.deps);
+    assert.equal(r.ok, true, `approve should report the hook is already usable: ${r.error ?? ""}`);
+    assert.equal(r.record?.trust, "user-trusted");
   } finally {
     ctx.cleanup();
   }
 });
 
-test("approve_hook denial keeps hook as draft", async () => {
+test("enforce decides whether a hook can block, and it is the only thing that decides", async () => {
+  /*
+   * `enforce` is the one flag on a hook that changes behaviour, and it is a
+   * capability flag, not a trust one. The two hooks below have identical source,
+   * identical scope, and identical trust; the only difference is the flag. The
+   * observer's `allow: false` must be discarded and its `message` surfaced; the
+   * blocker's `allow: false` must stop the call.
+   *
+   * Dispatching through the runner rather than reading `record.enforce` back is
+   * the point: the field being set proves nothing about what happens to a real
+   * tool call, and the adapter in `wrapHandler` is where the flag is acted on.
+   */
   const ctx = setup();
+  const payload = { toolName: "bash", cmd: "rm -rf /tmp/x" };
   try {
-    const denyLifecycle = new HookLifecycle({
-      runner: ctx.runner,
-      workspaceRoot: ctx.workspaceRoot,
-      userHome: ctx.userHome,
-      approvalRequester: async () => false,
-    });
+    // enforce: false, and the source asks to block. The outcome is still allow.
     await handleCreateHook(
-      { id: "denied", event: "PreToolUse", description: "x", source: VALID_OBSERVE_SOURCE, enforce: false, scope: "project" },
-      { lifecycle: denyLifecycle },
+      { id: "observer", event: "PreToolUse", description: "observes", source: VALID_BLOCK_WITH_HINT, enforce: false, scope: "project" },
+      ctx.deps,
     );
-    const r = await handleApproveHook({ id: "denied" }, { lifecycle: denyLifecycle });
-    assert.equal(r.ok, false);
-    assert.match(r.error ?? "", /denied/);
-  } finally {
-    ctx.cleanup();
-  }
-});
+    const observed = await ctx.runner.dispatch("PreToolUse", payload);
+    assert.equal(observed.allow, true, "an observation-only hook must not be able to block a tool call");
+    const observerResult = observed.results.find((r) => r.extensionId === "hook:observer");
+    assert.ok(observerResult, "the observer should still have run and been reported");
+    assert.equal(observerResult.outcome, "message", "the block is dropped and the hook is reported as advice");
+    assert.equal(observerResult.message, "careful with rm -rf", "the hint reaches the model");
+    assert.equal(
+      (observerResult as { reason?: string }).reason,
+      undefined,
+      "the reason is what justified a block that did not happen, so it must not be reported",
+    );
 
-test("approve_hook allow with enforce false registers a hook (observation-only)", async () => {
-  const ctx = setup();
-  try {
-    const autoApprover = async () => true;
-    const autoLifecycle = new HookLifecycle({
-      runner: ctx.runner,
-      workspaceRoot: ctx.workspaceRoot,
-      userHome: ctx.userHome,
-      approvalRequester: autoApprover,
-    });
+    /*
+     * Same source, same scope, same trust; `enforce: true` is the only
+     * difference, and it is added as a *second* hook so the dispatch below
+     * carries both. The observer runs first and is overruled.
+     */
     await handleCreateHook(
-      { id: "observer", event: "PreToolUse", description: "observes", source: VALID_OBSERVE_SOURCE, enforce: false, scope: "project" },
-      { lifecycle: autoLifecycle },
+      { id: "blocker", event: "PreToolUse", description: "blocks", source: VALID_BLOCK_WITH_HINT, enforce: true, scope: "project" },
+      ctx.deps,
     );
-    const r = await handleApproveHook({ id: "observer" }, { lifecycle: autoLifecycle });
-    assert.equal(r.ok, true);
-    // Project-scoped hooks promote to "project-untrusted" (their
-    // installation scope is project); the user-scoped case is
-    // tested separately below.
-    assert.equal(r.record?.trust, "project-untrusted");
-  } finally {
-    ctx.cleanup();
-  }
-});
-
-test("approve_hook allow with enforce true registers a blocking hook", async () => {
-  const ctx = setup();
-  try {
-    const autoApprover = async () => true;
-    const autoLifecycle = new HookLifecycle({
-      runner: ctx.runner,
-      workspaceRoot: ctx.workspaceRoot,
-      userHome: ctx.userHome,
-      approvalRequester: autoApprover,
-    });
-    await handleCreateHook(
-      { id: "blocker", event: "PreToolUse", description: "blocks", source: VALID_BLOCK_SOURCE, enforce: true, scope: "project" },
-      { lifecycle: autoLifecycle },
-    );
-    const r = await handleApproveHook({ id: "blocker" }, { lifecycle: autoLifecycle });
-    assert.equal(r.ok, true);
-    assert.equal(r.record?.enforce, true);
+    const blocked = await ctx.runner.dispatch("PreToolUse", payload);
+    assert.equal(blocked.allow, false, "an enforce: true hook must be able to block");
+    assert.equal(blocked.firstDenyReason, "blocked by hook");
   } finally {
     ctx.cleanup();
   }
@@ -244,12 +244,10 @@ test("approve_hook allow with enforce true registers a blocking hook", async () 
 test("update_hook re-compiles and re-registers", async () => {
   const ctx = setup();
   try {
-    const autoApprover = async () => true;
     const autoLifecycle = new HookLifecycle({
       runner: ctx.runner,
       workspaceRoot: ctx.workspaceRoot,
       userHome: ctx.userHome,
-      approvalRequester: autoApprover,
     });
     await handleCreateHook(
       { id: "upd", event: "PreToolUse", description: "x", source: VALID_OBSERVE_SOURCE, enforce: false, scope: "project" },
@@ -324,32 +322,31 @@ test("hook_manager dispatches every action, and refuses an unnamed one", async (
     );
     assert.equal((updated as { ok: boolean }).ok, true);
 
-    // No approval requester is wired into this harness, and without one the
-    // lifecycle fails closed for any hook that could block — so `approve` here
-    // is only reachable because `enforce` is false throughout.
+    // A no-op that reports success. No approval requester is wired into this
+    // harness and none is needed: there are no trust tiers to promote.
     const approved = await handleHookManager({ action: "approve", id: "managed-hook" }, ctx.deps);
     assert.equal((approved as { ok: boolean }).ok, true);
 
-    // Uninstalling a hook that is no longer a draft is gated, and the gate
-    // fails closed without a requester.
-    const gated = await handleHookManager({ action: "uninstall", id: "managed-hook" }, ctx.deps);
-    assert.equal((gated as { ok: boolean }).ok, false);
-    assert.match(String((gated as { error?: string }).error), /requires approval/);
-
-    // The requester is a lifecycle option, not a tool dep, so the approval path
-    // needs a lifecycle constructed with one. The manager's own discover() is
-    // what lets this second lifecycle see a hook it never created.
-    const approving = new HookLifecycle({
-      runner: ctx.runner,
-      workspaceRoot: ctx.workspaceRoot,
-      userHome: ctx.userHome,
-      approvalRequester: async () => true,
-    });
+    /*
+     * Uninstall is ungated, and reaches a hook this lifecycle did not create.
+     *
+     * This used to assert a refusal: removal was behind an approval gate, so a
+     * hook could be created but not removed, and because the live runner held
+     * it in memory, deleting the file did not stop it either. The second
+     * lifecycle here is the point — it never called `create`, so it only knows
+     * about the hook through the manager's own discovery walk, which is
+     * exactly the state a fresh session is in.
+     */
     const hookFile = join(ctx.workspaceRoot, ".reaper", "hooks", "managed-hook.json");
-    assert.ok(existsSync(hookFile), "the approved hook should have been persisted");
-    const uninstalled = await handleHookManager({ action: "uninstall", id: "managed-hook" }, { lifecycle: approving });
-    assert.equal((uninstalled as { ok: boolean }).ok, true);
+    assert.ok(existsSync(hookFile), "the created hook should have been persisted");
+    const reloaded = new HookLifecycle({ runner: ctx.runner, workspaceRoot: ctx.workspaceRoot, userHome: ctx.userHome });
+    const uninstalled = await handleHookManager({ action: "uninstall", id: "managed-hook" }, { lifecycle: reloaded });
+    assert.equal((uninstalled as { ok: boolean }).ok, true, `uninstall failed: ${(uninstalled as { error?: string }).error ?? ""}`);
     assert.equal(existsSync(hookFile), false, "uninstall must remove the hook file from disk");
+    assert.ok(
+      !ctx.runner.handlerIds().includes("hook:managed-hook"),
+      "uninstall must also detach it from the live runner",
+    );
 
     // `scope` is shared between `create` and `list`, and its manager-level enum
     // is wider because `list` alone accepts "all". A `create` that asks for it
@@ -364,3 +361,163 @@ test("hook_manager dispatches every action, and refuses an unnamed one", async (
     ctx.cleanup();
   }
 });
+
+/**
+ * The `trust` field on a hook file is inert.
+ *
+ * It used to decide everything: `discover()` only compiled and registered a
+ * record whose trust was not `draft`, so a hook file carrying `draft` or
+ * `project-untrusted` was loaded, listed as present, and attached to nothing.
+ * Nothing outside `HookLifecycle` writes a hook to disk, and nothing reachable
+ * promoted a loaded record, so a hook that arrived with the wrong label was
+ * quietly dead for the life of the session.
+ *
+ * These tests write files carrying each label and assert the hook runs anyway.
+ * The labels still parse — an old file must not break — but nothing reads them
+ * to decide anything.
+ */
+test("a hook file on disk is registered whatever trust label it carries", async () => {
+  const ctx = setup();
+  try {
+    const projectHooks = join(ctx.workspaceRoot, ".reaper", "hooks");
+    mkdirSync(projectHooks, { recursive: true });
+    for (const [id, trust] of [["legacy-draft", "draft"], ["legacy-untrusted", "project-untrusted"]] as const) {
+      writeFileSync(join(projectHooks, `${id}.json`), JSON.stringify({
+        id,
+        event: "PreToolUse",
+        description: "test fixture",
+        source: "return { allow: true };",
+        scope: "project",
+        trust,
+        enforce: false,
+      }));
+    }
+
+    new HookLifecycle({ runner: ctx.runner, workspaceRoot: ctx.workspaceRoot, userHome: ctx.userHome });
+    const registrations = ctx.runner.handlerIds();
+    assert.ok(
+      registrations.includes("hook:legacy-draft"),
+      `a hook labelled "draft" was not registered (registered: ${registrations.join(", ")})`,
+    );
+    assert.ok(
+      registrations.includes("hook:legacy-untrusted"),
+      `a hook labelled "project-untrusted" was not registered (registered: ${registrations.join(", ")})`,
+    );
+  } finally {
+    ctx.cleanup();
+  }
+});
+
+test("a hook whose source does not compile is listed but not registered", async () => {
+  /*
+   * The one thing that legitimately keeps a hook off the runner is source that
+   * cannot be compiled. `list` must say so rather than reporting the hook as
+   * present and live: the inventory asks the subscription map, so the panel
+   * cannot disagree with what will actually run.
+   */
+  const ctx = setup();
+  try {
+    const projectHooks = join(ctx.workspaceRoot, ".reaper", "hooks");
+    mkdirSync(projectHooks, { recursive: true });
+    writeFileSync(join(projectHooks, "broken-hook.json"), JSON.stringify({
+      id: "broken-hook",
+      event: "PreToolUse",
+      description: "test fixture",
+      source: "return { allow: ",
+      scope: "project",
+      trust: "user-trusted",
+      enforce: false,
+    }));
+
+    const lifecycle = new HookLifecycle({ runner: ctx.runner, workspaceRoot: ctx.workspaceRoot, userHome: ctx.userHome });
+    const listed = handleListHooks({ scope: "all" }, { lifecycle });
+    const broken = listed.hooks.find((h) => h.id === "broken-hook");
+    assert.ok(broken, "a hook with unparseable source should still be listed");
+    assert.equal(broken.registered, false, "an uncompilable hook must not report itself as registered");
+    assert.ok(
+      !ctx.runner.handlerIds().includes("hook:broken-hook"),
+      "nothing should be attached for a hook that failed to compile",
+    );
+  } finally {
+    ctx.cleanup();
+  }
+});
+
+test("approve reports success and leaves a live hook live", async () => {
+  const ctx = setup();
+  try {
+    const projectHooks = join(ctx.workspaceRoot, ".reaper", "hooks");
+    mkdirSync(projectHooks, { recursive: true });
+    writeFileSync(join(projectHooks, "project-hook.json"), JSON.stringify({
+      id: "project-hook",
+      event: "PreToolUse",
+      description: "test fixture",
+      source: "return { allow: true };",
+      scope: "project",
+      trust: "draft",
+      enforce: false,
+    }));
+
+    const lifecycle = new HookLifecycle({ runner: ctx.runner, workspaceRoot: ctx.workspaceRoot, userHome: ctx.userHome });
+    assert.ok(
+      ctx.runner.handlerIds().includes("hook:project-hook"),
+      "discovery should already have attached it — approve is not what makes a hook live",
+    );
+
+    const approved = await lifecycle.approve("project-hook");
+    assert.equal(approved.ok, true, `approve failed: ${approved.error ?? ""}`);
+    assert.equal(
+      approved.record?.trust,
+      "user-trusted",
+      "approve rewrites the label to the single trusted state",
+    );
+    assert.ok(
+      ctx.runner.handlerIds().includes("hook:project-hook"),
+      "and it stays registered",
+    );
+  } finally {
+    ctx.cleanup();
+  }
+});
+
+test("deleting a hook's file unregisters it on the next discovery", async () => {
+  const ctx = setup();
+  try {
+    const projectHooks = join(ctx.workspaceRoot, ".reaper", "hooks");
+    mkdirSync(projectHooks, { recursive: true });
+    const file = join(projectHooks, "removable-hook.json");
+    writeFileSync(file, JSON.stringify({
+      id: "removable-hook",
+      event: "PreToolUse",
+      description: "test fixture",
+      source: "return { allow: true };",
+      scope: "project",
+      trust: "user-trusted",
+      enforce: false,
+    }));
+
+    const lifecycle = new HookLifecycle({ runner: ctx.runner, workspaceRoot: ctx.workspaceRoot, userHome: ctx.userHome });
+    assert.ok(
+      ctx.runner.handlerIds().includes("hook:removable-hook"),
+      "the trusted hook should start registered",
+    );
+
+    /*
+     * Delete the file, then re-walk. `discover()` used to only ever add, so the
+     * hook stayed live for the rest of the session with no reachable way to stop
+     * it — `uninstall` is behind an approval gate. Removing the file is the one
+     * action a user outside the agent can always take.
+     */
+    rmSync(file, { force: true });
+    lifecycle.reload();
+
+    assert.equal(lifecycle.get("removable-hook"), null, "the record survived its file being deleted");
+    assert.ok(
+      !ctx.runner.handlerIds().includes("hook:removable-hook"),
+      "deleting a hook's file left it running on the live runner",
+    );
+  } finally {
+    ctx.cleanup();
+  }
+});
+
