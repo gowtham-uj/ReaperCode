@@ -322,6 +322,47 @@ function entryToDirtyFile(entry: GitStatusEntry): string {
  * statement of what does not belong in the repository, and this honours it
  * instead of inventing a second opinion.
  */
+/*
+ * Untracked file paths, non-ignored, as a NUL-separated buffer.
+ *
+ * `--exclude-standard` is what makes this honour `.gitignore` the way the
+ * header promises: a build artefact or a `node_modules` tree is not something a
+ * checkpoint should carry, and the user's ignore rules are the statement of
+ * that. `.reaper/` is dropped here rather than by a pathspec for the reason in
+ * the caller: naming an ignored path in a pathspec makes git fail.
+ *
+ * NUL separation rather than newlines because a path may contain a newline, and
+ * `-z` plus `--pathspec-file-nul` is the pair that survives it. The return is
+ * `undefined` when there is nothing untracked, so the caller can skip the git
+ * work entirely.
+ */
+async function untrackedPathspecBuffer(workspaceRoot: string, env: Record<string, string>): Promise<string | undefined> {
+  const raw = await runGitRawWithEnv(workspaceRoot, ["ls-files", "--others", "--exclude-standard", "-z"], env);
+  const paths = raw.split("\0").filter((entry) => entry.length > 0);
+  const keep = paths.filter((entry) => entry !== ".reaper" && !entry.startsWith(".reaper/"));
+  if (keep.length === 0) return undefined;
+  return `${keep.join("\0")}\0`;
+}
+
+/*
+ * A pathspec file holding the untracked list, written beside the scratch index.
+ *
+ * A file rather than stdin because the obvious stdin form does not work here and
+ * fails in the worst way: `execFile`'s `input` option is `execFileSync` only and
+ * is silently ignored by the async `execFile`, so `git add
+ * --pathspec-from-file=-` sat waiting on a stdin nobody would ever write to. The
+ * test suite hung for minutes with no output rather than erroring, which is a
+ * much worse failure to debug than a wrong result.
+ *
+ * The file lives in the checkpoint directory, beside the index, so it is outside
+ * the workspace and cannot appear in a status listing. The caller removes it.
+ */
+async function writePathspecFile(checkpointDir: string, contents: string): Promise<string> {
+  const filePath = path.join(checkpointDir, "untracked.pathspec");
+  await writeFile(filePath, contents, "utf8");
+  return filePath;
+}
+
 async function writeUntrackedInclusivePatch(
   workspaceRoot: string,
   checkpointDir: string,
@@ -337,18 +378,52 @@ async function writeUntrackedInclusivePatch(
     const env = { GIT_INDEX_FILE: indexPath };
     await runGitWithEnv(workspaceRoot, ["read-tree", "HEAD"], env);
     /*
-     * `.reaper/` is excluded by pathspec, not left to `.gitignore`.
+     * Stage exactly the untracked paths, by name, from a NUL-separated list.
      *
-     * Reaper's own scratch lives there, and a workspace that does not gitignore
-     * it — a fresh one before Reaper writes its default `.gitignore`, or a
-     * fixture that never had one — would otherwise sweep the checkpoint's own
-     * patch files into the patch. Restoring that patch then fails with
-     * "already exists in working directory" for `staged.patch` and
-     * `worktree.patch`, because it is trying to recreate the files it is
-     * reading from. Excluding the path makes the patch describe only the work,
-     * whatever the repository's ignore rules happen to say.
+     * Two earlier forms of this line were wrong, and both looked correct, so
+     * both are worth keeping written down.
+     *
+     * The first was `add -A -- . ':(exclude).reaper'`. `add -A -- .` skips an
+     * ignored path silently, so an exclude pathspec looks like just a more
+     * explicit way to say the same thing. It is not: naming an ignored path in a
+     * pathspec makes git fail --
+     *
+     *   The following paths are ignored by one of your .gitignore files:
+     *   .reaper
+     *
+     * -- exit 1 on git 2.39.5, for `:(exclude).reaper`, `:(exclude).reaper/`
+     * and `:(exclude).reaper/**` alike. `.reaper/` is gitignored in every
+     * standard Reaper workspace, so this failed everywhere, the catch below
+     * marked the whole checkpoint `restoreAvailable: false`, and no checkpoint
+     * could be restored at all, not even its tracked files.
+     *
+     * The second was `add -A -- .` on its own, which fixes that but stages the
+     * entire worktree, making this patch a diff of tracked edits too. On restore
+     * `worktree.patch` has already written those edits, so reapplying them from
+     * here fails with "patch does not apply" and aborts the restore of a
+     * checkpoint that reported itself restorable. The earlier tests missed it
+     * because their fixtures never modified a tracked file, so the tracked hunks
+     * were absent and the two patches did not overlap.
+     *
+     * Naming the untracked paths avoids both. `--pathspec-from-file=-` with
+     * `--pathspec-file-nul` reads the list from stdin, so a workspace with more
+     * untracked files than fit in argv still works and a path containing a
+     * newline still parses. `.reaper/` is filtered in `untrackedPathspecBuffer`
+     * rather than excluded here, which is what keeps the ignored name out of the
+     * pathspec. Without that filter, a workspace that does not gitignore
+     * `.reaper` sweeps the checkpoint's own patch files into the patch, and
+     * restoring it fails with "already exists in working directory" as the patch
+     * recreates the files it is being read from.
      */
-    await runGitWithEnv(workspaceRoot, ["add", "-A", "--", ".", ":(exclude).reaper"], env);
+    const pathspec = await untrackedPathspecBuffer(workspaceRoot, env);
+    if (pathspec === undefined) return;
+    const pathspecFile = await writePathspecFile(checkpointDir, pathspec);
+    await runGitWithEnv(
+      workspaceRoot,
+      ["add", `--pathspec-from-file=${pathspecFile}`, "--pathspec-file-nul"],
+      env,
+    );
+    await rm(pathspecFile, { force: true });
     const patch = await runGitRawWithEnv(workspaceRoot, ["diff", "--cached", "--binary"], env);
     if (patch.trim().length === 0) return;
     const normalized = patch.endsWith("\n") ? patch : `${patch}\n`;

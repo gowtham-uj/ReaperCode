@@ -33,6 +33,12 @@ import { dirname } from "node:path";
 import type { Browser, BrowserContext, Page } from "playwright";
 
 import { scopeBrowser, scopePage } from "./scoped-page.js";
+import {
+  BrowserControlPausedError,
+  BrowserControlRegistry,
+  BrowserLeaseStaleError,
+  type HandoffSummary,
+} from "./control-lease.js";
 
 import { perceive, type PerceptionResult } from "./engine.js";
 import { countOutline, PageObserver, type PageContentMeta, type PageViewOptions, type SnapshotStats } from "./page-view.js";
@@ -63,6 +69,15 @@ export interface ThreadRuntimeOptions {
    * across threads.
    */
   flows?: TransitionDb | undefined;
+  /**
+   * The control lease registry, shared across threads.
+   *
+   * Shared rather than per-runtime because the registry is keyed by thread id
+   * and the gateway, which handles the take-control request, has no runtime
+   * object for the thread at that moment. One registry per app-server means the
+   * HTTP handler and the browser tool consult the same record.
+   */
+  control?: BrowserControlRegistry | undefined;
 }
 
 /**
@@ -96,8 +111,23 @@ export class ThreadBrowserRuntime {
    */
   readonly flows: TransitionDb | undefined;
 
+  /**
+   * The control lease registry, when the caller shares one.
+   *
+   * Optional because most callers (tests, a one-off script) never hand control
+   * to a human, and requiring a registry would mean constructing one to do
+   * nothing. When it is present, every `step` is gated by it.
+   */
+  private readonly control: BrowserControlRegistry | undefined;
+
   constructor(private readonly options: ThreadRuntimeOptions) {
     this.flows = options.flows;
+    this.control = options.control;
+  }
+
+  /** This runtime's thread id, for lease lookups. */
+  get threadId(): string {
+    return this.options.threadId;
   }
 
   /**
@@ -162,6 +192,16 @@ export class ThreadBrowserRuntime {
       // failing every call on it.
       this.resetHandles();
     });
+
+    /*
+     * The pages this thread had open, put back.
+     *
+     * After the cookies are seeded, because a page that needs a session should
+     * load as the signed-in user rather than as a stranger and then be
+     * navigated. A failure here never fails the attach: a thread that cannot
+     * rebuild one of its tabs still needs a browser.
+     */
+    await this.restorePages(context).catch(() => undefined);
   }
 
   private resetHandles(): void {
@@ -214,6 +254,27 @@ export class ThreadBrowserRuntime {
   activeTargetId: string | undefined;
 
   /**
+   * Resolve and remember the active page's CDP target id.
+   *
+   * Exists for the live browser pane, which needs the target id to ask Steel to
+   * stream that exact page and must not receive one for a page it does not own.
+   * Reading `activeTargetId` directly is not enough because it is only set once
+   * a step has run, and the pane is often opened in the pause between turns when
+   * the page is live but nothing has pinned it yet.
+   *
+   * Safe to call repeatedly: it re-reads the target behind the currently active
+   * page, so a stale id is corrected rather than trusted. The id is derived
+   * from the page this runtime owns, which is what keeps the pane scoped: a
+   * client cannot name a target id, only a thread.
+   */
+  async pinActiveTarget(page?: Page): Promise<string | undefined> {
+    const target = page ?? (await this.ensureReady()).page;
+    this.active = target;
+    this.activeTargetId = await targetIdOf(target).catch(() => undefined);
+    return this.activeTargetId;
+  }
+
+  /**
    * A fresh page after the one we were driving was closed.
    *
    * Deliberately reads the context's live page list and only creates one when
@@ -264,6 +325,52 @@ export class ThreadBrowserRuntime {
    * `['cart', 'cart']`.
    */
   pagesForDisplay(): Array<{ name: string | undefined; url: string; active: boolean; index: number }> {
+    return this.pageEntries().map((entry) => ({
+      name: entry.name,
+      url: entry.page.url(),
+      active: entry.active,
+      index: entry.index,
+    }));
+  }
+
+  /**
+   * The thread's pages as scoped Playwright pages, each carrying its metadata.
+   *
+   * This is what both `browser.pages()` and a program's bare `pages()` return,
+   * and they are deliberately the same call. They were not: the facade returned
+   * real pages and the scope-level binding returned name/url/active records, so
+   * `pages()[0].url()` worked in one place and threw "p.url is not a function"
+   * in the other. A program cannot tell which of two identical-looking globals
+   * it reached for, so the only safe answer is that they agree.
+   *
+   * The metadata is attached as non-enumerable properties rather than wrapped in
+   * an object, because the page *is* the useful thing: a program wants to call
+   * Playwright on it. `pageName` is what makes `browser.setActive(name)` work
+   * from a page the program is holding, and `pageIndex` is what makes the
+   * display order reproducible.
+   *
+   * Non-enumerable so the serializer does not walk them and a returned list
+   * reads as a list of pages rather than a list of wrappers.
+   */
+  describePages(): Page[] {
+    return this.pageEntries().map((entry) => {
+      const page = scopePage(entry.page);
+      Object.defineProperties(page, {
+        pageName: { value: entry.name, enumerable: false, configurable: true },
+        pageIndex: { value: entry.index, enumerable: false, configurable: true },
+        isActivePage: { value: entry.active, enumerable: false, configurable: true },
+      });
+      return page;
+    });
+  }
+
+  /**
+   * The live pages with their bookkeeping, in the order `pagesForDisplay` uses.
+   *
+   * The one place the name map and the live list are joined, so the display
+   * form and the page form cannot disagree about which index is which.
+   */
+  pageEntries(): Array<{ page: Page; name: string | undefined; active: boolean; index: number }> {
     if (!this.context) return [];
     const live = this.context.pages().filter((p) => !p.isClosed());
     const names = new Map<Page, string>();
@@ -271,11 +378,48 @@ export class ThreadBrowserRuntime {
       if (!entry.page.isClosed()) names.set(entry.page, entry.name);
     }
     return live.map((page, index) => ({
+      page,
       name: names.get(page),
-      url: page.url(),
       active: page === this.active,
       index,
     }));
+  }
+
+  /**
+   * This thread's pages, each with the CDP target id that names it.
+   *
+   * The target id is what the live view's tab list is keyed by, because it is
+   * the only identifier that means the same thing to Playwright, to Steel and
+   * to the browser. A `Page` object cannot cross the wire, and an index moves
+   * when a tab opens or closes.
+   *
+   * Resolved per page rather than cached, so a tab that was replaced by the
+   * site's own `window.open` is reported under its current id rather than a
+   * stale one. A page whose id cannot be read is skipped rather than given a
+   * placeholder: an entry the viewer cannot connect to is worse than an absent
+   * one, because it looks like a tab that will not load.
+   */
+  async pageTargets(): Promise<Array<{ targetId: string; url: string; title: string; name: string | undefined; active: boolean }>> {
+    const entries = this.pageEntries();
+    const out: Array<{ targetId: string; url: string; title: string; name: string | undefined; active: boolean }> = [];
+    for (const entry of entries) {
+      const targetId = await targetIdOf(entry.page).catch(() => undefined);
+      if (targetId === undefined) continue;
+      out.push({
+        targetId,
+        url: entry.page.url(),
+        title: await entry.page.title().catch(() => ""),
+        name: entry.name,
+        active: entry.active,
+      });
+    }
+    return out;
+  }
+
+  /** Whether a CDP target id names one of this thread's pages. */
+  async ownsTarget(targetId: string): Promise<boolean> {
+    const targets = await this.pageTargets();
+    return targets.some((entry) => entry.targetId === targetId);
   }
 
   /** The live Page objects, in the same order `pagesForDisplay` reports them. */
@@ -482,6 +626,149 @@ export class ThreadBrowserRuntime {
   }
 
   /**
+   * Hand this thread's browser to the human, and remember where they started.
+   *
+   * The start state is captured here rather than read later because "what
+   * changed during the handoff" is only answerable against a *before*, and by
+   * the time control is returned the before is gone. Only non-secret facts are
+   * kept: URL, title, tab count. A human takes over most often to enter
+   * something the agent should not hold, and recording the page's inputs would
+   * put exactly those values in the transcript.
+   */
+  async beginHumanControl(): Promise<{ generation: number; startedAt: number }> {
+    if (!this.control) throw new Error("this runtime has no control registry");
+    const { context, page } = await this.ensureReady();
+    this.handoff = {
+      startedAt: Date.now(),
+      startedUrl: page.url(),
+      startedTitle: await page.title().catch(() => ""),
+      startedTabs: this.pageEntries().length,
+      navigations: [],
+    };
+    /*
+     * Watch the page while the human drives it.
+     *
+     * A passive listener, not an action: the CDP connection stays attached
+     * through the handoff because detaching would let the browser be reaped and
+     * lose the very state the handoff is about. Only the *destination* of a
+     * navigation is recorded. The events this fires on carry no input, so a
+     * password typed into a page that never navigates is never observed at all,
+     * which is the property that matters.
+     */
+    const onNavigated = (frame: import("playwright").Frame): void => {
+      if (frame !== page.mainFrame()) return;
+      const url = frame.url();
+      if (!url || url === "about:blank") return;
+      this.handoff?.navigations.push(url);
+    };
+    const onPage = (opened: import("playwright").Page): void => {
+      this.handoff?.navigations.push(`(new tab) ${opened.url() || "about:blank"}`);
+    };
+    page.on("framenavigated", onNavigated);
+    context.on("page", onPage);
+    this.handoffListeners = () => {
+      page.off("framenavigated", onNavigated);
+      context.off("page", onPage);
+    };
+    const lease = this.control.takeControl(this.threadId);
+    return { generation: lease.generation, startedAt: lease.since };
+  }
+
+  /**
+   * Take control back, drop everything the agent was holding, and read the page
+   * fresh.
+   *
+   * This is the resync, and the order matters: the cached view is discarded
+   * *before* the new one is read, because the agent is about to be told the
+   * state may have changed and a view that survived the handoff would let it
+   * diff against a page that no longer exists. Returning the summary as well as
+   * refreshing means the caller can tell the model what happened in one step
+   * rather than leaving it to notice a silent difference.
+   */
+  async endHumanControl(): Promise<{ generation: number; summary: HandoffSummary }> {
+    if (!this.control) throw new Error("this runtime has no control registry");
+    const started = this.handoff;
+    const { page } = await this.ensureReady();
+    const endedUrl = page.url();
+    const endedTitle = await page.title().catch(() => "");
+    const endedTabs = this.pageEntries().length;
+
+    /*
+     * Invalidate first. `observer.reset()` drops the held outline and returns
+     * the revision to zero, so the next read is a full page rather than a delta
+     * against pre-handoff state, and any action still holding a pre-handoff
+     * revision is refused by the ordinary stale-revision check as well as by the
+     * generation check below. Two independent guards on the same race, because
+     * the failure they prevent is a click landing in a page the human is typing
+     * into.
+     */
+    this.observer.reset();
+    await this.capture(page);
+
+    const lease = this.control.returnControl(this.threadId);
+    const tabDelta = endedTabs - (started?.startedTabs ?? endedTabs);
+    const urlChanged = (started?.startedUrl ?? endedUrl) !== endedUrl;
+    const titleChanged = (started?.startedTitle ?? endedTitle) !== endedTitle;
+    /*
+     * The change list is built from the facts, not from the raw event stream.
+     * Consecutive navigations are collapsed because a login flow that
+     * redirects twice is one event to the reader, and the destinations are
+     * listed because they say *where* the human went without saying what they
+     * typed to get there.
+     */
+    const changes: string[] = [];
+    const destinations = [...new Set(started?.navigations ?? [])];
+    if (destinations.length > 0) {
+      changes.push(`the page navigated during the handoff, through: ${destinations.join(" -> ")}`);
+    }
+    if (urlChanged) changes.push(`the page ended somewhere else: ${started?.startedUrl ?? "?"} -> ${endedUrl}`);
+    if (titleChanged && !urlChanged) changes.push(`the page title changed: "${started?.startedTitle ?? ""}" -> "${endedTitle}"`);
+    if (tabDelta > 0) changes.push(`the user opened ${tabDelta} new tab${tabDelta === 1 ? "" : "s"}`);
+    if (tabDelta < 0) changes.push(`the user closed ${-tabDelta} tab${tabDelta === -1 ? "" : "s"}`);
+    if (changes.length === 0) changes.push("nothing observable changed while the user had control");
+
+    const summary: HandoffSummary = {
+      startedAt: started?.startedAt ?? lease.since,
+      endedAt: Date.now(),
+      startedUrl: started?.startedUrl ?? endedUrl,
+      endedUrl,
+      urlChanged,
+      startedTitle: started?.startedTitle ?? endedTitle,
+      endedTitle,
+      titleChanged,
+      tabDelta,
+      changes,
+    };
+    this.handoff = undefined;
+    this.handoffListeners?.();
+    this.handoffListeners = undefined;
+    return { generation: lease.generation, summary };
+  }
+
+  /** Where the human started, while they have control. */
+  private handoff:
+    | { startedAt: number; startedUrl: string; startedTitle: string; startedTabs: number; navigations: string[] }
+    | undefined;
+  /** Detaches the handoff listeners. Held so a return removes exactly what a take added. */
+  private handoffListeners: (() => void) | undefined;
+
+  /** Whether a human currently owns this thread's browser. */
+  humanHasControl(): boolean {
+    return this.control?.lease(this.threadId).owner === "human";
+  }
+
+  /**
+   * The current control lease, for the pane's status line.
+   *
+   * Returns an agent-owned lease when this runtime has no registry, so a caller
+   * that only needs to display the state does not have to handle "unknown": a
+   * thread that cannot hand control is a thread the agent owns.
+   */
+  controlLease(): { owner: "agent" | "human"; generation: number; since: number } {
+    return this.control?.lease(this.threadId) ?? { owner: "agent", generation: 0, since: 0 };
+  }
+
+  /**
    * Run one action, and come back with what changed rather than whether it threw.
    *
    * This is the loop the model should not have to write by hand: revision check,
@@ -495,9 +782,39 @@ export class ThreadBrowserRuntime {
    */
   async step<T>(
     action: (page: Page) => Promise<T>,
-    options: { expectedRevision?: number | undefined; settle?: SettleOptions | undefined; timeoutMs?: number | undefined } = {},
+    options: {
+      expectedRevision?: number | undefined;
+      settle?: SettleOptions | undefined;
+      timeoutMs?: number | undefined;
+      /**
+       * The control generation this action was decided under.
+       *
+       * Checked here rather than at the tool boundary because this is the one
+       * function every agent action passes through, and the race it closes is
+       * between the decision and the doing: the model decides a click, the user
+       * takes control, and the click would otherwise land on the page the human
+       * is now driving. A refusal here is the earliest point the runtime can
+       * tell that the world moved.
+       */
+      controlGeneration?: number | undefined;
+    } = {},
   ): Promise<{ receipt: StepReceipt; result: T | undefined }> {
     const stepStarted = Date.now();
+    /*
+     * Refuse before touching the page, and before `ensureReady`, so a paused
+     * thread does not even reattach. The lease lives on the runtime because the
+     * runtime is per-thread and this check must use the same thread identity the
+     * handoff used.
+     */
+    if (this.control) {
+      const verdict = this.control.checkAgentAction(this.threadId, options.controlGeneration);
+      if (!verdict.ok) {
+        if (verdict.reason === "stale-generation") {
+          throw new BrowserLeaseStaleError(options.controlGeneration ?? -1, this.control.lease(this.threadId).generation);
+        }
+        throw new BrowserControlPausedError(this.control.lease(this.threadId));
+      }
+    }
     const { page } = await this.ensureReady();
     /*
      * The baseline is captured against the page the model is *looking at*, which
@@ -584,6 +901,17 @@ export class ThreadBrowserRuntime {
           },
         };
       }
+      /*
+       * Persist after the step, which is what `save()`'s own comment always
+       * said happened and did not.
+       *
+       * The case this covers that the save-on-close cannot: a step that just
+       * logged in, on a thread that then sits idle for an hour. Without this the
+       * cookies exist only in the live context, and a crash, a restart or a
+       * reaper pass costs the login. Best-effort and awaited, because it is a
+       * small file write and a step is already hundreds of milliseconds.
+       */
+      await this.save().catch(() => undefined);
       return { receipt, result: result as T | undefined };
     } catch (error) {
       /*
@@ -683,6 +1011,21 @@ export class ThreadBrowserRuntime {
        */
       await writeFile(temporary, JSON.stringify(state), { mode: 0o600 });
       await rename(temporary, path);
+      /*
+       * The pages are saved beside the cookies, in their own file.
+       *
+       * Cookies alone restore a login but not the *work*: a thread that had
+       * three tabs open, one of them a search result it was part-way through
+       * reading, came back as a single blank page after a restart and the agent
+       * had to redo the navigation that got it there. The tabs are the thread's
+       * working state, and they were the one part of it nothing persisted.
+       *
+       * A sibling file rather than a wrapper around the storage state, because
+       * `statePath` is fed straight to `newContext({ storageState })` and has to
+       * stay a valid Playwright storage state. Folding the page list into it
+       * would mean shaping a file a library parses to suit us.
+       */
+      await this.savePages(path);
     } catch {
       /*
        * Losing a login means signing in again; refusing to continue means the
@@ -690,6 +1033,81 @@ export class ThreadBrowserRuntime {
        * reason, and a caller that needs to know can read the file afterwards.
        */
     }
+  }
+
+  /** Where a thread's open pages are recorded, given its storage-state path. */
+  private static pagesPath(statePath: string): string {
+    return `${statePath}.pages.json`;
+  }
+
+  /**
+   * Record the thread's pages so a restart can rebuild them.
+   *
+   * Names are kept because the agent addresses pages by name, and a restore
+   * that gave back the right URLs under different names would be a thread whose
+   * own instructions no longer resolved. The active index is kept because "the
+   * page I was working on" is part of the state, not a detail.
+   *
+   * `about:blank` pages are skipped: they carry nothing, and restoring them
+   * would fill the tab strip with blanks that mean nothing to either side.
+   */
+  private async savePages(statePath: string): Promise<void> {
+    const entries = this.pageEntries();
+    const pages = entries
+      .map((entry) => ({ url: entry.page.url(), name: entry.name }))
+      .filter((entry) => entry.url && entry.url !== "about:blank");
+    if (pages.length === 0) return;
+    const activeIndex = Math.max(0, entries.findIndex((entry) => entry.active));
+    const payload = JSON.stringify({ version: 1, pages, activeIndex });
+    const target = ThreadBrowserRuntime.pagesPath(statePath);
+    await mkdir(dirname(target), { recursive: true });
+    const temporary = `${target}.${process.pid}.tmp`;
+    await writeFile(temporary, payload, { mode: 0o600 });
+    await rename(temporary, target);
+  }
+
+  /**
+   * Rebuild the thread's pages in a freshly attached context.
+   *
+   * The first saved page reuses the blank page `newContext` already made, so a
+   * single-page thread restores without a stray extra tab. The rest are created
+   * in order, because order is what `browser.setActive(1)` and the viewer's tab
+   * strip both mean.
+   *
+   * Every navigation is best-effort: a site that is down, or a URL that
+   * requires a login the cookies no longer cover, must not stop the thread from
+   * attaching. The page is still there, at whatever the browser landed on, and
+   * the agent can see that and act.
+   */
+  private async restorePages(context: BrowserContext): Promise<void> {
+    const path = this.options.statePath;
+    if (!path) return;
+    let saved: { pages?: Array<{ url?: string; name?: string }>; activeIndex?: number } | undefined;
+    try {
+      saved = JSON.parse(await readFile(ThreadBrowserRuntime.pagesPath(path), "utf8"));
+    } catch {
+      return;
+    }
+    const pages = (saved?.pages ?? []).filter((entry) => typeof entry?.url === "string" && entry.url.length > 0);
+    if (pages.length === 0) return;
+
+    const restored: Page[] = [];
+    for (const [index, entry] of pages.entries()) {
+      try {
+        const page = index === 0 ? (context.pages()[0] ?? (await context.newPage())) : await context.newPage();
+        await page.goto(entry.url!, { waitUntil: "domcontentloaded", timeout: 20_000 }).catch(() => undefined);
+        restored.push(page);
+        if (typeof entry.name === "string" && entry.name.length > 0) {
+          this.named.set(entry.name, { name: entry.name, page, openedAt: Date.now() });
+        }
+      } catch {
+        // One page that cannot be rebuilt must not cost the others.
+      }
+    }
+    if (restored.length === 0) return;
+    const activeIndex = Math.min(Math.max(saved?.activeIndex ?? 0, 0), restored.length - 1);
+    this.active = restored[activeIndex];
+    this.activeTargetId = await targetIdOf(restored[activeIndex]!).catch(() => undefined);
   }
 
   /**
@@ -724,6 +1142,24 @@ export class ThreadBrowserRuntime {
      */
     const context = this.context;
     const browser = this.browser;
+    /*
+     * Persist before anything is torn down, and this is the fix for a real bug
+     * rather than a tidy-up.
+     *
+     * `save()` existed and was only reachable if the *model* called it. Nothing
+     * called it on the way out, so the state file was never written at all:
+     * every thread started from a clean context, and every login, cookie and
+     * local-storage value was gone the moment the idle reaper closed the
+     * browser. Reproduced: set a cookie, close the runtime the way the reaper
+     * does, reattach, and the cookie is absent and no state file exists.
+     *
+     * Here rather than in `close()`'s caller because this is the one place that
+     * has both the live context and the knowledge that it is about to be
+     * destroyed. `resetHandles` below clears `this.context`, so this must run
+     * first.
+     */
+    if (context) await this.save().catch(() => undefined);
+
     this.resetHandles();
 
     /*

@@ -44,6 +44,15 @@ export type StepOutcome =
   | "POSTCONDITION_FAILED"
   | "TIMEOUT"
   | "PARTIAL_COVERAGE"
+  /**
+   * The user had taken the browser, so nothing was run.
+   *
+   * Its own outcome rather than an error because it is not a failure: the page
+   * is fine, the program is fine, and the right response is to wait rather than
+   * to retry or to re-plan. An error would push the model toward "make it work",
+   * and the way to make this work is for the user to hand control back.
+   */
+  | "BROWSER_HUMAN_CONTROL"
   | "BROWSER_DISCONNECTED";
 
 export interface StepReceipt {

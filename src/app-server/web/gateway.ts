@@ -25,7 +25,9 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { WebSocketServer, type WebSocket } from "ws";
 
 import { isLoopbackHost } from "../auth.js";
+import type { ThreadBrowsers } from "../thread-browsers.js";
 import type { BrowserHub } from "./hub.js";
+import { attachLiveView, handleBrowserControl, serveLiveViewPage } from "./live-view.js";
 import { parsePreviewPath, proxyPreview } from "./preview.js";
 import {
   gitDiff,
@@ -115,6 +117,16 @@ export interface BrowserGatewayOptions {
    * conversation was open.
    */
   resolveThreadRoot(threadId: string): Promise<string | undefined>;
+  /**
+   * The per-thread browser runtimes, for the live-view pane.
+   *
+   * The pane needs the thread's own page target so it streams that page and not
+   * another thread's. The target is resolved from this, never from the request,
+   * which is what keeps the pane scoped to the requesting thread.
+   */
+  threadBrowsers: ThreadBrowsers;
+  /** Base URL of the Steel API that serves the cast socket. Loopback by default. */
+  steelApiUrl?: string | undefined;
 }
 
 export interface RunningBrowserGateway {
@@ -151,6 +163,28 @@ export async function startBrowserGateway(options: BrowserGatewayOptions): Promi
     // A browser screenshot is binary; the JSON `handleRest` cannot serve it.
     // It is routed before the JSON surface and must be a GET like the rest.
     const parsed = new URL(url, "http://localhost");
+    /*
+     * The browser handoff protocol. A POST that changes who may drive, so it is
+     * routed before `handleRest` (GET-only) and it is not a file route: the
+     * thread id names a conversation, not a directory, and the runtime is looked
+     * up by that id rather than by a path.
+     */
+    if (parsed.pathname === "/api/browser-control") {
+      void handleBrowserControl(request, response, { threadBrowsers: options.threadBrowsers });
+      return;
+    }
+    /*
+     * Steel's own viewer page, proxied so it shares this origin and talks to
+     * our scoped cast bridge rather than Steel's session-wide socket. It is
+     * HTML, so it is served before `handleRest` rather than as JSON.
+     */
+    if (parsed.pathname === "/api/live-view") {
+      void serveLiveViewPage(request, response, {
+        threadBrowsers: options.threadBrowsers,
+        ...(options.steelApiUrl !== undefined ? { steelApiUrl: options.steelApiUrl } : {}),
+      });
+      return;
+    }
     if (parsed.pathname === "/api/screenshot") {
       const screenshotPath = parsed.searchParams.get("path");
       if (screenshotPath) {
@@ -170,39 +204,77 @@ export async function startBrowserGateway(options: BrowserGatewayOptions): Promi
         : handleRest(request, response, root));
   });
 
+  /*
+   * `noServer`, with one dispatcher below, rather than `server` plus a path.
+   *
+   * `ws` aborts the handshake with a 400 when a request's path does not match
+   * its configured `path`, and it destroys the socket doing so. That is fine
+   * with one socket, and fatal with two: the live-view pane is a second
+   * websocket on the same listener (`/api/live`), and the RPC server would kill
+   * its handshake before the live-view handler ever saw it. Owning the upgrade
+   * event lets each path be routed to its own server, and an unknown path be
+   * refused by us with a code we chose.
+   */
   const wss = new WebSocketServer({
-    server: http,
-    path: "/ws",
+    noServer: true,
     perMessageDeflate: false,
     /*
-     * Only a loopback page may hold this socket open.
+     * The socket is for the UI, and only for the UI.
      *
      * This listener accepts browser origins on purpose, because it *is* the
      * browser surface, and the raw protocol's blanket refusal would break the
      * UI. But "accepts browser origins" was implemented as "accepts any origin",
      * and WebSockets are not subject to CORS: the browser sends the handshake
      * regardless and only the server can refuse it. So any page a user visited
-     * could open `ws://127.0.0.1:4180/ws` and speak the full RPC protocol.
+     * could open this socket and speak the full RPC protocol.
      *
-     * Verified end to end before this guard: from a socket with
+     * Verified end to end before the first guard: from a socket with
      * `Origin: http://evil.example.com`, `thread/start` accepted
      * `cwd: ~/.reaper`, and a follow-up `GET /api/file?path=settings.json` read
      * that file from the attacker-chosen root. The same request against a
      * `providers.json` would have returned the provider keys.
      *
-     * A loopback origin is what the UI itself is, in dev (the Vite server on
-     * 127.0.0.1) and in any deployment that serves the built UI from this
-     * listener. A request with no Origin at all is a non-browser client, which
-     * is already inside the loopback boundary this whole surface trusts.
+     * That first guard accepted only loopback origins, which was right about the
+     * attack and wrong about legitimate use: a published deployment serves the
+     * UI from a public host, so the browser's Origin is that host, the guard
+     * refused it, and every socket reset. Reproduced — `http://127.0.0.1:5273`
+     * accepted, `https://167.86.121.124:5273` refused — and it looked exactly
+     * like a frontend that could not reach its backend.
+     *
+     * So the rule is same-origin against the request's own Host, which is what a
+     * browser guarantees for a page this server actually served:
+     *
+     *   - an Origin whose host matches the Host the request arrived on is the
+     *     UI talking to itself, whatever hostname that is, loopback or public
+     *   - a loopback origin is allowed as well, because the dev setup proxies
+     *     from the Vite server on one loopback port to this gateway on another,
+     *     and those two do not share a Host
+     *   - anything else is a page this server did not serve, which is the case
+     *     worth refusing
+     *
+     * A request with no Origin at all is a non-browser client, already inside the
+     * loopback boundary this surface trusts.
      */
     verifyClient: (info: { origin?: string; req: IncomingMessage }) => {
       const origin = info.origin ?? info.req.headers.origin;
       if (origin === undefined || origin === "") return true;
       try {
-        const host = new URL(origin).hostname;
-        if (isLoopbackHost(host)) return true;
+        const originHost = new URL(origin).host;
+        if (isLoopbackHost(new URL(origin).hostname)) return true;
+        // The Host header the client sent, which for the browser is the origin
+        // it is on. Comparing to it is what makes this work for any deployment
+        // hostname without configuring one.
+        const requestHost = info.req.headers.host;
+        if (typeof requestHost === "string" && requestHost.length > 0 && originHost === requestHost) return true;
+        // An explicitly configured public origin, for a deployment behind a
+        // proxy that rewrites Host.
+        const allowed = (process.env["REAPER_ALLOWED_ORIGINS"] ?? "")
+          .split(",")
+          .map((entry) => entry.trim())
+          .filter((entry) => entry.length > 0);
+        if (allowed.includes(origin)) return true;
       } catch {
-        // A malformed Origin is not a loopback one.
+        // A malformed Origin is not one of ours.
       }
       return false;
     },
@@ -226,6 +298,56 @@ export async function startBrowserGateway(options: BrowserGatewayOptions): Promi
     }));
   });
 
+  /*
+   * The live browser pane's socket.
+   *
+   * Separate server, separate path, same origin guard: it is the same UI making
+   * the same kind of request, so it gets the same rule rather than a second,
+   * weaker one. The guard itself is reused by asking this server for its
+   * `options.verifyClient`, which is the same function object the RPC server
+   * validates with.
+   */
+  const liveWss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
+  const liveView = attachLiveView(liveWss, {
+    threadBrowsers: options.threadBrowsers,
+    ...(options.steelApiUrl !== undefined ? { steelApiUrl: options.steelApiUrl } : {}),
+  });
+
+  const rpcUpgrade = wss.options.verifyClient;
+  http.on("upgrade", (request, socket, head) => {
+    const pathname = (request.url ?? "/").split("?")[0] ?? "/";
+    /*
+     * The live socket also accepts the thread id as a path segment, because
+     * Steel's viewer appends its own query to whatever base it is given and a
+     * base that already carried `?threadId=` produced a malformed URL. So the
+     * prefix is part of the route, not a fixed path.
+     */
+    const isLivePath = pathname === "/api/live" || pathname.startsWith("/api/live/");
+    if (pathname !== "/ws" && !isLivePath) {
+      socket.destroy();
+      return;
+    }
+    /*
+     * The same Origin check the RPC socket uses, applied before either route.
+     * A live socket is read *and* write access to a browser, so it must not be
+     * reachable from an origin the RPC socket would refuse.
+     */
+    if (typeof rpcUpgrade === "function") {
+      const originHeader = request.headers.origin;
+      const allowed = (rpcUpgrade as (info: { origin?: string; req: IncomingMessage }) => boolean)({
+        ...(originHeader === undefined ? {} : { origin: originHeader }),
+        req: request,
+      });
+      if (!allowed) {
+        socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+    }
+    if (liveView.handleUpgrade(request, socket, head)) return;
+    wss.handleUpgrade(request, socket, head, (client) => wss.emit("connection", client, request));
+  });
+
   await new Promise<void>((resolve, reject) => {
     http.once("error", reject);
     http.listen(options.port, options.host, () => {
@@ -239,7 +361,7 @@ export async function startBrowserGateway(options: BrowserGatewayOptions): Promi
     url: `http://${options.host}:${actualPort}`,
     port: actualPort,
     async close(): Promise<void> {
-      await closeServer(wss, http);
+      await closeServer(wss, liveWss, http);
     },
   };
 }
@@ -500,13 +622,16 @@ function replyError(socket: WebSocket, id: string | number, code: number, messag
   socket.send(JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } }));
 }
 
-function closeServer(wss: WebSocketServer, http: Server): Promise<void> {
+function closeServer(rpc: WebSocketServer, live: WebSocketServer, http: Server): Promise<void> {
   return new Promise((resolve) => {
     // `wss.close()` waits for every client socket to go away, and `http.close()`
     // waits for every keep-alive connection. Neither ends on its own, so drop
-    // them explicitly first.
-    for (const client of wss.clients) client.terminate();
-    wss.close(() => http.close(() => resolve()));
+    // them explicitly first. Both websocket servers are dropped, because a live
+    // view holds a socket that would otherwise keep the listener open.
+    for (const client of rpc.clients) client.terminate();
+    for (const client of live.clients) client.terminate();
+    rpc.close(() => undefined);
+    live.close(() => http.close(() => resolve()));
     http.closeAllConnections();
   });
 }

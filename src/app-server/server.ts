@@ -83,6 +83,16 @@ export interface RunningAppServer {
   manager: ReaperThreadManager;
   /** Present when the `web` option was requested and the gateway is mounted. */
   web?: RunningBrowserGateway;
+  /**
+   * The per-thread browser runtimes this server owns.
+   *
+   * Exposed because the gateway resolves a live-view request against *this*
+   * registry, and a caller that wants to test or drive the live pane has to
+   * reach the same one. Constructing a second `ThreadBrowsers` would attach its
+   * own CDP connections and the server would not know the thread, which is
+   * exactly how the pane reports "no browser" for a page that is plainly open.
+   */
+  threadBrowsers: ThreadBrowsers;
   stop(): Promise<void>;
 }
 
@@ -294,6 +304,16 @@ export async function startAppServer(options: StartAppServerOptions): Promise<Ru
       port: options.web.port ?? 0,
       workspaceRoot: options.workspaceRoot,
       hub,
+      threadBrowsers,
+      /*
+       * Where Steel's cast socket lives. Derived from the CDP URL so a
+       * deployment that moves Steel to another host keeps the live pane
+       * working: the browser port is 9222 and the API port is 3000 on the same
+       * host, which is the layout every Steel install uses.
+       */
+      ...(steelApiUrlFor(options.browserCdpUrl) !== undefined
+        ? { steelApiUrl: steelApiUrlFor(options.browserCdpUrl)! }
+        : {}),
       // A thread's own workspace root, read from its persisted metadata. This
       // is what scopes the files/diff panes to the conversation rather than to
       // whatever directory the app-server happened to start in.
@@ -317,6 +337,7 @@ export async function startAppServer(options: StartAppServerOptions): Promise<Ru
   return {
     ready,
     manager,
+    threadBrowsers,
     ...(browser ? { web: browser } : {}),
     async stop(): Promise<void> {
       if (stopped) return;
@@ -338,6 +359,36 @@ export async function startAppServer(options: StartAppServerOptions): Promise<Ru
       ]);
     },
   };
+}
+
+/**
+ * Steel's REST/cast base URL, from the browser's CDP URL.
+ *
+ * Steel runs two listeners on one host: the Chrome debugging port the agent
+ * connects to over CDP, and the Steel API that serves the session REST routes
+ * and the cast socket. The live-view pane needs the second, and the configured
+ * value names the first, so the port is swapped rather than configured twice:
+ * two settings that must agree is one setting too many, and a mismatch would
+ * show up only as a pane that never connects.
+ *
+ * Returns undefined for a URL that cannot be parsed or is not loopback-ish, so
+ * a caller falls back to the default rather than being handed a bad host.
+ */
+function steelApiUrlFor(cdpUrl: string | undefined): string | undefined {
+  if (cdpUrl === undefined || cdpUrl.length === 0) return undefined;
+  try {
+    const parsed = new URL(cdpUrl);
+    const port = parsed.port === "" ? undefined : Number(parsed.port);
+    /*
+     * Only the known Steel pairing is rewritten. A CDP URL on any other port is
+     * a browser Reaper did not start, and guessing an API port for it would
+     * point the pane at an unrelated service.
+     */
+    if (port !== 9222) return undefined;
+    return `${parsed.protocol === "https:" ? "https" : "http"}://${parsed.hostname}:3000`;
+  } catch {
+    return undefined;
+  }
 }
 
 function createHttpServer(): HttpServer {

@@ -119,3 +119,62 @@ test("several failed checks are all named", () => {
   assert.match(report.summary, /\/dashboard/);
   assert.match(report.summary, /Welcome/);
 });
+
+/*
+ * A search result is not a status message.
+ *
+ * Reported from a live run: a DuckDuckGo results page was flagged as a rejected
+ * action because one result's *link title* was "Runtime Error (SOLVED) - Cockos
+ * Incorporated Forums". The action had succeeded. The operator was told it
+ * failed, which is worse than saying nothing, because the next one of these
+ * gets ignored.
+ *
+ * The earlier guard excluded prose by length and stop-words, which does not help
+ * when the label is short and title-cased. The rule is now about the role: a
+ * link, heading or button is named by the page author to describe navigation,
+ * not to report on this step.
+ */
+test("a link whose title contains a failure word is not a failure", () => {
+  const outline = [
+    '- link "Runtime Error (SOLVED) - Cockos Incorporated Forums"',
+    '- link "Failed to install drivers - Stack Overflow"',
+  ].join("\n");
+  const report = verifyStep(receipt(), undefined, outline);
+  assert.equal(report.passed, true, "a search result must not be read as a page error");
+});
+
+test("a heading or button containing a failure word is not a failure", () => {
+  const outline = '- heading "Error handling"\n- button "Try again"';
+  const report = verifyStep(receipt(), undefined, outline);
+  assert.equal(report.passed, true, "a label is not a message");
+});
+
+/*
+ * The counterpart, so the narrowing above cannot be widened into uselessness: a
+ * role that is not a label still carries a real message.
+ */
+test("static text that reports a failure is still caught", () => {
+  const report = verifyStep(receipt(), undefined, '- paragraph "Your card was denied"');
+  assert.equal(report.passed, false);
+  assert.match(report.summary, /denied/);
+});
+
+/*
+ * An alert or status role is not, by itself, a failure.
+ *
+ * This branch returned on *any* alert or status element, on the theory that a
+ * live region only exists to carry a message. Three separate live runs proved
+ * otherwise on three unrelated sites: a promo region named "Announcement
+ * banner" was reported as a rejected action each time. The role has to earn the
+ * reading, and the name still has to say something went wrong.
+ */
+test("an alert role whose name is not a failure is not reported", () => {
+  const report = verifyStep(receipt(), undefined, '- status "Announcement banner"');
+  assert.equal(report.passed, true, "a promo region is not a rejection");
+});
+
+test("an alert role that does report a failure is still reported", () => {
+  const report = verifyStep(receipt(), undefined, '- alert "Your card was denied"');
+  assert.equal(report.passed, false);
+  assert.match(report.summary, /denied/i);
+});

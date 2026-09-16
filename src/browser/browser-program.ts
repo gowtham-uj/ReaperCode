@@ -89,9 +89,28 @@ export class BrowserFacade {
     return this.scoped(await this.runtime.newPage(name));
   }
 
-  /** Every open page, with its name and whether it is the active one. */
-  pages(): Array<{ name: string | undefined; url: string; active: boolean; index: number }> {
-    return this.runtime.pagesForDisplay();
+  /**
+   * Every open page in this thread, scoped, in display order.
+   *
+   * This returns the real pages rather than descriptors, because the
+   * documented usage is `await browser.pages()` followed by calling methods on
+   * the elements: the skill's "multiple pages" example and the tool
+   * description both read `browser.pages()` as a list of tabs, and a caller
+   * doing `(await browser.pages())[0].url()` is following the stated contract.
+   *
+   * It used to return `{name, url, active, index}` records, so that call threw
+   * "p.url is not a function". Worse, it was inconsistent with the rest of the
+   * surface: `browser.newPage("cart")` hands back a real page, so the same
+   * object type a program gets from `newPage` did not match what it got from
+   * `pages()`, and the failure looked like a bug in the caller's program
+   * rather than in the API.
+   *
+   * The name and active flag are attached as non-enumerable properties so a
+   * program that wants them still can, without them showing up when the list is
+   * serialized into the transcript.
+   */
+  async pages(): Promise<Page[]> {
+    return this.runtime.describePages();
   }
 
   /**

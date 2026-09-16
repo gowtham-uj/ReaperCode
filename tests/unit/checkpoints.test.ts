@@ -250,3 +250,53 @@ test("a restore brings back files deleted after the checkpoint", async () => {
   assert.equal(await readFile(tracked, "utf8"), "export const answer = 41;\n", "a deleted tracked file must come back");
   assert.equal(await readFile(untracked, "utf8"), "untracked notes\n", "a deleted untracked file must come back");
 });
+
+/**
+ * A checkpoint still restores in a workspace whose `.reaper/` is gitignored.
+ *
+ * This is the standard Reaper workspace, and a checkpoint in one could not be
+ * restored at all. The untracked-inclusive patch was built with
+ * `git add -A -- . ':(exclude).reaper'`, on the theory that excluding a path is
+ * the same as not naming it. It is not: a bare `add -A -- .` skips an ignored
+ * path silently, but an exclude pathspec that names that same ignored path
+ * makes git exit 1 with "The following paths are ignored by one of your
+ * .gitignore files". The catch around the capture marked the whole checkpoint
+ * `restoreAvailable: false`, so nothing restored, not even the tracked files
+ * that the other two patches covered.
+ *
+ * Reproduced before the fix, on git 2.39.5, for `:(exclude).reaper`,
+ * `:(exclude).reaper/` and `:(exclude).reaper/**` alike. The fixture here has no
+ * `.gitignore`, so this test adds one, which is what makes it the regression
+ * case rather than a duplicate of the untracked tests above.
+ */
+test("a checkpoint restores in a workspace whose .reaper directory is gitignored", async () => {
+  const workspaceRoot = await createTempWorkspace();
+  await writeFile(path.join(workspaceRoot, ".gitignore"), ".reaper/\n", "utf8");
+  execFileSync("git", ["add", ".gitignore"], { cwd: workspaceRoot });
+  execFileSync("git", ["commit", "-m", "ignore .reaper"], {
+    cwd: workspaceRoot,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "Reaper Tests",
+      GIT_AUTHOR_EMAIL: "reaper-tests@example.com",
+      GIT_COMMITTER_NAME: "Reaper Tests",
+      GIT_COMMITTER_EMAIL: "reaper-tests@example.com",
+    },
+  });
+
+  const appPath = path.join(workspaceRoot, "src", "app.ts");
+  await writeFile(appPath, "export const answer = 41;\nexport const line2 = 1;\n", "utf8");
+  const untracked = path.join(workspaceRoot, "notes", "keep.md");
+  await mkdir(path.dirname(untracked), { recursive: true });
+  await writeFile(untracked, "pre-existing untracked\n", "utf8");
+
+  const checkpoint = await createCheckpoint({ workspaceRoot, reason: "gitignored .reaper" });
+  assert.equal(checkpoint.restoreAvailable, true, "a gitignored .reaper must not disable the checkpoint");
+
+  await writeFile(appPath, "export const answer = 41;\nexport const line2 = 2;\n", "utf8");
+  const result = await restoreCheckpoint(workspaceRoot, checkpoint.id);
+
+  assert.equal(result.restored, true);
+  assert.match(await readFile(appPath, "utf8"), /line2 = 1/, "the tracked file must be restored");
+  assert.equal(await readFile(untracked, "utf8"), "pre-existing untracked\n", "the untracked file must survive");
+});

@@ -16,9 +16,14 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { startTortureSite, type RunningTortureSite } from "../fixtures/torture-site.js";
 import { probeBrowser, skipUnless } from "../fixtures/browser-availability.js";
+import { ThreadBrowsers } from "../../src/app-server/thread-browsers.js";
 import { ThreadBrowserRuntime } from "../../src/browser/thread-runtime.js";
 import { renderReceipt } from "../../src/browser/transaction.js";
 
@@ -217,6 +222,98 @@ test("the whole chain: open, see, act, observe", { skip }, async () => {
       rendered.length < first.text.length,
       `the delta must cost less than the page: ${rendered.length} vs ${first.text.length}`,
     );
+  }
+});
+
+/*
+ * A thread's browser state survives being closed and reopened.
+ *
+ * This was broken in a way that produced no error at all: `save()` existed but
+ * only the *model* could reach it, nothing called it on the way out, and no
+ * state file was ever written. So every thread began from a clean context and
+ * every login was lost the moment the idle reaper closed the browser. The
+ * symptom is a user signing in to the same site every session and never being
+ * told why.
+ *
+ * Asserted through a real close and reopen, because the failure was in the
+ * wiring rather than in the serialization: the save and load functions were
+ * both correct, and neither was called.
+ */
+test("a thread's cookies survive its browser being closed and reopened", { skip }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "browser-persist-"));
+  const statePath = join(root, "state.json");
+  try {
+    const first = new ThreadBrowserRuntime({ threadId: "persist-check", cdpUrl: CDP_URL, statePath });
+    const { context, page } = await first.ensureReady();
+    await page.goto(`${site!.origin}/basic`, { waitUntil: "domcontentloaded" }).catch(() => undefined);
+    await context.addCookies([{ name: "sid", value: "PERSIST-ME", domain: new URL(site!.origin).hostname, path: "/" }]);
+
+    // A step persists on its own, without the model asking.
+    await first.step(async () => "noop").catch(() => undefined);
+    assert.equal(existsSync(statePath), true, "a completed step must write the thread's state");
+
+    // Closing is the reaper's path, and it must also persist.
+    await first.close();
+    assert.equal(existsSync(statePath), true);
+
+    const second = new ThreadBrowserRuntime({ threadId: "persist-check", cdpUrl: CDP_URL, statePath });
+    try {
+      const reopened = (await second.ensureReady()).context;
+      const cookies = await reopened.cookies(site!.origin);
+      assert.equal(
+        cookies.some((cookie) => cookie.name === "sid" && cookie.value === "PERSIST-ME"),
+        true,
+        "the cookie must still be there after a reopen",
+      );
+    } finally {
+      await second.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/*
+ * A thread's open pages survive a restart, not just its cookies.
+ *
+ * Cookies restore a login but not the work: a thread with three tabs open came
+ * back as one blank page, and the agent redid the navigation that got it there.
+ * The pages are the thread's working state and they were the one part of it
+ * nothing persisted.
+ *
+ * The names and the active page are asserted alongside the URLs, because the
+ * agent addresses pages by name and "the page I was on" is part of the state: a
+ * restore that returned the right URLs under different names would be a thread
+ * whose own instructions no longer resolved.
+ */
+test("a thread's pages, names and active tab survive a restart", { skip }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "browser-pages-"));
+  const statePathFor = (threadId: string): string => join(root, `${threadId}.json`);
+  try {
+    const first = new ThreadBrowsers({ cdpUrl: CDP_URL, statePathFor });
+    const runtime = first.forThread("pages-check");
+    const { page } = await runtime.ensureReady();
+    await page.goto(`${site!.origin}/basic`, { waitUntil: "domcontentloaded" }).catch(() => undefined);
+    const second = await runtime.newPage("second");
+    await second.goto(`${site!.origin}/form`, { waitUntil: "domcontentloaded" }).catch(() => undefined);
+    await runtime.save();
+
+    // A fresh registry over the same state files stands in for a restarted server.
+    const restarted = new ThreadBrowsers({ cdpUrl: CDP_URL, statePathFor });
+    try {
+      const reopened = restarted.forThread("pages-check");
+      const pages = await reopened.pageTargets();
+      const urls = pages.map((entry) => entry.url);
+      assert.equal(urls.length >= 2, true, `expected both pages back, got ${JSON.stringify(urls)}`);
+      assert.equal(pages.some((entry) => entry.name === "second"), true, "the name must survive, since the agent addresses pages by it");
+      assert.equal(pages.some((entry) => entry.active && entry.url.includes("/form")), true, "the active page must be the one the thread was on");
+      assert.equal((await reopened.setActive("second")).url().includes("/form"), true, "setActive by name must still resolve");
+    } finally {
+      await restarted.close();
+    }
+    await first.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

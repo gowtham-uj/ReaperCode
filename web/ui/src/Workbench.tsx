@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { BrowserSurface } from "@reaper/web-shared";
 import type { BackgroundProcess, BackgroundState } from "./background.js";
 import { DiffView } from "./Transcript.jsx";
+import { LiveBrowser } from "./LiveBrowser.jsx";
 
 export type WorkbenchMode = "files" | "diff" | "output" | "preview" | "browser";
 interface TreeEntry { name: string; path: string; type: "file" | "directory" }
@@ -122,7 +123,7 @@ export function Workbench({ baseUrl, threadId, lastEditedPath, workspaceRevision
         ))}
         <label className="follow-toggle"><input type="checkbox" checked={follow} onChange={(event) => setFollow(event.currentTarget.checked)} />Follow edits</label>
       </div>
-      <div className="workbench-body" id="workbench-panel" role="tabpanel" aria-labelledby={`workbench-tab-${mode}`} tabIndex={-1}>
+      <div className="workbench-body" id="workbench-panel" role="tabpanel" aria-labelledby={`workbench-tab-${mode}`} tabIndex={-1} data-mode={mode}>
         {mode === "files" && (
           selected ? (
             <div className="file-view">
@@ -159,7 +160,7 @@ export function Workbench({ baseUrl, threadId, lastEditedPath, workspaceRevision
         {mode === "diff" && (diff.loading ? <p className="empty">Loading diff…</p> : diff.value ? <DiffView diff={diff.value} /> : <p className="empty">No uncommitted changes.</p>)}
         {mode === "output" && <OutputPane background={background} />}
         {mode === "preview" && <PreviewPane baseUrl={baseUrl} background={background} />}
-        {mode === "browser" && <BrowserPane baseUrl={baseUrl} threadId={threadId} surface={browser} />}
+        {mode === "browser" && <LiveBrowser baseUrl={baseUrl} threadId={threadId} surface={browser} />}
       </div>
     </section>
   );
@@ -318,46 +319,6 @@ function PreviewPane({ baseUrl, background }: { baseUrl: string; background: Bac
         {activePort && <button className="button preview-reload" data-variant="ghost" onClick={() => setNonce((value) => value + 1)}>Reload</button>}
       </div>
       {src ? <iframe className="preview-frame" title="Live preview" src={src} sandbox="allow-scripts allow-forms allow-same-origin allow-popups" /> : <p className="empty">No dev server detected. Start one in the background or enter its port.</p>}
-    </div>
-  );
-}
-
-/*
- * The "Screen stream" toggle that used to live here streamed a full-desktop
- * capture from the native live-view server. That server was started by
- * `start_live_view`, which is gone with the rest of the native-desktop tools,
- * so the toggle could only ever have produced a 502. A control that cannot
- * succeed is worse than no control: it looks like a browser feature that is
- * broken, rather than a capability that was removed on purpose.
- */
-function BrowserPane({ baseUrl, threadId, surface }: { baseUrl: string; threadId: string | undefined; surface: BrowserSurface | undefined }) {
-  const [nonce, setNonce] = useState(0);
-  return (
-    <div className="browser">
-      <BrowserToolbar reload={() => setNonce((value) => value + 1)} />
-      {surface ? <BrowserPage baseUrl={baseUrl} threadId={threadId} surface={surface} nonce={nonce} /> : <p className="empty">The agent has not used the browser yet.</p>}
-    </div>
-  );
-}
-
-function BrowserToolbar({ reload }: { reload(): void }) {
-  return <div className="browser-bar"><button className="button browser-reload" data-variant="ghost" onClick={reload}>Reload</button></div>;
-}
-
-function BrowserPage({ baseUrl, threadId, surface, nonce }: { baseUrl: string; threadId: string | undefined; surface: BrowserSurface; nonce: number }) {
-  const shot = surface.screenshotPath && threadId ? `${baseUrl}/api/screenshot?threadId=${encodeURIComponent(threadId)}&path=${encodeURIComponent(surface.screenshotPath)}&r=${nonce}` : undefined;
-  const vw = surface.viewport?.width;
-  const vh = surface.viewport?.height;
-  return (
-    <div className="browser-page">
-      <header className="browser-meta"><a href={surface.url} target="_blank" rel="noreferrer noopener">{surface.title || surface.url}</a></header>
-      {shot ? (
-        <div className="browser-stage" style={vw && vh ? { aspectRatio: `${vw} / ${vh}` } : undefined}>
-          <img className="browser-shot" src={shot} alt={`Screenshot of ${surface.url}`} />
-          {vw && vh ? surface.interactive.map((element) => <span className="browser-box" title={`${element.tag}: ${element.text}`} key={element.ref} style={{ left: `${element.x / vw * 100}%`, top: `${element.y / vh * 100}%`, width: `${element.width / vw * 100}%`, height: `${element.height / vh * 100}%` }} />) : null}
-        </div>
-      ) : <p className="empty">No screenshot for the latest browser action.</p>}
-      {surface.interactive.length > 0 && <ul className="browser-elements">{surface.interactive.map((element) => <li className="browser-element" key={element.ref}><span className="browser-ref">{element.ref}</span><span>{element.text || `<${element.tag}>`}</span></li>)}</ul>}
     </div>
   );
 }

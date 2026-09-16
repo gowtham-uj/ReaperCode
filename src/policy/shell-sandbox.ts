@@ -22,8 +22,10 @@
  * all in terms of the real path, and rewriting them at the boundary would be a
  * second translation layer to get wrong.
  *
- * Network is deliberately left shared. The agent installs packages and calls
- * APIs, and this is a filesystem boundary, not an egress policy.
+ * Capabilities are dropped and the network namespace is unshared. Both were
+ * added after the boundary above was walked out of, and both are load-bearing
+ * for the same reason: a mount this process can remount is not read-only, and
+ * a socket it can open is not confined. See `sandboxNamespaceTail`.
  */
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -126,6 +128,7 @@ function probeBubblewrap(): { path: string } | null {
     "--unshare-pid",
     "--unshare-ipc",
     "--unshare-uts",
+    "--cap-drop", "ALL",
     "--die-with-parent",
     "--",
     "/bin/sh", "-c", "exit 0",
@@ -286,6 +289,30 @@ function sandboxNamespaceTail(root: string, workingDirectory: string): string[] 
     "--unshare-ipc",
     "--unshare-uts",
     "--unshare-net",
+    /*
+     * Drop every capability, and this is the load-bearing one.
+     *
+     * The read-only binds above are `MS_RDONLY` on mounts this process still
+     * holds `CAP_SYS_ADMIN` over. A container that ships bwrap inherits the
+     * container's capability set, and on this host that is the full 41-bit set
+     * with `CAP_SYS_ADMIN` set and no seccomp filter, so `mount -o remount,rw
+     * /usr` cleared the read-only flag and the sandbox wrote the host
+     * filesystem: `/usr`, the host's own `/work/node_modules` (which Reaper
+     * then `require`d), and `/etc/hosts`, `/etc/resolv.conf`, `/etc/hostname`,
+     * which are the host's files rather than the container's overlay.
+     *
+     * The same capability also reached `/proc/kcore`, `kernel.core_pattern`,
+     * and `/proc/sysrq-trigger`. `--cap-drop ALL` closes all of them at once,
+     * because none of them needs anything but `CAP_SYS_ADMIN` over a mount the
+     * process can already see. Verified: with the flag, `CapEff` is
+     * `0000000000000000`, the remount fails with `EPERM`, and every intended
+     * mount still works. Without it, the escape reproduces in one line.
+     *
+     * Not `--unshare-user`: that also closes the escape, but it changes the uid
+     * the command runs as, and the workspace's files are written by the host
+     * user, so a command that creates a file would leave it owned by nobody.
+     */
+    "--cap-drop", "ALL",
     "--die-with-parent",
     "--new-session",
     "--chdir", insideWorkspace(root, workingDirectory) ? path.resolve(workingDirectory) : root,

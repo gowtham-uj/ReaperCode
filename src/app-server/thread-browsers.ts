@@ -18,6 +18,7 @@
  * to nothing else. A thread that wants to start over closes its own context.
  */
 
+import { BrowserControlRegistry } from "../browser/control-lease.js";
 import { ThreadBrowserRuntime } from "../browser/thread-runtime.js";
 import type { TransitionDb } from "../browser/transition-db.js";
 
@@ -54,6 +55,15 @@ export class ThreadBrowsers {
   /** When each thread's browser was last used, for the idle reaper. */
   private readonly lastUsed = new Map<string, number>();
   private reaper: NodeJS.Timeout | undefined;
+  /**
+   * Who may drive each thread's browser.
+   *
+   * Held here, not in each runtime, because the gateway's control endpoint
+   * looks a thread up by id and the browser tool holds a runtime: one registry
+   * on the server is what makes those two the same answer. Created here rather
+   * than injected because there is nothing to configure about it.
+   */
+  readonly control = new BrowserControlRegistry();
 
   constructor(private readonly options: ThreadBrowsersOptions) {}
 
@@ -76,10 +86,28 @@ export class ThreadBrowsers {
       cdpUrl: this.options.cdpUrl,
       ...(this.options.statePathFor ? { statePath: this.options.statePathFor(threadId) } : {}),
       ...(this.options.flows ? { flows: this.options.flows } : {}),
+      // One registry for the whole server, so the HTTP handler that takes
+      // control and the browser tool that must respect it read one record.
+      control: this.control,
     });
     this.runtimes.set(threadId, runtime);
     this.lastUsed.set(threadId, Date.now());
     return runtime;
+  }
+
+  /**
+   * The runtime for a thread if one already exists, without creating one.
+   *
+   * Distinct from `forThread` on purpose, and the distinction is load-bearing
+   * for the live browser pane. That pane asks "is this thread driving a browser
+   * I can show", and `forThread` would answer yes to everything: it constructs a
+   * runtime on demand, so a pane opened for a thread that has never touched the
+   * browser would create one and then wait for a page that will never come.
+   * `peek` answers the question actually asked, and returns undefined for a
+   * thread with no browser, which the pane reports as "waiting for the agent".
+   */
+  peek(threadId: string): ThreadBrowserRuntime | undefined {
+    return this.runtimes.get(threadId);
   }
 
   /** Start the idle reaper. Called once, by the app-server, at boot. */

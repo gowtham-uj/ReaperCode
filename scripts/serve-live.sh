@@ -134,6 +134,36 @@ if [ "$BUILD" = "1" ]; then
 fi
 
 # ---------------------------------------------------------------- start
+#
+# Load the workspace `.env` into the server's environment before starting it.
+#
+# The provider keys live here and nowhere else: there is no
+# `~/.reaper/providers.json` on this box, so the *only* source of a DeepSeek key
+# is this file. Nothing in the server reads it, so a server started from a shell
+# that had already sourced it works, and one started from a bare shell fails its
+# provider preflight with "Environment variable 'DEEPSEEK_API_KEY' is required
+# for provider 'deepseek'". That is exactly what a redeploy did to this stack:
+# the process was healthy, the ports answered, and every turn died on a key the
+# previous server had inherited and this one did not.
+#
+# Sourced before the listeners start so the whole process tree, including the
+# worker the app-server spawns, sees the same environment. `set -a` marks every
+# assignment for export, which matters because the file writes both bare
+# `NAME=value` and `export NAME=value` and only the second would otherwise
+# survive into a child.
+#
+# Values are read from disk as the user wrote them and are never printed. The
+# file is checked in nowhere and is mode 600.
+if [ -f "$ROOT/.env" ]; then
+  say "loading $ROOT/.env"
+  set -a
+  # shellcheck disable=SC1091
+  . "$ROOT/.env"
+  set +a
+else
+  say "no .env at $ROOT; provider keys must come from Settings or the shell"
+fi
+
 say "starting the app-server (log: $APP_LOG)"
 REAPER_SESSION_ID="${REAPER_SESSION_ID:-live}" \
   setsid nohup npx tsx scripts/run-web.ts >"$APP_LOG" 2>&1 </dev/null &

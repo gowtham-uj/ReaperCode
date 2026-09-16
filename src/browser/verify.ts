@@ -77,6 +77,52 @@ export interface VerificationReport {
 const FAILURE_MARKERS = ["error", "invalid", "required", "failed", "not found", "denied", "incorrect", "try again", "unable to"];
 
 /**
+ * Roles whose accessible name is a label rather than a message.
+ *
+ * A link named "Runtime Error (SOLVED) - Cockos Incorporated Forums" is a search
+ * result; a heading named "Error handling" is a section title; a button named
+ * "Retry" is an action. None of them is the page reporting that the step just
+ * failed, and treating them as one is a false failure on an ordinary page.
+ *
+ * Deliberately a deny-list of *labels*, not an allow-list of *message* roles, so
+ * an unfamiliar role that carries static text still gets checked. Missing a
+ * message is a smaller failure than inventing one, but the roles that actually
+ * announce a rejection (alert, status) are handled before this loop runs.
+ */
+/**
+ * Whether a piece of page text says something went wrong.
+ *
+ * One predicate, used by both branches of `findFailureMarker`, so an alert
+ * region and a paragraph are judged by the same rule. They differ in how much
+ * other filtering is applied first, not in what counts as a failure.
+ */
+function mentionsFailure(text: string): boolean {
+  const lower = text.toLowerCase();
+  return FAILURE_MARKERS.some((marker) => lower.includes(marker));
+}
+
+const NAME_BEARING_ROLES = new Set([
+  "link",
+  "button",
+  "heading",
+  "tab",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "option",
+  "checkbox",
+  "radio",
+  "switch",
+  "treeitem",
+  "img",
+  "image",
+  "figure",
+  "caption",
+  "columnheader",
+  "rowheader",
+]);
+
+/**
  * Run the checks that are free.
  *
  * Every one of these is a comparison against the receipt, so this costs nothing
@@ -180,21 +226,57 @@ function findFailureMarker(outline: string): string | undefined {
   const lines = outline.split("\n");
   for (const line of lines) {
     /*
-     * Only text the page is showing as content, so a button labelled "Retry"
-     * and a URL containing "error" do not count. Alert and status roles are
-     * where a site announces a rejection.
+     * Alert and status roles are where a site announces a rejection, but the
+     * *role alone* is not the announcement.
+     *
+     * This branch used to return on any alert or status element, on the theory
+     * that a live region only exists to carry a message. That is wrong about
+     * real pages: an alert or status role with a name like "Announcement
+     * banner" is a promo region, and every one of them was reported as a
+     * rejection. Three separate live runs hit it, on three unrelated sites,
+     * which is the shape of a rule that is wrong rather than a page that is
+     * unusual.
+     *
+     * So the role earns the right to be read as a message, and the name still
+     * has to say something went wrong. That is the same test the static-text
+     * branch below applies; the difference is only that a live region is worth
+     * reading even when its name is short, where a `generic` with a one-word
+     * name is usually a layout container.
      */
     const match = /- (alert|status)\s+"([^"]{1,80})"/i.exec(line);
-    if (match) return match[2]!.trim();
+    if (match) {
+      const name = match[2]!.trim();
+      if (mentionsFailure(name)) return name;
+    }
   }
   /*
-   * Then named elements, and only where the name is a short message rather than
-   * prose. The first version scanned every line for any marker word, which
-   * reported a page containing "Read the error handling guide" as an error, and
-   * a check that fires on ordinary text is a check that gets ignored.
+   * Then static text, and only where the name is a short message rather than
+   * prose or a label.
+   *
+   * Two narrower versions of this came before and both misfired, so the rules
+   * are worth stating rather than rediscovering.
+   *
+   * The first scanned every line for any marker word, which reported "Read the
+   * error handling guide" as an error.
+   *
+   * The second excluded prose by length and stop-words but still scanned every
+   * element, and that is what broke on real pages: a DuckDuckGo result page was
+   * reported as a rejected action because one *link title* read "Runtime Error
+   * (SOLVED) - Cockos Incorporated Forums". That is a search result, not a
+   * status message, and the operator was told an action had failed when it had
+   * succeeded. A check that fires on page content the user chose to search for
+   * is worse than no check, because it teaches the reader to ignore it.
+   *
+   * So elements whose name is a *label* are skipped outright. A link, button,
+   * heading, tab or menu item is named by the page author to describe
+   * navigation or structure; the title of a document is not a statement about
+   * this step. A rejection is announced through an alert or status role (handled
+   * above) or as static text, which is what remains: paragraph, text, generic.
    */
   for (const line of lines) {
     if (!/^(?:\s*)- /.test(line)) continue;
+    const role = /^\s*- ([a-zA-Z]+)/.exec(line)?.[1]?.toLowerCase();
+    if (role === undefined || NAME_BEARING_ROLES.has(role)) continue;
     const name = /"([^"]{1,80})"/.exec(line)?.[1];
     if (name === undefined) continue;
     const trimmed = name.trim();
@@ -203,8 +285,7 @@ function findFailureMarker(outline: string): string | undefined {
      * direct ("Email is required"), where documentation and body copy are not.
      */
     if (trimmed.length > 60 || /\s(and|or|the|a|to|for)\s/i.test(trimmed.slice(0, 30))) continue;
-    const lower = trimmed.toLowerCase();
-    if (FAILURE_MARKERS.some((marker) => lower.includes(marker))) return trimmed;
+    if (mentionsFailure(trimmed)) return trimmed;
   }
   return undefined;
 }

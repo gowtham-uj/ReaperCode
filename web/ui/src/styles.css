@@ -1067,6 +1067,16 @@ body[data-ds-reaper-theme] { --syntax-keyword: #dc82bb; }
 .tab-presence { display: inline-block; width: 5px; height: 5px; margin-left: 5px; vertical-align: 2px; border-radius: 50%; background: var(--dsw-alias-state-success-primary); }
 .follow-toggle { display: flex; align-items: center; gap: 5px; margin-left: auto; color: var(--dsw-alias-label-caption); font-size: 10px; white-space: nowrap; }
 .workbench-body { min-height: 0; padding: 14px; overflow: auto; }
+/*
+ * The browser pane fills the workbench rather than sitting inside its padding.
+ *
+ * Every other pane is a document that reads better with a margin and can scroll
+ * as a whole. The browser is not: it is a live viewport, so the pane's own
+ * scroll belongs to the page inside it and an outer scrollbar would be a second
+ * one on the same content. The padding goes to zero and the body stops
+ * scrolling, which hands the whole area to the frame.
+ */
+.workbench-body[data-mode="browser"] { padding: 0; overflow: hidden; }
 /* Neither pane stacked anything: `.back-button` has no bottom margin and
  * `.file-path` has no top margin, so in the file view the two ran together and
  * the contents box butted against the path line. */
@@ -1094,14 +1104,38 @@ body[data-ds-reaper-theme] { --syntax-keyword: #dc82bb; }
 .preview-manual input { width: 76px; min-height: 34px; padding: 5px 8px; border: .5px solid var(--dsw-alias-border-l3); border-radius: 9px; background: var(--dsw-specific-input-major); color: inherit; }
 .preview-reload, .browser-reload { margin-left: auto; }
 .preview-frame { flex: 1; min-height: 360px; width: 100%; border: .5px solid var(--dsw-alias-border-l3); border-radius: 12px; background: #fff; }
-.browser-page { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
-.browser-meta a { display: block; overflow: hidden; color: var(--dsw-alias-label-secondary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.browser-stage { position: relative; width: 100%; overflow: hidden; border: .5px solid var(--dsw-alias-border-l3); border-radius: 12px; background: #fff; }
-.browser-shot { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
-.browser-box { position: absolute; border: 1px solid var(--dsw-alias-state-business-primary); border-radius: 3px; background: color-mix(in srgb,var(--dsw-alias-state-business-primary) 20%,transparent); pointer-events: none; }
-.browser-elements { display: flex; flex-direction: column; gap: 3px; list-style: none; margin: 0; padding: 0; }
-.browser-element { display: flex; gap: 7px; font-size: 11px; }
-.browser-ref { flex: none; color: var(--dsw-alias-label-caption); font-family: var(--ds-font-family-code); }
+/* The live browser: Steel's own viewer, framed, plus the control lease bar. */
+.browser-spacer { flex: 1; }
+.browser-owner { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.browser-owner::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--dsw-alias-label-caption); }
+.browser-owner[data-owner="human"] { color: var(--dsw-alias-state-business-primary); }
+/* A pulsing dot only while the human holds input: it is the state that needs
+   noticing, and an always-animating status is one nobody reads. */
+.browser-owner[data-owner="human"]::before { background: var(--dsw-alias-state-business-primary); animation: browser-pulse 1.6s ease-in-out infinite; }
+@keyframes browser-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .browser-owner[data-owner="human"]::before { animation: none; } }
+.browser-note { margin: 0; color: var(--dsw-alias-label-tertiary); font-size: 12px; }
+.browser-note[data-tone="warn"] { color: var(--dsw-alias-state-warning-primary, var(--dsw-alias-label-secondary)); }
+/*
+ * The stage holds the frame and the input blocker, and does not scroll.
+ *
+ * Steel's viewer draws the browser's own chrome and sizes its canvas to the
+ * stream, so the scrollbar belongs to the page inside the frame, not to the
+ * frame itself. A scrolling stage would put two scrollbars on one screen and
+ * make the address bar scroll out of view.
+ */
+/* Squared off, because with the body's padding gone a rounded border would leave
+   four slivers of background showing through at the pane's own corners. */
+.browser-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; border-top: .5px solid var(--dsw-alias-border-l3); background: #171717; }
+.browser-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+/*
+ * The input blocker, present whenever the human does not own the browser.
+ *
+ * It sits above the frame and takes the clicks, so the page stays visible while
+ * being inert. The cursor is the only feedback that the pane is not accepting
+ * input, so it says so.
+ */
+.browser-blocker { position: absolute; inset: 0; z-index: 2; cursor: not-allowed; }
 
 /* Full routed settings page using DeepSeek settings/menu material. */
 .settings-page { height: 100%; overflow-y: auto; background: var(--dsw-alias-bg-base); }

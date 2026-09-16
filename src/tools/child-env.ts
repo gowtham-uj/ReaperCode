@@ -307,6 +307,34 @@ const SENSITIVE_LOOKALIKE_EXACT: ReadonlySet<string> = new Set<string>([
 ]);
 
 /**
+ * Credential-shaped *endings*, matched after the lookalike check.
+ *
+ * The prefix rules above only catch a provider whose name begins with a known
+ * root, so every provider named the other way round leaked: `DIGITAL_OCEAN_API_KEY`
+ * and `CRAZYROUTER_API_KEY` were both passed through to sandboxed children in
+ * full, while `OPENROUTER_API_KEY` was stripped, purely because one starts with
+ * a known root and the others do not. The name is the only signal available
+ * here, and a name ending in `_API_KEY` is a credential regardless of which
+ * word comes before it.
+ *
+ * Suffixes rather than substrings, and conservative ones, so the lookalikes
+ * above stay kept: `PUBLIC_KEY` does not end in `_PRIVATE_KEY`, `TOKEN_TYPE`
+ * does not end in `_ACCESS_TOKEN`. The lookalike check runs first for the same
+ * reason.
+ */
+const SENSITIVE_SUFFIXES: ReadonlyArray<string> = [
+  "_API_KEY",
+  "_API_TOKEN",
+  "_ACCESS_KEY",
+  "_ACCESS_TOKEN",
+  "_AUTH_KEY",
+  "_AUTH_TOKEN",
+  "_PRIVATE_KEY",
+  "_SECRET_KEY",
+  "_CLIENT_SECRET",
+];
+
+/**
  * Variable names that should NEVER be passed through to children,
  * regardless of value or allowlist, because they control Node /
  * process behavior and have been historically abused for code injection
@@ -454,6 +482,14 @@ export function isSensitiveEnvName(name: string, allowlist: ReadonlySet<string>)
   // Explicit exact matches.
   for (const sensitive of SENSITIVE_EXACT) {
     if (sensitive.toUpperCase() === normalized) return true;
+  }
+
+  // Suffix matches, for providers named like `VENDOR_API_KEY` rather than
+  // `API_KEY_VENDOR`. Placed after the lookalike check above, which is what
+  // keeps `PUBLIC_KEY` and `TOKEN_TYPE` out of this rule.
+  for (const suffix of SENSITIVE_SUFFIXES) {
+    const suffixUpper = suffix.toUpperCase();
+    if (normalized.endsWith(suffixUpper) && normalized.length > suffixUpper.length) return true;
   }
 
   // Prefix matches.

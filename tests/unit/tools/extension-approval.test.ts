@@ -20,7 +20,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, existsSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -28,13 +28,29 @@ import { ExtensionRegistry } from "../../../src/extensions/registry.js";
 import { ExtensionLifecycle } from "../../../src/extensions/lifecycle.js";
 import { handleExtensionManager } from "../../../src/tools/write/extension-tools.js";
 
-/** A workspace, a user home, and a path the probe extension tries to write. */
+/**
+ * A workspace, a user home, and a path the probe extension tries to write.
+ *
+ * The home is one the test trusts, because a project-scope extension's
+ * `activate()` runs in the host process and the registry refuses to run one
+ * from a workspace the user has not trusted. That gate is real behaviour and a
+ * fixture that skipped it would be testing a path no user can take: the
+ * consent being measured here is the approval prompt, so trust is established
+ * first and the prompt is what the test varies.
+ */
 function fixture(approved: boolean): { deps: never; marker: string; cleanup(): void } {
   const root = mkdtempSync(join(tmpdir(), "ext-approval-"));
   const workspaceRoot = join(root, "ws");
   const userHome = join(root, "home");
   mkdirSync(workspaceRoot, { recursive: true });
   mkdirSync(userHome, { recursive: true });
+  mkdirSync(join(userHome, ".reaper"), { recursive: true });
+  writeFileSync(
+    join(userHome, ".reaper", "project-trust.json"),
+    JSON.stringify({
+      entries: [{ workspaceRoot: realpathSync(workspaceRoot), trusted: true, updatedAt: Date.now() }],
+    }),
+  );
   const registry = new ExtensionRegistry({ workspaceRoot, userHome, builtinRoot: join(root, "builtin") });
   const deps = {
     lifecycle: new ExtensionLifecycle(registry),

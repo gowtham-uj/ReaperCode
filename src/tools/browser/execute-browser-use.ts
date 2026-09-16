@@ -18,6 +18,7 @@ import path from "node:path";
 import type { Page } from "playwright";
 
 import type { ThreadBrowserRuntime } from "../../browser/thread-runtime.js";
+import { BrowserControlPausedError, BrowserLeaseStaleError } from "../../browser/control-lease.js";
 import { renderReceipt, type StepReceipt } from "../../browser/transaction.js";
 import { serializeBrowserResult } from "../../browser/serialize.js";
 import type { BrowserUseArgs } from "./browser-use.js";
@@ -127,7 +128,16 @@ export interface BrowserInScope {
 
 export interface BrowserSurface {
   newPage(name?: string): Promise<Page>;
-  pages(): Array<{ name: string | undefined; url: string; active: boolean }>;
+  /**
+   * The thread's pages, as real pages.
+   *
+   * This declared a list of `{name, url, active}` records, which is what the
+   * facade no longer returns and what the scope-level `pages()` used to return.
+   * Both now hand back scoped Playwright pages carrying that metadata as
+   * non-enumerable properties, because the documented usage is
+   * `(await browser.pages())[0].url()` and a record makes that throw.
+   */
+  pages(): Page[] | Promise<Page[]>;
   page(selector?: string | number): Promise<Page>;
   setActive(selector: string | number): Promise<Page>;
   /**
@@ -265,7 +275,7 @@ function browserSurface(runtime: ThreadBrowserRuntime): BrowserSurface {
      * hold, not just the first one.
      */
     newPage: async (name?: string) => scopePage(await runtime.newPage(name)),
-    pages: () => runtime.pagesForDisplay().map((entry) => ({ name: entry.name, url: entry.url, active: entry.active })),
+    pages: () => runtime.describePages(),
     page: async (selector?: string | number) => (selector === undefined ? (await runtime.ensureReady()).page : runtime.setActive(selector)),
     setActive: (selector: string | number) => runtime.setActive(selector),
     save: () => runtime.save(),
@@ -459,6 +469,22 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
      * tool entirely, so the model got a stack trace instead of "you closed the
      * page you were driving".
      */
+    /*
+     * The control-lease refusals are answered before the generic cases, and
+     * they are not errors in the ordinary sense: nothing about the page or the
+     * program is wrong. The user took the browser, or the step was decided
+     * before they did. Both need to reach the model as a state to wait on
+     * rather than a failure to retry, so they get their own OUTCOME and a
+     * message that says what to do next.
+     */
+    if (error instanceof BrowserControlPausedError || error instanceof BrowserLeaseStaleError) {
+      return {
+        output: `OUTCOME: BROWSER_HUMAN_CONTROL\n\n${(error as Error).message}`,
+        outcome: "BROWSER_HUMAN_CONTROL",
+        isError: false,
+        rev: runtime.observer.revision,
+      };
+    }
     const message = (error as Error).message.split("\n")[0] ?? "unknown error";
     const closed = /closed|Target page, context or browser has been closed|disconnected/i.test(message);
     return {

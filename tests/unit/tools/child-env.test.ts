@@ -110,6 +110,55 @@ test("isSensitiveEnvName never strips harmless lookalikes", () => {
   }
 });
 
+/*
+ * The prefix rules only match a provider whose name starts with a known root,
+ * so a provider named the other way round was passed through intact:
+ * `DIGITAL_OCEAN_API_KEY` and `CRAZYROUTER_API_KEY` reached sandboxed children
+ * in full while `OPENROUTER_API_KEY` was stripped, purely because of which word
+ * came first. A name is the only signal this classifier has, and one ending in
+ * `_API_KEY` is a credential whatever precedes it.
+ *
+ * Written against real names from this workspace's `.env` and its provider
+ * catalogue, so the case that leaked is the case under test rather than an
+ * invented one.
+ */
+test("isSensitiveEnvName catches credential-shaped suffixes from any provider", () => {
+  const samples = [
+    "DIGITAL_OCEAN_API_KEY",
+    "CRAZYROUTER_API_KEY",
+    "CRAZY_ROUTER_API_KEY",
+    "SOME_VENDOR_ACCESS_KEY",
+    "MY_APP_CLIENT_SECRET",
+    "ACME_API_TOKEN",
+    "TEAM_PRIVATE_KEY",
+  ];
+  for (const name of samples) {
+    assert.equal(isSensitiveEnvName(name, new Set()), true, `${name} should be sensitive`);
+  }
+});
+
+/*
+ * The suffix rule must not swallow the lookalikes the exact lists protect.
+ * These are the names the suffix list is shaped to avoid: `PUBLIC_KEY` does not
+ * end in `_PRIVATE_KEY`, `TOKEN_TYPE` does not end in `_ACCESS_TOKEN`.
+ */
+test("the suffix rule does not overreach onto lookalikes", () => {
+  const samples = [
+    "PUBLIC_KEY",
+    "TOKEN_TYPE",
+    "TOKEN_NAME",
+    "KEY_FILE",
+    "KEY_NAME",
+    "SECRETS_DIR",
+    "SECRETS_PATH",
+    "TOKENIZER_VERSION",
+    "PASSTHROUGH",
+  ];
+  for (const name of samples) {
+    assert.equal(isSensitiveEnvName(name, new Set()), false, `${name} should NOT be stripped`);
+  }
+});
+
 test("isSensitiveEnvName honors the allowlist", () => {
   // Even though ANTHROPIC_API_KEY is sensitive, an explicit allowlist
   // should let it through.

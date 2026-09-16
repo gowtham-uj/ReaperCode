@@ -179,7 +179,11 @@ come back to it later:
 const cart = await browser.newPage("cart");      // the name is an argument
 await cart.goto("https://shop.example.com/cart");
 
-await browser.pages();                           // every open page, named
+const tabs = await browser.pages();              // the real pages, this thread's only
+await tabs[0].pageName;                          // its name, if it has one
+await tabs[0].url();                             // pages, not records: Playwright works
+await tabs[0].title();                           // and any of them can be driven
+await tabs[0].isActivePage;                      // whether a bare `page` means this one
 await browser.setActive("cart");                 // or: browser.page("cart")
 await page.url();                                // the bare `page` is the cart now
 

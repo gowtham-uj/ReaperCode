@@ -22,9 +22,10 @@
  */
 
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 
 import { assertActivated, loadExtensionMain, type ActivatedModule } from "./loader.js";
+import { ProjectTrustStore, resolveProjectTrusted } from "../resources/project-trust.js";
 import { ExtensionTrustResolver } from "./trust.js";
 import { ExtensionToolRegistry } from "./tool-registry.js";
 import { ExtensionPermissionManager } from "./permission-manager.js";
@@ -324,6 +325,50 @@ export class ExtensionRegistry {
    * failure. The failure is recorded on r.error + r.status.
    */
   async activateOne(r: LoadedExtension): Promise<boolean> {
+    /*
+     * A project-scope extension needs the project to be trusted first.
+     *
+     * This is Pi's rule, and it is the right one for the same reason: an
+     * extension is native code with the host's privileges, and a project-scope
+     * one arrives with a repository. Cloning a repo and opening it is not consent
+     * to run whatever `main.js` that repo shipped, and the model can put an
+     * extension there without the user ever seeing the file.
+     *
+     * Measured before this check: a workspace carrying
+     * `.reaper/extensions/from-repo/` resolved as `{trusted:false,
+     * source:"default-never"}`, and `discover()` loaded it anyway and `enable`
+     * returned `{ok:true}`. Nothing consulted the trust decision, even though
+     * `.reaper/extensions` is already in the trust-requiring path list and the
+     * resolver had already said no.
+     *
+     * Only project scope. A user-scope extension lives under `~/.reaper`, which
+     * nothing but the user can write, so it carries its own consent and asking
+     * twice would just train the user to click through.
+     */
+    if (isInside(r.installPath, join(this.opts.workspaceRoot, ".reaper", "extensions"))) {
+      /*
+       * Read trust from this registry's own home, not the process's.
+       *
+       * `resolveProjectTrusted` defaults to `ProjectTrustStore.create()`, which
+       * uses `homedir()`. A registry built with an explicit `userHome` (a test,
+       * or a server told to read settings from elsewhere) would then consult a
+       * different trust file than the one it was configured with, and a
+       * workspace trusted for that home would look untrusted here. Same class
+       * of bug as the credential store reading the developer's home instead of
+       * the configured one: the fix is to pass the home through rather than let
+       * the default win.
+       */
+      const trust = await resolveProjectTrusted({
+        workspaceRoot: this.opts.workspaceRoot,
+        store: ProjectTrustStore.create(this.opts.userHome),
+      });
+      if (!trust.trusted) {
+        r.status = "disabled";
+        r.error = `this extension is installed by the project, and the project is not trusted (${trust.source})`;
+        return false;
+      }
+    }
+
     const loadResult = await loadExtensionMain(r.installPath, r.manifest);
     if (!loadResult.ok || !loadResult.module) {
       r.status = "failed";
@@ -636,4 +681,17 @@ export function ensureAbsolute(p: string): string {
 export function writeTrustRecord(installPath: string, record: { extensionId: string; installPath: string; trust: ExtensionTrust; decidedAt: number }): void {
   mkdirSync(installPath, { recursive: true });
   writeFileSync(join(installPath, "trust.json"), JSON.stringify(record, null, 2));
+}
+
+/**
+ * Whether `target` is inside `root`.
+ *
+ * The separator matters: a plain `startsWith` says `/ws-evil` is inside `/ws`,
+ * which is the classic prefix bug, and this decides whether a directory's
+ * contents are treated as the user's own or as the project's.
+ */
+function isInside(target: string, root: string): boolean {
+  const resolvedTarget = resolve(target);
+  const resolvedRoot = resolve(root);
+  return resolvedTarget === resolvedRoot || resolvedTarget.startsWith(resolvedRoot + sep);
 }

@@ -25,7 +25,24 @@ export default defineConfig({
     // BFF itself never has to leave loopback.
     proxy: {
       "/ws": { target: BFF_TARGET, ws: true },
-      "/api": { target: BFF_TARGET },
+      /*
+       * `ws: true` on `/api`, not just `/ws`.
+       *
+       * The live browser pane's stream is a websocket under `/api/live/...`, and
+       * a proxy rule without `ws` drops the upgrade: the browser reports "closed
+       * before the connection was established" and Steel's viewer sits on
+       * "Session connecting" forever. Reproduced by comparing the two paths
+       * directly: `ws://127.0.0.1:4180/api/live/<thread>?tabInfo=true` returns a
+       * tab list, and the same URL through the Vite port fails the handshake.
+       *
+       * `cors: false` as well, because the dev server's default is to reflect
+       * any Origin back as `Access-Control-Allow-Origin`. That made a page on
+       * any loopback origin able to read `/api/*` through this port, including
+       * provider keys from `.env`. The UI is same-origin with its own dev
+       * server, so it needs no ACAO; a foreign page now gets none and the
+       * browser blocks the read.
+       */
+      "/api": { target: BFF_TARGET, ws: true, cors: false },
       "/healthz": { target: BFF_TARGET },
     },
   },

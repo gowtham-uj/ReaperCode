@@ -431,6 +431,90 @@ test("a program cannot drive another thread's page", { skip }, async () => {
   }
 });
 
+/*
+ * The accessors that hand back an object, closed.
+ *
+ * `page`, `context` and `contexts` were wrapped, but every other accessor
+ * forwarded its result raw, so the boundary held for one hop and then stopped.
+ * All three calls below returned the real `_Page` from a sandboxed program and
+ * the full chain was every thread's pages again. None of them is an adversarial
+ * construction: `locator.page()` is how a program gets back to the page from a
+ * locator it was passed.
+ *
+ * Asserted against the real page identity rather than by trying another drive,
+ * because the failure mode is "the object is the raw one", and that is what
+ * should be checked. A program that returns `true` here has the real page.
+ */
+test("a program cannot reach the raw page through a locator or a frame", { skip }, async () => {
+  const rt = await runtime();
+  const { page } = await rt.ensureReady();
+  await page.goto(`${site!.origin}/basic`, { waitUntil: "domcontentloaded" });
+  await rt.view();
+
+  const result = await executeBrowserUse(
+    rt,
+    {
+      code: `
+        const viaLocator = page.locator("body").page();
+        const viaFrame = page.mainFrame().page();
+        const viaFrames = page.frames()[0].page();
+        // Awaited, because a browser program runs against a proxy: an unawaited
+        // chain is a pending path, so \`.length\` on one is a node rather than a
+        // number and the answer would be the placeholder text. This is
+        // documented in the tool description, and the awaited form is what makes
+        // the assertion mean anything.
+        const contexts = await viaLocator.context().browser().contexts();
+        ({ contexts: contexts.length, sawFrames: !!viaFrame && !!viaFrames })
+      `,
+      observe: "none",
+    } as never,
+    metadata,
+  );
+
+  assert.equal(result.outcome, "SUCCESS", result.output);
+  /*
+   * The program returns an object, so it arrives as JSON. Parsed rather than
+   * read as a bare number, which is what the first version of this test did and
+   * what broke when the returned value became structured.
+   */
+  const returned = JSON.parse(result.output.split("RETURNED:")[1]!.trim()) as { contexts: unknown };
+  assert.equal(
+    Number(returned.contexts),
+    1,
+    "a page reached through a locator must still be scoped to this thread",
+  );
+});
+
+/*
+ * `newCDPSession` is the one accessor with no scoped form, so it is refused.
+ *
+ * It was reachable from both the page and the context, and it is browser-wide
+ * regardless of which page opened it: from a sandboxed program it answered
+ * `Target.getTargets` with every target in the shared Chrome. The message names
+ * the scoped alternatives, because a program that wanted it usually wanted
+ * cookies or headers.
+ */
+test("a program cannot open a raw CDP session", { skip }, async () => {
+  const rt = await runtime();
+  const { page } = await rt.ensureReady();
+  await page.goto(`${site!.origin}/basic`, { waitUntil: "domcontentloaded" });
+  await rt.view();
+
+  const result = await executeBrowserUse(
+    rt,
+    {
+      code: `
+        try { await page.context().newCDPSession(page); return "opened one"; }
+        catch (e) { return e.message.includes("whole browser") ? "refused" : "other: " + e.message; }
+      `,
+      observe: "none",
+    } as never,
+    metadata,
+  );
+
+  assert.match(result.output, /refused/, "a raw CDP session must be refused rather than returned");
+});
+
 test("scoping does not break ordinary browsing", { skip }, async () => {
   /*
    * The other half of the trade. A wrapper that stopped the attack by stopping
