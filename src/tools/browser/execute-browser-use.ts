@@ -19,6 +19,7 @@ import { renderReceipt, type StepReceipt } from "../../browser/transaction.js";
 import { serializeBrowserResult } from "../../browser/serialize.js";
 import type { BrowserUseArgs } from "./browser-use.js";
 import { verifyStep } from "../../browser/verify.js";
+import { scopePage } from "../../browser/scoped-page.js";
 import { liftTrailingDeclaration, splitTrailingExpression, wrapWithTail, wrapWithoutTail } from "../code/transform.js";
 
 export interface BrowserUseMetadata {
@@ -198,7 +199,15 @@ export function compileBrowserProgram(code: string): ProgramContext {
  */
 function browserSurface(runtime: ThreadBrowserRuntime): BrowserSurface {
   return {
-    newPage: (name?: string) => runtime.newPage(name),
+    /*
+     * A page this program opens is scoped, like the one it started with.
+     *
+     * Without this the new page is a raw Playwright page, so a program could
+     * open a tab and then walk out of its thread through `newTab.context()
+     * .browser().contexts()`. The scoping has to cover every page a program can
+     * hold, not just the first one.
+     */
+    newPage: async (name?: string) => scopePage(await runtime.newPage(name)),
     pages: () => runtime.pagesForDisplay().map((entry) => ({ name: entry.name, url: entry.url, active: entry.active })),
     page: async (selector?: string | number) => (selector === undefined ? (await runtime.ensureReady()).page : runtime.setActive(selector)),
     setActive: (selector: string | number) => runtime.setActive(selector),
@@ -303,8 +312,17 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
   try {
     const observe = observeSurface(runtime);
     const surface = browserSurface(runtime);
+    /*
+     * The program gets the SCOPED page, not the raw one.
+     *
+     * A raw Playwright page's context chain reaches every other thread's
+     * contexts, so `page.context().browser().contexts()` is a working route from
+     * one agent into another's tabs. Handing out the scoped page is what closes
+     * it; the runtime keeps the real handles.
+     */
+    const scoped = runtime.scopedHandles();
     const stepped = await runtime.step(
-      (page) => program(page, surface, observe.view, observe.viewChanges, observe.screenshot, surface.pages),
+      (page) => program(scoped.page ?? page, surface, observe.view, observe.viewChanges, observe.screenshot, surface.pages),
       {
       ...(args.expected_revision !== undefined ? { expectedRevision: args.expected_revision } : {}),
       ...(args.timeout_ms !== undefined ? { timeoutMs: args.timeout_ms } : {}),

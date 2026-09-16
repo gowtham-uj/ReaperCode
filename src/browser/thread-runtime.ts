@@ -32,6 +32,8 @@ import { dirname } from "node:path";
 
 import type { Browser, BrowserContext, Page } from "playwright";
 
+import { scopeBrowser, scopePage } from "./scoped-page.js";
+
 import { PageObserver, type PageContentMeta, type PageViewOptions, type SnapshotStats } from "./page-view.js";
 import { runStep, type SettleOptions, type StepReceipt } from "./transaction.js";
 import type { TransitionDb } from "./transition-db.js";
@@ -235,7 +237,7 @@ export class ThreadBrowserRuntime {
     return page;
   }
 
-  /** Open a page, optionally naming it. */
+  /** Open a page, optionally naming it. Returns the RAW handle, for the runtime. */
   async newPage(name?: string): Promise<Page> {
     const { context } = await this.ensureReady();
     const page = await context.newPage();
@@ -368,6 +370,23 @@ export class ThreadBrowserRuntime {
     }
     this.observer.capture({ url: page.url(), title: await page.title().catch(() => ""), snapshot });
     return { ...this.observer.view(), url: page.url() };
+  }
+
+  /**
+   * The page a model program is handed, and the browser that agrees with it.
+   *
+   * Both scoped to this thread, because a raw page's context chain reaches every
+   * other thread's contexts: `page.context().browser().contexts()` returns the
+   * whole browser, and agent A driving agent B's page was confirmed with exactly
+   * that line. The runtime keeps the raw handles; only model code gets these.
+   */
+  scopedHandles(): { page: Page; browser: Browser } {
+    const page = this.active;
+    const context = this.context;
+    if (!page || !context) throw new Error("the browser is not attached");
+    const browser = page.context().browser();
+    if (!browser) throw new Error("the page has no browser");
+    return { page: scopePage(page), browser: scopeBrowser(browser, context) };
   }
 
   /**

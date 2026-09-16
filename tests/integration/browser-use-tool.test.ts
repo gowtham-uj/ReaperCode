@@ -351,3 +351,110 @@ test("scoping by a role that does not exist fails loudly", { skip }, async () =>
   assert.notEqual(wrong.outcome, "SUCCESS", wrong.output);
   assert.match(wrong.output, /does not match any element/, "and it must say why");
 });
+
+/* ------------------------------------------------------------------ *
+ * One thread cannot reach another's pages
+ *
+ * Confirmed as a working attack before it was fixed: every thread attaches to
+ * the same Steel Chrome, `browser.contexts()` is browser-wide, and this line
+ *
+ *     page.context().browser().contexts().flatMap(c => c.pages())
+ *
+ * let one agent find and drive another agent's page. The scoped page closes it.
+ * ------------------------------------------------------------------ */
+
+test("a program cannot enumerate another thread's contexts", { skip }, async () => {
+  const other = new ThreadBrowserRuntime({ threadId: "other-agent", cdpUrl: CDP_URL });
+  try {
+    const mine = await runtime();
+    const { page } = await mine.ensureReady();
+    await page.goto(`${site!.origin}/basic`, { waitUntil: "domcontentloaded" });
+
+    const theirs = (await other.ensureReady()).page;
+    await theirs.goto(`${site!.origin}/hidden`, { waitUntil: "domcontentloaded" });
+
+    const counted = await executeBrowserUse(
+      mine,
+      { code: `page.context().browser().contexts().length`, observe: "none" } as never,
+      metadata,
+    );
+    const count = Number(counted.output.split("RETURNED:")[1]?.trim());
+    assert.equal(count, 1, "a program must see one context, its own, not every thread's");
+  } finally {
+    await other.close();
+  }
+});
+
+test("a program cannot drive another thread's page", { skip }, async () => {
+  /*
+   * The attack, run for real. It found the other agent's page by URL and
+   * navigated it, and the other thread's page ended up somewhere it had not
+   * asked to be.
+   */
+  const other = new ThreadBrowserRuntime({ threadId: "victim-agent", cdpUrl: CDP_URL });
+  try {
+    const mine = await runtime();
+    const { page } = await mine.ensureReady();
+    await page.goto(`${site!.origin}/basic`, { waitUntil: "domcontentloaded" });
+
+    const victim = (await other.ensureReady()).page;
+    await victim.goto(`${site!.origin}/hidden`, { waitUntil: "domcontentloaded" });
+    const victimUrlBefore = victim.url();
+
+    const attack = await executeBrowserUse(
+      mine,
+      {
+        code: `
+          const others = page.context().browser().contexts().flatMap(c => c.pages()).filter(p => p.url().includes("/hidden"));
+          if (others.length === 0) return "blocked";
+          await others[0].goto("${site!.origin}/canvas");
+          return "drove it";
+        `,
+        observe: "none",
+      } as never,
+      metadata,
+    );
+
+    assert.match(attack.output, /blocked/, "the other thread's page must not be findable");
+    assert.equal(victim.url(), victimUrlBefore, "and the other thread's page must be where it was");
+  } finally {
+    await other.close();
+  }
+});
+
+test("scoping does not break ordinary browsing", { skip }, async () => {
+  /*
+   * The other half of the trade. A wrapper that stopped the attack by stopping
+   * everything would pass the two tests above and be useless.
+   */
+  const rt = await runtime();
+  const { page } = await rt.ensureReady();
+  await page.goto(`${site!.origin}/basic`, { waitUntil: "domcontentloaded" });
+  await rt.view();
+
+  const result = await executeBrowserUse(
+    rt,
+    {
+      code: `
+        await page.locator("#first").fill("Ada");
+        const tabs = await browser.newPage("extra");
+        await tabs.goto("${site!.origin}/canvas");
+        const active = await browser.setActive("extra");
+        ({ filled: await page.locator("#first").inputValue().catch(() => "gone"), newTabUrl: tabs.url(), activeUrl: active.url() })
+      `,
+      observe: "none",
+    } as never,
+    metadata,
+  );
+
+  assert.equal(result.outcome, "SUCCESS", result.output);
+  /*
+   * The scoped page still behaves like a page: it filled a field, opened a tab,
+   * navigated it, and the handles all report where they are. `page` here is the
+   * one the program started with, so it stays on the form — which is correct,
+   * and is why this asserts on the tab handles rather than on `page.url()`.
+   */
+  assert.match(result.output, /"filled":"Ada"/, "the original page must still work after a tab is opened");
+  assert.match(result.output, /"newTabUrl":"[^"]*\/canvas"/, "the new tab must be scoped and drivable");
+  assert.match(result.output, /"activeUrl":"[^"]*\/canvas"/, "and setActive must return it");
+});
