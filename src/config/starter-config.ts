@@ -39,12 +39,6 @@ export function buildStarterConfig(input: { defaultModel?: string; defaultProvid
     security: {
       childEnvAllowlist: [],
     },
-    // ── Pruner (compaction strategy) ───────────────────────────────
-    pruner: {
-      enabled: true,
-      localOnly: true,
-      threshold: 0.5,
-    },
     // ── Runtime control ─────────────────────────────────────────────
     runtime: {
       recedingHorizonPlanContext: true,

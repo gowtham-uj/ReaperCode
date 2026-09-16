@@ -35,7 +35,7 @@ export function microcompact(input: MicrocompactInput): MicrocompactOutput {
   const seenOutputs = new Map<string, number>();
   for (let i = 0; i < results.length; i++) {
     const r = results[i]!;
-    if (!r.ok || !["file_view", "list_directory", "grep_search", "skim_file"].includes(r.name)) continue;
+    if (!r.ok || !["file_view", "list_directory", "grep_search"].includes(r.name)) continue;
     const key = outputKey(r);
     const prevIndex = seenOutputs.get(key);
     if (prevIndex !== undefined && prevIndex < i) {

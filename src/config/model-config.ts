@@ -479,16 +479,6 @@ export const ReaperConfigSchema = z
       .strict()
       .optional()
       .default({ devMode: false, sampleRate: 1.0, sessionMetrics: true }),
-    pruner: z
-      .object({
-        enabled: z.boolean().default(true),
-        localOnly: z.boolean().default(true),
-        url: z.string().url().optional(),
-        threshold: z.number().min(0).max(1).default(0.5),
-      })
-      .strict()
-      .optional()
-      .default({ enabled: true, localOnly: true, threshold: 0.5 }),
     runtime: RuntimeControlConfigSchema,
     verification: VerificationGateConfigSchema,
     modelRouting: ModelRoutingConfigSchema,

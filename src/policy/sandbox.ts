@@ -63,7 +63,6 @@ const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   "file_find",
   "grep_search",
   "list_directory",
-  "skim_file",
   "inspect_environment",
   "git_status",
   "git_diff",

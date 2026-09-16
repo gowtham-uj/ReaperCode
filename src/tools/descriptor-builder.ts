@@ -32,7 +32,6 @@ const TOOL_FAMILY: Record<string, ToolFamily> = {
   delete_file: "edit",
   list_directory: "file",
   grep_search: "search",
-  skim_file: "file",
   inspect_environment: "file",
 
   // Shell
@@ -86,7 +85,6 @@ const TOOL_CAPABILITY: Record<string, CapabilityTier> = {
   file_find: "read",
   list_directory: "read",
   grep_search: "read",
-  skim_file: "read",
   inspect_environment: "read",
   git_status: "read",
   git_diff: "read",
@@ -133,7 +131,6 @@ const TOOL_CONCURRENCY: Record<string, ToolConcurrency> = {
   file_find: "shared",
   list_directory: "shared",
   grep_search: "shared",
-  skim_file: "shared",
   inspect_environment: "shared",
   git_status: "shared",
   git_diff: "shared",
@@ -195,7 +192,6 @@ const TOOL_CONTEXT_COST: Record<string, ContextCost> = {
   git_status: "low",
   git_diff: "low",
   activate_skill: "low",
-  skim_file: "low",
   inspect_environment: "low",
   browser_use: "high",
   create_skill: "high",

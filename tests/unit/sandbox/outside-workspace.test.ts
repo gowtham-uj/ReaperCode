@@ -5,7 +5,7 @@
  *
  * These tests back the "outside_workspace" sandbox guarantee:
  *   - file_view, write_file, edit_file, delete_file,
- *     list_directory, grep_search, skim_file all reject
+ *     list_directory, grep_search, file_view all reject
  *     escape paths with `error.code === "path_escape"`.
  *   - The error message names the offending path AND the workspace
  *     root so the model can correct itself.

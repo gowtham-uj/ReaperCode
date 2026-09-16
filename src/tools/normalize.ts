@@ -127,12 +127,6 @@ export function normalizeToolCall(input: unknown): unknown {
           ...(typeof record.include === "string" ? { include: record.include } : {}),
         };
         break;
-      case "skim_file":
-        args = {
-          ...(normalizedWorkspacePath ? { path: normalizedWorkspacePath } : {}),
-          ...(typeof record.goalHint === "string" ? { goalHint: record.goalHint } : {}),
-        };
-        break;
       case "inspect_environment":
         args = {};
         break;

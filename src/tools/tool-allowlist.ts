@@ -18,7 +18,6 @@ const TOOL_ALLOWED_ARGS: Record<string, readonly string[]> = {
   file_edit: ["path", "start_line", "end_line", "new_content", "reason"],
   list_directory: ["path", "includeHidden"],
   grep_search: ["pattern", "path", "include"],
-  skim_file: ["path", "goalHint"],
   inspect_environment: [],
   web_search: ["query", "engine", "maxResults", "scrapePages"],
   write_file: ["path", "content"],

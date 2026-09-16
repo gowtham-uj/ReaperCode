@@ -51,7 +51,6 @@ export function declaredResourcesForToolCall(call: ToolCall): ResourceKeys {
   switch (call.name) {
     case "file_view":
     case "file_find":
-    case "skim_file":
       return { declared: true, keys: fileKey(stringArg(args, "path")) };
 
     case "write_file":

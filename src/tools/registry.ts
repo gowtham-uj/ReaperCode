@@ -2,7 +2,6 @@ import {
   DeleteFileArgsSchema,
   GrepSearchArgsSchema,
   ListDirectoryArgsSchema,
-  SkimFileArgsSchema,
   InspectEnvironmentArgsSchema,
   CreateCheckpointArgsSchema,
   RestoreCheckpointArgsSchema,
@@ -66,10 +65,6 @@ export const toolRegistry = {
       "sweep. Optional `include` filters by glob. Returns the file, line number, and matching line for " +
       "each hit.",
     argsSchema: GrepSearchArgsSchema,
-  },
-  skim_file: {
-    description: "Prune large file content with local SWE-pruner/heuristic skimming",
-    argsSchema: SkimFileArgsSchema,
   },
   inspect_environment: {
     description: "Inspect available runtimes/package managers, manifests, dependency state, and Reaper scratchpad/cache paths before deciding whether installs or tool setup are required.",

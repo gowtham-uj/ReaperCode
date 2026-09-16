@@ -143,11 +143,6 @@ function dedupKey(call: ToolCall): string | undefined {
       const window = typeof args.window === "number" ? args.window : "";
       return target ? `read:${call.name}:${target}:${start}:${window}` : undefined;
     }
-    case "skim_file": {
-      const target = argPath();
-      const goal = typeof args.goalHint === "string" ? args.goalHint : "";
-      return target ? `read:${call.name}:${target}:${goal}` : undefined;
-    }
     case "list_directory": {
       const target = argPath();
       return target ? `list_directory:${target}` : undefined;

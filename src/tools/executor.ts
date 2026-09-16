@@ -24,7 +24,6 @@ import { normalizeToolCall } from "./normalize.js";
 import { grepSearchTool } from "./read/grep-search.js";
 import { listDirectoryTool } from "./read/list-directory.js";
 import { readFileTool, renderTextReadResult, type ReadFileToolResult } from "./read/read-file.js";
-import { skimFileTool } from "./read/skim-file.js";
 import { inspectEnvironmentTool } from "./read/inspect-env.js";
 import { activateSkillTool } from "./read/activate-skill.js";
 import { webSearchTool, type WebSearchArgs } from "./read/web-search.js";
@@ -1526,16 +1525,6 @@ export class ToolExecutor {
             pattern: args.pattern,
             ...(args.path !== undefined ? { path: args.path } : {}),
             ...(args.include !== undefined ? { include: args.include } : {}),
-          });
-        }
-      case "skim_file":
-        {
-          const args = toolRegistry.skim_file.argsSchema.parse(call.args);
-          return skimFileTool(this.options.workspaceRoot, args, {
-            enabled: this.config?.pruner.enabled ?? true,
-            localOnly: this.config?.pruner.localOnly ?? true,
-            ...(this.config?.pruner.url ? { url: this.config.pruner.url } : {}),
-            threshold: this.config?.pruner.threshold ?? 0.5,
           });
         }
       case "inspect_environment":

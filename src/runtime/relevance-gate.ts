@@ -44,7 +44,7 @@ export function classifyActionRelevance(
     negativeConstraints: string[];
   },
 ): { relevance: "DIRECTLY_RELEVANT" | "INDIRECTLY_RELEVANT" | "IRRELEVANT"; reason: string } {
-  if (["file_view", "file_find", "list_directory", "grep_search", "skim_file", "inspect_environment"].includes(call.name)) {
+  if (["file_view", "file_find", "list_directory", "grep_search", "inspect_environment"].includes(call.name)) {
     return { relevance: "DIRECTLY_RELEVANT", reason: "cheap inspection is allowed" };
   }
   const contractText = buildProblemContractText(input);

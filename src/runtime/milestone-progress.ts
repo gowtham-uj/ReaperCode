@@ -150,7 +150,7 @@ function isRuntimeCrash(result: ToolResult): boolean {
 
 function isReadOnlyResult(result: ToolResult): boolean {
   if (!result.ok) return false;
-  return ["file_view", "file_find", "skim_file", "list_directory", "grep_search", "inspect_environment", "web_search", "web_fetch"].includes(result.name);
+  return ["file_view", "file_find", "list_directory", "grep_search", "inspect_environment", "web_search", "web_fetch"].includes(result.name);
 }
 
 function isSuccessfulMutation(result: ToolResult): boolean {

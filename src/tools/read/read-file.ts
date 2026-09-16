@@ -106,7 +106,7 @@ export function renderTextReadResult(input: {
   const truncated = unbounded && end < lines.length;
   const notes = [
     truncated
-      ? "Large unbounded read was limited to a preview. Use grep_search, skim_file, or file_view with an explicit start_line for the relevant range."
+      ? "Large unbounded read was limited to a preview. Use grep_search or file_view with an explicit start_line for the relevant range."
       : "",
     resolvedFrom
       ? `Requested path '${resolvedFrom}' was not found, so file_view used the unique same-basename match '${resolvedPath ?? filePath}'.`

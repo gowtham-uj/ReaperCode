@@ -85,14 +85,6 @@ test("allows timeoutMs zero to disable provider request deadline", () => {
   assert.equal(parsed.models.default_model.timeoutMs, 0);
 });
 
-test("defaults pruner to local-only mode", () => {
-  const parsed = parseReaperConfig({
-    models: createValidConfig().models,
-  });
-
-  assert.equal(parsed.pruner.localOnly, true);
-});
-
 test("enables session metrics by default", () => {
   const parsed = parseReaperConfig({
     models: createValidConfig().models,

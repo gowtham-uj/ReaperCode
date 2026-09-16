@@ -90,13 +90,6 @@ export const GrepSearchArgsSchema = z
   })
   .strict();
 
-export const SkimFileArgsSchema = z
-  .object({
-    path: z.string().min(1),
-    goalHint: z.string().min(1),
-  })
-  .strict();
-
 export const InspectEnvironmentArgsSchema = z.object({}).strict();
 
 
@@ -290,7 +283,6 @@ export const UpdateTodoArgsSchema = z.object({
 export const ToolCallSchema = z.discriminatedUnion("name", [
   z.object({ id: z.string().min(1), name: z.literal("list_directory"), args: ListDirectoryArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("grep_search"), args: GrepSearchArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("skim_file"), args: SkimFileArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("inspect_environment"), args: InspectEnvironmentArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("create_checkpoint"), args: CreateCheckpointArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("restore_checkpoint"), args: RestoreCheckpointArgsSchema }).strict(),

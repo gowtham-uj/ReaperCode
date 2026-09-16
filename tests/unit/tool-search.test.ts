@@ -8,13 +8,13 @@ test("search_tools supports direct select syntax and discovers exact tools", () 
   const runId = "tool-search-select-test";
   clearDiscoveredTools(runId);
 
-  const result = executeSearchTools("select:job,skim_file", runId);
+  const result = executeSearchTools("select:job,inspect_environment", runId);
 
-  assert.deepEqual(result.discovered, ["job", "skim_file"]);
+  assert.deepEqual(result.discovered, ["job", "inspect_environment"]);
   assert.equal(result.matches[0]?.name, "job");
-  assert.equal(result.matches[1]?.name, "skim_file");
+  assert.equal(result.matches[1]?.name, "inspect_environment");
   assert.equal(getDiscoveredTools(runId).has("job"), true);
-  assert.equal(getDiscoveredTools(runId).has("skim_file"), true);
+  assert.equal(getDiscoveredTools(runId).has("inspect_environment"), true);
 });
 
 test("search_tools supports required +terms for capability discovery", () => {

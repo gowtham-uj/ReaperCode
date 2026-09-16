@@ -47,7 +47,7 @@ test("Phase 2: BM25 search returns relevant results for 'read file content'", as
   assert.ok(results.length > 0, "should return results for 'read file content'");
   // A read tool should be in results. `view_file` is an alias, so only the
   // canonical name can appear.
-  const hasReader = results.some((r) => ["file_view", "file_find", "skim_file"].includes(r.name));
+  const hasReader = results.some((r) => ["file_view", "file_find"].includes(r.name));
   assert.ok(hasReader, "should include a file reading tool");
 
   resetDescriptors();

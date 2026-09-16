@@ -1326,7 +1326,6 @@ export class RuntimeEngine {
         maxContextTokens: Math.max(2000, Math.floor(getBoot().state.tokenBudget.softCap * 0.1)),
         compactToolResults: prePrepShouldCompact,
         forceIndexRefresh: state.iteration === 0,
-        prunerConfig: this.config.pruner,
         toolResults: state.toolResults,
         backgroundProcesses: getExecutor().getBackgroundProcesses(),
         ...(this.input.middlewares ? { middlewares: this.input.middlewares as any } : {}),
@@ -2806,7 +2805,6 @@ export class RuntimeEngine {
         prompt: state.prompt,
         maxContextTokens: Math.max(2000, Math.floor(getBoot().state.tokenBudget.softCap * 0.1)),
         compactToolResults: true,
-        prunerConfig: this.config.pruner,
         toolResults: state.toolResults,
         backgroundProcesses: getExecutor().getBackgroundProcesses(),
         ...(this.input.middlewares ? { middlewares: this.input.middlewares as any } : {}),
@@ -3228,7 +3226,6 @@ export class RuntimeEngine {
         ...(this.input.userHome ? { userHome: this.input.userHome } : {}),
         prompt: state.prompt,
         maxContextTokens: Math.max(2000, Math.floor(getBoot().state.tokenBudget.softCap * 0.1)),
-        prunerConfig: this.config.pruner,
         toolResults: state.toolResults,
         backgroundProcesses: getExecutor().getBackgroundProcesses(),
         ...(this.input.middlewares ? { middlewares: this.input.middlewares as any } : {}),
@@ -3739,7 +3736,7 @@ function partitionByToolPolicy(
 
 
 export function isReadOnlyToolResult(result: ToolResult): boolean {
-  return ["file_view", "file_find", "list_directory", "grep_search", "skim_file", "inspect_env", "web_search", "web_fetch"].includes(result.name);
+  return ["file_view", "file_find", "list_directory", "grep_search", "inspect_env", "web_search", "web_fetch"].includes(result.name);
 }
 function isMutationOrProducerResult(result: ToolResult): boolean {
   if (["write_file", "file_edit", "edit_file", "delete_file"].includes(result.name)) return true;
@@ -5468,7 +5465,7 @@ export function hasInformativeToolResultOutput(result: ToolResult): boolean {
   const stdout = typeof output.stdout === "string" ? output.stdout.trim() : "";
   const stderr = typeof output.stderr === "string" ? output.stderr.trim() : "";
   if (stdout || stderr) return true;
-  return ["file_view", "file_find", "list_directory", "grep_search", "skim_file", "inspect_environment"].includes(result.name);
+  return ["file_view", "file_find", "list_directory", "grep_search", "inspect_environment"].includes(result.name);
 }
 
 function hasLaterPlanStep(plan: ExecutionPlanStep[] | undefined, currentStepIndex: number): boolean {
@@ -5775,8 +5772,8 @@ function renderRecentToolResultSummary(result: ToolResult): Record<string, unkno
     };
   }
 
-  // grep_search / list_directory / skim_file: just path + count summary
-  if (result.name === "grep_search" || result.name === "list_directory" || result.name === "skim_file") {
+  // grep_search / list_directory: just path + count summary
+  if (result.name === "grep_search" || result.name === "list_directory") {
     const path = typeof args.path === "string" ? args.path : "";
     const count = Array.isArray(output.matches) ? output.matches.length : Array.isArray(output.entries) ? output.entries.length : undefined;
     return {

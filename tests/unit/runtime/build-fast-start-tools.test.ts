@@ -86,11 +86,11 @@ test("build narrowing keeps every deferred tool the model already promoted", () 
   const names = selectGeneralAgentToolsForTurn({
     request: buildRequest as never,
     state: { toolResults: [] } as never,
-    tools: buildGeneralAgentTools(["file_find", "skim_file"]),
+    tools: buildGeneralAgentTools(["file_find", "inspect_environment"]),
   }).map((tool) => tool.name);
   assert.ok(names.includes("file_find"), "a promoted file_find should survive narrowing");
-  assert.ok(names.includes("skim_file"), "a promoted deferred tool must keep its schema");
-  assert.deepEqual(names.sort(), [...CORE_SURFACE, "file_find", "skim_file"].sort());
+  assert.ok(names.includes("inspect_environment"), "a promoted deferred tool must keep its schema");
+  assert.deepEqual(names.sort(), [...CORE_SURFACE, "file_find", "inspect_environment"].sort());
 });
 
 test("build narrowing keeps promoted tools on the wire for as long as it applies", () => {
@@ -122,10 +122,10 @@ test("build narrowing does not reorder into duplicates", () => {
   const names = selectGeneralAgentToolsForTurn({
     request: buildRequest as never,
     state: { toolResults: [] } as never,
-    tools: buildGeneralAgentTools(["glob", "skim_file"]),
+    tools: buildGeneralAgentTools(["glob", "inspect_environment"]),
   }).map((tool) => tool.name);
   assert.equal(new Set(names).size, names.length, `duplicates in ${names.join(", ")}`);
-  assert.deepEqual(names.sort(), [...CORE_SURFACE, "skim_file"].sort());
+  assert.deepEqual(names.sort(), [...CORE_SURFACE, "inspect_environment"].sort());
 });
 
 test("build fast-start promotes scratchpad only when user prompt mentions it", () => {

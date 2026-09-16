@@ -148,7 +148,7 @@ export class PermissionClassifier {
     }
 
     // Read tools are always safe
-    if (["file_view", "file_find", "list_directory", "grep_search", "skim_file"].includes(call.name)) {
+    if (["file_view", "file_find", "list_directory", "grep_search"].includes(call.name)) {
       return { outcome: "safe", reasoning: "Read-only tool", confidence: 1.0 };
     }
 

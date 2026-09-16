@@ -13,7 +13,6 @@ import { getEnvironmentFingerprint, type EnvironmentFingerprint } from "./finger
 import type { ToolResult } from "../tools/types.js";
 import { readFileSync } from "node:fs";
 import { z } from "zod";
-import type { SwePrunerConfig } from "../context/swe-pruner.js";
 import { ProjectTrustStore, resolveProjectTrusted, type ProjectTrustResolution } from "../resources/project-trust.js";
 import { resolveResources, type ResolvedResources } from "../resources/resource-loader.js";
 import { DefaultResourcePackageManager } from "../resources/package-manager.js";
@@ -48,7 +47,6 @@ export interface ContentPrepInput {
   compactToolResults?: boolean;
   latestVerificationFailure?: string;
   middlewares?: Array<MiddlewareDefinition<ContentPrepResult>>;
-  prunerConfig?: SwePrunerConfig;
   backgroundProcesses?: Array<{ pid: number; status: "running" | "finished"; exitCode: number | null }>;
   /** Force a fresh workspace index at a run boundary. */
   forceIndexRefresh?: boolean;
@@ -94,7 +92,6 @@ export interface ContentPrepResult {
  *   - `latestVerificationFailure` (a string, feeds into compaction)
  *   - `toolResults` (hashed — the per-turn history)
  *   - `backgroundProcesses` (hashed — the live process list)
- *   - `prunerConfig` (frozen config; we JSON-stringify it)
  *
  * We deliberately skip `middlewares` (may be stateful and add
  * side-effects) and skip when `mcpRegistry` is supplied (the registry
@@ -241,15 +238,6 @@ function hashBackgroundProcesses(
   return fnv1a(procs.map((p) => `${p.pid}:${p.status}:${p.exitCode ?? ""}`).join("|"));
 }
 
-function hashPrunerConfig(cfg: SwePrunerConfig | undefined): string {
-  if (!cfg) return "0";
-  try {
-    return fnv1a(JSON.stringify(cfg));
-  } catch {
-    return "u";
-  }
-}
-
 function buildCacheKey(input: ContentPrepInput): string {
   return [
     input.workspaceRoot,
@@ -260,7 +248,6 @@ function buildCacheKey(input: ContentPrepInput): string {
     `v:${input.latestVerificationFailure ?? ""}`,
     `r:${hashToolResults(input.toolResults)}`,
     `b:${hashBackgroundProcesses(input.backgroundProcesses)}`,
-    `u:${hashPrunerConfig(input.prunerConfig)}`,
   ].join("||");
 }
 

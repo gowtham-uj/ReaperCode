@@ -114,7 +114,7 @@ function summaryFor(name: string, ok: boolean, output: unknown, args: unknown, e
 function detailsKind(name: string, output: unknown): NormalizedToolResultDetails["kind"] {
   if (output === undefined || output === null || output === "") return "none";
   if (tryParseJson(output) !== undefined) return "json";
-  if (["file_view", "file_find", "skim_file"].includes(name)) return "file";
+  if (["file_view", "file_find"].includes(name)) return "file";
   if (["bash", "job"].includes(name)) return "process";
   return "text";
 }

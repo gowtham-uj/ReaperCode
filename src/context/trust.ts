@@ -130,7 +130,7 @@ export function classifyReadFileTrust(
   result: Pick<ToolResult, "name" | "args">,
   workspaceRoot: string | undefined,
 ): TrustLevel {
-  if (result.name !== "skim_file" && result.name !== "file_view" && result.name !== "file_find") {
+  if (result.name !== "file_view" && result.name !== "file_find") {
     return classifyToolResultTrust(result);
   }
   const args = (result.args ?? {}) as { path?: unknown };

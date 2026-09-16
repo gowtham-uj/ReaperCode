@@ -391,7 +391,7 @@ test("exploration tool names all exist in the real tool registry", async () => {
   const known = new Set(Object.keys(toolRegistry));
 
   const classified = [
-    "file_view", "file_find", "skim_file",
+    "file_view", "file_find",
     "list_directory", "grep_search", "glob", "git_status", "git_diff",
     "search_memory", "search_tools", "inspect_environment", "diagnostics",
   ];

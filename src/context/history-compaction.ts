@@ -85,7 +85,7 @@ function traditionalCompact(input: HistoryCompactionInput): CompactedHistory {
         ...(latestFailureSummary ? [latestFailureSummary] : []),
         ...compactRepeatedObservations(
           input.toolResults.map((result, index) => {
-            const isStale = index < lastWriteIndex && ["file_view", "file_find", "list_directory", "grep_search", "skim_file"].includes(result.name);
+            const isStale = index < lastWriteIndex && ["file_view", "file_find", "list_directory", "grep_search"].includes(result.name);
             const prefix = isStale ? "[STALE Observation]" : "[Observation]";
             return `${prefix} ${summarizeToolResult(result, 600)}`;
           }),
@@ -115,7 +115,7 @@ function traditionalCompact(input: HistoryCompactionInput): CompactedHistory {
   compacted = compactRepeatedObservations(
     truncatedMiddle.map((result, idx) => {
       const actualIdx = idx + (middlePart.length - truncatedMiddle.length) + firstCount;
-      const isStale = actualIdx < lastWriteIndex && ["file_view", "file_find", "list_directory", "grep_search", "skim_file"].includes(result.name);
+      const isStale = actualIdx < lastWriteIndex && ["file_view", "file_find", "list_directory", "grep_search"].includes(result.name);
       const prefix = isStale ? "[STALE Observation]" : "[Observation]";
       return `${prefix} ${summarizeToolResult(result, 600)}`;
     }),
@@ -173,7 +173,7 @@ function summarizeFileOps(results: ToolResult[]): string | undefined {
     const args = result.args && typeof result.args === "object" ? (result.args as Record<string, unknown>) : {};
     const path = typeof args.path === "string" ? args.path : undefined;
     if (!path) continue;
-    if (["file_view", "file_find", "skim_file"].includes(result.name)) read.add(path);
+    if (["file_view", "file_find"].includes(result.name)) read.add(path);
     if (["write_file", "file_edit", "edit_file"].includes(result.name)) modified.add(path);
     if (result.name === "delete_file") deleted.add(path);
   }

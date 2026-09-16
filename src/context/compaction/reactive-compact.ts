@@ -87,8 +87,8 @@ function scoreImportance(result: ToolResult, index: number, total: number): numb
     score += 15;
   }
 
-  // list_directory and skim_file are low importance
-  if (["list_directory", "skim_file"].includes(result.name)) {
+  // list_directory is low importance
+  if (result.name === "list_directory") {
     score += 5;
   }
 

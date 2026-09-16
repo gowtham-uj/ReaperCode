@@ -27,7 +27,7 @@ test("path aliases survive normalization instead of being erased", () => {
     );
   }
 
-  for (const tool of ["file_view", "list_directory", "delete_file", "skim_file"]) {
+  for (const tool of ["file_view", "list_directory", "delete_file", "grep_search"]) {
     assert.equal(
       normalizeArgs(tool, { file_path: "src/index.ts" }).path,
       "src/index.ts",

@@ -18,11 +18,6 @@ export function createValidConfig(): ReaperConfig {
       maxAttachments: 8,
       maxArtifactRefs: 8,
     },
-    pruner: {
-      enabled: true,
-      localOnly: true,
-      threshold: 0.5,
-    },
     logging: {
       devMode: false,
       sampleRate: 1.0,

@@ -72,7 +72,7 @@ const RULES: Record<string, Predicate[]> = {
       if (history.length === 0) {
         return { severity: "info", ruleId: "ordering.write_first_no_history", message: "Writing a file before any read; consider inspecting the target path first." };
       }
-      const lastRead = findLast(history, (t) => t === "file_view" || t === "grep_search" || t === "skim_file" || t === "list_directory" || t === "inspect_environment");
+      const lastRead = findLast(history, (t) => t === "file_view" || t === "grep_search" || t === "list_directory" || t === "inspect_environment");
       if (lastRead === null) {
         return { severity: "warn", ruleId: "ordering.write_without_read", message: "write_file called without any prior read/list/grep in this run. Verify the target path before overwriting." };
       }
@@ -82,7 +82,7 @@ const RULES: Record<string, Predicate[]> = {
 
   edit_file: [
     (history) => {
-      const lastRead = findLast(history, (t) => t === "file_view" || t === "grep_search" || t === "skim_file");
+      const lastRead = findLast(history, (t) => t === "file_view" || t === "grep_search");
       if (lastRead === null) {
         return { severity: "warn", ruleId: "ordering.edit_without_read", message: "edit_file called without a prior read of the target file. Read the file first to confirm context." };
       }
