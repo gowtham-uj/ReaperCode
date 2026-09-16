@@ -139,7 +139,22 @@ export async function settle(page: Page, options: SettleOptions = {}): Promise<{
   return { settled: false, outline: previous, waitedMs: Date.now() - started };
 }
 
-/** One read of the page's outline, in the representation the model is shown. */
+/**
+ * One read of the page, in the representation the model is shown.
+ *
+ * Playwright's own snapshot, because settling is about *stability* rather than
+ * about the model's view: it is one CDP call against the compile's four, and it
+ * is polled every 60ms. What matters is that two reads of a still page agree,
+ * and any faithful representation has that property. The compile is what the
+ * model reads; this is what decides the page has stopped moving, and paying four
+ * CDP calls per poll to learn the same thing would be the wrong trade.
+ *
+ * The consequence is that the settled text is not what the observer captures.
+ * The settling read is discarded and the page is captured through the runtime's
+ * own path afterwards, so the diff the model reads is between two compiled
+ * views. Reading the settled text directly would diff a snapshot against a
+ * compile and report the whole page as changed.
+ */
 async function readOutline(page: Page): Promise<string> {
   return page.ariaSnapshot({ mode: "ai" });
 }
@@ -157,7 +172,20 @@ export async function runStep(
   page: Page,
   observer: PageObserver,
   action: () => Promise<unknown>,
-  options: { expectedRevision?: number | undefined; settle?: SettleOptions | undefined; before?: BrowserIR | undefined } = {},
+  options: {
+    expectedRevision?: number | undefined;
+    settle?: SettleOptions | undefined;
+    before?: BrowserIR | undefined;
+    /**
+     * How the page is captured into the observer.
+     *
+     * Injected so the transaction does not decide the representation. The
+     * runtime compiles; a test can hand in anything. Without this the two
+     * captures in this loop would have to be Playwright snapshots, and the model
+     * would read a diff between a snapshot and a compile, which is every line.
+     */
+    capture?: ((page: Page) => Promise<void>) | undefined;
+  } = {},
 ): Promise<{ receipt: StepReceipt; result: unknown }> {
   const started = Date.now();
   const revision = observer.revision;
@@ -212,8 +240,10 @@ export async function runStep(
      * here is what turns a stack trace into "a dialog is in the way".
      */
     const after = await settle(page, options.settle).catch(() => undefined);
-    const outline = after?.outline ?? "";
-    observer.capture({ url: page.url(), title: await page.title().catch(() => ""), snapshot: outline });
+    // The settled text is only a signal that the page stopped; the capture is
+    // what the model is diffed against, in the runtime's own representation.
+    void after;
+    await captureInto(options, page, observer);
     const changes = observer.viewChanges();
     return {
       result: undefined,
@@ -233,7 +263,17 @@ export async function runStep(
   }
 
   const settled = await settle(page, options.settle);
-  observer.capture({ url: page.url(), title: await page.title().catch(() => ""), snapshot: settled.outline });
+  /*
+   * The settled outline is not used directly.
+   *
+   * It is the signal that the page stopped changing, which is what the wait is
+   * for. What the model reads is the capture, which is the compiled view, and
+   * diffing a snapshot against a compile would report the entire page as new.
+   * The two are computed from the same page at the same moment, so nothing is
+   * stale in either direction.
+   */
+  void settled;
+  await captureInto(options, page, observer);
   const changes = observer.viewChanges();
   const urlAfter = page.url();
   const navigated = urlAfter !== urlBefore;
@@ -283,6 +323,28 @@ export async function runStep(
             : `The page changed without navigating.`,
     },
   };
+}
+
+/**
+ * Capture the page into the observer, through the injected path when there is
+ * one.
+ *
+ * The fallback is Playwright's snapshot, so a transaction with no capture
+ * function still works: it is what a test that does not care about the
+ * representation gets, and it is what happened before the compile existed. A
+ * runtime always passes one.
+ */
+async function captureInto(
+  options: { capture?: ((page: Page) => Promise<void>) | undefined },
+  page: Page,
+  observer: PageObserver,
+): Promise<void> {
+  if (options.capture) {
+    await options.capture(page);
+    return;
+  }
+  const outline = await page.ariaSnapshot({ mode: "ai" });
+  observer.capture({ url: page.url(), title: await page.title().catch(() => ""), snapshot: outline });
 }
 
 /**

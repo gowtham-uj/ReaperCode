@@ -34,6 +34,8 @@ import type { Browser, BrowserContext, Page } from "playwright";
 
 import { scopeBrowser, scopePage } from "./scoped-page.js";
 
+import { perceive, type PerceptionResult } from "./engine.js";
+import type { BrowserIR } from "./ir.js";
 import { PageObserver, type PageContentMeta, type PageViewOptions, type SnapshotStats } from "./page-view.js";
 import { runStep, type SettleOptions, type StepReceipt } from "./transaction.js";
 import type { TransitionDb } from "./transition-db.js";
@@ -320,19 +322,75 @@ export class ThreadBrowserRuntime {
    */
   async capture(page?: Page): Promise<void> {
     const target = page ?? (await this.ensureReady()).page;
-    /*
-     * Playwright's own `mode: "ai"` output, passed through unchanged.
-     *
-     * There used to be a hand-written renderer here that walked the JSON tree
-     * and emitted its own format. It was deleted once the JSON tree arrived and
-     * a second opinion about what a page contains turned out to be exactly the
-     * thing to avoid: every place a custom renderer disagreed with Playwright's
-     * was a place the model was told something Playwright would not have said.
-     * Verified byte-identical, so there is nothing left for it to add.
-     */
-    const snapshot = await target.ariaSnapshot({ mode: "ai" });
-    this.observer.capture({ url: target.url(), title: await target.title().catch(() => ""), snapshot });
+    const perceived = await this.perceive(target);
+    this.observer.capture({
+      url: target.url(),
+      title: await target.title().catch(() => ""),
+      snapshot: perceived.text,
+      ...(perceived.note !== undefined ? { note: perceived.note } : {}),
+      stats: statsOf(perceived),
+    });
   }
+
+  /**
+   * Read a page through the perception engine, holding the compile for the next
+   * revision.
+   *
+   * The `previous` compile is what keeps section ids and element ids stable
+   * across observations, which is the whole reason a model can hold "s1:r3" and
+   * come back to it. It is kept on the runtime rather than on the observer
+   * because the observer works on text and deliberately knows nothing about the
+   * compiler.
+   */
+  private async perceive(target: Page): Promise<PerceptionResult> {
+    const perceived = await perceive(target, {
+      ...(this.lastIr !== undefined ? { previous: this.lastIr } : {}),
+      context: {
+        ...(this.observer.step !== undefined ? { step: this.observer.step } : {}),
+        ...(this.observer.goal !== undefined ? { goal: this.observer.goal } : {}),
+      },
+    });
+    /*
+     * Only a successful compile replaces the previous one. A fallback must not
+     * clear it, or the next revision after a transient failure would renumber
+     * every section and invalidate every id the model is holding.
+     */
+    if (perceived.ir !== undefined) this.lastIr = perceived.ir;
+    this.lastWasFallback = perceived.usedFallback;
+    return perceived;
+  }
+
+  /** The last successful compile, for id stability across revisions. */
+  private lastIr: BrowserIR | undefined;
+
+  /**
+   * What the last read cost and contains, in the model's terms.
+   *
+   * Answered from the compile rather than by counting the rendered text. The
+   * text is a view with sections and rows, and counting `[ref=` in it would
+   * report zero on any page the compiler read, which reads to a model as "this
+   * page is empty". A fallback reports its own line count and no element count,
+   * because it has no elements in the compiled sense.
+   */
+  lastStats(): { lines: number; chars: number; elements: number; sections: number; fallback: boolean } {
+    const text = this.observer.currentOutline();
+    return {
+      lines: text.split("\n").filter((line) => line.trim().length > 0).length,
+      chars: text.length,
+      elements: this.lastIr?.elements.size ?? 0,
+      sections: this.lastIr?.sections.length ?? 0,
+      /*
+       * Whether the model is reading a fallback, reported rather than inferred.
+       * A caller that logs a step needs to know the read came from the snapshot
+       * path, because that is the signal that the compiler has a page it cannot
+       * handle and someone should look at why.
+       */
+      fallback: this.lastWasFallback,
+    };
+  }
+
+  /** Whether the last read fell back to Playwright's own snapshot. */
+  private lastWasFallback = false;
 
   /** The whole page, as the model should read it. */
   async view(options: PageViewOptions = {}): Promise<{
@@ -357,18 +415,41 @@ export class ThreadBrowserRuntime {
      */
     const scoped = isLocator(options.page) ? options.page : undefined;
     const page = isPage(options.page) ? options.page : active.page;
-    const target = scoped ?? (options.selector ? page.locator(options.selector).first() : page);
-    const snapshot = await target.ariaSnapshot({
-      mode: "ai",
-      ...(options.depth ? { depth: options.depth } : {}),
-    });
-    if (options.selector) {
+
+    /*
+     * A region read stays on Playwright's own snapshot, and a whole-page read
+     * compiles.
+     *
+     * That split is deliberate rather than a half-finished migration. Scoping to
+     * one region is what keeps a 25k-character job board down to the form the
+     * model is filling, and it is something Playwright's `ariaSnapshot` does
+     * well and the collector does not do at all: `collectPage` reads a whole
+     * document by construction, and narrowing it to a subtree would mean
+     * filtering the compile afterwards, which is a different feature. A model
+     * that wants a region gets one; a model that looks at the page gets the
+     * compiled view, which is the case the measurement is about.
+     */
+    const region = scoped ?? (options.selector ? page.locator(options.selector).first() : undefined);
+    if (region !== undefined) {
+      const snapshot = await region.ariaSnapshot({
+        mode: "ai",
+        ...(options.depth ? { depth: options.depth } : {}),
+      });
       // A scoped look replaces what the observer is holding, so a later diff is
       // against what the model actually saw rather than the whole page it did not.
       this.observer.capture({ url: page.url(), title: await page.title().catch(() => ""), snapshot });
-      return { ...this.observer.view(`selector: ${options.selector}`), url: page.url() };
+      const note = options.selector ? `selector: ${options.selector}` : undefined;
+      return { ...this.observer.view(note), url: page.url() };
     }
-    this.observer.capture({ url: page.url(), title: await page.title().catch(() => ""), snapshot });
+
+    const perceived = await this.perceive(page);
+    this.observer.capture({
+      url: page.url(),
+      title: await page.title().catch(() => ""),
+      snapshot: perceived.text,
+      ...(perceived.note !== undefined ? { note: perceived.note } : {}),
+      stats: statsOf(perceived),
+    });
     return { ...this.observer.view(), url: page.url() };
   }
 
@@ -478,7 +559,15 @@ export class ThreadBrowserRuntime {
 
     try {
       const { receipt, result } = await Promise.race([
-        runStep(startedOn, this.observer, () => action(page), options),
+        /*
+         * The transaction captures through this runtime rather than through
+         * Playwright directly, so every capture in the loop is the same
+         * representation: the compile when it works, the snapshot when it does
+         * not. A step that captured one way before the action and the other way
+         * after would diff two different descriptions of the page and report the
+         * whole thing as changed.
+         */
+        runStep(startedOn, this.observer, () => action(page), { ...options, capture: (target) => this.capture(target) }),
         deadline,
       ]);
 
@@ -547,8 +636,7 @@ export class ThreadBrowserRuntime {
          * model is told the program was cut off and shown where the browser
          * actually got to, rather than being told nothing at all.
          */
-        const outline = await page.ariaSnapshot({ mode: "ai" }).catch(() => "");
-        this.observer.capture({ url: page.url(), title: await page.title().catch(() => ""), snapshot: outline });
+        await this.capture(page).catch(() => undefined);
         return {
           result: undefined,
           receipt: {
@@ -658,6 +746,24 @@ export class ThreadBrowserRuntime {
      */
     if (browser) await browser.close().catch(() => undefined);
   }
+}
+
+/**
+ * The stats a perception produced, in the shape the observer reports.
+ *
+ * The compiled view has no `[ref=]` markers for `countOutline` to find, so the
+ * compiler's own counts are passed instead. `interactive` is the one field that
+ * cannot be answered from the compile directly: an element carrying a locator is
+ * one the model can act on, which is what the field means.
+ */
+function statsOf(perceived: PerceptionResult): SnapshotStats {
+  const text = perceived.text;
+  return {
+    lines: text.split("\n").filter((line) => line.trim().length > 0).length,
+    chars: text.length,
+    refs: perceived.ir?.elements.size ?? 0,
+    interactive: perceived.ir?.elements.size ?? 0,
+  };
 }
 
 /**

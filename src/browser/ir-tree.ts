@@ -212,6 +212,7 @@ function elementToNode(element: CandidateElement, index: number): IrNode {
     ...(element.tag !== undefined ? { tag: element.tag } : {}),
     ...(element.inputType !== undefined ? { inputType: element.inputType } : {}),
     ...(element.visible === false ? { hidden: true } : {}),
+    ...(element.textContent !== undefined ? { textContent: element.textContent } : {}),
   };
 }
 

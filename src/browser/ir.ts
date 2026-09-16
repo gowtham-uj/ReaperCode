@@ -115,6 +115,16 @@ export interface IrNode {
    * change nothing else.
    */
   placeholder?: string | undefined;
+  /**
+   * The words this node holds, when it is a leaf of prose.
+   *
+   * Set only for an element whose subtree contains text and nothing else, so a
+   * container never carries the sum of its children. This is what lets a view
+   * say that a form answered "submitted" rather than only describing its
+   * controls, which is the difference between a model that can act and a model
+   * that can tell whether acting worked.
+   */
+  textContent?: string | undefined;
 }
 
 /** A compiled section: a region of the page a person would name. */
@@ -154,6 +164,20 @@ export interface IrSection {
    * "List" printed thirty times.
    */
   items?: IrItem[] | undefined;
+  /**
+   * Text the section holds, in document order, deduplicated.
+   *
+   * What the page *says* rather than what it offers. A form of six fields and
+   * the line "Invalid password" are the same section to the compiler and two
+   * very different things to the model, and without this the second was
+   * invisible: every control compiled, and the sentence explaining why the last
+   * action did not work did not.
+   *
+   * Not elements, because prose is not a target. It has no locator worth
+   * printing and nothing to click, and giving it an element id would put a
+   * paragraph in the same list as the buttons and invite the model to pick it.
+   */
+  prose?: string[] | undefined;
 }
 
 /** One row of a repeated section. */
@@ -755,6 +779,17 @@ export interface CompileOptions {
 export const DETAIL_THRESHOLD = 0;
 
 /**
+ * How many prose leaves one section carries.
+ *
+ * Bounded because a page can hold a novel and the view has a character budget.
+ * The first few in document order are where the page's answers are: a status
+ * line, an error, a result count. A section that needs more than this is a
+ * content page, and a content page the model should read with a scoped view or
+ * a program rather than through the summary.
+ */
+export const MAX_PROSE_PER_SECTION = 8;
+
+/**
  * Compile a page into the IR.
  *
  * Deterministic: the same input compiles to the same output, which is what makes
@@ -1043,6 +1078,15 @@ export function compileIr(input: CompileInput, options: CompileOptions = {}): Br
     const owned: IrNode[] = [];
     /** Hidden but real: collected and marked, never offered as a target. */
     const hiddenOwned: IrNode[] = [];
+    /**
+     * The prose this section holds, in document order.
+     *
+     * Text and not elements, because prose is not something to act on. It is
+     * what the page says, which is a different fact from what the page offers,
+     * and collapsing the two is how a model ends up with a list of buttons and
+     * no idea whether the last one worked.
+     */
+    const prose: string[] = [];
     /*
      * Every node that became a section in its own right, which is where this
      * cut's claim to nested elements stops.
@@ -1095,7 +1139,23 @@ export function compileIr(input: CompileInput, options: CompileOptions = {}): Br
        * compiled to two sections both called "Results".
        */
       if (!isRoot && cutRoots.has(node.index)) return;
-      if (isInteractive(node)) owned.push(node);
+      if (isInteractive(node)) {
+        owned.push(node);
+      } else if (node.textContent !== undefined && node.textContent !== node.name) {
+        /*
+         * A leaf of prose, kept as text rather than as an element.
+         *
+         * It is not a target: there is nothing to click and no locator worth
+         * printing. But it is often the most important thing on the page after
+         * an action, because it is where the page says what happened. "submitted",
+         * "Invalid password", "3 results", "Your order could not be placed".
+         *
+         * The `!== node.name` guard is what stops a node repeating itself: an
+         * element whose accessible name is its own text would otherwise appear
+         * once as a named element and once as prose.
+         */
+        if (prose.length < MAX_PROSE_PER_SECTION) prose.push(node.textContent);
+      }
       for (const child of node.children) {
         const childNode = nodes[child];
         if (childNode) collect(childNode, false);
@@ -1215,6 +1275,25 @@ export function compileIr(input: CompileInput, options: CompileOptions = {}): Br
      * keep their stable ids, so a reference the model took to a specific link
      * still resolves.
      */
+    /*
+     * Prose that some element in this section already announces is dropped.
+     *
+     * The duplicate is real and it is not obvious from either side. A
+     * `<label for="first">First name</label>` has an empty accessible name of
+     * its own, because its text belongs to the input it labels, so the
+     * node-level guard in the walk does not catch it. What the model then read
+     * was a textbox called "First name" and, three lines down, a bare text line
+     * saying "First name" again, which looks like a second field.
+     *
+     * Checking against the collected elements rather than against a list of tags
+     * is deliberate: the same duplication arrives from a `<legend>`, an
+     * `<option>`, or a `<div>` a component library put a label in. What matters
+     * is whether the words are already spoken for, not what element produced
+     * them.
+     */
+    const spokenFor = new Set(owned.map((node) => node.name).filter((name) => name.length > 0));
+    const proseKept = [...new Set(prose)].filter((line) => !spokenFor.has(line));
+
     const items: IrItem[] = [];
     if (cut.itemRoots) {
       for (let rowIndex = 0; rowIndex < cut.itemRoots.length; rowIndex++) {
@@ -1237,6 +1316,7 @@ export function compileIr(input: CompileInput, options: CompileOptions = {}): Br
       elements: elementIds,
       heading: cut.heading,
       ...(items.length > 0 ? { items } : {}),
+      ...(proseKept.length > 0 ? { prose: proseKept.slice(0, MAX_PROSE_PER_SECTION) } : {}),
       ...(thisSectionHiddenIds.length > 0 ? { hiddenCount: thisSectionHiddenIds.length } : {}),
       ...(unchanged ? { unchanged: true } : {}),
     };
@@ -1256,6 +1336,20 @@ export function compileIr(input: CompileInput, options: CompileOptions = {}): Br
   const ancestorOf = (parent: IrNode, of: IrNode): boolean => descendants(parent, nodes).some((child) => child.index === of.index);
   const surviving = sections.filter((section, index) => {
     if (section.elements.length > 0) return true;
+    /*
+     * A container with prose of its own is not an empty container.
+     *
+     * This is the case that made a form's answer invisible. `<main>` wraps
+     * `<form>` and `<p id="result">`, and on this page the submit handler writes
+     * "submitted" into that paragraph. The form became a section, the `main` held
+     * no elements of its own, and the rule below dropped it, taking the one
+     * sentence that says whether the action worked with it. The model could see
+     * the button and not the result of pressing it.
+     *
+     * Prose is content, and a container holding content is a section whatever
+     * else is nested inside it.
+     */
+    if ((section.prose?.length ?? 0) > 0) return true;
     // Empty, and it wraps a section that is not empty: it is a container, not a
     // section, and it costs a line on every observation to say nothing.
     return !cuts.some(

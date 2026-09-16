@@ -268,9 +268,20 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
      * agent clicks a button that moved.
      */
     const flows = await flowHint(runtime, view.url);
+    /*
+     * The counts come from the runtime, not from counting the rendered text.
+     *
+     * They used to be derived from the outline by counting `[ref=` lines, which
+     * was right when the outline was Playwright's snapshot and is wrong now that
+     * it is the compiled view: the compiled view has no `ref=` markers, so every
+     * count would have reported zero refs on a page with hundreds of addressable
+     * elements. A wrong number here is worse than no number, because it reads as
+     * "this page has nothing on it".
+     */
+    const stats = runtime.lastStats();
     return {
       output:
-        `${view.text}\n\n[${view.stats.lines} lines, ${view.stats.chars} chars, ${view.stats.refs} refs, ${view.stats.interactive} interactive]` +
+        `${view.text}\n\n[${stats.lines} lines, ${stats.chars} chars, ${stats.elements} elements]` +
         `\n(REV ${runtime.observer.revision} - pass expected_revision with your next program)` +
         (flows.length > 0 ? `\n\n${flows.join("\n")}` : ""),
       outcome: "SUCCESS",

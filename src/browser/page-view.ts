@@ -277,10 +277,57 @@ export class PageObserver {
    * compares like with like: a diff between a pruned and an unpruned outline
    * would report every noise line as a change.
    */
-  capture(input: { url: string; title: string; snapshot: string; maxChars?: number }): void {
+  capture(input: {
+    url: string;
+    title: string;
+    snapshot: string;
+    maxChars?: number;
+    note?: string | undefined;
+    /**
+     * What the snapshot cost, when the caller already counted it.
+     *
+     * Needed because `countOutline` reads Playwright's text: it finds elements
+     * by `[ref=` markers, and the compiled view has none. Counting a compiled
+     * view would report zero refs and zero interactive elements on a page with
+     * hundreds of them, which reads to a model as "this page is empty" and is
+     * worse than reporting nothing. The compiler knows the real numbers, so it
+     * passes them and the line-based count stays for the snapshot path.
+     */
+    stats?: SnapshotStats | undefined;
+  }): void {
     this.current = trimOutline(input.snapshot, input.maxChars ?? VIEW_MAX_CHARS).outline;
     this.lastUrl = input.url;
     this.lastTitle = input.title;
+    this.note = input.note;
+    this.stats = input.stats;
+  }
+
+  /** The stats the last capture supplied, when it supplied them. */
+  private stats: SnapshotStats | undefined;
+
+  /**
+   * A line the next header carries, when the view is not the ordinary one.
+   *
+   * Used for the fallback: when the compiler could not read the page and the
+   * model is being shown Playwright's own accessibility snapshot instead, that
+   * has to be said before the content rather than after it. The two
+   * representations do not address elements the same way, so a model that reads
+   * a fallback without knowing it is one will write `s1:r3` against a page whose
+   * only handles are `aria-ref=e74`.
+   *
+   * Cleared on every capture, so it describes the view the reader is holding and
+   * not the last time something went wrong.
+   */
+  private note: string | undefined;
+
+  /** The goal the model is working toward, for relevance scoring. */
+  get goal(): string | undefined {
+    return this.goalValue;
+  }
+
+  /** The step the model says it is on, for relevance scoring. */
+  get step(): string | undefined {
+    return this.stepValue;
   }
 
   /**
@@ -298,7 +345,7 @@ export class PageObserver {
     return {
       text: `${this.header(selectorNote)}\n\n${outline}`,
       truncated,
-      stats: countOutline(outline, truncated),
+      stats: this.stats ?? countOutline(outline, truncated),
       contentMeta: { untrusted: true, source: "browser-page", url: this.lastUrl ?? "" },
     };
   }
@@ -322,25 +369,30 @@ export class PageObserver {
       `REV ${this.rev}`,
       `URL: ${this.lastUrl ?? "(unknown)"}`,
       ...(this.lastTitle ? [`Title: ${this.lastTitle}`] : []),
+      /*
+       * The fallback notice sits here, above the content and below the
+       * revision, because it changes how everything after it must be read.
+       */
+      ...(this.note ? [this.note] : []),
     ];
-    if (this.goal) lines.push(`Goal: ${this.goal}`);
-    if (this.step) lines.push(`Current step: ${this.step}`);
+    if (this.goalValue) lines.push(`Goal: ${this.goalValue}`);
+    if (this.stepValue) lines.push(`Current step: ${this.stepValue}`);
     if (selectorNote) lines.push(`Scope: ${selectorNote}`);
     return lines.join("\n");
   }
 
   /** What the model is trying to do, carried on every observation. */
   setGoal(goal: string | undefined): void {
-    this.goal = goal;
+    this.goalValue = goal;
   }
 
   /** The step the model says it is on, carried on every observation. */
   setStep(step: string | undefined): void {
-    this.step = step;
+    this.stepValue = step;
   }
 
-  private goal: string | undefined;
-  private step: string | undefined;
+  private goalValue: string | undefined;
+  private stepValue: string | undefined;
 
   /**
    * Only what differs from the last thing the model saw.
@@ -417,6 +469,7 @@ export class PageObserver {
     this.lastUrl = undefined;
     this.lastTitle = undefined;
     this.urlSeenByModel = undefined;
+    this.note = undefined;
     this.rev = 0;
   }
 }

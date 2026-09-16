@@ -86,63 +86,81 @@ export function renderModelView(ir: BrowserIR, options: ModelViewOptions = {}): 
   for (const section of ir.sections) scores.set(section.id, relevanceOf(section, options.context));
 
   /*
-   * The sections worth expanding, in priority order.
-   *
-   * An explicit `expand` wins because the model asked. Otherwise the
-   * highest-scoring section expands, which is the one the current step is most
-   * likely to touch.
+   * Sections in the order the model should consider them: what it is doing
+   * first, then what a page is usually for, then everything else by size.
    */
-  const ranked = [...ir.sections].sort((a, b) => (scores.get(b.id) ?? 0) - (scores.get(a.id) ?? 0));
+  const ranked = [...ir.sections].sort((a, b) => priorityOf(b, scores) - priorityOf(a, scores) || a.id.localeCompare(b.id));
+
+  /*
+   * Which sections to open, decided against the budget rather than by picking
+   * one.
+   *
+   * The first version opened exactly one section: the best-scoring, or the
+   * largest when nothing scored. On a small page that is a waste of the budget
+   * it was given, and on a form page it opened the *navigation*, because twelve
+   * nav links outweigh six form fields by element count. The model then read a
+   * view whose only named elements were menu items, on a page whose whole
+   * purpose was a button labelled Continue.
+   *
+   * So the budget decides. Sections open in priority order for as long as there
+   * is room, and the ones that do not fit stay as one line each. A small page
+   * shows everything it has; a large one shows what matters most. Nothing is
+   * ever removed, which is the rule the rest of this file is built on.
+   */
+  const budget = Math.max(200, maxChars - 200); // room for the header and the trim notice
+  const collapsedLines = new Map<string, string>();
+  let used = 0;
+  for (const section of ir.sections) {
+    const line = collapseSection(section, ir);
+    collapsedLines.set(section.id, line);
+    used += line.length + 1;
+  }
+
   const expanded = new Set(options.expand ?? []);
-  if (expanded.size === 0) {
-    /*
-     * Something always expands, and the first version of this did not.
-     *
-     * It expanded the best-scoring section only when the score was above zero.
-     * On Hacker News nothing matched the step ("read the stories" against a
-     * section labelled "Results (92)"), so nothing expanded and the model got a
-     * view saying "61 rows" with no rows in it. That is 195 characters of a page
-     * it cannot read: smaller than the snapshot and useless, which is worse than
-     * either.
-     *
-     * A first look has to contain something to act on. When relevance has no
-     * opinion, the largest section expands, because the biggest region on a page
-     * is the one the page is mostly about. Relevance still decides *which* when
-     * it does have an opinion; this is the answer when it does not.
-     */
-    const best = ranked.find((section) => (scores.get(section.id) ?? 0) > 0);
-    const fallback = [...ir.sections].sort((a, b) => weightOf(b) - weightOf(a))[0];
-    const chosen = best ?? fallback;
-    if (chosen) expanded.add(chosen.id);
+  const asked = new Set(options.expand ?? []);
+  for (const section of ranked) {
+    if (asked.has(section.id)) continue;
+    const cost = expandSection(section, ir).reduce((sum, line) => sum + line.length + 1, 0);
+    const collapsed = (collapsedLines.get(section.id) ?? "").length + 1;
+    // Opening costs the difference; a section that fits on its line already is
+    // always worth opening when there is any room at all.
+    if (used + (cost - collapsed) > budget) continue;
+    expanded.add(section.id);
+    used += cost - collapsed;
   }
 
   const lines: string[] = [];
 
-  /* ---- the header: where the model is, in two lines ---- */
-  lines.push(`REV ${ir.revision}`);
-  lines.push(`${ir.url}${ir.title.length > 0 ? `  (${ir.title})` : ""}`);
+  /*
+   * Coverage, and only coverage.
+   *
+   * This used to emit its own `REV n` and URL, which the observation header
+   * already carries, so every view began by saying where it was twice. Two
+   * headers is not a formatting bug: it doubles the cost of the one fact every
+   * look must include, and a model reading two revisions has to work out which
+   * one the diff is against.
+   *
+   * What stays here is the caveat, and it goes first rather than last. A model
+   * that reads only the top of a trimmed view must still know the view is not
+   * whole; a caveat at the bottom of a trimmed view is a caveat nobody sees.
+   */
   if (!ir.coverage.complete && ir.coverage.incompleteBecause !== undefined) {
-    /*
-     * Coverage goes in the header rather than the footer because a model that
-     * reads only the top must still know its view is not whole. A caveat at the
-     * bottom of a trimmed view is a caveat nobody sees.
-     */
-    lines.push(`COVERAGE INCOMPLETE: ${ir.coverage.incompleteBecause}`);
+    lines.push(`COVERAGE INCOMPLETE: ${ir.coverage.incompleteBecause}`, "");
   }
-  lines.push("");
 
   /* ---- sections, expanded or collapsed, always present ---- */
   for (const section of ranked) {
     const open = expanded.has(section.id);
-    lines.push(...(open ? expandSection(section, ir) : [collapseSection(section, ir)]));
+    const own = open ? expandSection(section, ir) : [collapsedLines.get(section.id) ?? collapseSection(section, ir)];
     const score = scores.get(section.id) ?? 0;
     if (!open && score > 0) {
       /*
        * A collapsed section that scored says so, so the model knows which line
        * to ask about rather than scanning all of them.
        */
-      lines[lines.length - 1] = `${lines[lines.length - 1]}  <- possibly relevant`;
+      own[own.length - 1] = `${own[own.length - 1]}  <- possibly relevant`;
     }
+    lines.push(...own);
   }
 
   /* ---- the footer: what was left out, so nothing is silently missing ---- */
@@ -154,6 +172,47 @@ export function renderModelView(ir: BrowserIR, options: ModelViewOptions = {}): 
 
   const trimmed = trimToBudget(lines, maxChars);
   return { text: trimmed.text, truncated: trimmed.truncated, expanded: [...expanded] };
+}
+
+/**
+ * How early a section should be considered for opening.
+ *
+ * Relevance first, because a section the current step mentions is the one worth
+ * spending characters on. Then the shape of the section, because that is what a
+ * page is usually for: a form to fill, a list to pick from, a dialog to answer.
+ * Navigation and footers come last and are never opened unless there is room
+ * left over, which on a page of any size there will not be.
+ *
+ * The ordering is a preference rather than a filter. Every section is printed
+ * either way; this only decides which ones get their contents.
+ */
+function priorityOf(section: IrSection, scores: Map<string, number>): number {
+  const score = scores.get(section.id) ?? 0;
+  if (score > 0) return 1000 + score;
+  switch (section.kind) {
+    case "form":
+    case "search":
+      return 500;
+    case "dialog":
+      return 450;
+    case "results":
+      return section.items !== undefined ? 400 : 300;
+    case "product":
+    case "article":
+      return 250;
+    case "list":
+    case "main":
+      return 200;
+    case "unknown":
+      return 100;
+    /*
+     * Header, footer and navigation last, and below zero so that a page which is
+     * nothing but a nav still opens something rather than showing a list of
+     * section names with no contents anywhere.
+     */
+    default:
+      return -100;
+  }
 }
 
 /**
@@ -188,6 +247,7 @@ function expandSection(section: IrSection, ir: BrowserIR): string[] {
         if (element) out.push(...elementLines(element, "      "));
       }
     }
+    out.push(...proseLines(section));
     return out;
   }
 
@@ -197,6 +257,30 @@ function expandSection(section: IrSection, ir: BrowserIR): string[] {
     const element = ir.elements.get(elementId);
     if (element) out.push(...elementLines(element, "  "));
   }
+  out.push(...proseLines(section));
+  return out;
+}
+
+/**
+ * What the section says, as opposed to what it offers.
+ *
+ * Rendered after the elements because that is the order the model reads in:
+ * find the control, then read the result it produced. Quoted so it is visibly
+ * page text rather than something Reaper is asserting, which matters because
+ * this is the one part of the view that is prose rather than structure and the
+ * part a hostile page has the most room to write a lie in.
+ *
+ * Capped at three lines. A section with a status line, an error and a result
+ * count is worth all three; a section with forty paragraphs is a content page
+ * whose prose the model should read with a program, and printing all of it
+ * would spend the whole budget on the least actionable part of the page.
+ */
+function proseLines(section: IrSection): string[] {
+  const prose = section.prose ?? [];
+  if (prose.length === 0) return [];
+  const shown = prose.slice(0, 3);
+  const out = shown.map((line) => `  text: ${truncate(line, 120)}`);
+  if (prose.length > shown.length) out.push(`  text: ... ${prose.length - shown.length} more text block${prose.length - shown.length === 1 ? "" : "s"}`);
   return out;
 }
 
@@ -230,6 +314,14 @@ function describe(section: IrSection, ir: BrowserIR): string {
   for (const [role, count] of [...counts].sort((a, b) => b[1] - a[1]).slice(0, 4)) {
     parts.push(count === 1 ? role : `${count} ${plural(role, count)}`);
   }
+  /*
+   * Text is mentioned even when collapsed, because a section that says
+   * something is a different proposition from a section that only offers
+   * controls. A model reading "s5 results "Results" 12 rows" and "s9 main
+   * "Main" text, 2 links" can tell at a glance which one is likely to hold the
+   * answer to its last action, without opening either.
+   */
+  if ((section.prose?.length ?? 0) > 0) parts.unshift("text");
   if (section.hiddenCount !== undefined && section.hiddenCount > 0) parts.push(`${section.hiddenCount} hidden`);
   return parts.length > 0 ? parts.join(", ") : "empty";
 }
@@ -266,18 +358,6 @@ function elementLines(element: IrElement, indent: string): string[] {
 
 function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
-}
-
-/**
- * How big a section is, for deciding which one to show when nothing is relevant.
- *
- * Rows count for more than elements because a list of sixty rows is the page's
- * content where a form of six fields is one part of it. Interaction is not
- * counted at all: the biggest thing on a page is often a nav, and a nav expanded
- * in full is the most expensive way to say nothing.
- */
-function weightOf(section: IrSection): number {
-  return (section.items?.length ?? 0) * 3 + section.elements.length;
 }
 
 /** How much this section matters to the current step. Mirrors the compiler's own. */

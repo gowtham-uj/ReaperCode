@@ -131,3 +131,4 @@ tool-discovery-trace.json
 # .reaper/steel-patches.{md,patch} so a fresh clone can be brought up to date
 # without carrying the whole tree in this repository's history.
 vendor/
+.scratch/

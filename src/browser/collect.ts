@@ -130,7 +130,25 @@ export interface CandidateElement {
    * bare clickable div is ever found.
    */
   hasText?: boolean | undefined;
+  /**
+   * The words this node directly holds, when it is a leaf of prose.
+   *
+   * Set only for an element whose subtree contains text and no other elements,
+   * so it is the text's own holder and not a container that merely sums its
+   * children. That is what stops a `<form>` contributing the concatenation of
+   * every label inside it, and what stops a `<td>` holding a link from
+   * duplicating that link's name.
+   *
+   * Collapsed and capped, because this ends up in a view with a character
+   * budget: a page can hold a hundred thousand characters of prose and the
+   * model needs the sentence that says whether its last action worked, not the
+   * whole article.
+   */
+  textContent?: string | undefined;
 }
+
+/** The longest run of prose worth carrying out of one leaf. */
+const MAX_TEXT_CONTENT_CHARS = 240;
 
 /**
  * A frame, with what is known about reaching into it.
@@ -568,6 +586,22 @@ export async function collectPage(page: Page, options: CollectOptions = {}): Pro
       // A hidden form control is reported whether or not anything else says so.
       if (!element.visible && isFormControlTag(element.tag, element.inputType, element.role)) return true;
       if (!element.visible) return false;
+      /*
+       * A leaf of prose is kept, which is the fifth kind and the one that was
+       * missing.
+       *
+       * Without it the view described every control on a page and none of the
+       * sentences, so a form that answered "submitted", a search that said "3
+       * results", a login that said "Invalid password" all compiled to a view
+       * that said nothing had happened. The model could act and could not tell
+       * whether acting worked, which is the failure the receipt exists to
+       * prevent and this is the half of it the receipt could not see.
+       *
+       * A named node is still kept by the rule below, so this only adds the
+       * unnamed holders of text, which is exactly the set that was being
+       * dropped.
+       */
+      if (element.textContent !== undefined) return true;
       return element.accessibleName.length > 0 || isMeaningfulRole(element.role);
     });
 
@@ -682,6 +716,61 @@ function buildFrame(document_: SnapshotDocument, prefix: string, strings: string
       cursor = nodes.parentIndex[cursor];
     }
   }
+
+  /*
+   * Which nodes have at least one element child, and each element's own text
+   * children.
+   *
+   * This is what makes a node a *leaf of prose*: an element whose subtree holds
+   * text and no other elements. A paragraph, a status line, a table cell with
+   * only words in it. Those are the nodes whose text nothing else already
+   * carries, and they are the reason this exists: the compiled view used to omit
+   * page text entirely, so a form that answered "submitted" or "Invalid
+   * password" compiled to a view that said nothing about it. The model could see
+   * every control and not the one sentence that tells it whether the last action
+   * worked.
+   *
+   * Restricted to leaves deliberately, and that restriction is what keeps it
+   * from duplicating everything else. A `<td>` holding a link has an element
+   * child, so its text is skipped and the link keeps its name. A `<form>` has
+   * element children, so its text, which is the concatenation of every label
+   * inside it, is never collected. Only the innermost holder of a run of words
+   * contributes, and it contributes exactly once.
+   */
+  const hasElementChild = new Uint8Array(nodes.nodeName.length);
+  const textChildren = new Map<number, string[]>();
+  for (let i = 0; i < nodes.nodeName.length; i++) {
+    const parent = nodes.parentIndex[i];
+    if (typeof parent !== "number" || parent < 0) continue;
+    if (nodes.nodeType[i] === 1) {
+      hasElementChild[parent] = 1;
+      continue;
+    }
+    if (nodes.nodeType[i] !== 3) continue;
+    const own = at(nodes.nodeValue[i]);
+    if (own === undefined || own.trim().length === 0) continue;
+    const bucket = textChildren.get(parent);
+    if (bucket === undefined) textChildren.set(parent, [own]);
+    else bucket.push(own);
+  }
+
+  /**
+   * The prose a node holds directly, when it is the innermost holder of it.
+   *
+   * Undefined for anything with an element child, for anything whose text is
+   * already covered, and for text that is only whitespace. The cap is applied
+   * after collapsing runs of whitespace, because the snapshot preserves the
+   * source's newlines and indentation and a paragraph of prose in real markup
+   * arrives with a few hundred characters of layout around it.
+   */
+  const proseFor = (index: number): string | undefined => {
+    if (hasElementChild[index] === 1) return undefined;
+    const parts = textChildren.get(index);
+    if (parts === undefined) return undefined;
+    const collapsed = parts.join(" ").replace(/\s+/g, " ").trim();
+    if (collapsed.length === 0) return undefined;
+    return collapsed.length <= MAX_TEXT_CONTENT_CHARS ? collapsed : `${collapsed.slice(0, MAX_TEXT_CONTENT_CHARS - 1)}…`;
+  };
 
   const elements: CandidateElement[] = [];
 
@@ -810,6 +899,13 @@ function buildFrame(document_: SnapshotDocument, prefix: string, strings: string
       inShadow: shadowRoots.has(index),
       inSvg: evidence.inSvg === true,
       hasText: hasTextUnder.has(index),
+      /*
+       * Only for a leaf of prose, and only when it is not already the element's
+       * accessible name. A `<button>Continue</button>` would otherwise carry
+       * "Continue" twice, once as its name and once as its text, and the view
+       * would print it on two lines.
+       */
+      textContent: proseFor(index),
       ...(liveValue !== undefined && attributeValue !== undefined && liveValue !== attributeValue
         ? { valueConflicts: true }
         : {}),
