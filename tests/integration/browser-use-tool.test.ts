@@ -563,3 +563,46 @@ test("an array callback runs in the sandbox, so the ordinary chain still works",
     await otherThread.close();
   }
 });
+
+test("a tab opened through the facade is scoped too", { skip }, async () => {
+  /*
+   * The gap the primary-root scoping left open. `page` was scoped, so a program
+   * that started there could not widen; a page the program opened through
+   * `browser.newPage()` was not, so starting from *that* reached every thread.
+   * Verified before the fix: `tab.context().browser().contexts()` returned 2 and
+   * listed another agent's page URL.
+   *
+   * Asserted on the other thread's URL rather than on a context count, because a
+   * count depends on how many threads happen to be alive.
+   */
+  const other = new ThreadBrowserRuntime({ threadId: "facade-tab-victim", cdpUrl: CDP_URL });
+  try {
+    const victim = (await other.ensureReady()).page;
+    await victim.goto(`${site!.origin}/hidden`, { waitUntil: "domcontentloaded" });
+
+    const rt = await runtime();
+    const { page } = await rt.ensureReady();
+    await page.goto(`${site!.origin}/basic`, { waitUntil: "domcontentloaded" });
+    await rt.view();
+
+    const result = await executeBrowserUse(
+      rt,
+      {
+        code: `
+          const tab = await browser.newPage("facade-scope-probe");
+          await tab.goto(${JSON.stringify(site!.origin)} + "/canvas");
+          const all = await tab.context().browser().contexts().flatMap(c => c.pages());
+          const urls = await Promise.all(all.map(async (p) => await p.url()));
+          ({ contexts: await tab.context().browser().contexts().length, urls })
+        `,
+        observe: "none",
+      } as never,
+      metadata,
+    );
+
+    assert.equal(result.outcome, "SUCCESS", result.output);
+    assert.doesNotMatch(result.output, /\/hidden/, "a tab opened through the facade must not see another thread");
+  } finally {
+    await other.close();
+  }
+});

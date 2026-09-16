@@ -43,6 +43,7 @@
 import type { Page } from "playwright";
 
 import { RemotePageHost, type CallResult } from "./remote-page.js";
+import { scopePage } from "./scoped-page.js";
 import type { ThreadBrowserRuntime } from "./thread-runtime.js";
 
 /** The observation helpers, which are not Playwright calls. */
@@ -64,9 +65,28 @@ export interface ObserveSurface {
 export class BrowserFacade {
   constructor(private readonly runtime: ThreadBrowserRuntime) {}
 
+  /*
+   * Every page this hands out is SCOPED, and that is not a detail.
+   *
+   * These returned the runtime's raw pages, so a program that opened a tab
+   * through the facade and then walked the chain from that tab reached every
+   * other thread: `tab.context().browser().contexts()` returned 2 contexts and
+   * listed another agent's page by URL. Verified by running it. The scoping was
+   * applied only to the primary root, which closed the chain for a program that
+   * started from `page` and left it open for one that started from a tab it had
+   * just opened.
+   *
+   * So the wrapping happens here, at the single place pages leave the runtime,
+   * rather than at each call site. A page that escapes unscoped is the whole
+   * bug, and there is exactly one door.
+   */
+  private scoped(page: Page): Page {
+    return scopePage(page);
+  }
+
   /** Open a page in this thread's own context, optionally naming it. */
   async newPage(name?: string): Promise<Page> {
-    return await this.runtime.newPage(name);
+    return this.scoped(await this.runtime.newPage(name));
   }
 
   /** Every open page, with its name and whether it is the active one. */
@@ -86,17 +106,17 @@ export class BrowserFacade {
    * that reaches for any of them is right rather than nearly right.
    */
   async setActive(selector: string | number): Promise<Page> {
-    return await this.runtime.setActive(selector);
+    return this.scoped(await this.runtime.setActive(selector));
   }
 
   /** The same call, spelled the way the skill's examples show it. */
   async page(selector: string | number): Promise<Page> {
-    return await this.runtime.setActive(selector);
+    return this.scoped(await this.runtime.setActive(selector));
   }
 
   /** The same call under the name that reads best in a program. */
   async usePage(selector: string | number): Promise<Page> {
-    return await this.runtime.setActive(selector);
+    return this.scoped(await this.runtime.setActive(selector));
   }
 
   /** Close a page and forget it, so a name is not left pointing at a corpse. */
@@ -106,7 +126,7 @@ export class BrowserFacade {
 
   /** The page a bare `page` currently means. */
   async current(): Promise<Page> {
-    return (await this.runtime.ensureReady()).page;
+    return this.scoped((await this.runtime.ensureReady()).page);
   }
 
   /** Write this thread's cookies now, mid-program. */

@@ -64,29 +64,57 @@ async function portOpen(cdpUrl: string): Promise<boolean> {
  * that accepts connections and does not answer `/json/version` is a process in
  * trouble rather than a browser, and that distinction is the whole point.
  */
+/**
+ * How long the connect is given, and how many times.
+ *
+ * Five seconds was the first number and it was wrong in a way that produced a
+ * false alarm: on a machine running the whole browser suite at load 2, a healthy
+ * Steel that is merely busy took longer than that, and the fixture reported
+ * "something is listening but it does not speak CDP" — a diagnosis of a dead
+ * process for a process that was fine. That message is the fixture's whole
+ * purpose, so getting it wrong in the direction of a false positive is the worst
+ * way for it to fail.
+ *
+ * Three attempts of ten seconds. A Steel that is up answers the first one; one
+ * under load answers a later one; one that is genuinely crashed never answers,
+ * which is the case the message is for.
+ */
+const CDP_CONNECT_TIMEOUT_MS = 10_000;
+const CDP_CONNECT_ATTEMPTS = 3;
+
 export async function probeBrowser(cdpUrl: string): Promise<BrowserAvailability> {
-  try {
-    const browser = await chromium.connectOverCDP(cdpUrl, { timeout: 5_000 });
-    await browser.close();
-    return { available: true, cdpUrl };
-  } catch (error) {
-    const message = (error as Error).message.split("\n")[0] ?? "unknown error";
-    const listening = await portOpen(cdpUrl);
-    if (!listening) {
-      return {
-        available: false,
-        cdpUrl,
-        reason: `nothing is listening on ${cdpUrl}, so Steel is not running`,
-      };
+  let lastMessage = "unknown error";
+  for (let attempt = 0; attempt < CDP_CONNECT_ATTEMPTS; attempt++) {
+    try {
+      const browser = await chromium.connectOverCDP(cdpUrl, { timeout: CDP_CONNECT_TIMEOUT_MS });
+      await browser.close();
+      return { available: true, cdpUrl };
+    } catch (error) {
+      lastMessage = (error as Error).message.split("\n")[0] ?? "unknown error";
+      /*
+       * A refused connection is final: nothing is listening, so retrying only
+       * delays a report that is already certain.
+       */
+      if (await portOpen(cdpUrl) === false) break;
     }
+  }
+
+  const listening = await portOpen(cdpUrl);
+  if (!listening) {
     return {
       available: false,
       cdpUrl,
-      reason:
-        `something is listening on ${cdpUrl} but it does not speak CDP (${message}). ` +
-        `This is what a crashed or half-started Steel looks like, and it is not the same as Steel being absent.`,
+      reason: `nothing is listening on ${cdpUrl}, so Steel is not running`,
     };
   }
+  return {
+    available: false,
+    cdpUrl,
+    reason:
+      `something is listening on ${cdpUrl} but it does not speak CDP after ${CDP_CONNECT_ATTEMPTS} attempts of ` +
+      `${CDP_CONNECT_TIMEOUT_MS}ms (${lastMessage}). ` +
+      `This is what a crashed or half-started Steel looks like, and it is not the same as Steel being absent.`,
+  };
 }
 
 /** The `skip` option for a test, or false when it should run. */
