@@ -798,6 +798,26 @@ export class RuntimeEngine {
         workspaceRoot: this.input.workspaceRoot,
         userHome: this.input.userHome ?? process.env.HOME ?? "",
         hookRunner: this.getHookRunner(),
+        /*
+         * The approval surface, so the extension gates are real.
+         *
+         * Creating or enabling an extension runs JavaScript in Reaper's own
+         * process with Reaper's privileges, and the control for that is the user
+         * being asked. Without this the gates check a requester that was never
+         * supplied, which is the same as having no gate: a model could write code
+         * and run it as the host in two tool calls.
+         */
+        ...(this.input.approvalRequester ? { approvalRequester: this.input.approvalRequester } : {}),
+        /*
+         * The named session is the only identity the engine holds at this point.
+         * The per-run id arrives with the run context, which is not in scope
+         * here and would not help anyway: this runtime is built once and reused,
+         * so an id baked in at construction would name the first run for every
+         * later one. The session is the stable identity, and it is what a user
+         * sees on the approval prompt.
+         */
+        sessionId: this.input.namedSession ?? "unknown",
+        ...(this.input.abortSignal ? { abortSignal: this.input.abortSignal } : {}),
       });
     }
     return this.authoringRuntime;

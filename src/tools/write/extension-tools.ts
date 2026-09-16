@@ -45,7 +45,15 @@ import type {
 } from "../types/extension-tools.schema.js";
 
 export type ExtensionApprovalRequester = (input: {
-  kind: "trust_extension" | "uninstall_extension";
+  /**
+   * Which action is asking.
+   *
+   * `create_extension` and `enable_extension` are here because those are the two
+   * that lead to code running as Reaper: create writes it, enable executes it.
+   * Gating only `trust` and `uninstall` left the model a path from a turn to
+   * arbitrary code execution with no approval on it at all.
+   */
+  kind: "create_extension" | "enable_extension" | "trust_extension" | "uninstall_extension";
   id: string;
   description: string;
   trust: string;
@@ -80,6 +88,32 @@ export async function handleCreateExtension(
   args: CreateExtensionArgs,
   deps: ExtensionToolDeps,
 ): Promise<CreateExtensionResult> {
+  /*
+   * Creating an extension is gated, because creating one is the first half of
+   * running arbitrary code as Reaper.
+   *
+   * `activate()` is a plain in-process `import()`: an extension has the process
+   * identity (root, in a container), the process environment (including
+   * `ANTHROPIC_AUTH_TOKEN`), and the whole filesystem. Verified by running one:
+   * an extension's `activate()` read `/etc/hostname` and listed the credential
+   * variables, none of which a sandboxed `eval` script can do.
+   *
+   * That is a legitimate design for a plugin system, in the same way a VS Code
+   * extension runs in the editor's process. What is not legitimate is that the
+   * *model* could reach it unattended: `create` then `enable` was a complete
+   * path from a turn to arbitrary code execution as the host, with no approval
+   * anywhere on it. `trust` and `uninstall` were already gated; the two actions
+   * that actually execute code were not.
+   */
+  if (deps.approvalRequester) {
+    const allowed = await deps.approvalRequester({
+      kind: "create_extension",
+      id: args.id,
+      description: args.description,
+      trust: "new",
+    });
+    if (!allowed) return { ok: false, id: args.id, error: "denied by approval gate" };
+  }
   if (!ID_REGEX.test(args.id)) return { ok: false, error: `id "${args.id}" must match ${ID_REGEX.source}` };
   if (/\.ts$/i.test(args.main) || /\.tsx$/i.test(args.main)) {
     return { ok: false, error: `extensions are JavaScript-only (got "${args.main}"); rename to .js` };
@@ -213,6 +247,29 @@ export async function handleEnableExtension(
 ): Promise<{ ok: boolean; id: string; activated: boolean; error?: string }> {
   const r = deps.registry.get(args.id);
   if (!r) return { ok: false, id: args.id, activated: false, error: `extension "${args.id}" not loaded` };
+  /*
+   * Approval is required here, and this is the gate that matters.
+   *
+   * The lines below run the extension's `activate()` in Reaper's own process.
+   * Until this was added, a model could create an extension and enable it in two
+   * calls and be executing code as root with the provider token in scope, having
+   * passed through no approval at all — the sandbox on `eval` and `browser_use`
+   * bought nothing, because this path walks around it.
+   *
+   * An extension is a plugin, and a plugin runs with the host's privileges by
+   * design. So the control is consent, not confinement: the user is asked before
+   * code runs in their process. `trust` and `uninstall` were already asked; the
+   * action that executes was not.
+   */
+  if (deps.approvalRequester) {
+    const allowed = await deps.approvalRequester({
+      kind: "enable_extension",
+      id: args.id,
+      description: r.manifest.description,
+      trust: r.trust,
+    });
+    if (!allowed) return { ok: false, id: args.id, activated: false, error: "denied by approval gate" };
+  }
   /*
    * No trust gate.
    *

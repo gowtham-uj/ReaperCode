@@ -39,6 +39,8 @@ import { SkillMemoryRegistry } from "../../adaptive/skill-memory-registry.js";
 import { TOOL_METADATA } from "../../governance/tool-metadata.js";
 
 import type { AuthoringToolDeps } from "../executor.js";
+import type { ToolApprovalRequester } from "../approval.js";
+import type { PermissionMode } from "../../policy/classifier.js";
 import { handleSkillManager } from "./skill-tools.js";
 import { handleExtensionManager } from "./extension-tools.js";
 import type { ExtensionToolRegistry } from "../../extensions/tool-registry.js";
@@ -51,6 +53,26 @@ export interface AuthoringRuntimeInput {
   skillMemory?: SkillMemoryRegistry;
   /** The live hook runner the runtime already emits through, when there is one. */
   hookRunner?: HookRunner;
+  /**
+   * How the run asks the user to approve something.
+   *
+   * Threaded here because creating or enabling an extension executes code with
+   * Reaper's own privileges, and the control for that is consent rather than
+   * confinement: an extension is a plugin, so it runs in-process by design, and
+   * the only thing standing between a model and arbitrary code execution as the
+   * host is the user being asked. Without this the gates on `create` and `enable`
+   * are inert — they check a requester that was never supplied.
+   *
+   * Optional because tests and direct construction legitimately build these
+   * handlers without an approval surface; when it is absent the gates are
+   * skipped rather than every call failing.
+   */
+  approvalRequester?: ToolApprovalRequester | undefined;
+  /** Identity for the approval request, when there is a requester. */
+  runId?: string | undefined;
+  sessionId?: string | undefined;
+  permissionMode?: PermissionMode | undefined;
+  abortSignal?: AbortSignal | undefined;
 }
 
 /**
@@ -223,9 +245,45 @@ export class AuthoringRuntime {
         registry,
         workspaceRoot,
         userHome,
+        ...(this.approvalGate() ? { approvalRequester: this.approvalGate() } : {}),
       };
     });
     return this.extensionDeps;
+  }
+
+  /**
+   * The approval adapter the extension handlers call.
+   *
+   * The executor's requester speaks in whole `ToolCall`s, because that is what
+   * its own gate has when a tool needs approving. These handlers know which
+   * action is asking, not which call it arrived in, so the request is built here
+   * with that action as the reason — which is exactly the sentence a user needs
+   * to decide: "an extension wants to write and run code in this process".
+   *
+   * Returns undefined when the run has no approval surface, so a test or a
+   * direct caller is not blocked by a gate it cannot satisfy.
+   */
+  private approvalGate(): ((input: { kind: string; id: string; description: string; trust: string }) => Promise<boolean>) | undefined {
+    const requester = this.input.approvalRequester;
+    if (!requester) return undefined;
+    return async (input) => {
+      const decision = await requester.requestApproval(
+        {
+          approvalId: `extension-${input.kind}-${input.id}`,
+          runId: this.input.runId ?? "unknown",
+          sessionId: this.input.sessionId ?? "unknown",
+          toolCall: { id: `extension-${input.id}`, name: "extension_manager", args: { action: "enable", id: input.id } },
+          workspaceRoot: this.input.workspaceRoot,
+          workingDirectory: this.input.workspaceRoot,
+          permissionMode: this.input.permissionMode ?? "strict",
+          reason:
+            `An extension is about to ${input.kind === "create_extension" ? "be written" : "run"} in Reaper's own process ` +
+            `with Reaper's privileges (${input.id}: ${input.description}). Extensions are not sandboxed.`,
+        },
+        this.input.abortSignal,
+      );
+      return decision === "approved";
+    };
   }
 
   private hooks(): { deps: unknown } | { error: Error } {
