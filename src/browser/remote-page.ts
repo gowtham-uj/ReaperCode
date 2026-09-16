@@ -291,37 +291,32 @@ function handleFailure(): string {
 }
 
 /**
- * Rebuild an argument that cannot travel as structured data.
+ * Walk an argument for the one thing the host must never do: call a function.
  *
- * Only functions need this. They arrive as `{ __reaperFn: "<source>" }` and are
- * rebuilt with `new Function`, which is what Playwright does with the functions
- * it sends into the page. The consequence is the same one Playwright documents:
- * the function must be self-contained, because its closure did not come with it.
+ * There is nothing to rebuild any more, and that is deliberate. Arguments are
+ * data: the sandbox refuses to send a function at all (see
+ * `remote-page-source.ts`, which explains the escape this closed), so this only
+ * has to recurse through containers and hand back what it was given.
+ *
+ * The revival that used to live here was `new Function("return (" + src + ")")()`
+ * and it ran *in this process*. A payload shaped like
+ * `0) || (process.getBuiltinModule('fs').writeFileSync(...), 0) || (0` closed the
+ * wrapper's paren and executed at revival time, in the app-server, before
+ * Playwright was ever reached. Reproduced by writing a file to the host
+ * filesystem from a sandboxed program. Deleting the primitive is the fix; a
+ * smarter parser would only move the boundary.
  */
 function reviveArgument(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
-  if (Array.isArray(value)) {
-    // An array can hold handles, so it is walked rather than passed through.
-    return value.map((item) => reviveArgument(item));
-  }
-  const candidate = value as { __reaperFn?: unknown; __reaperNode?: unknown };
+  if (Array.isArray(value)) return value.map((item) => reviveArgument(item));
+  const candidate = value as { __reaperFn?: unknown };
   /*
-   * A live object travelling as an argument, sent by the worker as its handle.
-   *
-   * `browser.closePage(tab)` is the call that found this: without it the page
-   * arrived as `{}` and the failure named the method rather than the argument.
+   * Belt to the sandbox's braces. The worker refuses to encode a function, so a
+   * wrapper arriving here means something bypassed it, and running it is exactly
+   * what must not happen. Named so the failure says which side sent it.
    */
-  if (typeof candidate.__reaperNode === "number") return value;
-  if (typeof candidate.__reaperFn !== "string") return value;
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-implied-eval
-    return new Function(`return (${candidate.__reaperFn})`)();
-  } catch {
-    /*
-     * A function that does not parse is refused rather than passed through,
-     * because passing the wrapper object to Playwright would fail with a message
-     * about an unexpected argument rather than about the real problem.
-     */
-    throw new Error("a function argument could not be rebuilt from its source");
+  if (typeof candidate.__reaperFn === "string") {
+    throw new Error("a function argument reached the browser bridge; functions must not cross this boundary");
   }
+  return value;
 }

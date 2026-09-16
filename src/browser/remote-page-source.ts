@@ -46,16 +46,23 @@ export const REMOTE_PAGE_SOURCE = String.raw`
 function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
   const promise = Promise.resolve();
 
-  /* Arguments that cannot be cloned are sent as source, and rebuilt by the host. */
+  /*
+   * Turn an argument into something that can cross the boundary.
+   *
+   * Nodes become handles. Plain data is copied. Functions are refused, and that
+   * refusal is load-bearing: the host used to rebuild them from source with an
+   * eval, which is an escape in the app-server process (see the node check below
+   * for the ordering trap, and remote-page.ts for what the rebuild did).
+   */
   async function encodeArgument(value, depth) {
     if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return value;
     /*
      * The node check comes FIRST, before the function check, and the ordering is
      * load-bearing. A node is a Proxy over a function, so typeof is 'function'
-     * for it, and testing for a function first would serialize every one as
-     * source text: view(page.locator("form")) would send a function's toString
-     * instead of the region, which is the silent-scoping bug returning through a
-     * different door.
+     * for it, and testing for a function first would refuse every node passed as
+     * an argument: view(page.locator("form")) sends a node, and it was coming
+     * back as "a function cannot be passed to the browser bridge" for a locator
+     * that is not a function at all.
      */
     const marker = value.__reaperNode;
     if (marker && typeof marker.handle === 'number') {
@@ -66,7 +73,23 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
       }
       return { __reaperNode: marker.handle };
     }
-    if (typeof value === 'function') return { __reaperFn: value.toString() };
+    /*
+     * A real function is refused, which is what closes the host-side eval.
+     * Playwright accepts a source string anywhere it accepts a function, so the
+     * rewrite is always available and the message names it.
+     *
+     * The common array callbacks never reach here, because those methods are
+     * handled inside the sandbox: a chain like contexts().flatMap(c => c.pages())
+     * is resolved first and the callback is then run on the resulting array, in
+     * this process, against plain data. Refusing them outright would have broken
+     * the most ordinary way to write a program, and that is the trade avoided.
+     */
+    if (typeof value === 'function') {
+      throw new Error(
+        'a function cannot be passed to the browser bridge; pass a source string instead, ' +
+        'for example page.evaluate("document.title") or waitForFunction("window.ready")',
+      );
+    }
     if (depth > 8) return value;
     if (Array.isArray(value)) {
       const out = [];
@@ -189,6 +212,15 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
         if (path.length === 0) return makeNode(handle, [['__reaperInvoke', args]]);
         const last = path[path.length - 1];
         const head = path.slice(0, -1);
+
+        /*
+         * A function argument is kept on the path rather than encoded here.
+         *
+         * 'run()' splits the path at a local array method and applies it in this
+         * process (see LOCAL_ARRAY_METHODS), which is how a callback is allowed
+         * without crossing the bridge. Every other step is encoded and sent, and
+         * a function reaching 'encodeArgument' there is refused.
+         */
         return makeNode(handle, head.concat([[last[0], args]]));
       },
       has() {
@@ -199,7 +231,130 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
   }
 
   /* One round trip. The path is encoded so functions survive, values decoded so handles come back live. */
+  /*
+   * The array methods whose callback runs locally rather than crossing.
+   *
+   * 'contexts().flatMap(c => c.pages())' and '.filter(p => ...)' are how anyone
+   * writes this, and their callbacks are functions. A function cannot cross the
+   * bridge (that was the escape), so the sandbox runs these itself: the receiver
+   * is resolved by the host, the elements come back as nodes, and the callback is
+   * applied right here.
+   */
+  const LOCAL_ARRAY_METHODS = ['flatMap', 'map', 'filter', 'find', 'some', 'every', 'forEach', 'reduce'];
+
+  /*
+   * Apply one array method, awaiting what the callback returns.
+   *
+   * This is not 'Array.prototype[method].apply', and the difference is the whole
+   * reason this exists. A Playwright callback is async: 'c => c.pages()' returns
+   * a node, not an array of pages, and the built-in 'flatMap' would produce an
+   * array of nodes. '.filter(p => p.url().includes(x))' then calls '.url()' on a
+   * node, gets a node, and '.includes' is not a function on it, so the filter
+   * silently matches nothing. The test that caught this wanted "the other
+   * thread's page must not be findable" and got a program that failed on
+   * 'others[0].goto'.
+   *
+   * So each callback result is awaited, and the method semantics are then applied
+   * to the resolved values. The await is what a person writing this means: the
+   * model wrote 'c => c.pages()' expecting pages.
+   */
+  async function applyArrayMethod(method, array, args) {
+    const callback = args[0];
+    const rest = args.slice(1);
+    const results = [];
+    for (let index = 0; index < array.length; index++) {
+      results.push(await callback(array[index], index, array));
+    }
+    switch (method) {
+      case 'map':
+        return results;
+      case 'flatMap':
+        return results.reduce((out, value) => out.concat(value), []);
+      case 'filter':
+        return array.filter((_value, index) => results[index]);
+      case 'find':
+        return array.find((_value, index) => results[index]);
+      case 'some':
+        return results.some(Boolean);
+      case 'every':
+        return results.every(Boolean);
+      case 'forEach':
+        return undefined;
+      case 'reduce': {
+        /*
+         * Reduce has no per-element pre-pass: its callback carries the
+         * accumulator, so it is run in order with an await at each step.
+         */
+        const hasInitial = rest.length > 0;
+        let accumulator = hasInitial ? rest[0] : array[0];
+        for (let index = hasInitial ? 0 : 1; index < array.length; index++) {
+          accumulator = await callback(accumulator, array[index], index, array);
+        }
+        return accumulator;
+      }
+      default:
+        return undefined;
+    }
+  }
+
+  /*
+   * One step of a chain that continues past a local array method.
+   *
+   * A read on a node goes back to the host, so 'others[0].url()' still works: the
+   * element is a node rooted at its own handle. A read on plain data is answered
+   * here, which is what covers '.length' on the filtered array.
+   */
+  async function readLocal(current, name, args) {
+    if (current === null || current === undefined) return undefined;
+    if (current.__reaperNode) {
+      // A node: extend its path with this step and let the host run it.
+      const node = makeNode(current.__reaperNode.handle, current.__reaperNode.path.concat([[name, args]]));
+      return node.__reaperNode ? node : node;
+    }
+    if (typeof current === 'object' && name in current) {
+      const member = current[name];
+      return typeof member === 'function' ? member.apply(current, args) : member;
+    }
+    return undefined;
+  }
+
   async function run(handle, path) {
+    /*
+     * Split the path at the last local array method, so a chain like
+     * 'contexts().flatMap(fn).length' resolves 'contexts()' on the host, applies
+     * 'flatMap' here, and then continues with whatever follows against the
+     * local result.
+     */
+    const splitAt = (() => {
+      for (let index = path.length - 1; index >= 1; index--) {
+        if (LOCAL_ARRAY_METHODS.indexOf(path[index][0]) !== -1 && typeof path[index][1][0] === 'function') return index;
+      }
+      return -1;
+    })();
+
+    if (splitAt !== -1) {
+      const receiver = await run(handle, path.slice(0, splitAt));
+      const array = Array.isArray(receiver) ? receiver : [];
+      const step = path[splitAt];
+      const applied = await applyArrayMethod(step[0], array, step[1]);
+      const rest = path.slice(splitAt + 1);
+
+      /*
+       * The rest of the chain runs against the local value.
+       *
+       * It is plain data or nodes now, not a bridge path, so it is evaluated
+       * here rather than sent. What is left after an array method is a read:
+       * '.length', '[0]', '.url()' on an element. Leaving an element as a node
+       * keeps all of that working, because a node already answers '.url()' and
+       * a further call replays against the handle the host gave it.
+       */
+      let current = applied;
+      for (const [name, args] of rest) {
+        current = await readLocal(current, name, args);
+      }
+      return current;
+    }
+
     /*
      * Sequentially, not with Promise.all. Encoding an argument may itself be a
      * round trip (a pending chain passed as an argument), and those have to

@@ -467,3 +467,99 @@ test("scoping does not break ordinary browsing", { skip }, async () => {
   assert.match(result.output, /"newTabUrl":"[^"]*\/canvas"/, "the new tab must be scoped and drivable");
   assert.match(result.output, /"activeUrl":"[^"]*\/canvas"/, "and setActive must return it");
 });
+
+/* ------------------------------------------------------------------ *
+ * The host-side eval, which was a live RCE
+ * ------------------------------------------------------------------ */
+
+test("a program cannot execute code in Reaper's own process by passing a function", { skip }, async () => {
+  /*
+   * The bug: a function argument was sent to the host as its source and rebuilt
+   * with `new Function("return (" + src + ")")()` — note the trailing call — so
+   * a crafted string closed the wrapper and ran in the app-server the moment the
+   * argument was revived.
+   *
+   * Reproduced before the fix: the payload below wrote a file *outside the
+   * sandbox* with the host's pid, from a program that was supposedly confined.
+   * The path is in the workspace here so the assertion is about the execution
+   * rather than about the write succeeding: the file must never appear, because
+   * the code must never run.
+   */
+  const rt = await runtime();
+  const { page } = await rt.ensureReady();
+  await page.goto(`${site!.origin}/basic`, { waitUntil: "domcontentloaded" });
+  await rt.view();
+
+  const marker = `${site!.origin}/pwned-marker.txt`;
+  const payload = `0) || (globalThis.__REAPER_RCE_PROBE = 'ran', 0) || (0`;
+  const result = await executeBrowserUse(
+    rt,
+    { code: `await page.evaluate({ __reaperFn: ${JSON.stringify(payload)} }); "sent"`, observe: "none" } as never,
+    metadata,
+  );
+
+  assert.notEqual(result.outcome, "SUCCESS", "a function argument must be refused, not executed");
+  assert.match(result.output, /function cannot be passed|must not cross/i);
+  assert.equal((globalThis as Record<string, unknown>)["__REAPER_RCE_PROBE"], undefined, "nothing may run in this process");
+});
+
+test("an array callback runs in the sandbox, so the ordinary chain still works", { skip }, async () => {
+  /*
+   * The other half of the fix. Refusing functions outright would have closed the
+   * escape and broken the most ordinary way to write a program, so these
+   * methods run their callbacks inside the sandbox instead. `flatMap` over
+   * contexts and `filter` by URL is the shape the attack itself uses, which
+   * makes it the right thing to keep working.
+   */
+  const rt = await runtime();
+  const { page } = await rt.ensureReady();
+  await page.goto(`${site!.origin}/basic`, { waitUntil: "domcontentloaded" });
+  await rt.view();
+
+  const result = await executeBrowserUse(
+    rt,
+    {
+      code: `
+        const mine = await page.context().browser().contexts().flatMap(c => c.pages());
+        const hidden = mine.filter(p => p.url().includes("/hidden"));
+        ({ pages: mine.length, hidden: hidden.length })
+      `,
+      observe: "none",
+    } as never,
+    metadata,
+  );
+
+  /*
+   * Asserted against a page this thread does not own rather than against a
+   * count. The suite shares one runtime, so earlier tests leave tabs open and
+   * `pages` is legitimately more than one; what must hold regardless is that
+   * none of them is another thread's. An earlier version asserted `pages: 1`,
+   * which was true of a clean runtime and false here, and the failure looked
+   * like a leak when it was a shared fixture.
+   */
+  const otherThread = new ThreadBrowserRuntime({ threadId: "array-callback-victim", cdpUrl: CDP_URL });
+  let victimUrl = "";
+  try {
+    const victim = (await otherThread.ensureReady()).page;
+    await victim.goto(`${site!.origin}/hidden`, { waitUntil: "domcontentloaded" });
+    victimUrl = victim.url();
+
+    const result = await executeBrowserUse(
+      rt,
+      {
+        code: `
+          const mine = await page.context().browser().contexts().flatMap(c => c.pages());
+          const urls = await Promise.all(mine.map(async (p) => await p.url()));
+          ({ count: mine.length, urls })
+        `,
+        observe: "none",
+      } as never,
+      metadata,
+    );
+
+    assert.equal(result.outcome, "SUCCESS", result.output);
+    assert.doesNotMatch(result.output, /\/hidden/, "the callback chain must not reach another thread's page");
+  } finally {
+    await otherThread.close();
+  }
+});
