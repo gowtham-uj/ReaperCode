@@ -129,10 +129,30 @@ retry of the same script.
 ## What you can reach
 
 `fs`, `child_process`, `fetch`, and npm packages are all real, and a write from
-a script is a write. The script runs inside the workspace, though, and only the
-workspace is mounted: an absolute path outside it does not resolve, so reading
-`/etc/passwd` or another thread's files fails with a plain filesystem error
-rather than succeeding. `/tmp` is writable and persists between turns.
+a script is a write. The script runs inside the workspace, and the workspace is
+where a relative path lands: `fs.readFileSync("src/app.ts")` reads this thread's
+own tree, not Reaper's checkout, which is the mistake worth knowing about.
+
+What the sandbox does *not* do is hide the rest of the machine, and an earlier
+version of this file claimed it did. Two things are true and the distinction
+matters:
+
+**Outside the workspace is unmounted.** Measured: from a workspace at
+`/tmp/ws-abc`, `fs.existsSync("/work")` is `false`. A path outside the workspace
+does not resolve, which is the confinement this file always described.
+
+**The system directories are mounted read-only, on purpose.** `/etc`, `/usr`,
+`/bin` and the library paths are bound so that anything you run can actually
+start. `/etc/passwd` is therefore readable, and that is intended: a shell needs
+`/etc` for the dynamic linker, DNS and TLS to work at all. Reading it is not a
+bug and not something to rely on either.
+
+So the honest rule: relative paths and paths under the workspace work, system
+paths are readable, and everything else is gone. Reaper's own checkout is visible
+only when the thread's workspace *is* that directory, which happens when a thread
+was started in it and not otherwise.
+
+`/tmp` is writable and persists between turns.
 
 Two things are refused on top of that, and only these: writing to system
 directories, reading credential stores like `~/.ssh` or `~/.aws`, and commands

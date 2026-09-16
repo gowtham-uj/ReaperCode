@@ -19,20 +19,26 @@
  *   2. Updating the TrustResolver's trust.json cache.
  *   3. Persisting the SkillMemoryRegistry entry for the legacy CLI.
  *
- * The `runCommand` callback is the only thing this module uses to
- * actually run shell. The default is `spawnSync` (used by tests); the
- * CLI passes in a sandboxed variant that goes through the policy
- * gate.
+ * The `runCommand` callback is the only thing this module uses to actually run
+ * shell, and its default is sandboxed. That was not always true: the default ran
+ * `spawnSync(cmd, { shell: true, cwd })` unconfined, so a validation command from
+ * a manifest read the whole filesystem while `bash` and `eval` in the same
+ * session saw only the workspace. The default now goes through
+ * `buildSandboxedShellCommand`, the same builder `bash` uses, so the boundary
+ * holds whichever caller constructs the lifecycle rather than only for the ones
+ * that remembered to pass their own runner. A caller may still supply
+ * `runCommand`, and the CLI does, but omitting it is no longer the unsafe choice.
  */
 
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve as pathResolve, sep } from "node:path";
 
 import type { SkillMemoryRegistry } from "../adaptive/skill-memory-registry.js";
 import { parseSkillManifest, sha256OfManifest, writeSkillManifest } from "./manifest.js";
 import { SkillRegistry } from "./registry.js";
 import { TrustResolver } from "./trust.js";
+import { buildSandboxedShellCommand } from "../policy/shell-sandbox.js";
 import {
   type InstalledSkillRecord,
   type SkillManifest,
@@ -72,32 +78,52 @@ export interface InstallResult {
   error?: string;
 }
 
-const DEFAULT_RUN_COMMAND: RunCommandFn = (cmd, cwd) => {
-  /*
-   * Run the validation command in a real shell.
-   *
-   * This called `require("node:child_process")` inside the function body. The
-   * module is ESM — it imports with `import` at the top — so `require` does not
-   * exist, and the call threw before `spawnSync` ever ran. The catch turned
-   * that into `{ exitCode: 127, stderr: "require is not defined" }`, so *every*
-   * validation command failed regardless of what it was, and the failure read
-   * as the user's command being wrong rather than this one being broken:
-   *
-   *   skill_manager test -> exitCode 127, stderr: "require is not defined"
-   *
-   * `spawnSync` is now a normal import, which is what the CommonJS form was
-   * reaching for. `shell: true` is the other half of the contract — a
-   * validation command is a shell line (`echo`, `pytest -q`, `npm test`), not a
-   * JavaScript expression, and running it through any kind of evaluator would
-   * break every one of them.
-   */
-  try {
-    const r = spawnSync(cmd, { shell: true, cwd, encoding: "utf8" });
-    return { exitCode: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-  } catch (e) {
-    return { exitCode: 127, stdout: "", stderr: (e as Error).message };
-  }
-};
+/**
+ * Run a validation command, confined to the workspace.
+ *
+ * A validation command is a shell line the *manifest* supplies, which is not the
+ * same trust level as a line the user typed. It used to run as
+ * `spawnSync(cmd, { shell: true, cwd })` with no cwd default and no sandbox, so
+ * a skill whose command was `ls /work` read the Reaper installation tree while
+ * `bash` and `eval` in the same session could not see it at all. A validation
+ * command is code from a file, and the file can come from anywhere.
+ *
+ * So it runs the way every other untrusted command runs: bubblewrap, with the
+ * workspace mounted and nothing else. `buildSandboxedShellCommand` is the same
+ * builder `bash` uses, so there is one sandbox and not a second one to keep in
+ * step. A manifest-supplied `cwd` is honoured only when it resolves inside the
+ * workspace, because a working directory elsewhere is not something this feature
+ * has any business using.
+ *
+ * When bubblewrap is unavailable the command still runs, in the workspace
+ * directory rather than in the process's own. That is weaker, and it is the same
+ * fallback every sandboxed path in this codebase takes: refusing to validate a
+ * skill at all on a host without bubblewrap would break the feature to enforce a
+ * boundary the rest of the system is not enforcing either.
+ */
+function defaultRunCommand(workspaceRoot: string): RunCommandFn {
+  return (cmd, cwd) => {
+    const root = pathResolve(workspaceRoot);
+    const requested = cwd === undefined ? root : pathResolve(root, cwd);
+    const workingDirectory = requested === root || requested.startsWith(root + sep) ? requested : root;
+
+    const sandboxed = buildSandboxedShellCommand({
+      workspaceRoot: root,
+      workingDirectory,
+      shell: "/bin/sh",
+      shellArgs: ["-c", cmd],
+    });
+
+    try {
+      const r = sandboxed
+        ? spawnSync(sandboxed.command, sandboxed.args, { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 })
+        : spawnSync("/bin/sh", ["-c", cmd], { cwd: workingDirectory, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
+      return { exitCode: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+    } catch (e) {
+      return { exitCode: 127, stdout: "", stderr: (e as Error).message };
+    }
+  };
+}
 
 export class SkillLifecycle {
   private readonly opts: LifecycleOptions;
@@ -249,7 +275,7 @@ export class SkillLifecycle {
        */
       return { ok: true, results: [], note: "no validation commands declared" };
     }
-    const run = this.opts.runCommand ?? DEFAULT_RUN_COMMAND;
+    const run = this.opts.runCommand ?? defaultRunCommand(this.opts.workspaceRoot);
     /*
      * `stdout` is carried through as well as `stderr`. A validation command
      * usually reports through stdout — a test summary, a printed marker — and

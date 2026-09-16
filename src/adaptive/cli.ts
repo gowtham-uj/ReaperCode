@@ -961,15 +961,23 @@ export class ReaperCLI {
         workspaceRoot: this.opts.workspaceRoot,
         userHome,
         builtinRoot: builtinSkillsRoot(),
-        runCommand: async (cmd, cwd) => {
-          const { execFile } = await import("node:child_process");
-          return new Promise((resolve) => {
-            execFile("bash", ["-lc", cmd], { cwd, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
-              const exitCode = err && typeof (err as { code?: unknown }).code === "number" ? (err as { code: number }).code : 0;
-              resolve({ exitCode, stdout: String(stdout), stderr: String(stderr) });
-            });
-          });
-        },
+        /*
+         * No `runCommand` override, deliberately.
+         *
+         * There was one, and it ran `execFile("bash", ["-lc", cmd], { cwd })`
+         * with no sandbox and no cwd default. A validation command comes from a
+         * manifest, which is a file, and a file can come from anywhere; running
+         * it unconfined meant a skill whose command was `ls /work` read Reaper's
+         * own checkout while `bash` and `eval` in the same session could not see
+         * it. It also inherited the process's working directory whenever the
+         * manifest named none, which is where the `/work` came from.
+         *
+         * The lifecycle's own default is sandboxed now, and it is the same
+         * builder `bash` uses. Leaving the override in place would have kept the
+         * CLI on the old path while the app-server got the fix, which is the
+         * split this is meant to remove: one backend, one sandbox, whichever
+         * surface constructed the lifecycle.
+         */
       });
     }
     return { registry: this._newSkillRegistry, lifecycle: this._newSkillLifecycle };
