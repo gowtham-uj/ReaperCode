@@ -66,13 +66,27 @@ export type SessionEntryType =
   | "checkpoint";
 
 export interface SessionMessage {
-  role: "user" | "assistant" | "tool" | "system";
+  /*
+   * `thinking` is here because the journal writes it — `session-format.ts`
+   * records a reasoning turn as `{ role: "thinking", content }` — and leaving it
+   * out of the union was a lie the reader paid for: `projectHistory` could not
+   * narrow on it, so the compiler would have rejected the very case that rebuilt
+   * a thread's reasoning from disk. The type now matches what is on disk.
+   */
+  role: "user" | "assistant" | "tool" | "system" | "thinking";
   content: string;
   /** Tool call id (when role is tool or when this is an assistant message with tool_calls). */
   tool_call_id?: string;
   tool_calls?: Array<{ id: string; name: string; args: unknown }>;
   name?: string;
   is_error?: boolean;
+  /*
+   * How long a tool took, written by `session-format.ts` on a tool-result row
+   * and read back when a transcript is rebuilt. Absent from this type before,
+   * so a replayed thread had no timings at all — the field was real on disk and
+   * invisible to the code that needed it.
+   */
+  duration_ms?: number;
   /** Wall-clock timestamp (ms since epoch) for time-based compaction. */
   ts?: number;
   /** Set by shake so we know the result was already compacted. */

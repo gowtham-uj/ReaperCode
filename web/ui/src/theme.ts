@@ -35,12 +35,24 @@ export function isTheme(value: unknown): value is Theme {
 }
 
 /**
+ * What a browser with no stored preference gets.
+ *
+ * Not `dark`. That is the vendored sheet's own default and carries a blue
+ * accent, so a fresh install showed DeepSeek's brand rather than this one and
+ * the Reaper palette was only ever seen by someone who went looking in
+ * Settings. The default is the theme the product is named after.
+ */
+export const DEFAULT_THEME: Theme = "reaper";
+
+/**
  * Storage is read directly rather than guarded by a module-level cache: the
  * inline `index.html` script that prevents a flash-of-wrong-theme writes the
  * same key from a different context, and a cache here would go stale behind it.
  *
  * Private-mode Safari throws on localStorage access, so every path is wrapped;
  * an unreadable preference degrades to the default instead of breaking boot.
+ * `DEFAULT_THEME` is a valid theme, so the same constant serves both paths
+ * rather than a second literal that could drift from this one.
  */
 export function readTheme(): Theme {
   try {
@@ -49,7 +61,7 @@ export function readTheme(): Theme {
   } catch {
     /* storage unavailable — fall through to the default */
   }
-  return "dark";
+  return DEFAULT_THEME;
 }
 
 export function applyTheme(theme: Theme): void {

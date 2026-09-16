@@ -74,7 +74,7 @@ const TOOL_FAMILY: Record<string, ToolFamily> = {
   reload_hooks: "diagnostic",
 
   // Browser control
-  browser_control: "exec",
+  browser_use: "exec",
 
 
 };
@@ -103,7 +103,7 @@ const TOOL_CAPABILITY: Record<string, CapabilityTier> = {
 
   // Exec tools
   bash: "exec",
-  browser_control: "exec",
+  browser_use: "exec",
   create_checkpoint: "write",
   restore_checkpoint: "write",
   activate_skill: "exec",
@@ -150,7 +150,7 @@ const TOOL_CONCURRENCY: Record<string, ToolConcurrency> = {
 
   // Exec / shell tools are exclusive
   bash: "exclusive",
-  browser_control: "exclusive",
+  browser_use: "exclusive",
   create_checkpoint: "exclusive",
   restore_checkpoint: "exclusive",
   activate_skill: "exclusive",
@@ -197,7 +197,7 @@ const TOOL_CONTEXT_COST: Record<string, ContextCost> = {
   activate_skill: "low",
   skim_file: "low",
   inspect_environment: "low",
-  browser_control: "high",
+  browser_use: "high",
   create_skill: "high",
   test_skill: "medium",
   approve_skill: "medium",

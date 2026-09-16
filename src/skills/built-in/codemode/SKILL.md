@@ -126,14 +126,19 @@ retry of the same script.
 - `timeout` / `memory` / `tool_call_limit` — you hit a resource ceiling. Return
   less, or in pieces.
 
-## The one restriction
+## What you can reach
 
-This is not a sandbox. `fs`, `child_process`, `fetch`, and npm packages are all
-real, and a write from a script is a write. Two things are refused, and only
-these: writing to system directories, reading credential stores like `~/.ssh`
-or `~/.aws`, and commands like `rm -rf /`, `mkfs`, `dd of=/dev/sda`, and fork
-bombs. A refusal is thrown as a `REAPER_REFUSED` error — catchable, and it
-means the operation, not your code.
+`fs`, `child_process`, `fetch`, and npm packages are all real, and a write from
+a script is a write. The script runs inside the workspace, though, and only the
+workspace is mounted: an absolute path outside it does not resolve, so reading
+`/etc/passwd` or another thread's files fails with a plain filesystem error
+rather than succeeding. `/tmp` is writable and persists between turns.
+
+Two things are refused on top of that, and only these: writing to system
+directories, reading credential stores like `~/.ssh` or `~/.aws`, and commands
+like `rm -rf /`, `mkfs`, `dd of=/dev/sda`, and fork bombs. A refusal is thrown
+as a `REAPER_REFUSED` error — catchable, and it means the operation, not your
+code.
 
 Everything else works normally. Because of that:
 

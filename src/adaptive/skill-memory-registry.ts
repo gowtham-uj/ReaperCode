@@ -46,22 +46,31 @@ export class SkillMemoryRegistry {
 
   private load(): SkillIndex {
     for (const path of [this.projectIndexPath, this.userIndexPath]) {
-      if (existsSync(path)) {
-        try {
-          const raw = readFileSync(path, "utf8");
-          const parsed = JSON.parse(raw) as SkillIndex;
-          if (parsed.version === INDEX_VERSION) return parsed;
-        } catch { /* ignore */ }
-      }
+      const parsed = this.readIndexFile(path);
+      if (parsed) return parsed;
     }
     return { version: INDEX_VERSION, skills: {}, health: {}, usage: [], updatedAt: new Date().toISOString() };
   }
 
-  private save(scope: SkillScope): void {
-    const path = scope === "user" ? this.userIndexPath : this.projectIndexPath;
+  /** Read one index file, or null when it is missing, malformed, or a version we do not understand. */
+  private readIndexFile(path: string): SkillIndex | null {
+    if (!existsSync(path)) return null;
+    try {
+      const parsed = JSON.parse(readFileSync(path, "utf8")) as SkillIndex;
+      return parsed.version === INDEX_VERSION ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private writeIndexFile(path: string, index: SkillIndex): void {
     mkdirSync(join(path, ".."), { recursive: true });
-    this.index.updatedAt = new Date().toISOString();
-    writeFileSync(path, JSON.stringify(this.index, null, 2));
+    index.updatedAt = new Date().toISOString();
+    writeFileSync(path, JSON.stringify(index, null, 2));
+  }
+
+  private save(scope: SkillScope): void {
+    this.writeIndexFile(scope === "user" ? this.userIndexPath : this.projectIndexPath, this.index);
   }
 
   /** Add or update a skill. */
@@ -154,14 +163,39 @@ export class SkillMemoryRegistry {
     return true;
   }
 
-  /** Remove a skill from the registry. */
+  /**
+   * Remove a skill from the registry, from *every* index file that names it.
+   *
+   * The old version looked the skill up in `this.index` — the single index
+   * `load()` returned, which is the first one that exists (project before user)
+   * — deleted it there, and saved only to that scope's file. So a skill that
+   * had been written to the **user** index while a **project** index also
+   * existed was never actually removed: `forget` did not find it in the loaded
+   * (project) index, returned false, and left the user index untouched. The
+   * skill's folder was deleted by the lifecycle but its entry, including its
+   * health record, stayed behind. `activate_skill` then saw a registered skill
+   * whose directory was gone and failed with "registered in the registry but no
+   * on-disk file was found" — an error about a skill the user had just
+   * successfully uninstalled.
+   *
+   * Purging each file independently makes removal match what the user asked
+   * for, regardless of which index a since-deleted run happened to load.
+   */
   forget(name: string): boolean {
-    const skill = this.index.skills[name];
-    if (!skill) return false;
+    let removed = false;
+    for (const path of [this.userIndexPath, this.projectIndexPath]) {
+      const index = this.readIndexFile(path);
+      if (!index) continue;
+      if (index.skills[name] === undefined && index.health[name] === undefined) continue;
+      delete index.skills[name];
+      delete index.health[name];
+      this.writeIndexFile(path, index);
+      removed = true;
+    }
+    const hadInMemory = this.index.skills[name] !== undefined || this.index.health[name] !== undefined;
     delete this.index.skills[name];
     delete this.index.health[name];
-    this.save(skill.scope);
-    return true;
+    return removed || hadInMemory;
   }
 
   /** Get a skill's health. */

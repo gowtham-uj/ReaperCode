@@ -10,7 +10,7 @@ import type {
   ProviderHealth,
 } from "./models.js";
 import { usableProviders } from "./models.js";
-import { PERMISSION_MODES, type PermissionMode, type SettingsStore } from "./settings.js";
+import { PERMISSION_MODES, toggleDisabledProvider, type PermissionMode, type SettingsStore } from "./settings.js";
 import { THEME_DESCRIPTIONS, THEME_LABELS, THEMES } from "./theme.js";
 import { useTheme } from "./useTheme.js";
 
@@ -102,13 +102,14 @@ function matchProviders(providers: CatalogProvider[], query: string): CatalogPro
   });
 }
 
-export function ProvidersSettings({ catalog, client }: { catalog: ModelCatalog; client: JsonRpcClient | undefined }) {
+export function ProvidersSettings({ catalog, client, settings }: { catalog: ModelCatalog; client: JsonRpcClient | undefined; settings: SettingsStore }) {
   const [adding, setAdding] = useState(false);
   const [selectedId, setSelectedId] = useState<string>();
   const [query, setQuery] = useState("");
   const configured = usableProviders(catalog.providers);
   const available = catalog.providers.filter((provider) => !provider.configured);
   const filtered = useMemo(() => matchProviders(available, query), [available, query]);
+  const disabledProviders = settings.settings?.disabledProviders ?? [];
   // A provider the user already connected is filtered out of this list, so a
   // search for it would otherwise read as "no such provider" rather than
   // "already added".
@@ -122,6 +123,12 @@ export function ProvidersSettings({ catalog, client }: { catalog: ModelCatalog; 
     setAdding(false);
     setQuery("");
   };
+  const setDisabled = async (providerId: string, disabled: boolean): Promise<void> => {
+    if (!client) return;
+    await settings.saveSettings(client, {
+      disabledProviders: toggleDisabledProvider(disabledProviders, providerId, disabled),
+    });
+  };
   return (
     <section className="settings-section">
       <div className="settings-section-heading">
@@ -129,6 +136,7 @@ export function ProvidersSettings({ catalog, client }: { catalog: ModelCatalog; 
         <span className="section-count">{configured.length}</span>
       </div>
       {catalog.error && <p className="field-error" role="alert">{catalog.error}</p>}
+      {settings.error && <p className="field-error" role="alert">{settings.error}</p>}
       {catalog.loading && catalog.providers.length === 0 ? (
         <p className="empty">Loading providers…</p>
       ) : configured.length === 0 ? (
@@ -140,6 +148,8 @@ export function ProvidersSettings({ catalog, client }: { catalog: ModelCatalog; 
               provider={provider}
               catalog={catalog}
               client={client}
+              disabled={disabledProviders.includes(provider.providerId)}
+              onToggleDisabled={(disabled) => setDisabled(provider.providerId, disabled)}
               onReconnect={() => { setAdding(true); setSelectedId(provider.providerId); }}
               key={provider.providerId}
             />
@@ -202,15 +212,27 @@ function ProviderHealthNote({ health }: { health: ProviderHealth }) {
   );
 }
 
-function ProviderRow({ provider, catalog, client, onReconnect }: { provider: CatalogProvider; catalog: ModelCatalog; client: JsonRpcClient | undefined; onReconnect(): void }) {
+function ProviderRow({ provider, catalog, client, disabled, onToggleDisabled, onReconnect }: { provider: CatalogProvider; catalog: ModelCatalog; client: JsonRpcClient | undefined; disabled: boolean; onToggleDisabled(disabled: boolean): Promise<void>; onReconnect(): void }) {
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string>();
   const [health, setHealth] = useState<ProviderHealth>();
-  const remove = async (): Promise<void> => {
-    if (!client || provider.connectionSource === "environment") return;
+  /*
+   * Enable/Disable, not Disconnect.
+   *
+   * Disconnect called `provider/remove`, which deletes the stored credential.
+   * That is the wrong verb for "I do not want this provider in the picker right
+   * now": it makes the user re-enter a key to get it back, and the row treated
+   * the mere presence of a key as the thing to remove. Disable is a reversible
+   * switch — the credential stays, the provider just stops being offered — so
+   * the action matches the intent and costs nothing to undo. Removing the key
+   * outright is still possible by disconnecting through the environment or by
+   * replacing the login; what is gone is the accidental one-click credential
+   * loss.
+   */
+  const toggle = async (next: boolean): Promise<void> => {
     setBusy(true); setFailure(undefined);
-    try { await catalog.disconnect(client, provider.providerId); }
-    catch (cause) { setFailure(cause instanceof Error ? cause.message : "Could not disconnect the provider"); }
+    try { await onToggleDisabled(next); }
+    catch (cause) { setFailure(cause instanceof Error ? cause.message : "Could not change the provider's state"); }
     finally { setBusy(false); }
   };
   const check = async (): Promise<void> => {
@@ -225,10 +247,40 @@ function ProviderRow({ provider, catalog, client, onReconnect }: { provider: Cat
     : provider.authType === "oauth"
       ? `OAuth${provider.accountId ? ` · ${provider.accountId}` : ""}`
       : `API key${provider.keyHint ? ` · ${provider.keyHint}` : ""}`;
+  /*
+   * A provider wired up through the environment has no Disconnect button, and
+   * it should not have one.
+   *
+   * `provider/remove` deletes a *stored* credential. When a provider is
+   * configured by `DEEPSEEK_API_KEY` there is nothing stored, so the call
+   * returns `{ removed: false }` and a button wired to it would look like it
+   * worked while changing nothing. Hiding it is right; leaving no explanation
+   * is not, because "Replace login" is the only control on the row and it
+   * suggests the credential is Reaper's to manage.
+   *
+   * So the row says where the credential actually lives and what would end the
+   * connection. That is the actionable part: the user either edits the
+   * environment or replaces it with a stored key, which is what the other
+   * button does.
+   */
+  const envConfigured = provider.connectionSource === "environment";
   return (
     <li className="provider-row">
-      <div className="provider-head"><div className="provider-identity"><span className="provider-mark">{provider.label.slice(0, 1)}</span><div><span className="provider-name">{provider.label}</span><span className="provider-state" data-tone={provider.authStatus === "connected" ? "ready" : "missing"}>● {provider.authStatus === "expired" ? "Authentication expired" : source}</span></div></div><div className="provider-actions"><button className="button" data-variant="ghost" disabled={busy} onClick={() => void check()}>{busy ? "Testing…" : "Test connection"}</button><button className="button" data-variant="outline" disabled={busy} onClick={onReconnect}>{provider.authStatus === "expired" ? "Reconnect" : "Replace login"}</button>{provider.connectionSource !== "environment" && <button className="button" data-variant="ghost" disabled={busy} onClick={() => void remove()}>Disconnect</button>}</div></div>
+      <div className="provider-head"><div className="provider-identity"><span className="provider-mark">{provider.label.slice(0, 1)}</span><div><span className="provider-name">{provider.label}</span><span className="provider-state" data-tone={disabled ? "missing" : provider.authStatus === "connected" ? "ready" : "missing"}>● {disabled ? "Disabled" : provider.authStatus === "expired" ? "Authentication expired" : source}</span></div></div><div className="provider-actions"><button className="button" data-variant="ghost" disabled={busy} onClick={() => void check()}>{busy ? "Testing…" : "Test connection"}</button><button className="button" data-variant="outline" disabled={busy} onClick={onReconnect}>{provider.authStatus === "expired" ? "Reconnect" : "Replace login"}</button><button className="button" data-variant={disabled ? "outline" : "ghost"} disabled={busy} onClick={() => void toggle(!disabled)}>{disabled ? "Enable" : "Disable"}</button></div></div>
       <p className="provider-models">{provider.modelCount} model{provider.modelCount === 1 ? "" : "s"}{provider.defaultModel ? ` · default ${provider.defaultModel}` : ""}</p>
+      {disabled && (
+        <p className="provider-note">
+          Disabled. Its credential is kept, but it is hidden from the model picker in chat. Enable it to use it again without re-entering the key.
+        </p>
+      )}
+      {envConfigured && (
+        <p className="provider-note">
+          {/* Naming the variable is the whole point: it is the thing the user
+              has to change, and it is not visible anywhere else in the UI. */}
+          Configured by {provider.envVar ?? "an environment variable"}, which Reaper does not own. Unset it in the environment to
+          disconnect, or use Replace login to save a key here instead.
+        </p>
+      )}
       {/*
         * Connected but not servable. The credential is fine and the connection
         * genuinely succeeded, so the failure is reported next to the model

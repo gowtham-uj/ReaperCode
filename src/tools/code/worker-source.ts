@@ -11,11 +11,14 @@
  * What runs here is the model's code, unmodified, as real Node. It can import
  * npm packages, open sockets, spawn processes, and use every language feature
  * the host Node supports, because it *is* the host Node — a second thread of
- * it. The isolation that remains is the isolation a thread gives: its own V8
- * isolate, its own heap with a hard `resourceLimits` ceiling, and a
- * `terminate()` that kills a `while (true)` instantly. That is what keeps the
- * app responsive while untrusted code runs, and it is a liveness guarantee, not
- * a security one.
+ * it. The isolation the thread itself gives is a liveness guarantee rather than
+ * a security one: its own V8 isolate, its own heap with a hard
+ * `resourceLimits` ceiling, and a `terminate()` that kills a `while (true)`
+ * instantly. That is what keeps the app responsive while untrusted code runs.
+ * What bounds the script's reach is where the thread lives: on a host where
+ * bubblewrap is available the relay runs in a mount namespace containing only
+ * the thread's workspace, so the worker's `node:fs` sees that and nothing else.
+ * See `transport.ts`.
  *
  * Three things the worker owns:
  *
@@ -540,6 +543,28 @@ patchModule('node:child_process', {
  * npm package installed in the project is importable.
  * ------------------------------------------------------------------ */
 const workspaceRequire = nodeModule.createRequire(workerData.workspace + '/__codemode__.js');
+
+/*
+ * Playwright is patched at the loader, not at one require site.
+ *
+ * The model reaches Playwright through whichever of \`require\` (the parameter),
+ * \`await import(...)\`, or a \`require\` inside a module it wrote, and a patch on
+ * any single one of those leaves the other two open. \`Module._load\` is the
+ * funnel all three pass through, including the CJS load a dynamic \`import()\` of
+ * a \`.cjs\` entry point performs internally.
+ *
+ * The module is cached by Node, so this runs the wrapper once per process no
+ * matter how many times \`playwright\` is required. \`guardPlaywrightModule\` marks
+ * what it patched, so even a second pass is a no-op rather than a double wrap.
+ */
+const originalModuleLoad = nodeModule._load;
+nodeModule._load = function (request, ...rest) {
+  const loaded = originalModuleLoad.call(this, request, ...rest);
+  if (request === 'playwright' || request === 'playwright-core') {
+    guardPlaywrightModule(loaded, workerData.browser && workerData.browser.cdpUrl);
+  }
+  return loaded;
+};
 
 function isPromise(value) {
   return value && (typeof value === 'object' || typeof value === 'function') && typeof value.then === 'function';

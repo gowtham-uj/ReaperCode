@@ -169,7 +169,7 @@ test("2. arrays and objects serialize both ways and keep their types", async () 
   assert.equal(typeof text.value, "string");
 
   // `undefined` is distinct from `null`.
-  const nothing = await runScript("const a = 1;");
+  const nothing = await runScript("undefined");
   assert.equal(nothing.value, undefined);
   const explicit = await runScript("null");
   assert.equal(explicit.value, null);
@@ -1226,7 +1226,11 @@ test("14b. a value from one eval cannot leak into the next as a result", async (
     const two = await runtime.run({ source: "typeof globalThis.kept;", tools: FIXTURE_TOOLS, host });
     assert.equal(two.value, "undefined", "a global from a previous eval must not survive into this one");
 
-    const three = await runtime.run({ source: "const nothing = 1;", tools: FIXTURE_TOOLS, host });
+    // A genuinely valueless script — one that ends in a loop — must return
+    // nothing rather than inheriting the previous result. (A trailing
+    // declaration is no longer valueless: it is lifted into a return, which is
+    // covered by its own test below.)
+    const three = await runtime.run({ source: "for (const _ of [1, 2]) {}", tools: FIXTURE_TOOLS, host });
     assert.equal(three.value, undefined, "a valueless script must not inherit the previous result");
   } finally {
     runtime.dispose();
@@ -1479,6 +1483,103 @@ test("16b. the guard refuses the commands whose every use is a disaster", () => 
   ]) {
     assert.equal(isDangerousCommand(allowed), undefined, `${allowed} is ordinary work and must be allowed`);
   }
+});
+
+test("16b2. the guard refuses fetching or starting a browser of its own", () => {
+  /*
+   * The whole point of the refusal is not that these commands are destructive —
+   * they are not — but that they lead somewhere other than the browser Reaper
+   * is driving. A second browser is not the one the live pane shows and not the
+   * one holding the thread's logins, so a model that reaches for one is about
+   * to have a confusing session rather than a working one.
+   */
+  for (const command of [
+    "npx playwright install chromium",
+    "playwright install",
+    "pnpm exec playwright install --with-deps",
+    "sudo apt-get install -y chromium",
+    "apt install google-chrome-stable",
+    "apk add chromium",
+    "dnf install chromium-browser",
+    "/root/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome --headless --remote-debugging-port=9999",
+    "chromium --user-data-dir=/tmp/x about:blank",
+  ]) {
+    assert.ok(isDangerousCommand(command), `${command} must be refused`);
+  }
+
+  /*
+   * And the negations. A model installing a *package* named after a browser, or
+   * running a build, must not be caught: a false refusal here costs a rephrase
+   * and teaches the model that the guard is noise.
+   */
+  for (const allowed of [
+    "npm install playwright",
+    "npm install",
+    "npx playwright --version",
+    "npm run build",
+    "git log --oneline",
+    "apt-get install -y curl",
+  ]) {
+    assert.equal(isDangerousCommand(allowed), undefined, `${allowed} is ordinary work and must be allowed`);
+  }
+});
+
+test("16b3. a loaded playwright module cannot launch, but can connect to the thread's browser", async () => {
+  /*
+   * The module patch is exercised against the real `playwright-core` export
+   * rather than a hand-built stand-in, because the thing most likely to break
+   * is the shape of the export itself: if `chromium.launch` turns out to be a
+   * getter, a plain assignment silently does nothing and the guard is a lie.
+   */
+  const { guardPlaywrightModule } = await import("../../src/tools/code/guard.js");
+  const mod = await import("playwright-core");
+  /*
+   * A dead port rather than the real one, so the assertion below is about the
+   * guard and not about whether a browser happens to be running on this
+   * machine. Pointing at 9222 would make this test pass or fail depending on
+   * Steel's state, which is the definition of a flaky test.
+   */
+  const CONFIGURED = "http://127.0.0.1:9";
+  guardPlaywrightModule(mod, CONFIGURED);
+
+  for (const name of ["chromium", "firefox", "webkit"]) {
+    const type = (mod as Record<string, any>)[name];
+    assert.throws(() => type.launch(), /REAPER_REFUSED/, `${name}.launch must be refused`);
+    assert.throws(
+      () => type.launchPersistentContext("/tmp/p"),
+      /REAPER_REFUSED/,
+      `${name}.launchPersistentContext must be refused`,
+    );
+    assert.throws(() => type.executablePath(), /REAPER_REFUSED/, `${name}.executablePath must be refused`);
+    // A different browser is the same mistake as a new one.
+    assert.throws(
+      () => type.connectOverCDP("http://127.0.0.1:9999"),
+      /REAPER_REFUSED/,
+      `${name}.connectOverCDP to an unknown endpoint must be refused`,
+    );
+  }
+
+  // The refusal reads as the operation, not the script, and names the way out.
+  try {
+    (mod as Record<string, any>).chromium.launch();
+    assert.fail("launch should have thrown");
+  } catch (error) {
+    const refusal = error as Error & { code?: string };
+    assert.equal(refusal.code, "REAPER_REFUSED");
+    assert.match(refusal.message, /browser_use|`browser`/, "the refusal must name the path that works");
+  }
+
+  /*
+   * The configured endpoint still works. It is not actually reached here —
+   * there may be no browser in a unit test — so the assertion is that the call
+   * fails on the *connection* rather than on the guard, which is the difference
+   * between "this was refused" and "this was allowed and the browser is down".
+   */
+  await assert.rejects(
+    () => (mod as Record<string, any>).chromium.connectOverCDP(CONFIGURED, { timeout: 800 }),
+    (error: Error) => !/REAPER_REFUSED/.test(error.message),
+    "connecting to the configured endpoint must be permitted",
+  );
 });
 
 test("16c. a refusal is attributed to the guard, not read as a broken script", async () => {
@@ -2097,14 +2198,18 @@ test("eval is registered, is core, and is described for routing", () => {
       "Use eval when the user asks for it, or when the task needs what a single call cannot express: the same operation over many items, a loop or fan-out, filtering or aggregating a large result to a small answer, or dependent steps that chain with no reasoning needed between them.",
       "It is a real Node runtime, and Reaper's own tools are available inside it through `tools.*` — every tool this agent can call, including any whose schema is not in your context, with nothing to unlock first. Use whichever fits each step; reading with `tools.file_view` and parsing with a package is one script, not two styles. `tools.search_tools({ query })` finds a tool by capability, `tools.describe(name)` gives its arguments, `tools.list()` gives the catalogue. `eval` itself is the one exception: a script cannot call eval.",
       "`await models.call({ messages: [...] })` reaches this thread's chat model, and `Promise.all` over several is real concurrency — for when one program needs several answers to compare or combine.",
-      "End with the value: the result is the last *expression*'s value, and a trailing declaration, loop, or `console.log` returns nothing even when the work succeeded. `const r = await tools.grep_search(…); r.matches.length` works; stopping after the `const` does not. Keep intermediate data in JavaScript and return a compact final result.",
+      // `console.log` is named separately from the declaration case because it
+      // is the one a model reaches for when it has an answer to report: it is
+      // an expression, so nothing warns about it, and its value is `undefined`.
+      "End with the value: the result is the last *expression*'s value, so a trailing declaration, loop, or `console.log(x)` returns nothing (`log` gives `undefined` however much it printed). `const r = await tools.grep_search(…); r.matches.length` works; stopping after the `const` does not. Keep intermediate data in JavaScript and return a compact final result.",
       "A `tools.*` call carries the workspace, the permission checks, and the audit log, so it is the better choice when one does the job — and when none does, write the code.",
-      "Load the `codemode` skill with activate_skill before writing a script that loops or batches more than a couple of calls: it has the return semantics, the tools.* and models.* APIs, and worked examples.",
+      "Load the `codemode` skill with activate_skill before writing a script that loops or batches more than a couple of calls: it has the return semantics, the APIs, and worked examples.",
       "Pass `timeout_ms` if the script waits on something slow: the default is 2 minutes and a model call can take a minute.",
       // The confinement is stated as a rule rather than as advice: it is
-      // enforced by the guard, and a model that reads it as a preference will
-      // spend a turn discovering that writes elsewhere fail.
-      "Each eval starts with a fresh environment, so variables from an earlier eval are not visible here. The script runs with your access and its effects are real, so writes outside the workspace are refused. Destructive operations are irreversible.",
+      // enforced by the mount namespace, and a model that reads it as a
+      // preference will spend a turn discovering that paths outside the
+      // workspace do not resolve.
+      "Each eval starts with a fresh environment, so variables from an earlier eval are not visible here. The script is confined to the workspace: only it is writable, and paths outside it do not resolve. Destructive writes there are irreversible.",
     ].join("\n"),
     "the description is the routing mechanism; it is pinned so it cannot drift silently",
   );
@@ -2164,4 +2269,59 @@ test("modern JavaScript works, including the syntax that needs the async wrapper
     }
   }
   assert.deepEqual(failures, [], `language failures:\n  ${failures.join("\n  ")}`);
+});
+
+/**
+ * The silent ways a script fails to return its answer.
+ *
+ * All three produce an empty result after doing the work, which reads as a tool
+ * failure rather than as a mistake in the script. The note is the only thing
+ * that tells the model which mistake it made, so each is asserted together with
+ * the case that must *not* be flagged: a script that logs and ends with a real
+ * expression returns its value and has nothing to explain.
+ */
+test("a trailing console.log explains why the result is empty", async () => {
+  const printed = await runScript("const total = 3;\nconsole.log(total);");
+  assert.equal(printed.value, undefined);
+  assert.match(printed.note ?? "", /console\.log/);
+  assert.match(printed.note ?? "", /undefined/);
+
+  const both = await runScript("const total = 3;\nconsole.log(total);\ntotal;");
+  assert.equal(both.value, 3, "logging before a real expression must keep the value");
+  assert.equal(both.note, undefined, "a script that returns a value has nothing to explain");
+});
+
+/*
+ * A trailing declaration returns its binding, not nothing.
+ *
+ * This used to assert the opposite — `const nothing = 1;` produced no value and
+ * a note telling the model to add a final expression — and that was the bug. The
+ * model writes `const { matches } = await tools.grep_search(…)` constantly (the
+ * codemode skill names it as the most common way to lose a result), so the tool
+ * kept answering "produced no value" for scripts that had computed exactly what
+ * was asked. The trailing declaration is now lifted into a return, so the value
+ * comes back and no note fires.
+ */
+test("a trailing declaration returns its binding", async () => {
+  const simple = await runScript("const nothing = 1;");
+  assert.equal(simple.value, 1, "a trailing const must return its value");
+  assert.equal(simple.note, undefined, "and needs no explanation");
+
+  const destructured = await runScript("const { a, b } = { a: 1, b: 2 };\nconst total = a + b;");
+  assert.equal(destructured.value, 3, "a trailing declaration after other statements returns its binding");
+});
+
+test("a block whose last line is a declaration explains itself", async () => {
+  /*
+   * The rewrite lifts a `return` into each branch of a trailing block, so
+   * `returnsValue` is true and the generic note does not fire — but a branch
+   * ending in a declaration returns `undefined`. This shape is the one that
+   * looked like a broken tool rather than a script that never produced a value.
+   */
+  const result = await runScript("try { const a = 1; } catch (error) { void error; }");
+  assert.equal(result.value, undefined);
+  assert.match(result.note ?? "", /block/);
+
+  const withExpression = await runScript("try { 1 } catch (error) { void error; }");
+  assert.equal(withExpression.value, 1, "a block ending in an expression must still return it");
 });

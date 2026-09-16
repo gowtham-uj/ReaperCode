@@ -71,8 +71,19 @@ export function resolveDefaultSelection(
     descriptorFor: (id) => findProviderDescriptor(id),
     transportInstalled: (input) => isTransportInstalled(input),
   },
+  /**
+   * Providers the user switched off. The picker withholds them, and this must
+   * agree or the composer would label the thread with a model the user cannot
+   * choose and did not ask for — a disabled provider showing up as the fallback
+   * is the switch appearing not to work. It is a skip, not an error: with every
+   * provider disabled the result is `undefined`, the same as having configured
+   * none, which is the honest thing to report.
+   */
+  disabledProviders: readonly string[] = [],
 ): DefaultSelection | undefined {
+  const disabled = disabledProviders.length > 0 ? new Set(disabledProviders) : undefined;
   for (const credential of credentials.list()) {
+    if (disabled?.has(credential.providerId)) continue;
     if (!credentials.secretFor(credential.providerId)) continue;
     const descriptor = deps.descriptorFor(credential.providerId);
     if (!descriptor?.defaultModel) continue;

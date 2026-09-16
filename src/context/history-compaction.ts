@@ -260,6 +260,7 @@ export function renderToolResultForModel(result: ToolResult, options: RenderTool
     ok: result.ok,
     durationMs: result.durationMs,
     ...(output !== undefined ? output : {}),
+    ...(result.hint ? { hint: result.hint } : {}),
     ...(result.error ? { error: result.error } : {}),
     ...(workspacePathAliases ? { workspacePathAliases } : {}),
   };

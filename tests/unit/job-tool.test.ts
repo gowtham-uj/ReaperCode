@@ -106,7 +106,7 @@ test("job: write actually reaches the child's stdin and poll observes the echo",
   }
 });
 
-test("job: cancel actually terminates the process", async () => {
+test("job: cancel actually terminates the process and reports the terminal state", async () => {
   const workspaceRoot = makeWorkspace();
   const manager = makeManager(workspaceRoot);
   try {
@@ -122,6 +122,18 @@ test("job: cancel actually terminates the process", async () => {
     assert.equal(result.error, undefined);
     await exited;
     assert.notEqual(child.exitCode ?? child.signalCode, null);
+    /*
+     * SIGKILL kills the process by signal, so `exitCode` stays null and only
+     * `signalCode` is set. The old status check keyed on `exitCode` alone,
+     * concluded the process was still running, and returned "signalled" — an
+     * answer that says "we sent a signal", not "it is dead", for a signal that
+     * cannot be caught. The caller is asking whether the job stopped.
+     */
+    assert.equal(
+      result.status,
+      "finished",
+      "a SIGKILL'd process must be reported as finished, not merely signalled",
+    );
   } finally {
     rmSync(workspaceRoot, { recursive: true, force: true });
   }
@@ -178,6 +190,51 @@ test("job: missing process manager is reported for every action", async () => {
   try {
     const result = await executeJob({ action: "list" }, { workspaceRoot, runId: "test-run" });
     assert.match(result.error ?? "", /No process manager/);
+  } finally {
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+/*
+ * Background output must not have blank lines injected between real ones.
+ *
+ * The audit's finding: a background loop echoing tick-1/2/3/finished polled back
+ * as `tick-1\n\ntick-2\n\ntick-3\n\nfinished`. Each `data` chunk ends in a
+ * newline, and `split(/\r?\n/)` turns the trailing newline into an empty final
+ * field that was pushed as a line, so re-joining put a blank between every pair.
+ */
+test("job: background output does not inject blank lines between chunks", async () => {
+  const workspaceRoot = makeWorkspace();
+  const manager = makeManager(workspaceRoot);
+  try {
+    const child = spawn("bash", ["-c", "for i in 1 2 3; do echo tick-$i; done; echo finished"], { cwd: workspaceRoot, stdio: ["ignore", "pipe", "pipe"] });
+    manager.register({
+      child, output: [], startedAt: new Date().toISOString(), startedAtMs: Date.now(), cmd: "loop", cwd: workspaceRoot, notified: false,
+    });
+    await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    await new Promise((r) => setTimeout(r, 150));
+
+    const polled = await executeJob({ action: "poll", jobId: String(child.pid) }, { workspaceRoot, runId: "t", processManager: manager });
+    const out = polled.output ?? "";
+    assert.doesNotMatch(out, /\n\n/, `blank lines injected: ${JSON.stringify(out)}`);
+    assert.match(out, /tick-1\ntick-2\ntick-3\nfinished/);
+  } finally {
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("job: cancel names the signal that stopped the job", async () => {
+  const workspaceRoot = makeWorkspace();
+  const manager = makeManager(workspaceRoot);
+  try {
+    const child = spawnEcho(manager, workspaceRoot);
+    const result = await executeJob(
+      { action: "cancel", jobId: String(child.pid), signal: "SIGKILL" },
+      { workspaceRoot, runId: "t", processManager: manager },
+    );
+    assert.equal(result.status, "finished");
+    assert.equal(result.cancelledBy, "SIGKILL", "the result must say the job was cancelled, and with what");
+    assert.match(result.note ?? "", /no longer listed|cancelled/i);
   } finally {
     rmSync(workspaceRoot, { recursive: true, force: true });
   }

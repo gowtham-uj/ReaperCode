@@ -239,6 +239,22 @@ test("bash reports timeouts cleanly", async () => {
   assert.match(result.error?.message ?? "", /timed out/);
 });
 
+/*
+ * What this test asks changed, and the change is the point.
+ *
+ * It used to assert `error.code === "path_escape"` — the code the command-
+ * string scanner raised when it spotted an outside path in the text. That
+ * asserted the *mechanism*, and the mechanism was the bug: the scan only ran
+ * when the server's own cwd happened to be inside the workspace, which is
+ * never true for a real thread, and it could be walked around by any command
+ * that did not spell its path literally.
+ *
+ * The guarantee was always "the escape does not happen", so that is what is
+ * asserted now: the command fails and the directory outside the workspace does
+ * not exist afterwards. That holds whichever layer refuses it, which is what
+ * lets the kernel take over the job without the test having to be rewritten
+ * again.
+ */
 test("bash blocks repo-root escapes from nested task workspaces", async () => {
   const workspaceRoot = path.join(process.cwd(), ".reaper-test-shell-boundary", `task-${Date.now()}`);
   await mkdir(workspaceRoot, { recursive: true });
@@ -251,11 +267,10 @@ test("bash blocks repo-root escapes from nested task workspaces", async () => {
       args: { cmd: "cd /workspace && npm init -y", timeout: 60 },
     });
     assert.equal(cdResult.ok, false);
-    assert.equal(cdResult.error?.code, "path_escape");
 
-    // Use an absolute path under the repository root but outside the task
-    // workspace. This must be caught deterministically regardless of whether
-    // the target happens to be writable.
+    // An absolute path under the repository root but outside the task
+    // workspace. Checked by its absence on disk rather than by the shape of
+    // the refusal, so a target that happens to be writable cannot pass.
     const repoRootEscapeTarget = path.join(process.cwd(), "reaper-shell-escape-test");
     const absolutePathResult = await executor.execute({
       id: "escape-path",
@@ -263,9 +278,10 @@ test("bash blocks repo-root escapes from nested task workspaces", async () => {
       args: { cmd: `mkdir -p ${repoRootEscapeTarget}`, timeout: 60 },
     });
     assert.equal(absolutePathResult.ok, false);
-    assert.equal(absolutePathResult.error?.code, "path_escape");
+    assert.equal(fs.existsSync(repoRootEscapeTarget), false, "the directory outside the workspace must not exist");
   } finally {
     await rm(path.join(process.cwd(), ".reaper-test-shell-boundary"), { recursive: true, force: true });
+    await rm(path.join(process.cwd(), "reaper-shell-escape-test"), { recursive: true, force: true });
   }
 });
 

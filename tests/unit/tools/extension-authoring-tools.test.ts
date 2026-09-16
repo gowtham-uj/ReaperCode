@@ -205,24 +205,43 @@ test("validate_extension runs validation.commands and reports exit codes", async
       ctx.deps,
     );
     const r = await handleValidateExtension({ id: "validateable" }, ctx.deps);
-    // No validation.commands declared on the manifest — the lifecycle
-    // surfaces this as ok:false with an explanatory error rather than
-    // silently reporting success (the old behavior masked missing
-    // validation hooks).
-    assert.equal(r.ok, false);
-    assert.match(r.error ?? "", /no validation commands/i);
+    /*
+     * No validation.commands declared. That is a successful call with nothing
+     * to do, not a failed validation.
+     *
+     * It used to answer `ok: false` with the remark in `error`, which read as
+     * "this extension is invalid" for a freshly created, perfectly valid one —
+     * the audit hit exactly that. The remark travels in `note` now, and `ok` is
+     * true because nothing went wrong.
+     */
+    assert.equal(r.ok, true);
+    assert.equal(r.error, undefined, "having nothing to validate is not an error");
+    assert.match(r.note ?? "", /no validation commands/i);
     assert.deepEqual(r.results, []);
   } finally {
     ctx.cleanup();
   }
 });
 
-test("enable_extension rejects untrusted extension", async () => {
+/**
+ * A project-scope extension must be enableable.
+ *
+ * This replaces a test that asserted `enable` refused an untrusted extension.
+ * That assertion was the bug written down: the refusal could never be lifted for
+ * a project-scope extension, because `trust_` only flipped the in-memory flag,
+ * `discover()` (run before every action) rebuilt it from disk, and the trust
+ * resolver deliberately refuses to persist `user-trusted` under the project
+ * directory. The advice it gave ("call trust_extension") named an action absent
+ * from the enum. `activateAll` had already dropped the same gate — "there are no
+ * trust tiers: an installed extension activates when it is enabled" — so the
+ * right behavior is what `activateAll` already does, and this asserts it.
+ */
+test("enable_extension enables a freshly created project extension", async () => {
   const ctx = setup();
   try {
-    await handleCreateExtension(
+    const created = await handleCreateExtension(
       {
-        id: "needs-trust",
+        id: "needs-enable",
         version: "1.0.0",
         description: "x",
         main: "main.js",
@@ -233,9 +252,10 @@ test("enable_extension rejects untrusted extension", async () => {
       },
       ctx.deps,
     );
-    const r = await handleEnableExtension({ id: "needs-trust" }, ctx.deps);
-    assert.equal(r.ok, false);
-    assert.match(r.error ?? "", /untrusted/);
+    assert.equal(created.ok, true, created.error);
+    const r = await handleEnableExtension({ id: "needs-enable" }, ctx.deps);
+    assert.equal(r.ok, true, `enable failed: ${r.error ?? ""}`);
+    assert.equal(r.activated, true, `activate failed: ${r.error ?? ""}`);
   } finally {
     ctx.cleanup();
   }
@@ -386,12 +406,14 @@ test("extension_manager dispatches every action, and refuses an unnamed one", as
     );
     assert.equal((created as { ok: boolean }).ok, true);
 
-    // The manager forwards to the same lifecycle call the standalone tool used,
-    // so a manifest with no validation commands is still reported as a failure
-    // rather than a silent pass.
+    // The manager forwards to the same lifecycle call the standalone tool used.
+    // A manifest with no validation commands is a successful call with nothing
+    // to do, and the remark says so in `note` rather than reading as a failure
+    // in `error`.
     const validated = await handleExtensionManager({ action: "validate", id: "managed-tool" }, ctx.deps);
-    assert.equal((validated as { ok: boolean }).ok, false);
-    assert.match(String((validated as { error?: string }).error), /no validation commands/i);
+    assert.equal((validated as { ok: boolean }).ok, true);
+    assert.equal((validated as { error?: string }).error, undefined);
+    assert.match(String((validated as { note?: string }).note), /no validation commands/i);
 
     const trusted = await handleExtensionManager({ action: "trust", id: "managed-tool", note: "reviewed" }, ctx.deps);
     assert.equal((trusted as { ok: boolean }).ok, true);

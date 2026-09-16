@@ -2,9 +2,10 @@
  * Zod schemas for extension authoring, now a single model-callable tool.
  *
  *   extension_manager(action="create")     author a new extension (JS only)
+ *   extension_manager(action="list")       inventory, incl. refused registrations
  *   extension_manager(action="validate")   run validation.commands
  *   extension_manager(action="enable")     activate the extension
- *   extension_manager(action="trust")      promote to user-trusted (gated)
+ *   extension_manager(action="trust")      record a trust decision (no tiers)
  *   extension_manager(action="uninstall")  remove (gated)
  *
  * There is no `reload` action. The registry re-walks the disk on every
@@ -109,8 +110,8 @@ export type UninstallExtensionArgs = z.infer<typeof UninstallExtensionArgsSchema
 export const ExtensionManagerArgsSchema = z
   .object({
     action: z
-      .enum(["create", "validate", "enable", "trust", "uninstall"])
-      .describe("author, validate, activate, trust, or remove an extension"),
+      .enum(["create", "list", "validate", "enable", "trust", "uninstall"])
+      .describe("author, inventory, validate, activate, trust, or remove an extension"),
     ...CreateExtensionArgsSchema.partial().shape,
     /** Free-text reason recorded with `action="trust"`. */
     note: z.string().optional(),

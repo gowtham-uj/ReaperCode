@@ -8,6 +8,7 @@ import { evaluateCommandPolicy, type SafetyProfile } from "../../policy/rules.js
 import type { RuleEvaluationContext } from "../../policy/rules.js";
 import { getReaperScratchpadPaths } from "../../workspace/scratchpad.js";
 import { PathPolicyError, normalizeWorkspacePath } from "../../policy/paths.js";
+import { buildSandboxedShellCommand } from "../../policy/shell-sandbox.js";
 import { getBashTunables } from "../../config/config-tunables.js";
 import { buildChildEnv, type ChildEnvBuildResult } from "../child-env.js";
 import { writeHumanOutput } from "../../logging/stream-events.js";
@@ -72,7 +73,7 @@ export function isForegroundShellResult(value: ShellCommandResult): value is For
 
 export async function executeBashTool(
   workspaceRoot: string,
-  args: { cmd: string; timeoutMs?: number; idleTimeoutMs?: number; isBackground?: boolean },
+  args: { cmd: string; timeoutMs?: number; idleTimeoutMs?: number; isBackground?: boolean; sandbox?: boolean },
   safetyProfile: SafetyProfile,
   workingDirectory = workspaceRoot,
   ruleContext?: RuleEvaluationContext,
@@ -84,7 +85,30 @@ export async function executeBashTool(
   onOutput?: ShellOutputCallback,
 ): Promise<ShellCommandResult> {
   args = { ...args, cmd: normalizeWorkspaceShellAliases(args.cmd, workspaceRoot) };
-  enforceShellWorkspaceBoundary(workspaceRoot, workingDirectory, args.cmd);
+  /*
+   * The string scan is the fallback boundary, not the boundary.
+   *
+   * When the command is about to run inside a mount namespace that contains
+   * only the workspace, reading the command text for paths that leave it is
+   * both unnecessary and harmful: unnecessary because an unmounted path cannot
+   * resolve, and harmful because the scan is a regex over a shell command and
+   * refuses legitimate ones (a path mentioned in a string literal, a grep
+   * pattern, a URL) while missing every indirect form. It runs only on hosts
+   * where the kernel boundary is unavailable, where an approximate guard beats
+   * none.
+   */
+  const sandboxActive = args.sandbox !== false
+    && buildSandboxedShellCommand({
+      workspaceRoot,
+      workingDirectory,
+      shell: "/bin/sh",
+      shellArgs: ["-c", ":"],
+    }) !== undefined;
+  if (!sandboxActive) {
+    enforceShellWorkspaceBoundary(workspaceRoot, workingDirectory, args.cmd);
+  } else {
+    normalizeWorkspacePath(path.resolve(workspaceRoot), workingDirectory);
+  }
   if (isBareInteractiveShellCommand(args.cmd)) {
     throw new Error(
       `Interactive shell commands are disabled: ${args.cmd.trim()}. ` +
@@ -140,10 +164,25 @@ export async function executeBashTool(
 
   const isServerCommand = isLikelyServerCommand(args.cmd);
   const isBackground = args.isBackground || isServerCommand;
+  const launch = (script: string, cwd: string): { file: string; argv: string[] } => {
+    const shell = resolveShellBinary();
+    const shellArgs = ["-c", script];
+    if (args.sandbox === false) return { file: shell, argv: shellArgs };
+    const sandboxed = buildSandboxedShellCommand({
+      workspaceRoot,
+      workingDirectory: cwd,
+      shell,
+      shellArgs,
+    });
+    return sandboxed
+      ? { file: sandboxed.command, argv: sandboxed.args }
+      : { file: shell, argv: shellArgs };
+  };
 
   if (isBackground) {
     const logPath = runtime ? await createProcessLog(runtime, args.cmd, effectiveWorkingDirectory) : undefined;
-    const child = spawn(resolveShellBinary(), ["-c", args.cmd], {
+    const backgroundLaunch = launch(args.cmd, effectiveWorkingDirectory);
+    const child = spawn(backgroundLaunch.file, backgroundLaunch.argv, {
       cwd: effectiveWorkingDirectory,
       env: buildCommandEnv(workspaceRoot, childEnvOptions),
       detached: true,
@@ -205,7 +244,8 @@ printf '___REAPER_EXIT_CODE:%s___\\n' "$__REAPER_EXIT_CODE"
 exit 0
 `;
 
-      const child = spawn(resolveShellBinary(), ["-c", wrapper], {
+      const foregroundLaunch = launch(wrapper, effectiveWorkingDirectory);
+      const child = spawn(foregroundLaunch.file, foregroundLaunch.argv, {
         cwd: effectiveWorkingDirectory,
         env: buildCommandEnv(workspaceRoot, childEnvOptions),
         detached: true,

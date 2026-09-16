@@ -30,13 +30,15 @@ export interface ThreadTool {
  * would let a thread opt out of all of them without saying so. The server
  * appends whatever is written here after it, and the copy says so.
  */
-export function ThreadSettingsDialog({ open, onClose, client, thread, threadId, catalog, onError, onSaved, onOpenPermissions }: {
+export function ThreadSettingsDialog({ open, onClose, client, thread, threadId, catalog, disabledProviders, onError, onSaved, onOpenPermissions }: {
   open: boolean;
   onClose(): void;
   client: JsonRpcClient | undefined;
   thread: AppThread | undefined;
   threadId: string | undefined;
   catalog: ModelCatalog;
+  /** Providers switched off in Settings; withheld from the model picker here too. */
+  disabledProviders?: readonly string[] | undefined;
   onError(message: string): void;
   onSaved(): void;
   onOpenPermissions(): void;
@@ -51,6 +53,8 @@ export function ThreadSettingsDialog({ open, onClose, client, thread, threadId, 
   const [toolsError, setToolsError] = useState<string>();
   const [toolsLoading, setToolsLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [sandbox, setSandbox] = useState(true);
+  const [sandboxSaving, setSandboxSaving] = useState(false);
   const [activeTab, setActiveTab] = useState<"agent" | "tools">("agent");
   const [toolQuery, setToolQuery] = useState("");
   const model = useModelMetadata(catalog, client, thread?.modelProvider, thread?.model);
@@ -69,7 +73,8 @@ export function ThreadSettingsDialog({ open, onClose, client, thread, threadId, 
     setPrompt(thread?.systemPrompt ?? "");
     setWorkspace(thread?.cwd ?? "");
     setDisabled(new Set(thread?.disabledTools ?? []));
-  }, [thread?.name, thread?.systemPrompt, thread?.cwd, thread?.disabledTools]);
+    setSandbox(thread?.filesystemSandbox !== false);
+  }, [thread?.name, thread?.systemPrompt, thread?.cwd, thread?.disabledTools, thread?.filesystemSandbox]);
 
   useEffect(() => {
     if (open) seed();
@@ -103,6 +108,29 @@ export function ThreadSettingsDialog({ open, onClose, client, thread, threadId, 
       .finally(() => { if (!cancelled) setToolsLoading(false); });
     return () => { cancelled = true; };
   }, [open, client]);
+
+  /*
+   * The sandbox writes on toggle rather than on Save.
+   *
+   * Every other field here changes what the agent does on its next turn, so
+   * batching them behind one button is honest. This one changes where the
+   * agent's next *command* can reach, and the reason to reach for it is a
+   * thread that is doing something now. A confinement that waits for a dialog
+   * to be dismissed is not a confinement you would use in that moment.
+   */
+  const toggleSandbox = async (next: boolean): Promise<void> => {
+    if (!client || !threadId) return;
+    setSandbox(next);
+    setSandboxSaving(true);
+    try {
+      await client.call("thread/config/set", { threadId, filesystemSandbox: next });
+    } catch (cause) {
+      setSandbox(!next);
+      onError(cause instanceof Error ? cause.message : "Could not change the workspace sandbox");
+    } finally {
+      setSandboxSaving(false);
+    }
+  };
 
   const save = async (): Promise<void> => {
     if (!client || !threadId) return;
@@ -242,6 +270,7 @@ export function ThreadSettingsDialog({ open, onClose, client, thread, threadId, 
                   provider={thread?.modelProvider}
                   model={thread?.model}
                   turnActive={false}
+                  disabledProviders={disabledProviders}
                   onSetup={() => onError("Add a provider in Settings before choosing a model.")}
                   onError={onError}
                 />
@@ -278,6 +307,25 @@ export function ThreadSettingsDialog({ open, onClose, client, thread, threadId, 
                 </small>
                 <small className="thread-settings-count">{prompt.length.toLocaleString()} / 20,000 characters</small>
               </label>
+
+              <div className="field">
+                <span>Workspace sandbox</span>
+                <label className="thread-settings-switch">
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    checked={sandbox}
+                    disabled={sandboxSaving || !threadId}
+                    onChange={(event) => void toggleSandbox(event.currentTarget.checked)}
+                  />
+                  <span>{sandbox ? "Confined to this thread's workspace" : "Full filesystem access"}</span>
+                </label>
+                <small>
+                  Commands run in a sandbox that contains this thread&apos;s workspace and the read-only system
+                  directories, and nothing else, so a path outside the workspace does not exist for them to reach.
+                  Network access is unchanged. Applies to the next command, including during a turn already running.
+                </small>
+              </div>
 
               <PermissionNote mode={thread?.approvalPolicy} onOpenPermissions={onOpenPermissions} />
             </div>

@@ -80,6 +80,21 @@ export interface ToolInvoker {
  */
 export type CodeModelRunner = (invocation: CodeModelInvocation) => Promise<CodeModelOutcome>;
 
+/**
+ * The extension tools this run may call, as the bridge needs to see them.
+ *
+ * A narrow interface rather than the whole `ExtensionToolRegistry`, because the
+ * bridge needs exactly three things: which names exist, what one takes, and
+ * whether a name is real. Keeping it structural means a test can supply a stub
+ * without constructing a registry, and it keeps the bridge from depending on a
+ * module it has no other reason to import.
+ */
+export interface CodeBridgeExtensionTools {
+  listTools(): string[];
+  hasTool(name: string): boolean;
+  getDefinition(name: string): { name: string; description: string; schema?: Record<string, unknown> } | undefined;
+}
+
 export interface CodeBridgeOptions {
   executor: ToolInvoker;
   /**
@@ -89,6 +104,17 @@ export interface CodeBridgeOptions {
    * from being handed a name it can only fail on.
    */
   disabledTools?: ReadonlySet<string>;
+  /**
+   * Extension-contributed tools, when this run has any enabled.
+   *
+   * Without them `names()`/`canonicalName()` consulted only the static
+   * `toolRegistry`, so an extension tool that the executor would happily
+   * dispatch was invisible inside a script: `tools.list()` omitted it and a
+   * call to it came back `TOOL_NOT_EXPOSED`, "there is no Reaper tool called
+   * ...". The executor's own dispatch had the name all along, which is why the
+   * two disagreed.
+   */
+  extensionTools?: CodeBridgeExtensionTools;
   /**
    * The thread's chat models, when this run has any.
    *
@@ -103,12 +129,14 @@ export interface CodeBridgeOptions {
 export class ReaperToolBridge implements CodeToolHost {
   private readonly executor: ToolInvoker;
   private readonly disabledTools: ReadonlySet<string>;
+  private readonly extensionTools: CodeBridgeExtensionTools | undefined;
   private readonly modelCatalogue: readonly CodeModelDescriptor[];
   private readonly modelRunner: CodeModelRunner | undefined;
 
   constructor(options: CodeBridgeOptions) {
     this.executor = options.executor;
     this.disabledTools = options.disabledTools ?? new Set<string>();
+    this.extensionTools = options.extensionTools;
     this.modelCatalogue = options.models ?? [];
     this.modelRunner = options.callModel;
   }
@@ -152,7 +180,12 @@ export class ReaperToolBridge implements CodeToolHost {
    * looks for `read` here would be told the surface disagrees with itself.
    */
   names(): readonly string[] {
-    return Object.keys(toolRegistry).filter((name) => this.canonicalName(name) === name);
+    const staticNames = Object.keys(toolRegistry).filter((name) => this.canonicalName(name) === name);
+    // Extension tools have no aliases and are not in `toolRegistry`, so they are
+    // added straight from the registry, minus any this thread switched off.
+    const extensionNames = (this.extensionTools?.listTools() ?? [])
+      .filter((name) => !this.disabledTools.has(name) && !WITHHELD_FROM_SCRIPTS.has(name));
+    return [...staticNames, ...extensionNames];
   }
 
   describe(name: string): { description: string; inputSchema: unknown } | undefined {
@@ -164,6 +197,13 @@ export class ReaperToolBridge implements CodeToolHost {
      */
     const canonical = this.canonicalName(name);
     if (canonical === undefined) return undefined;
+    const extensionDefinition = this.extensionTools?.getDefinition(canonical);
+    if (extensionDefinition) {
+      return {
+        description: extensionDefinition.description,
+        inputSchema: extensionDefinition.schema ?? { type: "object", properties: {} },
+      };
+    }
     const descriptor = buildAgentToolDescriptor(canonical);
     if (!descriptor) return undefined;
     return { description: descriptor.description, inputSchema: descriptor.inputSchema };
@@ -173,8 +213,10 @@ export class ReaperToolBridge implements CodeToolHost {
   catalogue(): CodeToolDescriptor[] {
     return this.names().flatMap((name) => {
       const entry = toolRegistry[name as ToolName];
-      if (!entry) return [];
-      return [{ name, description: entry.description }];
+      if (entry) return [{ name, description: entry.description }];
+      // Extension tools carry their own description; they are not in `toolRegistry`.
+      const extensionDefinition = this.extensionTools?.getDefinition(name);
+      return extensionDefinition ? [{ name, description: extensionDefinition.description }] : [];
     });
   }
 
@@ -204,7 +246,19 @@ export class ReaperToolBridge implements CodeToolHost {
     }
 
     const candidate = { id: invocation.callId, name: canonical, args: invocation.args };
-    const parsed = ToolCallSchema.safeParse(candidate);
+    /*
+     * `ToolCallSchema` is a discriminated union over the *static* tool names, so
+     * it has no branch for an extension-contributed tool and rejects the call
+     * with "name: Invalid input". The executor skips this same parse for
+     * extension tools for the same reason, and validates their arguments against
+     * the schema the extension declared instead. Reaching `executor.execute`
+     * with the raw candidate lets that identical path run; parsing here first
+     * would fail a call the executor would have accepted.
+     */
+    const isExtensionTool = this.extensionTools?.hasTool(canonical) === true;
+    const parsed = isExtensionTool
+      ? { success: true as const, data: candidate as unknown as ToolCall }
+      : ToolCallSchema.safeParse(candidate);
     if (!parsed.success) {
       /*
        * Argument errors are returned rather than thrown, and the message keeps
@@ -281,7 +335,16 @@ export class ReaperToolBridge implements CodeToolHost {
     const canonical = canonicalToolName(name);
     if (WITHHELD_FROM_SCRIPTS.has(canonical)) return undefined;
     if (this.disabledTools.has(canonical)) return undefined;
-    return Object.prototype.hasOwnProperty.call(toolRegistry, canonical) ? canonical : undefined;
+    if (Object.prototype.hasOwnProperty.call(toolRegistry, canonical)) return canonical;
+    /*
+     * An extension tool, when this run has one by that name. Extension tools
+     * have no aliases, so the name must match exactly; there is nothing to
+     * resolve it to. The executor dispatches these already — this is the same
+     * name the executor's `extensionTools.hasTool` check accepts, so the two
+     * cannot disagree about what exists.
+     */
+    if (this.extensionTools?.hasTool(canonical)) return canonical;
+    return undefined;
   }
 
   /**

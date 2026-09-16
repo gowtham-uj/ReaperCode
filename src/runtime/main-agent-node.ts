@@ -4,6 +4,7 @@ import { ToolCallSchema, type ToolCall } from "../tools/types.js";
 import { dim } from "./session-printer.js";
 import { validateToolCallBatch, type ToolValidationBlocker } from "./tool-validation.js";
 import { getEngineTunables } from "../config/config-tunables.js";
+import { tokenUsageFromEvent } from "../context/token-budget.js";
 import { writeHumanOutput } from "../logging/stream-events.js";
 
 
@@ -222,12 +223,19 @@ export async function streamMainAgentResponse(
       }
       const data = asRecord(event.data);
       if (typeof data?.finishReason === "string") finishReason = data.finishReason;
-      const rawUsage = asRecord(data?.usage);
-      if (rawUsage) {
-        const prompt = typeof rawUsage.promptTokens === "number" ? rawUsage.promptTokens : typeof rawUsage.inputTokens === "number" ? rawUsage.inputTokens : 0;
-        const completion = typeof rawUsage.completionTokens === "number" ? rawUsage.completionTokens : typeof rawUsage.outputTokens === "number" ? rawUsage.outputTokens : 0;
-        usage = { inputTokens: prompt, outputTokens: completion };
-      }
+      /*
+       * Normalise whatever usage shape the provider sent.
+       *
+       * This read only `promptTokens`/`inputTokens`, so a provider reporting
+       * snake_case — DeepSeek and every OpenAI-compatible stream, i.e. the
+       * default here — produced `{ inputTokens: 0, outputTokens: 0 }` and the
+       * context meter never moved. `tokenUsageFromEvent` accepts every spelling
+       * (`prompt_tokens`, `input_tokens`, `inputTokens`, …), so the meter works
+       * for all providers rather than the one whose key names this line
+       * happened to assume.
+       */
+      const normalizedUsage = tokenUsageFromEvent(data?.usage);
+      if (normalizedUsage) usage = normalizedUsage;
       continue;
     }
     if (event.type === "error") {

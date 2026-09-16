@@ -262,6 +262,49 @@ test("update_hook re-compiles and re-registers", async () => {
   }
 });
 
+/**
+ * `update` must apply the fields it advertises, not just `source`/`enforce`.
+ *
+ * Two separate holes made an update silently partial. `requireHookId` returned
+ * `{ id }` and dropped every other argument before the handler saw it, and
+ * `UpdateHookInput` had no `description` or `event` field for the handler to set
+ * even when it had them. Both were invisible because `update` returned
+ * `ok: true` and bumped `updatedAt` either way, so an update that changed
+ * nothing looked exactly like one that worked.
+ *
+ * This drives the manager (the path the model actually calls, where the
+ * `requireHookId` drop happened) and asserts every field landed.
+ */
+test("update_hook applies description, event, matcher and enforce, not just source", async () => {
+  const ctx = setup();
+  try {
+    await handleHookManager(
+      { action: "create", id: "upd-all", event: "PreToolUse", description: "before", source: VALID_OBSERVE_SOURCE, enforce: false, scope: "project" },
+      ctx.deps,
+    );
+    const updated = await handleHookManager(
+      {
+        action: "update",
+        id: "upd-all",
+        description: "after",
+        event: "PostToolUse",
+        matcher: { tool_name: "bash" },
+        enforce: true,
+        source: VALID_BLOCK_SOURCE,
+      },
+      ctx.deps,
+    ) as { ok: boolean; record?: { description: string; event: string; matcher: unknown; enforce: boolean; source: string } };
+    assert.equal(updated.ok, true, "update reported failure");
+    assert.equal(updated.record?.description, "after", "description was not applied");
+    assert.equal(updated.record?.event, "PostToolUse", "event was not applied");
+    assert.deepEqual(updated.record?.matcher, { tool_name: "bash" }, "matcher was not applied");
+    assert.equal(updated.record?.enforce, true, "enforce was not applied");
+    assert.equal(updated.record?.source, VALID_BLOCK_SOURCE, "source was not applied");
+  } finally {
+    ctx.cleanup();
+  }
+});
+
 test("uninstall_hook removes from disk + HookRunner", async () => {
   const ctx = setup();
   try {
@@ -521,3 +564,123 @@ test("deleting a hook's file unregisters it on the next discovery", async () => 
   }
 });
 
+
+/*
+ * A hook's manifestSha256 survives a rediscovery.
+ *
+ * `recordToDisk` does not persist the hash and `recordFromDisk` hardcoded `""`,
+ * and every manager action re-runs `discover()` first — so the hash a `create`
+ * returned was wiped by the very next call. The audit saw it as `approve`
+ * "corrupting" the record (blank hash, unchanged updatedAt). Recomputing it from
+ * the file's own bytes keeps the field honest across a reload.
+ */
+test("a hook's manifestSha256 is intact after a rediscovery", async () => {
+  const ctx = setup();
+  try {
+    const created = await handleCreateHook(
+      { id: "hash-hook", event: "PreToolUse", description: "x", source: VALID_OBSERVE_SOURCE, enforce: false, scope: "project" },
+      ctx.deps,
+    );
+    const before = created.record?.manifestSha256 ?? "";
+    assert.ok(before.length > 0, "create must return a real hash");
+
+    // A fresh lifecycle over the same roots can only learn the hook by discovering it.
+    const reloaded = new HookLifecycle({ runner: ctx.runner, workspaceRoot: ctx.workspaceRoot, userHome: ctx.userHome });
+    const after = reloaded.get("hash-hook")?.manifestSha256 ?? "";
+    assert.equal(after, before, "the hash must survive a rediscovery, not be blanked");
+
+    // And `approve` (a documented no-op) must not blank it either.
+    const approved = await handleApproveHook({ id: "hash-hook" }, { lifecycle: reloaded });
+    assert.equal(approved.record?.manifestSha256, before, "approve must not blank the hash");
+  } finally {
+    ctx.cleanup();
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/* Matchers                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The matcher has to find the value in the envelope the runtime actually sends.
+ *
+ * A real tool call reports its arguments nested under `args` — `payload.args.path`,
+ * `payload.args.cmd` — and the first version of the matcher read the top level.
+ * The field it looked at was always absent, so `matcherAllows` returned false on
+ * every call and the hook silently never fired. That is a hook that looks
+ * correct, saves, loads, and does nothing, which is the worst shape a bug can
+ * take here. So these cases use the nested envelope the executor builds.
+ */
+test("a path_glob matcher matches the path in the nested tool arguments", async () => {
+  const ctx = setup();
+  try {
+    await handleCreateHook(
+      {
+        id: "block-secret-path",
+        event: "PreToolUse",
+        description: "blocks writes to secrets",
+        source: VALID_BLOCK_SOURCE,
+        enforce: true,
+        scope: "project",
+        matcher: { path_glob: "**/secrets/*.txt" },
+      },
+      ctx.deps,
+    );
+
+    // The nested shape the executor emits, matching path.
+    const blocked = await ctx.runner.dispatch("PreToolUse", { toolName: "write_file", args: { path: "config/secrets/token.txt", content: "x" } });
+    assert.equal(blocked.allow, false, "a matching nested path must reach the hook and block");
+
+    // A non-matching path must not be touched by this hook.
+    const allowed = await ctx.runner.dispatch("PreToolUse", { toolName: "write_file", args: { path: "src/index.ts", content: "x" } });
+    assert.equal(allowed.allow, true, "a non-matching path must not fire the hook");
+  } finally {
+    ctx.cleanup();
+  }
+});
+
+test("a cmd_pattern matcher matches the command in the nested tool arguments", async () => {
+  const ctx = setup();
+  try {
+    await handleCreateHook(
+      {
+        id: "block-dangerous-rm",
+        event: "PreToolUse",
+        description: "blocks rm -rf",
+        source: VALID_BLOCK_SOURCE,
+        enforce: true,
+        scope: "project",
+        matcher: { cmd_pattern: "rm\\s+-rf" },
+      },
+      ctx.deps,
+    );
+
+    const blocked = await ctx.runner.dispatch("PreToolUse", { toolName: "bash", args: { cmd: "rm -rf /tmp/scratch" } });
+    assert.equal(blocked.allow, false, "a matching nested command must block");
+
+    const allowed = await ctx.runner.dispatch("PreToolUse", { toolName: "bash", args: { cmd: "ls -la" } });
+    assert.equal(allowed.allow, true, "a non-matching command must not block");
+  } finally {
+    ctx.cleanup();
+  }
+});
+
+test("a bare `return false` from an enforcing hook blocks the call", async () => {
+  const ctx = setup();
+  try {
+    /*
+     * The documented contract is `{ allow: false }`, but a bare boolean is the
+     * natural reading of "the result decides the outcome". It used to be a
+     * silent no-op: the call went through and nothing reported a problem. A
+     * blocking hook that does not block is the failure this test exists for.
+     */
+    await handleCreateHook(
+      { id: "bare-false", event: "PreToolUse", description: "block", source: "return false;", enforce: true, scope: "project" },
+      ctx.deps,
+    );
+    const result = await ctx.runner.dispatch("PreToolUse", { toolName: "bash", args: { cmd: "echo hi" } });
+    assert.equal(result.allow, false, "`return false` must block");
+  } finally {
+    ctx.cleanup();
+  }
+});

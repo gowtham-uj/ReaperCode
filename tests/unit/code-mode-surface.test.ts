@@ -91,6 +91,69 @@ test("a script is offered the whole registry, not the core subset", async () => 
   }
 });
 
+/**
+ * A script must see extension-contributed tools, not only the static registry.
+ *
+ * An extension's tool is dispatched by the executor like any other — `hasTool`
+ * is true and `executeTool` runs it — but it is not a member of `toolRegistry`.
+ * The bridge built its surface from `toolRegistry` alone, so the tool the
+ * executor would happily run was invisible inside a script: `tools.list()` left
+ * it out and a call came back `TOOL_NOT_EXPOSED`, "there is no Reaper tool
+ * called ...". The two layers disagreed about what exists, and the script got
+ * the wrong answer.
+ */
+test("a script is offered an extension-contributed tool", async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "code-mode-ext-"));
+  const executor = new ToolExecutor({
+    workspaceRoot,
+    runId: "code-mode-ext",
+    sessionId: "code-mode-ext",
+    traceId: "code-mode-ext",
+    logLevel: "info",
+    safetyProfile: { mode: "permissive", policy: "default" },
+  } as never);
+
+  const extensionTools = {
+    listTools: () => ["ext_ping"],
+    hasTool: (name: string) => name === "ext_ping",
+    getDefinition: (name: string) =>
+      name === "ext_ping"
+        ? { name: "ext_ping", description: "Returns a fixed string.", schema: { type: "object", properties: {} } }
+        : undefined,
+  };
+
+  try {
+    const bridge = new ReaperToolBridge({
+      executor,
+      disabledTools: new Set<string>(),
+      extensionTools,
+    });
+
+    assert.ok(bridge.names().includes("ext_ping"), "an extension tool must be offered to the script");
+    const described = bridge.describe("ext_ping");
+    assert.ok(described, "an offered extension tool must be describable");
+    assert.equal(described?.description, "Returns a fixed string.");
+    assert.ok(
+      (bridge.catalogue() as Array<{ name: string }>).some((entry) => entry.name === "ext_ping"),
+      "the extension tool must appear in the catalogue the script is initialised with",
+    );
+
+    // The same name the executor would dispatch must resolve, so the surface and
+    // dispatch cannot disagree about what exists.
+    const result = await evaluateScript({
+      args: { code: `const listed = await tools.list(); listed.some((t) => t.name === 'ext_ping');` },
+      toolCallId: "ext-surface-1",
+      runId: "code-mode-ext",
+      host: bridge,
+      workspace: workspaceRoot,
+    });
+    assert.equal(result?.value, true, "tools.list() inside the script must include the extension tool");
+  } finally {
+    await executor.cleanupBackgroundProcesses("code-mode-ext").catch(() => undefined);
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("a script can call a tool that is not in the core set", async () => {
   /*
    * The end-to-end half. The test above reads the surface off the bridge; this

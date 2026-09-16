@@ -181,3 +181,129 @@ test("an empty run still reports no blocker when the provider had something to s
     "a turn that produced tool calls is not an empty response",
   );
 });
+
+/**
+ * A model that thinks and then stops without answering.
+ *
+ * This is the other half of the same bug, and the more misleading one. The
+ * empty-stop counter tests `assistantText` only, so a reasoning model that
+ * returns thinking on every turn but never a summary was counted as returning
+ * "3 empty responses in a row" and the run was killed with a message telling
+ * the user to check their provider. The provider was fine: it sent reasoning
+ * every single time.
+ */
+test("a reasoning-only stop is not counted as an empty response", async () => {
+  const workspaceRoot = await createTempWorkspace();
+  const request = createValidRequestEnvelope();
+  request.payload = { prompt: "Summarise what the failing test proves." };
+
+  let calls = 0;
+  const gateway: ModelGateway = {
+    streamCount: 0,
+    async resolveRole(role: ModelRole): Promise<ResolvedModelProfile> {
+      return {
+        role,
+        profileName: role,
+        provider: "test",
+        model: "thinking-only",
+        capabilities: { streaming: true, toolCalling: true, jsonMode: false, structuredOutput: false, embeddings: false },
+      };
+    },
+    async *stream(): AsyncIterable<StreamEvent> {
+      calls += 1;
+      yield { type: "message_start", data: {} };
+      /*
+       * Reasoning on the channel, no content, and a clean stop — the shape an
+       * OpenAI-compatible reasoning model produces when it thinks and then ends
+       * the turn without committing to an answer.
+       */
+      yield { type: "reasoning_delta", content: `thinking, pass ${calls}` } as StreamEvent;
+      yield { type: "message_end", data: { finishReason: "stop" } };
+    },
+    async generate(request: GenerateRequest): Promise<GenerateResult> {
+      return { role: request.role, profileName: request.role, provider: "test", model: "thinking-only", content: "", finishReason: "stop", raw: {} };
+    },
+    async embed(request: EmbeddingRequest): Promise<EmbeddingResult> {
+      return { role: request.role, profileName: request.role, provider: "test", model: "thinking-only", vectors: [], raw: {} };
+    },
+    async countTokens(): Promise<number> {
+      return 0;
+    },
+  } as ModelGateway;
+
+  const engine = new RuntimeEngine({
+    config: createValidConfig(),
+    workspaceRoot,
+    requestEnvelope: request,
+    modelGateway: gateway,
+  });
+
+  const result = await engine.run();
+
+  const emptyBlocker = (result.runtimeBlockers ?? []).find((entry) => entry.code === "empty_model_response");
+  assert.equal(
+    emptyBlocker,
+    undefined,
+    "a turn that carried reasoning must not be reported as an empty response; the provider did send something",
+  );
+
+  /*
+   * It is still nudged, because thinking without answering is not a finished
+   * turn, but on its own budget: the model gets more exchanges and the run ends
+   * with a message that names what happened rather than blaming the transport.
+   */
+  if (result.runtimeBlockers?.some((entry) => entry.code === "reasoning_without_answer")) {
+    assert.match(
+      result.runtimeBlockers.find((entry) => entry.code === "reasoning_without_answer")!.message,
+      /thinking/i,
+    );
+  }
+  assert.ok(calls > 1, "a reasoning-only stop should be nudged toward an answer, not accepted as final");
+});
+
+test("reasoning alongside real text is an ordinary turn", async () => {
+  // The common shape: a reasoning model that thinks and then answers. Nothing
+  // about the new reasoning branch may flag this.
+  const workspaceRoot = await createTempWorkspace();
+  const request = createValidRequestEnvelope();
+  request.payload = { prompt: "Say hello." };
+
+  const gateway: ModelGateway = {
+    streamCount: 0,
+    async resolveRole(role: ModelRole): Promise<ResolvedModelProfile> {
+      return {
+        role,
+        profileName: role,
+        provider: "test",
+        model: "think-and-answer",
+        capabilities: { streaming: true, toolCalling: true, jsonMode: false, structuredOutput: false, embeddings: false },
+      };
+    },
+    async *stream(): AsyncIterable<StreamEvent> {
+      yield { type: "message_start", data: {} };
+      yield { type: "reasoning_delta", content: "the user wants a greeting" } as StreamEvent;
+      yield { type: "message_delta", content: "Hello." };
+      yield { type: "message_end", data: { finishReason: "stop" } };
+    },
+    async generate(request: GenerateRequest): Promise<GenerateResult> {
+      return { role: request.role, profileName: request.role, provider: "test", model: "think-and-answer", content: "Hello.", finishReason: "stop", raw: {} };
+    },
+    async embed(request: EmbeddingRequest): Promise<EmbeddingResult> {
+      return { role: request.role, profileName: request.role, provider: "test", model: "think-and-answer", vectors: [], raw: {} };
+    },
+    async countTokens(): Promise<number> {
+      return 0;
+    },
+  } as ModelGateway;
+
+  const engine = new RuntimeEngine({
+    config: createValidConfig(),
+    workspaceRoot,
+    requestEnvelope: request,
+    modelGateway: gateway,
+  });
+
+  const result = await engine.run();
+  assert.equal(result.assistantMessage, "Hello.");
+  assert.equal(result.runtimeBlockers?.length ?? 0, 0, "an answered turn has nothing to block on");
+});

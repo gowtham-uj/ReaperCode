@@ -52,6 +52,7 @@ import {
   HookManagerArgsSchema,
 } from "./types/hook-tools.schema.js";
 import { EvalArgsSchema, EVAL_TOOL_DESCRIPTION } from "./eval.js";
+import { BROWSER_USE_DESCRIPTION, BrowserUseArgsSchema } from "./browser/browser-use.js";
 
 export const toolRegistry = {
   list_directory: {
@@ -76,12 +77,12 @@ export const toolRegistry = {
   },
   create_checkpoint: {
     description:
-      "Create a recoverable git-backed checkpoint under .reaper/checkpoints before a risky mutation batch. Stores metadata plus tracked staged/worktree patches; ignored files are not included. Requires a git repository: outside one this records metadata only and restore_checkpoint will have nothing to restore, which the result reports as restoreAvailable: false.",
+      "Create a recoverable git-backed checkpoint under .reaper/checkpoints before a risky mutation batch. Captures tracked changes, untracked files, and deletions as patches, so restore returns the workspace to this moment. Gitignored files are not included, since `.gitignore` says they are not part of the repository. Requires a git repository: outside one this records metadata only and restore_checkpoint will have nothing to restore, which the result reports as restoreAvailable: false.",
     argsSchema: CreateCheckpointArgsSchema,
   },
   restore_checkpoint: {
     description:
-      "Explicitly restore a named Reaper checkpoint in the current git workspace. This resets tracked files to the checkpoint base, removes new untracked files, and reapplies the checkpoint's saved pre-existing patches. Only a checkpoint created in a git repository can be restored; check that the create result did not report restoreAvailable: false.",
+      "Explicitly restore a named Reaper checkpoint in the current git workspace. Returns tracked files to the checkpoint's content, reverts edits to files that were untracked at checkpoint time, removes files created since, and leaves gitignored files alone. Only a checkpoint created in a git repository can be restored; check that the create result did not report restoreAvailable: false.",
     argsSchema: RestoreCheckpointArgsSchema,
   },
   git_status: {
@@ -139,10 +140,9 @@ export const toolRegistry = {
       "After a failed broad build or test, inspect the focused failure before repeating the command.",
     argsSchema: BashArgsSchema,
   },
-  browser_control: {
-    description:
-      "Control a persistent Playwright browser page: navigate, compact ref-based snapshot, screenshot, click/type/select by selector or ref (e.g. e0), press keys, scroll, or close. Use humanize:true when slower mouse/typing behavior is useful for UI reliability.",
-    argsSchema: BrowserControlArgsSchema,
+  browser_use: {
+    description: BROWSER_USE_DESCRIPTION,
+    argsSchema: BrowserUseArgsSchema,
   },
   activate_skill: {
     /*
@@ -202,17 +202,17 @@ export const toolRegistry = {
    */
   skill_manager: {
     description:
-      "Author and manage skills. Actions: create (writes `skill.json` + `SKILL.md` to `~/.reaper/skills/<name>/`; the skill is registered and usable immediately), test (runs the skill's `validation.commands` in order, fails fast), approve (a no-op kept for compatibility — creation already makes the skill usable), uninstall (removes it from the registry and disk).",
+      "Author and manage skills. Actions: create (writes `skill.json` + `SKILL.md` to `~/.reaper/skills/<name>/`; the skill is registered and usable immediately; REQUIRES name, description, category, when_to_use and body — the schema marks them optional because they only apply to create, but create rejects a call missing any of them), test (runs the skill's `validation.commands` in order, fails fast), approve (a no-op kept for compatibility — creation already makes the skill usable), uninstall (removes it from the registry and disk).",
     argsSchema: SkillManagerArgsSchema,
   },
   extension_manager: {
     description:
-      "Author and manage extensions (JavaScript only). Actions: create (writes `extension.json` + `main.js` to `.reaper/extensions/<id>/`, lands dormant as `project-untrusted`), validate (runs `validation.commands`, does not activate), trust (promotes to `user-trusted`; gated), enable (marks enabled and runs `default.activate(ctx)`; requires `user-trusted` first), uninstall (removes from registry and disk; gated).",
+      "Author and manage extensions (JavaScript only). Actions: create (writes `extension.json` + `main.js` to `.reaper/extensions/<id>/`), list (inventory plus the tools an activation refused, with reasons), validate (runs `validation.commands` when the manifest carries them; the current manifest schema does not expose that field, so in practice this reports that there is nothing to validate, which is a success and not a failure), trust (records a trust decision), enable (marks enabled and runs `default.activate(ctx)`; the extension then takes effect immediately), uninstall (removes from registry and disk).",
     argsSchema: ExtensionManagerArgsSchema,
   },
   hook_manager: {
     description:
-      "Author and manage event hooks. A hook is a `(event, matcher, JS handler)` triple that runs on a lifecycle event. Actions: create (writes `.reaper/hooks/<id>.json`, compiles the handler, and attaches it to the live runner in one call), list (read-only inventory: id, event, matcher, enforce, registered flag), update (re-compile and re-register), approve (a no-op kept for compatibility — creation already registers it), uninstall (removes it from disk and the live runner). The handler body is compiled with `new Function` and its result decides the outcome; `enforce: false` (the default) means the hook can only advise, and `enforce: true` lets it block the tool call.",
+      "Author and manage event hooks. A hook is a `(event, matcher, JS handler)` triple that runs on a lifecycle event. Actions: create (writes `.reaper/hooks/<id>.json`, compiles the handler, and attaches it to the live runner in one call; requires `id` (kebab-case), `event`, `description`, and `source` — omitting any is rejected, and `matcher`, `enforce`, `scope` and `timeout_ms` are optional), list (read-only inventory: id, event, matcher, enforce, registered flag), update (re-compile and re-register; accepts the same fields as create, all optional), approve (a no-op kept for compatibility — creation already registers it), uninstall (removes it from disk and the live runner). The handler body is compiled with `new Function` and its result decides the outcome; `enforce: false` (the default) means the hook can only advise, and `enforce: true` lets it block the tool call. A handler returns `{ allow: boolean, reason?, message? }`, and a bare `false` blocks.",
     argsSchema: HookManagerArgsSchema,
   },
   apply_patch_edit: {

@@ -14,13 +14,20 @@ import {
  * makes the file binary to grep, diff, and most editors. */
 const SEPARATOR = "\u0000";
 
-export function ModelPicker({ catalog, client, threadId, provider, model, turnActive, onSetup, onError }: {
+export function ModelPicker({ catalog, client, threadId, provider, model, turnActive, disabledProviders, onSetup, onError }: {
   catalog: ModelCatalog;
   client: JsonRpcClient | undefined;
   threadId: string | undefined;
   provider: string | null | undefined;
   model: string | null | undefined;
   turnActive: boolean;
+  /**
+   * Providers the user switched off in Settings. Passed in rather than folded
+   * into the catalog because it is user settings, not catalog data, and the
+   * picker must not offer a provider the turn would refuse. `undefined` when
+   * settings have not loaded yet, which reads as "nothing disabled".
+   */
+  disabledProviders?: readonly string[] | undefined;
   onSetup(): void;
   onError(message: string): void;
 }) {
@@ -30,7 +37,10 @@ export function ModelPicker({ catalog, client, threadId, provider, model, turnAc
   const [deferred, setDeferred] = useState<string>();
   const rootRef = useRef<HTMLDivElement>(null);
   const id = useId();
-  const available = useMemo(() => sendableProviders(catalog.providers), [catalog.providers]);
+  const available = useMemo(
+    () => sendableProviders(catalog.providers, disabledProviders ?? []),
+    [catalog.providers, disabledProviders],
+  );
   const current = provider && model ? `${provider}${SEPARATOR}${model}` : "";
   /*
    * A thread with no model is not a thread with no model.

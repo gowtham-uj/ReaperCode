@@ -92,6 +92,14 @@ export interface SessionRunOptions {
   signal?: AbortSignal;
   limits?: Partial<CodeRuntimeLimits>;
   /**
+   * The thread's workspace, and the root the sandbox confines the script to.
+   *
+   * Read here as well as by the runtime because the runtime is built once per
+   * run and the confinement decision is made at that moment: a run whose first
+   * eval has no workspace gets an unconfined runtime for its whole life.
+   */
+  workspace?: string;
+  /**
    * Live view of the run, forwarded to the runtime. Present here rather than
    * read off the runtime because the runtime is shared across turns and the
    * sink belongs to the turn.
@@ -257,7 +265,7 @@ async function acquire(slot: SessionSlot, options: SessionRunOptions): Promise<S
    * note in `runInSession`. A caller's `limits` are applied per run, where they
    * cannot outlive the script that asked for them.
    */
-  const runtime = (await ReaperNodeRuntime.create()) as unknown as RuntimeLike;
+  const runtime = (await ReaperNodeRuntime.create(undefined, options.workspace)) as unknown as RuntimeLike;
 
   const entry: SessionEntry = { runtime, surface: options.tools, surfaceBound: false };
   slot.entry = entry;

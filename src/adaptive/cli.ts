@@ -54,8 +54,13 @@ import { SlashCommandRegistry, ConsoleHost } from "../extensions/slash-command-r
 import { registerBuiltinCommands } from "../commands/index.js";
 import { builtinSkillsRoot } from "../skills/built-in/index.js";
 import { packagedSkillBody, packagedSkills } from "../context/packaged-skills.js";
-import { runExec, type ExecRunnerOptions } from "./exec-runner.js";
+import type { ExecProvider } from "./exec-runner.js";
+import { isValidSessionName } from "../context/session-journal.js";
+import { ProviderCredentialStore } from "../config/provider-credentials.js";
 import { startAppServer } from "../app-server/server.js";
+import { createCliClient, connectInProcess, connectRemote } from "../cli-client/index.js";
+import { TerminalRenderer } from "../cli-client/renderer.js";
+import type { JsonRpcClient } from "../../web/shared/src/jsonrpc-client.js";
 
 
 export interface ReaperCLIOptions {
@@ -644,14 +649,77 @@ export class ReaperCLI {
     const workspaceRoot = flags["workspace"] ?? this.opts.workspaceRoot;
     const wantJson = flags["json"] === "true" || flags["json"] === "1";
     const model = flags["model"];
-    const maxTokens = flags["max-tokens"] ? Number(flags["max-tokens"]) : undefined;
     const timeoutMs = flags["timeout-ms"] ? Number(flags["timeout-ms"]) : undefined;
     const session = flags["session"];
     const wantStreamEvents = flags["stream-events"] === "true" || flags["stream-events"] === "1";
+    /*
+     * `--sandbox on|off`. Omitted leaves the thread's stored setting alone,
+     * which is the behaviour `--session` needs: a thread configured in the web
+     * UI keeps its confinement when a terminal drives it.
+     */
+    const sandboxRaw = flags["sandbox"];
+    if (sandboxRaw !== undefined && !["on", "off", "true", "false", "1", "0"].includes(sandboxRaw)) {
+      return { exitCode: 2, stdout: "", stderr: `--sandbox expects on or off; got "${sandboxRaw}"` };
+    }
+    const filesystemSandbox = sandboxRaw === undefined
+      ? undefined
+      : sandboxRaw === "on" || sandboxRaw === "true" || sandboxRaw === "1";
     if (wantStreamEvents) process.env.REAPER_STREAM_EVENTS = "1";
+    /*
+     * `--connect` attaches to an app-server that is already running, which is
+     * what lets a terminal drive the same thread the web UI is showing. Without
+     * it a server is started inside this process, which needs no port and
+     * cannot collide with another run.
+     *
+     * The token flags are the same pair the `app-server` subcommand defines, so
+     * the two ends of one connection are configured with the same words.
+     */
+    const connectOption = typeof flags["connect"] === "string" ? flags["connect"] : undefined;
+    let authToken = typeof flags["auth-token"] === "string" ? flags["auth-token"] : undefined;
+    const authTokenFile = typeof flags["auth-token-file"] === "string" ? flags["auth-token-file"] : undefined;
+    if (authToken && authTokenFile) {
+      return { exitCode: 2, stdout: "", stderr: "Use only one of --auth-token or --auth-token-file" };
+    }
+    if (authTokenFile) {
+      try {
+        const { readFileSync } = await import("node:fs");
+        authToken = readFileSync(authTokenFile, "utf8").trim();
+      } catch (error) {
+        return {
+          exitCode: 2,
+          stdout: "",
+          stderr: `--auth-token-file unreadable: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
+    if ((authToken || authTokenFile) && !connectOption) {
+      return { exitCode: 2, stdout: "", stderr: "--auth-token and --auth-token-file require --connect <url>" };
+    }
+    /*
+     * `--session` becomes the thread id, so it has to satisfy the same rule the
+     * journal does. Validated here rather than left to the server because the
+     * alternative is a thread created under a name the journal cannot use, and
+     * the failure would surface later as a missing session rather than as a bad
+     * argument.
+     */
+    if (typeof session === "string" && !isValidSessionName(session)) {
+      return {
+        exitCode: 2,
+        stdout: "",
+        stderr: `invalid --session name "${session}" (allowed: letters, digits, ., _, - ; max 128 chars)`,
+      };
+    }
+    if (flags["max-tokens"] !== undefined) {
+      /*
+       * Refused rather than ignored. The app-server has no per-turn output cap
+       * to map this onto, and a flag that silently does nothing is worse than
+       * one that says so: a user who set a cap would believe it was applied.
+       */
+      return { exitCode: 2, stdout: "", stderr: "--max-tokens is not supported on the app-server path; set the limit on the provider or model instead" };
+    }
     const providerRaw = flags["provider"];
     const EXEC_PROVIDERS = ["openai", "anthropic", "minimax", "deepseek", "nuralwatt", "nuralwatt2"] as const;
-    const isExecProvider = (value: string | undefined): value is NonNullable<ExecRunnerOptions["provider"]> =>
+    const isExecProvider = (value: string | undefined): value is NonNullable<ExecProvider> =>
       value !== undefined && (EXEC_PROVIDERS as readonly string[]).includes(value);
     /*
      * A provider name that is not one of these is an error, not a fallback.
@@ -673,12 +741,12 @@ export class ReaperCLI {
         stderr: `unknown provider "${providerRaw}"\n  supported: ${EXEC_PROVIDERS.join(", ")}\n`,
       };
     }
-    let provider: ExecRunnerOptions["provider"] | undefined = isExecProvider(providerRaw) ? providerRaw : undefined;
+    let provider: ExecProvider | undefined = isExecProvider(providerRaw) ? providerRaw : undefined;
     let selectedModel = model;
     if (this.opts.userHome === undefined) {
       const { seedEnvFromOnboarding } = await import("../model/provider-onboarding.js");
       const saved = seedEnvFromOnboarding();
-      const savedProvider: ExecRunnerOptions["provider"] | undefined = isExecProvider(saved?.provider) ? saved.provider : undefined;
+      const savedProvider: ExecProvider | undefined = isExecProvider(saved?.provider) ? saved.provider : undefined;
       if (!provider && savedProvider) {
         provider = savedProvider;
       }
@@ -691,80 +759,145 @@ export class ReaperCLI {
       ? reasoningEffortRaw
       : undefined;
     const thinkingRaw = flags["thinking"];
-    const thinking: ExecRunnerOptions["thinking"] | undefined =
+    /*
+     * `--thinking off` now means "do not print the model's reasoning".
+     *
+     * It used to be a provider parameter that asked the model not to think.
+     * The app-server has no per-turn switch for that, and the honest reading of
+     * the flag from a user's side is about what they see, not what the model
+     * does internally: the reasoning channel is rendered here now, so this is
+     * the knob that removes it. Renamed in the help text to say so.
+     */
+    const thinking =
       thinkingRaw === "on" || thinkingRaw === "enabled" || thinkingRaw === "1"
         ? "enabled"
         : thinkingRaw === "off" || thinkingRaw === "disabled" || thinkingRaw === "0"
           ? "disabled"
           : undefined;
+    const printReasoning = thinking !== "disabled";
+    /*
+     * The turn runs through the app-server, in-process by default.
+     *
+     * This used to call `runExec`, which drove the engine directly with its own
+     * provider setup and its own stdout path. That second path is why the CLI
+     * printed reasoning interleaved into the answer while the web UI did not:
+     * the CLI had no typed events to render from, only raw text. Going through
+     * the app-server means one implementation and one set of bugs.
+     */
+    const connect = flags["connect"];
+    const output = wantStreamEvents ? process.stderr : process.stdout;
+    const renderer = wantJson ? undefined : new TerminalRenderer({ out: output, showReasoning: printReasoning });
+
+    const controller = new AbortController();
+    /*
+     * `--timeout-ms` caps the whole run. It used to be an engine option; now it
+     * aborts the client, which sends `turn/interrupt` and waits for the turn to
+     * close. The distinction matters: a timeout should leave a journaled turn
+     * behind, not a killed process with a half-written session.
+     */
+    const timeout = timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? setTimeout(() => controller.abort(), timeoutMs)
+      : undefined;
+
+    const onSigint = (): void => controller.abort();
+
+    let link: { client: JsonRpcClient; dispose(): void };
     try {
-      const result = await runExec({
+      link = connectOption !== undefined
+        ? await connectRemote({
+            url: connectOption,
+            ...(authToken ? { authToken } : {}),
+          })
+        /*
+         * `settingsHome` is what the app-server calls this CLI's `userHome`.
+         * Not passing it meant an embedded server always read the real
+         * `~/.reaper`, so a run given an explicit home would authenticate
+         * against credentials from a different one. The test that caught this
+         * used a temp home precisely because that must be the only one read.
+         */
+        : connectInProcess({
+            workspaceRoot,
+            ...(this.opts.userHome !== undefined ? { settingsHome: this.opts.userHome } : {}),
+            /*
+             * The credential store has its own `home` and defaults to the real
+             * one, so `settingsHome` alone was not enough: settings would be
+             * read from the given home while keys came from `~/.reaper`. Both
+             * have to point at the same place or a run silently authenticates
+             * against credentials it was never given.
+             */
+            ...(this.opts.userHome !== undefined
+              ? { credentials: new ProviderCredentialStore({ home: this.opts.userHome }) }
+              : {}),
+          });
+    } catch (error) {
+      if (timeout) clearTimeout(timeout);
+      return { exitCode: 1, stdout: "", stderr: error instanceof Error ? error.message : String(error) };
+    }
+
+    const handle = createCliClient(link.client);
+    process.on("SIGINT", onSigint);
+    try {
+      const result = await handle.runTurn({
         workspaceRoot,
         prompt,
-        ...(selectedModel !== undefined ? { model: selectedModel } : {}),
-        ...(maxTokens !== undefined && Number.isFinite(maxTokens) ? { maxTokens } : {}),
-        ...(timeoutMs !== undefined && Number.isFinite(timeoutMs) ? { timeoutMs } : {}),
+        ...(session !== undefined ? { threadId: session } : {}),
         ...(provider !== undefined ? { provider } : {}),
+        ...(selectedModel !== undefined ? { model: selectedModel } : {}),
         ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
-        ...(thinking !== undefined ? { thinking } : {}),
-        ...(session !== undefined ? { session } : {}),
+        ...(filesystemSandbox !== undefined ? { filesystemSandbox } : {}),
+        signal: controller.signal,
+        ...(renderer ? { onNotification: (method, params) => renderer.handle(method, params) } : {}),
+        onApproval: async (request) => {
+          /*
+           * A CLI-started thread runs yolo, so this only fires for `--connect`
+           * against a thread whose mode is stricter. Declining is the honest
+           * answer for a runner with no one to ask; silently accepting would
+           * defeat the mode the user chose, and hanging would look like a bug.
+           */
+          output.write(`\n  ✕ approval required for ${request.params.command ?? request.params.path ?? request.method}; declined (use the web UI to approve)\n`);
+          return "decline";
+        },
       });
+      renderer?.finish();
+
       if (wantJson) {
-        return { exitCode: result.status === "completed" ? 0 : 1, stdout: JSON.stringify(result, null, 2) + "\n", stderr: "" };
+        return {
+          exitCode: result.status === "completed" ? 0 : 1,
+          stdout: `${JSON.stringify({
+            status: result.status,
+            assistantMessage: result.assistantMessage,
+            toolResults: result.toolResults,
+            notices: result.notices,
+            threadId: result.threadId,
+            turnId: result.turnId,
+          }, null, 2)}\n`,
+          stderr: "",
+        };
       }
-      const isDev = process.env.REAPER_DEV === "1" || process.env.REAPER_DEV === "true";
-      const lines: string[] = [];
-      if (isDev) {
-        lines.push(`status: ${result.status}`);
-        lines.push(`duration: ${result.durationMs}ms`);
-        if (result.trajectoryPath) lines.push(`trajectory: ${result.trajectoryPath}`);
-        if (result.contentFingerprint) lines.push(`fingerprint: ${result.contentFingerprint}`);
-        if (result.verification) {
-          lines.push(`verification: ${result.verification.ok ? "ok" : "fail"} (attempts=${result.verification.attemptCount}${result.verification.reason ? `, reason=${result.verification.reason}` : ""})`);
-        }
-        if (result.assistantMessage) {
-          lines.push("");
-          lines.push("--- assistant ---");
-          lines.push(result.assistantMessage);
-        }
-        if (result.toolResults.length) {
-          lines.push("");
-          lines.push(`--- tool results (${result.toolResults.length}) ---`);
-          for (const tr of result.toolResults) {
-            lines.push(`- ${tr.name}${tr.id ? ` [${tr.id}]` : ""}`);
-          }
-        }
-        if (result.notices.length) {
-          lines.push("");
-          lines.push("--- notices ---");
-          for (const n of result.notices) lines.push(`[${n.kind}] ${n.message}`);
-        }
-      }
-      // In prod mode, model output was already streamed live — nothing extra to print.
-      let summary = lines.length ? lines.join("\n") + "\n" : "";
-      // C1: a non-completed run must never fail silently. In prod
-      // (`REAPER_DEV` unset) the human summary is empty, so a failure
-      // returned exit code 1 with no diagnostic. Always surface the
-      // status + error notices to stderr on incomplete runs; keep stdout
-      // clean for `--json`/`--stream-events` consumers.
+
+      // A non-completed run must never fail silently: exit 1 with no
+      // explanation is what a 502 looked like before.
+      let summary = "";
       if (result.status !== "completed") {
         const failureLines = [`exec run ${result.status}`];
         const errors = result.notices.filter((n) => n.kind === "error");
         for (const n of errors) failureLines.push(`  ${n.message}`);
-        if (errors.length === 0 && result.assistantMessage) failureLines.push(`  ${result.assistantMessage.slice(0, 500)}`);
-        if (errors.length === 0) failureLines.push("  (no error notice was recorded — see the trajectory for details)");
-        summary = `${summary}${failureLines.join("\n")}\n`;
+        if (errors.length === 0) failureLines.push("  (the turn ended without an error notice)");
+        summary = `${failureLines.join("\n")}\n`;
       }
-      // When stream-events is enabled, stdout is the pure JSONL event
-      // stream; route the human summary to stderr so consumers can
-      // pipe it without parsing noise.
       return {
         exitCode: result.status === "completed" ? 0 : 1,
-        stdout: wantStreamEvents ? "" : summary,
-        stderr: wantStreamEvents ? summary : "",
+        stdout: "",
+        stderr: summary,
       };
     } catch (e) {
+      renderer?.finish();
       return { exitCode: 1, stdout: "", stderr: e instanceof Error ? e.message : String(e) };
+    } finally {
+      process.removeListener("SIGINT", onSigint);
+      if (timeout) clearTimeout(timeout);
+      handle.dispose();
+      link.dispose();
     }
   }
 
@@ -781,7 +914,8 @@ export class ReaperCLI {
       "  visual      list | analyze | bridge",
       "  capability  show | probe",
       "  redact      <file|->",
-      "  exec        run --prompt <text> [--session <name>] [--workspace <dir>] [--model <id>] [--provider anthropic|openai|minimax|deepseek|nuralwatt|nuralwatt2] [--reasoning-effort low|medium|high] [--thinking on|off] [--max-tokens N] [--timeout-ms N] [--json] [--stream-events]",
+      "  exec        run --prompt <text> [--session <name>] [--workspace <dir>] [--model <id>] [--provider anthropic|openai|minimax|deepseek|nuralwatt|nuralwatt2] [--reasoning-effort low|medium|high] [--thinking on|off (print the model's reasoning)] [--sandbox on|off (confine shell commands to the workspace; default on)] [--timeout-ms N] [--json] [--stream-events]",
+      "              [--connect ws://host:port] [--auth-token <token>|--auth-token-file <path>]   (attach to a running app-server)",
       "  app-server  [--listen ws://127.0.0.1:0] [--workspace <dir>] [--auth-token <token>|--auth-token-file <path>] [--max-concurrent-turns N]",
     ].join("\n");
     return { exitCode: 0, stdout: usage + "\n", stderr: "" };

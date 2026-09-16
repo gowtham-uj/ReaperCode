@@ -12,7 +12,7 @@ test("main-agent system prompt stays stable when the provider tool list changes"
   ];
   const system = buildMainAgentSystemPrompt({}, { availableTools: tools });
   assert.equal(system, buildMainAgentSystemPrompt({}));
-  assert.doesNotMatch(system, /# Tool inventory|- file_view|- file_edit|browser_control/);
+  assert.doesNotMatch(system, /# Tool inventory|- file_view|- file_edit|browser_use/);
 });
 
 test("composeAbortSignals returns undefined when no signals are provided", () => {

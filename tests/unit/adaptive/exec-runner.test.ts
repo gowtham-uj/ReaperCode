@@ -20,17 +20,33 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { resolveBaseUrl, buildConfig, runExec, buildRequestEnvelope, deriveExecFinalStatus } from "../../../src/adaptive/exec-runner.js";
+import { resolveBaseUrl, buildConfig, buildRequestEnvelope, deriveExecFinalStatus } from "../../../src/adaptive/exec-runner.js";
 import { ReaperCLI } from "../../../src/adaptive/cli.js";
 
-function withEnv<T>(patch: Record<string, string | undefined>, fn: () => T): T {
+/**
+ * Run `fn` with `patch` applied to the environment, then restore it.
+ *
+ * Async-aware, and that is a fix rather than a nicety. The signature used to be
+ * `(patch, fn: () => T) => T`, so `await withEnv(patch, async () => …)` awaited
+ * the *callback's promise* but `withEnv` itself had already restored the
+ * environment in its `finally` — the restore ran synchronously, before the
+ * async body reached its first await. Anything that read the environment after
+ * that point (which is all of a real run) saw the developer's own values.
+ *
+ * The test it broke was `missing credential surfaces a clear error`: it deleted
+ * the token, then the runner found a real stored key and succeeded, and the
+ * test failed with exit 0. The deletion had been undone before it mattered.
+ */
+async function withEnv<T>(patch: Record<string, string | undefined>, fn: () => T | Promise<T>): Promise<T> {
   const saved: Record<string, string | undefined> = {};
   for (const k of Object.keys(patch)) {
     saved[k] = process.env[k];
     if (patch[k] === undefined) delete process.env[k];
     else process.env[k] = patch[k]!;
   }
-  try { return fn(); } finally {
+  try {
+    return await fn();
+  } finally {
     for (const k of Object.keys(patch)) {
       if (saved[k] === undefined) delete process.env[k];
       else process.env[k] = saved[k]!;
@@ -38,32 +54,32 @@ function withEnv<T>(patch: Record<string, string | undefined>, fn: () => T): T {
   }
 }
 
-test("resolveBaseUrl: appends /v1 when missing", () => {
-  withEnv({ ANTHROPIC_BASE_URL: "https://api.minimax.io/anthropic" }, () => {
+test("resolveBaseUrl: appends /v1 when missing", async () => {
+  await withEnv({ ANTHROPIC_BASE_URL: "https://api.minimax.io/anthropic" }, () => {
     assert.equal(resolveBaseUrl(), "https://api.minimax.io/anthropic/v1");
   });
 });
 
-test("resolveBaseUrl: keeps /v1 when already present", () => {
-  withEnv({ ANTHROPIC_BASE_URL: "https://api.anthropic.com/v1" }, () => {
+test("resolveBaseUrl: keeps /v1 when already present", async () => {
+  await withEnv({ ANTHROPIC_BASE_URL: "https://api.anthropic.com/v1" }, () => {
     assert.equal(resolveBaseUrl(), "https://api.anthropic.com/v1");
   });
 });
 
-test("resolveBaseUrl: strips trailing slash from /v1 base", () => {
-  withEnv({ ANTHROPIC_BASE_URL: "https://api.anthropic.com/v1/" }, () => {
+test("resolveBaseUrl: strips trailing slash from /v1 base", async () => {
+  await withEnv({ ANTHROPIC_BASE_URL: "https://api.anthropic.com/v1/" }, () => {
     assert.equal(resolveBaseUrl(), "https://api.anthropic.com/v1");
   });
 });
 
-test("resolveBaseUrl: default to api.anthropic.com/v1 when unset", () => {
-  withEnv({ ANTHROPIC_BASE_URL: undefined }, () => {
+test("resolveBaseUrl: default to api.anthropic.com/v1 when unset", async () => {
+  await withEnv({ ANTHROPIC_BASE_URL: undefined }, () => {
     assert.equal(resolveBaseUrl(), "https://api.anthropic.com/v1");
   });
 });
 
-test("buildConfig: throws when no auth token is present", () => {
-  withEnv({ ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_API_KEY: undefined }, () => {
+test("buildConfig: throws when no auth token is present", async () => {
+  await withEnv({ ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_API_KEY: undefined }, () => {
     assert.throws(
       () => buildConfig({ workspaceRoot: "/tmp", prompt: "hi" }),
       /requires ANTHROPIC_AUTH_TOKEN/,
@@ -71,8 +87,8 @@ test("buildConfig: throws when no auth token is present", () => {
   });
 });
 
-test("buildConfig: injects ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL", () => {
-  withEnv(
+test("buildConfig: injects ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL", async () => {
+  await withEnv(
     { ANTHROPIC_AUTH_TOKEN: "tok-x", ANTHROPIC_API_KEY: undefined, ANTHROPIC_BASE_URL: "https://api.minimax.io/anthropic" },
     () => {
       buildConfig({ workspaceRoot: "/tmp", prompt: "hi" });
@@ -82,15 +98,15 @@ test("buildConfig: injects ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL", () => {
   );
 });
 
-test("buildConfig: uses --model override; default falls back to env or claude-sonnet-4-6", () => {
-  withEnv(
+test("buildConfig: uses --model override; default falls back to env or claude-sonnet-4-6", async () => {
+  await withEnv(
     { ANTHROPIC_AUTH_TOKEN: "tok", ANTHROPIC_MODEL: undefined, ANTHROPIC_BASE_URL: "https://x" },
     () => {
       const cfg = buildConfig({ workspaceRoot: "/tmp", prompt: "hi", model: "foo-1" }) as { models: { default_model: { model: string } } };
       assert.equal(cfg.models.default_model.model, "foo-1");
     },
   );
-  withEnv(
+  await withEnv(
     { ANTHROPIC_AUTH_TOKEN: "tok", ANTHROPIC_MODEL: "env-model", ANTHROPIC_BASE_URL: "https://x" },
     () => {
       const cfg = buildConfig({ workspaceRoot: "/tmp", prompt: "hi" }) as { models: { default_model: { model: string } } };
@@ -99,7 +115,7 @@ test("buildConfig: uses --model override; default falls back to env or claude-so
   );
 });
 
-test("buildConfig: the default model follows the provider, not anthropic's", () => {
+test("buildConfig: the default model follows the provider, not anthropic's", async () => {
   /*
    * Every provider except anthropic fell through to `claude-sonnet-4-6`.
    * `--provider deepseek` therefore sent Anthropic's model name to DeepSeek,
@@ -119,7 +135,7 @@ test("buildConfig: the default model follows the provider, not anthropic's", () 
     ["anthropic", { ANTHROPIC_AUTH_TOKEN: "tok" }, "claude-sonnet-4-6"],
   ];
   for (const [provider, env, expected] of cases) {
-    withEnv({ ...env, ANTHROPIC_MODEL: undefined, ANTHROPIC_BASE_URL: "https://x" }, () => {
+    await withEnv({ ...env, ANTHROPIC_MODEL: undefined, ANTHROPIC_BASE_URL: "https://x" }, () => {
       const cfg = buildConfig({ workspaceRoot: "/tmp", prompt: "hi", provider: provider as never }) as {
         models: { default_model: { model: string } };
       };
@@ -153,8 +169,8 @@ test("an unknown --provider is refused by name rather than aliased to anthropic"
   });
 });
 
-test("buildConfig: routes every role to default_model without removed guard knobs", () => {
-  withEnv({ ANTHROPIC_AUTH_TOKEN: "tok", ANTHROPIC_BASE_URL: "https://x" }, () => {
+test("buildConfig: routes every role to default_model without removed guard knobs", async () => {
+  await withEnv({ ANTHROPIC_AUTH_TOKEN: "tok", ANTHROPIC_BASE_URL: "https://x" }, () => {
     const cfg = buildConfig({ workspaceRoot: "/tmp", prompt: "hi" }) as {
       models: { default_model: { capabilities: Record<string, unknown> } };
       runtime: Record<string, unknown>;
@@ -169,8 +185,8 @@ test("buildConfig: routes every role to default_model without removed guard knob
   });
 });
 
-test("buildConfig: --provider minimax routes through api.minimax.io + OPENAI_API_KEY", () => {
-  withEnv(
+test("buildConfig: --provider minimax routes through api.minimax.io + OPENAI_API_KEY", async () => {
+  await withEnv(
     {
       MINIMAX_API_KEY: "sk-mini",
       ANTHROPIC_AUTH_TOKEN: undefined,
@@ -191,8 +207,8 @@ test("buildConfig: --provider minimax routes through api.minimax.io + OPENAI_API
   );
 });
 
-test("buildConfig: --provider nuralwatt seeds NURALWATT_API_KEY and points at NeuralWatt", () => {
-  withEnv(
+test("buildConfig: --provider nuralwatt seeds NURALWATT_API_KEY and points at NeuralWatt", async () => {
+  await withEnv(
     {
       NURALWATT_API_KEY: "nw-key",
       NURALWATT_API_KEY2: undefined,
@@ -216,8 +232,8 @@ test("buildConfig: --provider nuralwatt seeds NURALWATT_API_KEY and points at Ne
   );
 });
 
-test("buildConfig: --provider nuralwatt2 seeds NURALWATT_API_KEY2 and points at NeuralWatt", () => {
-  withEnv(
+test("buildConfig: --provider nuralwatt2 seeds NURALWATT_API_KEY2 and points at NeuralWatt", async () => {
+  await withEnv(
     {
       NURALWATT_API_KEY2: "nw-key2",
       NURALWATT_API_KEY: undefined,
@@ -241,8 +257,8 @@ test("buildConfig: --provider nuralwatt2 seeds NURALWATT_API_KEY2 and points at 
   );
 });
 
-test("buildConfig: --provider deepseek seeds DEEPSEEK_API_KEY and points at api.deepseek.com", () => {
-  withEnv(
+test("buildConfig: --provider deepseek seeds DEEPSEEK_API_KEY and points at api.deepseek.com", async () => {
+  await withEnv(
     {
       DEEPSEEK_API_KEY: "ds-key",
       ANTHROPIC_AUTH_TOKEN: undefined,
@@ -269,8 +285,8 @@ test("buildConfig: --provider deepseek seeds DEEPSEEK_API_KEY and points at api.
   );
 });
 
-test("buildConfig: --provider deepseek throws when no key is available", () => {
-  withEnv(
+test("buildConfig: --provider deepseek throws when no key is available", async () => {
+  await withEnv(
     {
       DEEPSEEK_API_KEY: undefined,
       ANTHROPIC_AUTH_TOKEN: undefined,
@@ -287,8 +303,8 @@ test("buildConfig: --provider deepseek throws when no key is available", () => {
   );
 });
 
-test("buildConfig: deepseek does NOT leak its key into MINIMAX_API_KEY or vice versa", () => {
-  withEnv(
+test("buildConfig: deepseek does NOT leak its key into MINIMAX_API_KEY or vice versa", async () => {
+  await withEnv(
     {
       DEEPSEEK_API_KEY: "ds-only",
       MINIMAX_API_KEY: undefined,
@@ -301,7 +317,7 @@ test("buildConfig: deepseek does NOT leak its key into MINIMAX_API_KEY or vice v
       assert.equal(process.env.DEEPSEEK_API_KEY, "ds-only");
     },
   );
-  withEnv(
+  await withEnv(
     {
       MINIMAX_API_KEY: "sk-only",
       DEEPSEEK_API_KEY: undefined,
@@ -336,12 +352,29 @@ test("ReaperCLI.exec: missing --prompt returns exit 2", async () => {
   assert.match(r.stderr, /--prompt/);
 });
 
-test("ReaperCLI.exec: missing auth token surfaces a clear error and does not call the network", async () => {
+test("ReaperCLI.exec: missing credential surfaces a clear error and does not call the network", async () => {
+  /*
+   * The CLI is now a client of the app-server, so "no credential" is no longer
+   * a pre-flight check in the runner: the turn starts, the provider resolution
+   * inside it fails, and the turn closes as `failed` with a notice naming the
+   * variable. Exit code and diagnosability are unchanged, which is what this
+   * test is for; only the channel moved.
+   *
+   * `userHome` is what makes this deterministic. It roots both the settings and
+   * the credential store, so the run cannot pick up a real key from the
+   * developer's own `~/.reaper/providers.json` and pass for the wrong reason.
+   */
   const cli = new ReaperCLI({ workspaceRoot: "/home/coder", userHome: "/home/coder" });
   await withEnv({ ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_API_KEY: undefined }, async () => {
     const r = await cli.run(["exec", "run", "--prompt", "ping", "--json"]);
-    assert.equal(r.exitCode, 1);
-    assert.match(r.stdout, /ANTHROPIC_AUTH_TOKEN/);
+    assert.equal(r.exitCode, 1, "an unauthenticated run must not exit 0");
+    const payload = JSON.parse(r.stdout) as { status: string; notices: Array<{ message: string }> };
+    assert.equal(payload.status, "failed");
+    assert.match(
+      payload.notices.map((n) => n.message).join("\n"),
+      /ANTHROPIC_AUTH_TOKEN/,
+      "the failure must name the missing credential rather than only failing",
+    );
   });
 });
 
@@ -350,16 +383,6 @@ test("ReaperCLI.exec: usage line advertises the exec group", async () => {
   const r = await cli.run([]);
   assert.equal(r.exitCode, 0);
   assert.match(r.stdout, /exec\s+run --prompt/);
-});
-
-test("runExec: returns failed status when no auth token is set (no network call)", async () => {
-  await withEnv({ ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_API_KEY: undefined }, async () => {
-    const r = await runExec({ workspaceRoot: "/home/coder", prompt: "ping" });
-    assert.equal(r.status, "failed");
-    assert.equal(r.toolResults.length, 0);
-    assert.equal(r.assistantMessage, "");
-    assert.match(r.notices.map((n) => n.message).join("\n"), /ANTHROPIC_AUTH_TOKEN/);
-  });
 });
 
 test("buildRequestEnvelope passes the user prompt without instruction wrappers", () => {

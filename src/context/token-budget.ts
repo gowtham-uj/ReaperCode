@@ -166,6 +166,9 @@ export function tokenUsageFromResponse(
           output_tokens?: number;
           prompt_tokens?: number;
           completion_tokens?: number;
+          /* The `message_end` event's own key style, seen on internal events. */
+          promptTokens?: number;
+          completionTokens?: number;
           cache_creation_input_tokens?: number;
           cache_read_input_tokens?: number;
         };
@@ -181,14 +184,18 @@ export function tokenUsageFromResponse(
       ? u.input_tokens
       : typeof u.prompt_tokens === "number"
         ? u.prompt_tokens
-        : undefined;
+        : typeof u.promptTokens === "number"
+          ? u.promptTokens
+          : undefined;
   const output = typeof u.outputTokens === "number"
     ? u.outputTokens
     : typeof u.output_tokens === "number"
       ? u.output_tokens
       : typeof u.completion_tokens === "number"
         ? u.completion_tokens
-        : undefined;
+        : typeof u.completionTokens === "number"
+          ? u.completionTokens
+          : undefined;
   if (input === undefined && output === undefined) return undefined;
   const result: TokenUsage = {
     inputTokens: input ?? 0,
@@ -203,4 +210,24 @@ export function tokenUsageFromResponse(
   if (typeof cacheRead === "number") result.cacheReadTokens = cacheRead;
   if (typeof cacheWrite === "number") result.cacheWriteTokens = cacheWrite;
   return result;
+}
+
+/**
+ * Normalise a usage object from any provider into `TokenUsage`.
+ *
+ * The streaming consumer used to read only `promptTokens`/`inputTokens`, so a
+ * provider that reports snake_case (`prompt_tokens`, as DeepSeek and every
+ * OpenAI-compatible stream do) produced 0/0 and the context meter sat empty for
+ * the whole conversation. Providers disagree on both the key spelling and the
+ * case — `input_tokens` (Anthropic), `prompt_tokens` (OpenAI-compatible),
+ * `inputTokens` (an already-normalised event) — and that disagreement belongs in
+ * one place rather than in whichever consumer happens to read the field first.
+ *
+ * Accepts a bare usage object (the `message_end` payload's `usage`) rather than
+ * a whole response, because that is the shape the streaming path has. Thin
+ * wrapper over the response-level extractor so the two cannot drift.
+ */
+export function tokenUsageFromEvent(raw: unknown): TokenUsage | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  return tokenUsageFromResponse({ usage: raw as Record<string, number> });
 }

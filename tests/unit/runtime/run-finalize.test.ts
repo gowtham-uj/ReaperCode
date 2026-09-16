@@ -92,15 +92,6 @@ test("classifyRunFinalStatus: aborted run is cancelled, never completed", () => 
   assert.equal(status, "cancelled");
 });
 
-test("classifyRunFinalStatus: iteration-capped run is cancelled", () => {
-  const status = classifyRunFinalStatus({
-    toolResults: [okResult()],
-    mode: "autonomous",
-    loopCapped: true,
-  });
-  assert.equal(status, "cancelled");
-});
-
 test("classifyRunFinalStatus: abort overrides a would-be completed natural stop", () => {
   const status = classifyRunFinalStatus({
     toolResults: [okResult("bash")],

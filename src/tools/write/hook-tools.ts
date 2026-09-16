@@ -104,6 +104,8 @@ export async function handleUpdateHook(
   deps: HookToolDeps,
 ): Promise<{ ok: boolean; record?: HookRecord; error?: string }> {
   const input: UpdateHookInput = { id: args.id };
+  if (args.description !== undefined) input.description = args.description;
+  if (args.event !== undefined) input.event = args.event;
   if (args.source !== undefined) input.source = args.source;
   if (args.matcher !== undefined) input.matcher = (args.matcher ?? null) as HookMatcher | null;
   if (args.timeout_ms !== undefined) input.timeout_ms = args.timeout_ms;
@@ -159,7 +161,19 @@ export async function handleHookManager(
       return handleListHooks({ scope }, deps);
     }
     case "update":
-      return handleUpdateHook(requireHookId(args, "update"), deps);
+      /*
+       * The full args, not `requireHookId(args, "update")`.
+       *
+       * `requireHookId` returns `{ id }` and nothing else, so calling it here
+       * meant `handleUpdateHook` saw `source`, `matcher`, `timeout_ms`,
+       * `enforce`, `description` and `event` as `undefined` no matter what the
+       * caller supplied. Every `update` bumped `updatedAt` and returned
+       * `ok: true` while changing nothing, which is the worst shape for a bug:
+       * it reports success. `requireHookId` is the right guard for `approve`
+       * and `uninstall`, which take nothing but an id; `update` has fields to
+       * carry, so it validates the id separately and keeps them.
+       */
+      return handleUpdateHook(withRequiredHookId(args, "update"), deps);
     case "approve":
       return handleApproveHook(requireHookId(args, "approve"), deps);
     case "uninstall":
@@ -167,8 +181,22 @@ export async function handleHookManager(
   }
 }
 
-function requireHookId(args: HookManagerArgs, action: string): UpdateHookArgs & ApproveHookArgs & UninstallHookArgs {
+function requireHookId(args: HookManagerArgs, action: string): ApproveHookArgs & UninstallHookArgs {
   const id = typeof args.id === "string" ? args.id : "";
   if (!id) throw new Error(`hook_manager action="${action}" requires "id"`);
   return { id };
+}
+
+/**
+ * `update` needs the id enforced but the other fields preserved.
+ *
+ * `requireHookId` builds a fresh `{ id }`, which is right for `approve` and
+ * `uninstall` and wrong for `update`: the caller's `source`, `matcher`,
+ * `description`, `event`, `timeout_ms` and `enforce` all have to survive into
+ * the handler. This validates the id and otherwise returns the args unchanged.
+ */
+function withRequiredHookId(args: HookManagerArgs, action: string): UpdateHookArgs {
+  const id = typeof args.id === "string" ? args.id : "";
+  if (!id) throw new Error(`hook_manager action="${action}" requires "id"`);
+  return args as UpdateHookArgs;
 }

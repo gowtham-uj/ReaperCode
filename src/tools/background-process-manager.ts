@@ -69,6 +69,24 @@ export interface BackgroundOutputEvent {
 
 export type BackgroundOutputListener = (event: BackgroundOutputEvent) => void;
 
+/**
+ * Has this child actually finished, including when a signal killed it?
+ *
+ * `child.exitCode === null` alone is not that question. Node sets `exitCode`
+ * only when the process exited on its own; a process terminated by a signal
+ * exits with `exitCode === null` and `signalCode === <signal>`. So every place
+ * that tested `exitCode === null` to mean "still running" reported a SIGTERM'd
+ * or SIGKILL'd process as running forever — most visibly in `job cancel`, which
+ * returned `status: "signalled"` after a SIGKILL and, because it had already
+ * deleted the record, left the caller with no way to observe the real end state.
+ *
+ * `signalCode` is set on the same tick as the exit event, so checking both is
+ * the correct liveness test.
+ */
+export function processHasExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
 export interface BackgroundProcessSnapshot {
   pid: number;
   status: "running" | "finished";
@@ -157,7 +175,7 @@ export class BackgroundProcessManager {
     return Array.from(this.processes.entries()).map(([pid, entry]) => {
       const snap: BackgroundProcessSnapshot = {
         pid,
-        status: entry.child.exitCode === null ? "running" : "finished",
+        status: processHasExited(entry.child) ? "finished" : "running",
         exitCode: entry.child.exitCode,
         startedAt: entry.startedAt,
         cmd: entry.cmd,
@@ -214,8 +232,19 @@ export class BackgroundProcessManager {
     return entry.output.slice(-lines).join("\n");
   }
 
+  /**
+   * Append a chunk of output, one line per entry.
+   *
+   * The trailing empty field a split leaves is dropped. `"a\nb\n".split("\n")`
+   * is `["a", "b", ""]`, and pushing that empty string added a phantom blank
+   * line between every real one, so a background job that printed
+   * `tick-1\ntick-2\n` polled back as `tick-1\n\ntick-2\n\n` — the audit's
+   * "injects blank lines" finding. The empty field is not output; it is the
+   * text after the final separator, and it belongs to no line.
+   */
   private pushBoundedOutput(output: string[], text: string): void {
     const lines = text.split(/\r?\n/);
+    if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
     for (const line of lines) {
       output.push(line);
     }
@@ -321,11 +350,11 @@ export class BackgroundProcessManager {
     const entries = Array.from(this.processes.entries());
     await Promise.all(
       entries.map(async ([pid, entry]) => {
-        if (entry.child.exitCode === null) {
+        if (!processHasExited(entry.child)) {
           await this.killTree(pid, "SIGTERM");
           await this.waitForExit(entry.child, getTermGraceMs());
         }
-        if (entry.child.exitCode === null) {
+        if (!processHasExited(entry.child)) {
           await this.killTree(pid, "SIGKILL");
           await this.waitForExit(entry.child, getKillGraceMs());
         }

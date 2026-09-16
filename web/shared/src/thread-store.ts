@@ -225,6 +225,9 @@ export function applyNotification(
         : [];
       if (disabled.length > 0) next.disabledTools = disabled;
       else delete next.disabledTools;
+      if (typeof params.filesystemSandbox === "boolean") {
+        next.filesystemSandbox = params.filesystemSandbox;
+      }
       return withThread(state, next);
     }
     case "thread/closed":
@@ -460,39 +463,38 @@ function foldVerification(raw: Record<string, unknown>): VerificationSurface {
 }
 
 /**
- * Lift the browser surface out of a completed `browser_control` item, or
- * undefined when this item is not one. The result shape is `BrowserOutput`
- * from `src/tools/browser/computer-browser.ts`; only the fields the panel
- * needs survive, so the UI never reaches into tool-specific `result`.
+ * Lift the browser surface out of a completed `browser_use` item.
+ *
+ * The tool returns a `surface` alongside the prose the model reads: the page's
+ * url, title and viewport, so the pane shows the same step the model was
+ * looking at rather than a second reading taken later.
+ *
+ * The old shape carried an `interactive` list of `ref`/`x`/`y` overlays, which
+ * is gone with the tool that produced it. A ref was a position in a snapshot
+ * rather than an identity, so the overlay could point at a different element
+ * after a re-render without anything saying so. The pane shows the page and its
+ * stats now, and anything that needs an element addresses it by locator.
  */
 function browserSurfaceFromItem(item: AppThreadItem): BrowserSurface | undefined {
-  // Only a completed action is a trustworthy page state; a failed one may
-  // carry a stale or partial `result`, and surfacing it would mislead.
+  // Only a completed call is a trustworthy page state; a failed one may carry a
+  // stale or partial result, and surfacing it would mislead.
   if (item.type !== "dynamicToolCall" || item.tool !== BROWSER_SURFACE_TOOL || item.status !== "completed") {
     return undefined;
   }
   const result = asRecord(item.result);
-  if (!result || typeof result.url !== "string") return undefined;
+  const surface = asRecord(result?.surface) ?? result;
+  if (!surface || typeof surface.url !== "string") return undefined;
 
-  const interactive = (Array.isArray(result.interactive) ? result.interactive : [])
-    .map(asRecord)
-    .filter((entry): entry is Record<string, unknown> =>
-      Boolean(entry)
-      && typeof entry!.ref === "string"
-      && typeof entry!.x === "number"
-      && typeof entry!.y === "number",
-    )
-    .map((entry) => entry as unknown as BrowserInteractiveElement);
-
-  const viewport = asRecord(result.viewport);
+  const viewport = asRecord(surface.viewport);
   return {
-    url: result.url,
-    title: typeof result.title === "string" ? result.title : "",
-    interactive,
+    url: surface.url,
+    title: typeof surface.title === "string" ? surface.title : "",
+    // Coordinates are gone with the refs they belonged to, so the overlay list
+    // is empty rather than populated with positions that no longer mean anything.
+    interactive: [],
     ...(viewport && typeof viewport.width === "number" && typeof viewport.height === "number"
       ? { viewport: { width: viewport.width, height: viewport.height } }
       : {}),
-    ...(typeof result.screenshotPath === "string" ? { screenshotPath: result.screenshotPath } : {}),
   };
 }
 
@@ -550,6 +552,7 @@ export function mergeThreadMetadata(
   if (Array.isArray(raw.disabledTools)) {
     next.disabledTools = raw.disabledTools.filter((name): name is string => typeof name === "string");
   } else if (!stale) delete next.disabledTools;
+  if (typeof raw.filesystemSandbox === "boolean") next.filesystemSandbox = raw.filesystemSandbox;
   if (typeof raw.hasTurns === "boolean") next.hasTurns = raw.hasTurns;
   if (typeof raw.createdAt === "string") next.createdAt = raw.createdAt;
   if (typeof raw.updatedAt === "string") next.updatedAt = raw.updatedAt;

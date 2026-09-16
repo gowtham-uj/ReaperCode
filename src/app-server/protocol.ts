@@ -136,6 +136,7 @@ export const ThreadConfigSetParamsSchema = z.object({
   threadId: ThreadIdSchema,
   systemPrompt: z.string().max(20_000).nullable().optional(),
   disabledTools: z.array(z.string().min(1).max(128)).max(200).optional(),
+  filesystemSandbox: z.boolean().optional(),
 }).strict();
 
 /**
@@ -286,10 +287,16 @@ export const SettingsWriteParamsSchema = z.object({
    * may reasonably want most of a large library out of the way.
    */
   disabledSkills: z.array(z.string().min(1).max(200)).max(500).optional(),
+  /**
+   * Providers switched off, replaced wholesale. Kept separate from
+   * `disabledSkills` because a skill name and a provider id resolve against
+   * different registries and a shared list would let one shadow the other.
+   */
+  disabledProviders: z.array(z.string().min(1).max(200)).max(500).optional(),
 }).strict().refine((value) =>
   value.permissionMode !== undefined || value.modelRouting !== undefined
   || value.thinking !== undefined || value.pinnedSkills !== undefined
-  || value.disabledSkills !== undefined,
+  || value.disabledSkills !== undefined || value.disabledProviders !== undefined,
 { message: "settings/write requires at least one change" });
 
 /** Per-thread permission mode. Mirrors thread/model/set: applies to the next

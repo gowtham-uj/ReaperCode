@@ -12,6 +12,8 @@ import { AppServerMessageProcessor } from "./message-processor.js";
 import { AppServerOutgoingRouter } from "./outgoing-router.js";
 import type { ManagedTurnRunner } from "./managed-turn-runner.js";
 import { ReaperThreadManager } from "./thread-manager.js";
+import { ThreadBrowsers } from "./thread-browsers.js";
+import { join } from "node:path";
 import { BrowserHub, VirtualAppServerConnection } from "./web/hub.js";
 import { startBrowserGateway, type RunningBrowserGateway } from "./web/gateway.js";
 
@@ -27,6 +29,16 @@ export interface StartAppServerOptions {
   outboundFlushDelayMs?: number;
   maxReplayEvents?: number;
   approvalTimeoutMs?: number;
+  /**
+   * CDP endpoint of the browser threads attach to.
+   *
+   * The app-server starts Steel and owns its lifecycle; this is where the
+   * browser it started is listening. Overridable so a test or a differently
+   * configured host points at its own.
+   */
+  browserCdpUrl?: string;
+  /** Close a thread's browser after this long unused, in milliseconds. */
+  browserIdleCloseMs?: number;
   allowBrowserOrigins?: boolean;
   heartbeatIntervalMs?: number;
   /** Test and embedding hook. CLI callers use the real RuntimeEngine runner. */
@@ -73,30 +85,82 @@ export interface RunningAppServer {
   stop(): Promise<void>;
 }
 
-export async function startAppServer(options: StartAppServerOptions): Promise<RunningAppServer> {
-  const listenUrl = new URL(options.listen ?? "ws://127.0.0.1:0");
-  if (listenUrl.protocol !== "ws:") throw new Error("App server currently supports ws:// listeners only");
-  if (listenUrl.username || listenUrl.password || listenUrl.search || listenUrl.hash) {
-    throw new Error("The app-server listen URL cannot include credentials, query parameters, or a fragment");
-  }
-  const host = listenUrl.hostname;
-  const port = parsePort(listenUrl.port);
-  const websocketPath = normalizePath(listenUrl.pathname);
-  assertSafeListener({
-    host,
-    ...(options.authToken ? { authToken: options.authToken } : {}),
-    ...(options.allowBrowserOrigins !== undefined ? { allowBrowserOrigins: options.allowBrowserOrigins } : {}),
-  });
-
+/**
+ * The app-server's brain, with no listener attached.
+ *
+ * Everything the processor needs, and nothing that knows how a client reaches
+ * it. `startAppServer` calls this and then opens a WebSocket; a client that
+ * lives in the same process calls it and drives the processor through a virtual
+ * connection, the way the browser gateway already does.
+ *
+ * Separated because it was already being done twice in one function: the
+ * browser gateway is mounted in-process (`VirtualAppServerConnection`) while
+ * the raw protocol gets a socket, and both talk to this same processor. A CLI
+ * client is a third caller of the same pattern, and it should not have to open
+ * a port, mint a token, or fork a process to reach the agent both other
+ * frontends already share.
+ *
+ * No listener, no port, no auth: those are properties of a *transport*, and the
+ * caller owns one. That is also why this is synchronous while `startAppServer`
+ * is not — the only awaiting down there is binding a socket.
+ */
+export function createAppServerCore(options: StartAppServerOptions): {
+  processor: AppServerMessageProcessor;
+  router: AppServerOutgoingRouter;
+  manager: ReaperThreadManager;
+  threadBrowsers: ThreadBrowsers;
+} {
   const maxConcurrentTurns = options.maxConcurrentTurns ?? 2;
+
+  /*
+   * One browser owner for the server, created here beside the thread manager.
+   *
+   * The app-server owns the browser lifecycle: Steel is started once, and every
+   * thread attaches to it through this. Creating it per turn would lose every
+   * login at the end of each turn, which is the whole reason the browser is
+   * attached rather than launched.
+   *
+   * It attaches lazily, on the first `browser_use` of a thread, so a server that
+   * never browses pays nothing for it.
+   */
+  const threadBrowsers = new ThreadBrowsers({
+    cdpUrl: options.browserCdpUrl ?? "http://127.0.0.1:9222",
+    ...(options.browserIdleCloseMs !== undefined ? { idleMs: options.browserIdleCloseMs } : {}),
+    /*
+     * One state file per thread, under the same `.reaper` root everything else
+     * uses. The thread id is sanitized because it reaches a filesystem path, and
+     * an id is not trusted to be a safe path segment.
+     */
+    statePathFor: (threadId) =>
+      join(options.workspaceRoot, ".reaper", "browser", `${threadId.replace(/[^a-zA-Z0-9_-]/g, "_")}.json`),
+  });
+  threadBrowsers.start();
   const router = new AppServerOutgoingRouter();
+  /*
+   * `processor` is read inside the manager's callbacks before it is assigned.
+   * Those callbacks only fire once a turn is running, which cannot happen until
+   * this function has returned and the caller has started one, so the closure
+   * always sees the assigned value. Typed as possibly-undefined rather than
+   * asserted so the ordering stays visible.
+   */
   let processor: AppServerMessageProcessor | undefined;
   const manager = new ReaperThreadManager({
+    threadBrowsers,
     dataRoot: options.workspaceRoot,
     maxConcurrentTurns,
     ...(options.maxReplayEvents !== undefined ? { maxReplayEvents: options.maxReplayEvents } : {}),
     ...(options.approvalTimeoutMs !== undefined ? { approvalTimeoutMs: options.approvalTimeoutMs } : {}),
     ...(options.turnRunner ? { turnRunner: options.turnRunner } : {}),
+    /*
+     * The same store the processor uses for Settings, so the two cannot
+     * disagree about which home they are reading.
+     */
+    ...(options.credentials ? { credentials: options.credentials } : {}),
+    /*
+     * The same settings home the processor reads Settings from, so a turn's
+     * disabled-provider list is the one the browser is showing.
+     */
+    ...(options.settingsHome ? { settingsHome: options.settingsHome } : {}),
     onApprovalRequested: async (request) => {
       await processor?.handleApprovalRequest(request);
     },
@@ -114,6 +178,31 @@ export async function startAppServer(options: StartAppServerOptions): Promise<Ru
     ...(options.settingsHome ? { settingsHome: options.settingsHome } : {}),
     ...(options.memoryStore ? { memoryStore: options.memoryStore } : {}),
   });
+  return { processor, router, manager, threadBrowsers };
+}
+
+export async function startAppServer(options: StartAppServerOptions): Promise<RunningAppServer> {
+  const listenUrl = new URL(options.listen ?? "ws://127.0.0.1:0");
+  if (listenUrl.protocol !== "ws:") throw new Error("App server currently supports ws:// listeners only");
+  if (listenUrl.username || listenUrl.password || listenUrl.search || listenUrl.hash) {
+    throw new Error("The app-server listen URL cannot include credentials, query parameters, or a fragment");
+  }
+  const host = listenUrl.hostname;
+  const port = parsePort(listenUrl.port);
+  const websocketPath = normalizePath(listenUrl.pathname);
+  assertSafeListener({
+    host,
+    ...(options.authToken ? { authToken: options.authToken } : {}),
+    ...(options.allowBrowserOrigins !== undefined ? { allowBrowserOrigins: options.allowBrowserOrigins } : {}),
+  });
+
+  /*
+   * The router is needed here as well as inside the core: the heartbeat below
+   * pings every connection, and the browser gateway registers its virtual
+   * connection with it. Both are transport concerns, which is exactly what the
+   * core leaves to its caller.
+   */
+  const { processor, router, manager, threadBrowsers } = createAppServerCore(options);
 
   const httpServer = createHttpServer();
   const wss = new WebSocketServer({
@@ -228,6 +317,13 @@ export async function startAppServer(options: StartAppServerOptions): Promise<Ru
         closeWebSocketServer(wss),
         closeHttpServer(httpServer),
         ...(browser ? [browser.close()] : []),
+        /*
+         * Detaches each thread's Playwright connection. It does not stop Chrome:
+         * Steel owns that process, and closing it here would be a decision about
+         * Steel's lifecycle made by the wrong component. What stops Steel is
+         * whoever started it.
+         */
+        threadBrowsers.close(),
       ]);
     },
   };

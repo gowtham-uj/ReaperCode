@@ -114,6 +114,19 @@ export const FileEditResultSchema = z
     totalLines: z.number().int().nonnegative(),
     window: z.array(z.string()),
     lintVerdict: LintVerdictSchema,
+    /**
+     * The text this edit replaced, if it replaced anything.
+     *
+     * Sent back because the transcript cannot recover it: `expected_content` is
+     * an optional argument, and a model that does not pass it leaves the before
+     * side absent from the call, so the only honest diff would be the new text
+     * as additions. The dispatch reads the old lines anyway, so they travel with
+     * the result rather than being re-read by a projection that has no file
+     * access.
+     */
+    replacedText: z.string().optional(),
+    /** 1-based line the replaced text started at, so the diff can be numbered. */
+    replacedStartLine: z.number().int().positive().optional(),
     /** Set when `expected_content` matched elsewhere and the range was moved. */
     relocatedFrom: z.object({ startLine: z.number().int().positive(), endLine: z.number().int().positive() }).optional(),
     /** Set when the lint verdict failed and nothing was written. */

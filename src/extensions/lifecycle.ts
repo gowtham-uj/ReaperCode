@@ -24,8 +24,14 @@ import type { ExtensionManifest } from "./types.js";
 export interface ValidateResult {
   ok: boolean;
   id: string;
-  results: Array<{ id: string; exitCode: number; stderr: string }>;
+  results: Array<{ id: string; exitCode: number; stdout: string; stderr: string }>;
   error?: string;
+  /**
+   * A non-failure remark, such as "there was nothing to validate". Distinct
+   * from `error`: an extension with no validation commands is valid, and the
+   * caller should not read it as broken.
+   */
+  note?: string;
 }
 
 export class ExtensionLifecycle {
@@ -58,19 +64,43 @@ export class ExtensionLifecycle {
     };
     const cmds = extManifest.validation?.commands ?? [];
     if (cmds.length === 0) {
-      // No validation commands declared — be explicit that there is no
-      // validation evidence rather than reporting success.
-      const message = loaded.error
-        ? `extension "${id}" failed to load: ${loaded.error}`
-        : `extension "${id}" declares no validation commands (manifest schema does not yet expose validation.commands); validation is a no-op`;
-      return { ok: false, id, results: [], error: message };
+      /*
+       * Nothing to validate is not a failed validation.
+       *
+       * The load error is the only thing that can make this a failure. A
+       * healthy extension with no `validation.commands` block has nothing
+       * wrong with it, and reporting `ok: false` for it read as "the extension
+       * is invalid" — the audit observed exactly that on a freshly created,
+       * perfectly valid extension. `ok: true` with an empty result list and a
+       * note is the honest answer: the call did what it could, which was
+       * nothing, and said so.
+       */
+      if (loaded.error) {
+        return { ok: false, id, results: [], error: `extension "${id}" failed to load: ${loaded.error}` };
+      }
+      return {
+        ok: true,
+        id,
+        results: [],
+        note: `extension "${id}" declares no validation commands, so there was nothing to run; this is not a failure`,
+      };
     }
-    const results: Array<{ id: string; exitCode: number; stderr: string }> = [];
+    /*
+     * `stdout` is captured as well as `stderr`.
+     *
+     * A validation command usually reports through stdout — a test runner's
+     * summary, a `printf` marker — and the first version kept only stderr, so a
+     * command that exited 0 with a printed result was returned as
+     * `{ id, exitCode: 0, stderr: "" }` and its output was lost. The audit hit
+     * this with a `printf` that printed a marker to stdout and got nothing back.
+     */
+    const results: Array<{ id: string; exitCode: number; stdout: string; stderr: string }> = [];
     for (const c of cmds) {
       const r = spawnSync(c.command, { shell: true, encoding: "utf8" });
       results.push({
         id: c.id,
         exitCode: r.status ?? -1,
+        stdout: r.stdout ?? "",
         stderr: r.stderr ?? "",
       });
       if (r.status !== 0) {

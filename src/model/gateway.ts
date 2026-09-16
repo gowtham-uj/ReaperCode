@@ -23,6 +23,7 @@ import {
   type ExtensionLifecycleEventBus,
 } from "../extensions/lifecycle-events.js";
 import { routeForCapabilities } from "./capability-router.js";
+import { pairingWasRepaired, repairToolCallPairing } from "./repair-tool-pairing.js";
 
 export interface ProviderModelClient {
   generate(request: GenerateRequest, profile: ResolvedModelProfile): Promise<GenerateResult>;
@@ -438,14 +439,15 @@ export class ConfiguredModelGateway implements ModelGateway {
     request: GenerateRequest,
     profile: ResolvedModelProfile,
   ): GenerateRequest {
-    const wantsToolCalling = Array.isArray(request.tools) && request.tools.length > 0;
+    const paired = this.repairToolPairing(request);
+    const wantsToolCalling = Array.isArray(paired.tools) && paired.tools.length > 0;
     const decision = routeForCapabilities({
       capabilities: profile.capabilities,
       wantsToolCalling,
     });
 
     if (decision.strategy === "native_tools" || !wantsToolCalling) {
-      return request;
+      return paired;
     }
 
     // Downgrade: strip native tools, force JSON mode when available, and
@@ -454,12 +456,12 @@ export class ConfiguredModelGateway implements ModelGateway {
       ? `\n\n[capability-router] Native tool calling unavailable for this profile. ${decision.jsonEnvelopeTemplate}`
       : "\n\n[capability-router] Native tool calling unavailable; emit a JSON object with tool_calls.";
     const system =
-      typeof request.system === "string"
-        ? `${request.system}${envelopeHint}`
+      typeof paired.system === "string"
+        ? `${paired.system}${envelopeHint}`
         : envelopeHint.trim();
 
     const next: GenerateRequest = {
-      ...request,
+      ...paired,
       system,
     };
     delete (next as { tools?: unknown }).tools;
@@ -467,6 +469,41 @@ export class ConfiguredModelGateway implements ModelGateway {
       next.responseFormat = "json";
     }
     return next;
+  }
+
+  /**
+   * Enforce the provider's tool-call pairing rule on the outgoing request.
+   *
+   * This is the last point every request passes through, on both `generate`
+   * and `stream`, for every provider. Enforcing the invariant here rather than
+   * in each pass that reshapes a conversation is what keeps it true: a pass
+   * that drops a tool result does not have to compensate, because whatever it
+   * leaves behind is corrected before the request leaves the process.
+   *
+   * See `repair-tool-pairing.ts` for what the rule is and why the two
+   * directions are not symmetric.
+   */
+  private repairToolPairing(request: GenerateRequest): GenerateRequest {
+    const result = repairToolCallPairing(request.messages as Array<{ role: string; content?: string }>);
+    if (!pairingWasRepaired(result)) return request;
+    /*
+     * The repair is a correctness fix, and a silent one would be the wrong
+     * kind of quiet: a synthesised result means the conversation lost a tool
+     * output somewhere upstream, which is worth seeing in the logs. Logged at
+     * warn rather than error because the request is being made sendable, not
+     * abandoned.
+     */
+    const names = result.synthesised.map((entry) => entry.toolName).join(", ");
+    console.warn(
+      `[gateway] repaired tool-call pairing for role '${request.role}': ` +
+        `${result.synthesised.length} unanswered call(s)${names ? ` (${names})` : ""}, ` +
+        `${result.dropped} unattributable tool message(s) dropped, ` +
+        `${result.idAssigned} call(s) given a synthetic id`,
+    );
+    return {
+      ...request,
+      messages: result.messages as GenerateRequest["messages"],
+    };
   }
 
   private assertGenerateCompatibility(

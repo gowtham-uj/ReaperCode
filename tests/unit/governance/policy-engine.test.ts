@@ -98,12 +98,12 @@ test("a tool with no metadata is denied rather than waved through", () => {
   }
 });
 
-test("browser_control is browser-only; other roles are denied", () => {
+test("browser_use is browser-only; other roles are denied", () => {
   for (const role of ["explorer", "architect", "implementer", "test", "reviewer", "critic", "root"]) {
-    const d = evaluateToolCall({ toolName: "browser_control", args: {}, callerRole: role, trustedSandbox: false });
-    assert.equal(d.verdict, "deny", `${role} should not be allowed to call browser_control`);
+    const d = evaluateToolCall({ toolName: "browser_use", args: {}, callerRole: role, trustedSandbox: false });
+    assert.equal(d.verdict, "deny", `${role} should not be allowed to call browser_use`);
   }
-  const d = evaluateToolCall({ toolName: "browser_control", args: {}, callerRole: "browser", trustedSandbox: false });
+  const d = evaluateToolCall({ toolName: "browser_use", args: {}, callerRole: "browser", trustedSandbox: false });
   assert.equal(d.verdict, "allow");
 });
 

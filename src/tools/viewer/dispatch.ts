@@ -441,6 +441,18 @@ async function handleFileEdit(
     return fail("stale_range", resolved.error);
   }
   const replacementLines = new_content.length === 0 ? [] : new_content.split("\n");
+  /*
+   * The text this edit replaced, captured before it is overwritten.
+   *
+   * The transcript derives its diff from the call, and `expected_content` is
+   * optional — a model that omits it (the common case) leaves the before side
+   * nowhere in the arguments, so the edit card could only show the new text as
+   * pure additions. A replacement reported as `+1 -0` is wrong in the way that
+   * matters: it says the file grew when it did not, and it hides the line that
+   * went away. The old text is in hand right here, so it goes back with the
+   * result and the projection prefers it over anything it could infer.
+   */
+  const replacedLines = allLines.slice(resolved.start - 1, resolved.end);
   const nextLines = [
     ...allLines.slice(0, resolved.start - 1),
     ...replacementLines,
@@ -518,6 +530,13 @@ async function handleFileEdit(
       totalLines: postTotalLines,
       window: numbered,
       lintVerdict: verdict,
+      /*
+       * What the edit replaced, and where it started, so a transcript can draw
+       * the removal it would otherwise have to guess at. See `replacedLines`
+       * above for why the arguments are not enough.
+       */
+      replacedText: replacedLines.join("\n"),
+      replacedStartLine: resolved.start,
       ...(resolved.relocatedFrom ? { relocatedFrom: resolved.relocatedFrom } : {}),
     },
     Date.now() - started,

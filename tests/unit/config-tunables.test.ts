@@ -7,7 +7,6 @@ import {
   getBgTunables,
   getContextTunables,
   getEngineTunables,
-  getRetryTunables,
   getTunables,
 } from "../../src/config/config-tunables.js";
 import { buildStarterConfig } from "../../src/config/starter-config.js";
@@ -26,8 +25,6 @@ test("applyConfigToTunables populates the cache from the config", () => {
   assert.equal(all.bash.idleTimeoutMs, 5_000);
   assert.equal(all.bg.termGraceMs, 5_000);
   assert.equal(all.engine.permissionMode, "yolo");
-  assert.equal(all.engine.strictCompletionGate, true);
-  assert.equal(all.retry.maxRetries, 3);
 });
 
 test("applyConfigToTunables is idempotent and accepts overrides", () => {
@@ -49,8 +46,6 @@ test("get<Group>Tunables returns the expected slices", () => {
   assert.equal(typeof bg.termGraceMs, "number");
   const engine = getEngineTunables();
   assert.equal(typeof engine.permissionMode, "string");
-  const retry = getRetryTunables();
-  assert.equal(typeof retry.maxRetries, "number");
 });
 
 test("engine tunables also drive secrets-aware lookup at module import time", () => {

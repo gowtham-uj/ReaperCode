@@ -235,16 +235,31 @@ export class SkillLifecycle {
    * on success. The runCommand callback defaults to a sync shell;
    * pass a sandboxed async runner from the CLI to enforce policy.
    */
-  async testSkill(name: string): Promise<{ ok: boolean; results: Array<{ id: string; exitCode: number; stderr: string }>; error?: string }> {
+  async testSkill(name: string): Promise<{ ok: boolean; results: Array<{ id: string; exitCode: number; stdout: string; stderr: string }>; error?: string; note?: string }> {
     const r = this.opts.registry.get(name);
     if (!r) return { ok: false, results: [], error: `skill "${name}" not found` };
     const cmds = r.manifest.validation?.commands ?? [];
-    if (cmds.length === 0) return { ok: true, results: [], error: "no validation commands declared" };
+    if (cmds.length === 0) {
+      /*
+       * Nothing to validate is a success, not a failure with a message in the
+       * `error` field. Putting "no validation commands declared" in `error`
+       * made a healthy skill read as broken to anything that checks `ok` or
+       * looks for a non-empty `error`; the remark belongs in `note`, which is
+       * what says "this is fine, there was just nothing to do".
+       */
+      return { ok: true, results: [], note: "no validation commands declared" };
+    }
     const run = this.opts.runCommand ?? DEFAULT_RUN_COMMAND;
-    const results: Array<{ id: string; exitCode: number; stderr: string }> = [];
+    /*
+     * `stdout` is carried through as well as `stderr`. A validation command
+     * usually reports through stdout — a test summary, a printed marker — and
+     * keeping only stderr meant a command that exited 0 with a result was
+     * returned as `{ id, exitCode: 0, stderr: "" }` and its output vanished.
+     */
+    const results: Array<{ id: string; exitCode: number; stdout: string; stderr: string }> = [];
     for (const c of cmds) {
       const out = await run(c.command, c.cwd);
-      results.push({ id: c.id, exitCode: out.exitCode, stderr: out.stderr });
+      results.push({ id: c.id, exitCode: out.exitCode, stdout: out.stdout ?? "", stderr: out.stderr });
       if (out.exitCode !== 0) {
         return { ok: false, results, error: `validation command "${c.id}" failed with exit ${out.exitCode}` };
       }

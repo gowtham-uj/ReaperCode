@@ -5,7 +5,7 @@
  *    `.reaper/sessions/<name>/session.jsonl`.
  * 2. The next run with the same name rehydrates the prior conversation:
  *    the model's first call sees the earlier turns before the new prompt.
- * 3. runExec rejects invalid session names before touching the engine.
+ * 3. The CLI rejects invalid session names before touching the engine.
  */
 
 import test from "node:test";
@@ -16,7 +16,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import { RuntimeEngine } from "../../src/runtime/engine.js";
-import { runExec } from "../../src/adaptive/exec-runner.js";
+import { ReaperCLI } from "../../src/adaptive/cli.js";
 import {
   appendEntry,
   buildActiveBranchMessages,
@@ -229,17 +229,22 @@ test("unnamed runs do not create session journals", async () => {
   );
 });
 
-test("runExec rejects invalid session names before running the engine", async () => {
+test("the CLI rejects an invalid session name before running the engine", async () => {
+  /*
+   * This used to call `runExec` directly, which validated the name before
+   * touching the engine. The CLI is now a client of the app-server, so the
+   * check moved to the CLI itself and this asserts it at that level: the
+   * engine must not run, which is the property that mattered.
+   */
   const workspaceRoot = await createTempWorkspace();
-  const result = await runExec({
-    workspaceRoot,
-    prompt: "irrelevant",
-    provider: "minimax",
-    session: "bad name!",
-  });
-  assert.equal(result.status, "failed");
-  assert.equal(result.trajectoryPath, "", "engine must not run for an invalid session name");
-  assert.match(result.notices[0]?.message ?? "", /invalid --session name/);
+  const cli = new ReaperCLI({ workspaceRoot });
+  const result = await cli.run(["exec", "run", "--prompt", "irrelevant", "--session", "bad name!"]);
+  assert.equal(result.exitCode, 2, "an invalid session name is a usage error");
+  assert.match(result.stderr, /invalid --session name/);
+  // No thread was created, so nothing ran.
+  const sessionsRoot = path.join(workspaceRoot, ".reaper", "sessions");
+  const created = existsSync(sessionsRoot) ? readdirSync(sessionsRoot) : [];
+  assert.equal(created.length, 0, "the engine must not run for an invalid session name");
 });
 
 test("grown session context triggers full summary and writes compaction back to the journal", async () => {
@@ -424,4 +429,102 @@ test("named session journals tool turns and rehydrates the full multi-turn conve
     (m) => m.role === "assistant" && m.tool_calls?.some((c) => c.function.name === "write_file"),
   );
   assert.ok(rehydratedAssistant, "run 2 must rehydrate the assistant tool_calls turn");
+});
+
+/**
+ * A provider failure mid-conversation must not cost the thread its history.
+ *
+ * The report: a turn died with a DeepSeek 400 ("Messages with role 'tool' must
+ * be a response to a preceding message with 'tool_calls'"), the user sent
+ * another message, and the model had no memory of anything before — it answered
+ * as if the conversation had just started. Two things have to hold for a
+ * conversation to survive days of use with the occasional failed turn, and this
+ * pins both:
+ *
+ *   1. A turn whose model call throws still leaves the prior history intact and
+ *      readable, so the NEXT turn rehydrates everything up to and including the
+ *      failed turn's prompt.
+ *   2. The failed turn does not move the journal. Boot must not create a second,
+ *      empty session directory that shadows the real one.
+ */
+test("a failed turn does not erase the conversation", async () => {
+  const workspaceRoot = await createTempWorkspace();
+  const sessionName = "sess-failure-recovery";
+
+  // ── Run 1: a normal exchange that must survive everything after it ────
+  const request1 = createValidRequestEnvelope();
+  request1.payload = { prompt: "Remember the codeword PERSIST-OK-9." };
+  const gateway1 = new CapturingJsonGateway([
+    { assistant_message: "Noted: PERSIST-OK-9.", tool_calls: [] },
+  ]);
+  await new RuntimeEngine({
+    config: createValidConfig(),
+    workspaceRoot,
+    requestEnvelope: request1,
+    modelGateway: gateway1,
+    namedSession: sessionName,
+  }).run();
+
+  const journalPath = path.join(workspaceRoot, ".reaper", "sessions", sessionName, "session.jsonl");
+  assert.ok(existsSync(journalPath), "run 1 must create the journal");
+  const sizeAfterRun1 = readFileSync(journalPath, "utf8").length;
+
+  // ── Run 2: the model call throws, exactly as the 400 did ─────────────
+  const request2 = createValidRequestEnvelope();
+  request2.payload = { prompt: "Add a line to the notes." };
+  const gateway2 = new CapturingJsonGateway([{ assistant_message: "unused", tool_calls: [] }]);
+  // Fail every call the way the provider did.
+  (gateway2 as unknown as { generate: () => Promise<never> }).generate = async () => {
+    throw new Error(
+      "Primary streaming provider 'deepseek' failed and no fallback profile is configured. "
+      + "Cause: DeepSeek stream request failed: HTTP 400 — {\"error\":{\"message\":\"Messages with role 'tool' must be a response to a preceding message with 'tool_calls'\"}}",
+    );
+  };
+  await new RuntimeEngine({
+    config: createValidConfig(),
+    workspaceRoot,
+    requestEnvelope: request2,
+    modelGateway: gateway2,
+    namedSession: sessionName,
+  }).run().catch(() => undefined);
+
+  // The failed turn must not have destroyed or relocated the journal.
+  assert.ok(existsSync(journalPath), "the journal must still exist after a failed turn");
+  const journalAfterFailure = readFileSync(journalPath, "utf8");
+  assert.ok(
+    journalAfterFailure.length >= sizeAfterRun1,
+    "a failed turn must not truncate the journal",
+  );
+  assert.match(journalAfterFailure, /PERSIST-OK-9/, "run 1's content must survive the failed turn");
+
+  // ── Run 3: a fresh turn must still see run 1 ─────────────────────────
+  const request3 = createValidRequestEnvelope();
+  request3.payload = { prompt: "What was the codeword?" };
+  const gateway3 = new CapturingJsonGateway([
+    { assistant_message: "The codeword is PERSIST-OK-9.", tool_calls: [] },
+  ]);
+  await new RuntimeEngine({
+    config: createValidConfig(),
+    workspaceRoot,
+    requestEnvelope: request3,
+    modelGateway: gateway3,
+    namedSession: sessionName,
+  }).run();
+
+  assert.ok(gateway3.capturedMessages.length >= 1, "run 3 must call the model");
+  const firstCall = gateway3.capturedMessages[0]!;
+  assert.match(
+    JSON.stringify(firstCall),
+    /PERSIST-OK-9/,
+    "run 1's codeword must still reach the model after a failed turn in between",
+  );
+
+  // And the journal must be in exactly one place — no shadow directory.
+  const sessionsDir = path.join(workspaceRoot, ".reaper", "sessions");
+  const entries = readdirSync(sessionsDir);
+  assert.deepEqual(
+    entries.filter((e) => e.startsWith("sess-")),
+    [sessionName],
+    "a named session must have exactly one directory, never a second empty one",
+  );
 });

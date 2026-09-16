@@ -5,7 +5,7 @@ import path from "node:path";
 
 
 import { parseReaperConfig, type ReaperConfig } from "../config/model-config.js";
-import { getEngineTunables, runWithConfigTunables } from "../config/config-tunables.js";
+import { getContextTunables, getEngineTunables, runWithConfigTunables } from "../config/config-tunables.js";
 import { ReaperConfigSearchPaths, loadReaperConfigFromWorkspace } from "../runtime/workspace-config.js";
 import { describeToolResultTarget,  renderStepText,  getToolResultCommand,  isBuildCommand,  isTestCommand,  normalizeVerificationCommand, 
   isVerificationLikeCommand,  hasInlineAssertionOrFailureExit, 
@@ -33,9 +33,10 @@ import { AuditLogger } from "../logging/audit.js";
 import { logLangfuseEvent } from "../logging/langfuse.js";
 import { TrajectoryLogger } from "../logging/trajectory.js";
 import { lastEntryId } from "../context/session-journal.js";
+import { spillLargePrompt } from "../context/prompt-spill.js";
 import { generateFinalSummary, summarizeExplicitToolRun } from "./final-summary.js";
 import { classifyRunFinalStatus, persistRunFailure } from "./run-finalize.js";
-import { buildGeneralAgentTools, buildAgentToolDescriptor, userPromptRequestsScratchpad, EMPTY_TOOL_SET, type AgentToolDescriptor } from "./agent-tools.js";
+import { buildGeneralAgentTools, buildAgentToolDescriptor, extensionToolDescriptors, userPromptRequestsScratchpad, toolNamesUsedInTranscript, EMPTY_TOOL_SET, type AgentToolDescriptor } from "./agent-tools.js";
 import {
   escapeRegExp, 
   hasSourceMutationShellFragment, 
@@ -51,6 +52,7 @@ import { runWithModelCallLogContext } from "../logging/model-call-log.js";
 import { appendFailureMemory, loadRecentFailureMemory } from "../recovery/failure-memory.js";
 import { commitVerifiedRunKnowledge, loadVerifiedLessons } from "../recovery/verified-memory.js";
 import { RecoverySession } from "../recovery/session.js";
+import type { ThreadBrowserRuntime } from "../browser/thread-runtime.js";
 import {ToolExecutor} from "../tools/executor.js";
 import type { ShellRunner} from "../tools/executor.js";
 import type { ToolApprovalRequester } from "../tools/approval.js";
@@ -87,6 +89,7 @@ import { normalizeToolCall } from "../tools/normalize.js";
 import { streamMainAgentResponse } from "./main-agent-node.js";
 import type { GenerateRequest } from "../model/types.js";
 import { batchNeedsMutationCheckpoint, createCheckpoint } from "./checkpoints.js";
+import { ensureGitRepo } from "../workspace/git.js";
 import { getGitDiffState, getGitStatusState, summarizeGitDiffState } from "./diff-state.js";
 import {
   classifyVerificationFailure,
@@ -198,6 +201,15 @@ export interface RuntimeEngineInput {
   /** True when running inside a trusted sandbox (skips high-risk approval). */
   trustedSandbox?: boolean;
   /**
+   * The thread's browser, when one is available.
+   *
+   * Owned by the app-server and shared across the turns of one thread, which is
+   * what makes a login survive from one message to the next. Absent in tests and
+   * in direct construction, where `browser_use` then fails with a clear message
+   * rather than hanging on a connection that does not exist.
+   */
+  threadBrowser?: ThreadBrowserRuntime | undefined;
+  /**
    * Extra instructions for this run, appended after the built-in prompt.
    *
    * Appended, never substituted. The built-in text is the contract the tool
@@ -216,6 +228,15 @@ export interface RuntimeEngineInput {
    * gets a stated refusal instead of the tool actually running.
    */
   disabledTools?: readonly string[];
+  /**
+   * Whether shell commands are confined to `workspaceRoot` by the kernel.
+   *
+   * Defaults to on. Passed per run rather than read from config so a thread
+   * can turn it off from its settings and have the next command honour it,
+   * which is what "takes effect in real time" means for a setting whose
+   * subject is a process that has not started yet.
+   */
+  filesystemSandbox?: boolean;
 }
 
 export interface RuntimeEngineResult {
@@ -338,7 +359,6 @@ type GraphState = {
   needsReplan: boolean;
   done: boolean;
   aborted?: boolean;
-  loopCapped?: boolean;
 };
 
 type ModelRouteName = keyof ReaperConfig["modelRouting"];
@@ -826,6 +846,19 @@ export class RuntimeEngine {
     };
   }
 
+  /**
+   * The model name the meter should show, or undefined when it is unknown.
+   *
+   * Undefined rather than a placeholder: the meter names the model so a user
+   * can tell which limit the percentage is against, and a guessed name would
+   * make the number look attributable to a model that did not produce it.
+   */
+  private activeModelName(): string | undefined {
+    const profile = this.config.models[modelRoute(this.config, "mainAgent")] ?? this.config.models.default_model;
+    const model = profile?.model;
+    return typeof model === "string" && model.length > 0 ? model : undefined;
+  }
+
   private async runScoped(): Promise<RuntimeEngineResult> {
     const startedAt = Date.now();
     // Provider-readiness preflight: fail fast on a missing API key
@@ -863,6 +896,22 @@ export class RuntimeEngine {
     });
     await ensureReaperRunContext(runContext, initialRequest);
     await writeLatestRunPointer(this.input.workspaceRoot, runContext);
+    /*
+     * Give a thread workspace a repo before anything needs one.
+     *
+     * The checkpoint tools, the diff surface, and `git_stash`-based checkpoint
+     * rollback all require a repository with a HEAD. Nothing created one: the
+     * lazy `ensureRepoForEmptyDirectory` in the web routes only fired on a
+     * *completely empty* directory, and every thread workspace holds `.reaper/`
+     * from its first turn, so the condition was never true and checkpoints were
+     * dead on arrival. `ensureGitRepo` treats `.reaper/` as Reaper's own and
+     * initializes around it, and running here means the repo exists for the
+     * whole turn rather than being raced by the first tool that wants it.
+     *
+     * Best-effort and idempotent: a workspace that already has a repo (the CLI
+     * at /work, a cloned project) is left untouched.
+     */
+    await ensureGitRepo(this.input.workspaceRoot).catch(() => undefined);
     clearSessionTasks(runContext.runId);
     clearDiscoveredTools(runContext.runId);
     this.trajectoryLogger = new TrajectoryLogger(this.input.workspaceRoot, { ...this.config.logging, runId: runContext.runId });
@@ -1072,6 +1121,7 @@ export class RuntimeEngine {
         // through the ToolExecutorOptions so the role-policy engine applies.
         ...(this.input.callerRole ? { callerRole: this.input.callerRole } : {}),
         ...(this.input.trustedSandbox ? { trustedSandbox: this.input.trustedSandbox } : {}),
+        ...(this.input.threadBrowser ? { threadBrowser: this.input.threadBrowser } : {}),
         ...(this.config?.security?.childEnvAllowlist ? { childEnvAllowlist: this.config.security.childEnvAllowlist } : {}),
         recoverySession,
         config: this.config,
@@ -1089,6 +1139,7 @@ export class RuntimeEngine {
         // offered and the tool surface the executor honours the same value
         // rather than two values that happen to agree.
         disabledTools: this.disabledTools,
+        ...(this.input.filesystemSandbox === false ? { filesystemSandbox: false } : {}),
         // The three authoring managers dispatch through this. Their handlers
         // and the executor switch that calls them were both written and both
         // tested; the option that joins them was never supplied by any caller,
@@ -1429,7 +1480,11 @@ export class RuntimeEngine {
       if (!this.input.modelGateway || !state.contentPrep) return {};
 
 
-      const allGeneralAgentTools = buildGeneralAgentTools(getDiscoveredTools(getBoot().state.runId), this.disabledTools);
+      const allGeneralAgentTools = buildGeneralAgentTools(
+        getDiscoveredTools(getBoot().state.runId),
+        this.disabledTools,
+        extensionToolDescriptors(this.getAuthoringRuntime().extensionToolRegistry()),
+      );
       const generalAgentTools = selectGeneralAgentToolsForTurn({
         request: getRequest(),
         state,
@@ -1471,11 +1526,36 @@ export class RuntimeEngine {
         let liveModelTurnIndex = 0;
         let incompleteRecoveryAttempts = 0;
         let emptyStopRetries = 0;
+        let reasoningNudges = 0;
         let prematureStopNudges = 0;
         const EMPTY_STOP_MAX_RETRIES = 3;
+        /*
+         * Higher than the empty limit on purpose. This is not a failure budget
+         * — nothing terminal is built from it — it is how many times the runtime
+         * will ask a model to convert its thinking into an answer. A reasoning
+         * model can legitimately spend several exchanges thinking before it
+         * commits, and cutting it off early would be the runtime deciding the
+         * model had failed when it was working.
+         */
+        const REASONING_NUDGE_LIMIT = 6;
         const PREMATURE_STOP_MAX_NUDGES = 2;
         const rawPromptValue = getRequest().payload.prompt;
-        const rawUserPrompt = typeof rawPromptValue === "string" ? rawPromptValue : "";
+        /*
+         * A large paste is spilled to a workspace file and replaced by a
+         * reference, HERE, so both the live conversation and the journal record
+         * the reference rather than the paste.
+         *
+         * Substituting later would put the reference in the model's context but
+         * leave the full text in the journal — and a resumed thread rehydrates
+         * from the journal, so the next turn would blow the window all over
+         * again. One substitution at the source keeps the two in step.
+         */
+        const spilledPrompt = spillLargePrompt({
+          workspaceRoot: this.input.workspaceRoot,
+          prompt: typeof rawPromptValue === "string" ? rawPromptValue : "",
+          thresholdChars: getContextTunables().promptSpillChars,
+        });
+        const rawUserPrompt = spilledPrompt.text;
         let currentRequestLogged = false;
         // Pi-style: conversation continuity comes from session.jsonl message
         // tree via onBoot → buildActiveBranchMessages. No live-conversation.json.
@@ -1501,6 +1581,26 @@ export class RuntimeEngine {
             }
             resumeMessages.push(...(rehydratedMessages as unknown[]));
             liveConversation.push(...(resumeMessages as any[]));
+            /*
+             * Re-declare every tool this transcript has already called.
+             *
+             * `clearDiscoveredTools` ran at the top of this run, so on resume
+             * the discovered set is empty and the wire carries only the core
+             * tools. The rehydrated conversation, meanwhile, is a record of the
+             * model calling whatever it had unlocked in the earlier turns.
+             *
+             * A provider silently drops a tool call naming a tool that is not
+             * in the request's `tools` array and returns no content with it, so
+             * the model appears to answer nothing. That is what produced the
+             * "the model returned 3 empty responses in a row" failure: the
+             * model called `extension_manager`, which it had promoted in the
+             * previous turn, and the call never reached Reaper.
+             *
+             * Discovering these names restores the surface the history assumes.
+             * The model can then continue its own trajectory instead of
+             * reaching for a tool the runtime has quietly taken away.
+             */
+            discoverTools(toolNamesUsedInTranscript(resumeMessages), getBoot().state.runId);
             runState.rehydratedCount = resumeMessages.length;
             runState.sessionResume = undefined;
             try {
@@ -1595,14 +1695,29 @@ export class RuntimeEngine {
         let liveAdvancementEvidence: string[] = [];
         let liveAborted = false;
 
-        // R3: hard bound on the live loop. The model owns the stop
-        // decision, but a model that keeps emitting tool_calls (or keeps
-        // hitting retry re-prompts) must not spin forever. Honoring the
-        // configured `langgraphRecursionLimit` gives operators a real cap.
-        const liveIterationLimit = getGraphRecursionLimit();
+        /*
+         * No iteration cap. The model owns the stop decision.
+         *
+         * There used to be one, defaulting to 50 model turns per run. It is the
+         * reason a long task stopped in the middle of its work: the loop hit the
+         * cap, the run ended, and the last thing in the transcript was a tool
+         * result with no follow-up and no explanation. A thread is meant to run
+         * for days and hundreds of user messages, so a per-run cap of 50 turns
+         * is not a safety net, it is a guillotine.
+         *
+         * What actually bounds the loop is the model itself — a turn ends when
+         * the model stops calling tools — plus the user's stop control and the
+         * abort signal, both of which are checked below. A model that spins
+         * without progress is a real failure mode, but the answer to it is a
+         * nudge or a blocker that names the problem, not a silent truncation
+         * that looks the same as a completed turn.
+         *
+         * `liveIteration` is still counted, because it is the honest measure of
+         * how hard the run worked and it goes in the metrics.
+         */
         let liveIteration = 0;
 
-        while (liveIteration < liveIterationLimit) {
+        for (;;) {
           liveIteration += 1;
           const ctxCallStartedAt = Date.now();
 
@@ -1698,7 +1813,11 @@ export class RuntimeEngine {
           const currentGeneralAgentTools = selectGeneralAgentToolsForTurn({
             request: getRequest(),
             state: { toolResults: [...state.toolResults, ...liveToolResults] },
-            tools: buildGeneralAgentTools(getDiscoveredTools(getBoot().state.runId), this.disabledTools),
+            tools: buildGeneralAgentTools(
+              getDiscoveredTools(getBoot().state.runId),
+              this.disabledTools,
+              extensionToolDescriptors(this.getAuthoringRuntime().extensionToolRegistry()),
+            ),
           });
           // The role prompt is built ONCE per autonomous run (see `run()` ->
           // `systemPromptPrefix`) and reused byte-for-byte on every model call,
@@ -1745,11 +1864,19 @@ export class RuntimeEngine {
         }
         const steeringMessages = this.input.turnControl?.drain() ?? [];
         for (const content of steeringMessages) {
-          liveConversation.push({ role: "user", content });
+          // A steered message is user text too, so a large one is spilled the
+          // same way. Same substitution point, same reason: the journal and the
+          // live conversation must agree.
+          const spilledSteer = spillLargePrompt({
+            workspaceRoot: this.input.workspaceRoot,
+            prompt: content,
+            thresholdChars: getContextTunables().promptSpillChars,
+          });
+          liveConversation.push({ role: "user", content: spilledSteer.text });
           await appendSessionTreeMessage(this.trajectoryLogger, {
             runId: getBoot().state.runId,
             sessionId: getBoot().state.sessionId,
-            message: { role: "user", content },
+            message: { role: "user", content: spilledSteer.text },
           });
         }
 
@@ -1879,12 +2006,26 @@ export class RuntimeEngine {
             });
           }
           const turnUsage = (turn as { usage?: { inputTokens?: number; outputTokens?: number } }).usage;
+          // Hoisted rather than called inline twice: the truthiness check does
+          // not narrow a second call to the same function, so the property came
+          // out as `string | undefined` and `exactOptionalPropertyTypes`
+          // rejected it.
+          const usageModel = this.activeModelName();
           if (turnUsage && typeof turnUsage.inputTokens === "number" && typeof turnUsage.outputTokens === "number") {
             await emitRuntimeEvent(this.input.eventSink, {
               type: "token.usage",
               inputTokens: turnUsage.inputTokens,
               outputTokens: turnUsage.outputTokens,
               ...this.contextWindowInfo(),
+              /*
+               * The output reservation travels with the usage, because the
+               * context meter has to subtract it from the window. A request
+               * that declares `max_tokens: 32000` against a 200k window can
+               * only hold about 168k of prompt, and a meter that divides by
+               * the raw window reports a budget the request cannot use.
+               */
+              ...(typeof turnRequest.maxTokens === "number" ? { reservedOutputTokens: turnRequest.maxTokens } : {}),
+              ...(usageModel ? { model: usageModel } : {}),
             });
           }
           if (turnReasoning) {
@@ -2038,10 +2179,73 @@ export class RuntimeEngine {
                 .catch(() => undefined);
               continue;
             }
+            /*
+             * A response that carried reasoning is not an empty one.
+             *
+             * The comment on this ladder says "no text and no tool calls", and
+             * the condition only ever tested the text. A reasoning model that
+             * thinks and then stops without emitting a summary hits the counter
+             * three times and the run dies with "the model returned 3 empty
+             * responses" — while the thinking channel held content on every one
+             * of them. That is the reported failure: the provider sent
+             * something, and the parser did not count it.
+             *
+             * Reasoning does not stand in for an answer, which is why this does
+             * not simply `continue` as though a real reply arrived. The turn is
+             * still close to empty and the nudge is still worth sending, but it
+             * must not be *charged* to a counter whose whole meaning is "the
+             * model said nothing at all" — that counter is what fails the run.
+             *
+             * `turnReasoning` is the channel text plus any `<think>` block
+             * lifted out of the content, so both ways a model exposes thinking
+             * are covered.
+             */
+            const reasoningOnly = Boolean(turnReasoning) && !assistantText;
+            /*
+             * A reasoning-only stop is nudged once and then allowed to end.
+             *
+             * Falling through it would reproduce the silent turn this ladder
+             * exists to prevent: no text, no tool calls, no blocker, and a
+             * transcript showing a user message with no reply. But it must not
+             * use the empty counter, because four nudges that all come back
+             * with thinking would otherwise end the run as "3 empty responses".
+             *
+             * Bounded separately and generously. `reasoningNudges` is per turn
+             * and never reaches a terminal blocker; if the model keeps thinking
+             * and never answering, the turn closes with the reasoning it
+             * produced visible in the transcript, which is a truthful outcome
+             * rather than a failure blamed on the provider.
+             */
+            if (reasoningOnly && reasoningNudges < REASONING_NUDGE_LIMIT) {
+              reasoningNudges += 1;
+              liveConversation.push({
+                role: "user",
+                content:
+                  "Your previous turn ended after thinking, with no tool_calls and no answer. " +
+                  "Continue from that reasoning: take the next concrete action with structured " +
+                  "tool_calls, or emit the short final summary now.",
+              });
+              await this.trajectoryLogger
+                .write({
+                  event_id: randomUUID(),
+                  run_id: getBoot().state.runId,
+                  session_id: getBoot().state.sessionId,
+                  trace_id: getBoot().state.runId,
+                  timestamp: new Date().toISOString(),
+                  log_schema_version: 1,
+                  kind: "reasoning_only_nudge",
+                  level: getBoot().state.logLevel,
+                  attempt: reasoningNudges,
+                  max_attempts: REASONING_NUDGE_LIMIT,
+                } as any)
+                .catch(() => undefined);
+              continue;
+            }
             // OMP #handleEmptyAssistantStop: empty stop is a harness glitch —
             // retry a few times. Non-empty text-only stop is model-owned.
             if (
               !assistantText &&
+              !reasoningOnly &&
               emptyStopRetries < EMPTY_STOP_MAX_RETRIES &&
               (!turn.finishReason ||
                 turn.finishReason === "stop" ||
@@ -2083,7 +2287,15 @@ export class RuntimeEngine {
             // requests with `finish_reason: "stop"` and no content or
             // tool_calls roughly four times in six, so this path is the
             // expected outcome for a real fraction of turns.
-            if (!assistantText && emptyStopRetries >= EMPTY_STOP_MAX_RETRIES) {
+            /*
+             * `!reasoningOnly` as well as the count, because the counter is
+             * cumulative across the turn and this tests it, not the retry
+             * ladder. A turn that was empty twice and then produced reasoning
+             * has a count at the limit and a model that *did* send something,
+             * so blaming it for "empty responses" would be the same misreport
+             * in the message instead of in the counter.
+             */
+            if (!assistantText && !reasoningOnly && emptyStopRetries >= EMPTY_STOP_MAX_RETRIES) {
               terminalRuntimeBlocker = {
                 source: "model",
                 code: "empty_model_response",
@@ -2091,6 +2303,24 @@ export class RuntimeEngine {
                   `The model returned ${EMPTY_STOP_MAX_RETRIES} empty responses in a row — no text and no tool calls — `
                   + "and the run was stopped. This is usually the provider rather than your prompt: send the message "
                   + "again, or switch models.",
+              };
+            } else if (!assistantText && reasoningOnly && reasoningNudges >= REASONING_NUDGE_LIMIT) {
+              /*
+               * A separate message, because it is a separate situation and the
+               * old one would be a false report here. The model did answer
+               * every request; it answered with thinking and never with text.
+               * Saying "no text and no tool calls" about turns whose reasoning
+               * is in the transcript would send the user to check a provider
+               * that is working. Naming what actually happened tells them the
+               * one useful thing: this model is not producing answers.
+               */
+              terminalRuntimeBlocker = {
+                source: "model",
+                code: "reasoning_without_answer",
+                message:
+                  `The model spent ${REASONING_NUDGE_LIMIT} responses thinking and never produced an answer or a tool call. `
+                  + "Its reasoning is in the transcript above. This is usually a model that is a poor fit for tool use: "
+                  + "switch models, or rephrase the request as a single concrete action.",
               };
             }
             if (turn.content) {
@@ -2408,19 +2638,10 @@ export class RuntimeEngine {
           continue;
         }
 
-        // R3/R4: the loop exited either by model self-stop, abort, or the
-        // iteration cap. Surface the abort/cap as an error event and a
-        // runtime blocker so the run is not misclassified as a natural
-        // completed stop.
-        const loopCapped = !liveAborted && liveIteration >= liveIterationLimit;
-        if (loopCapped) {
-          liveEvents.push(makeEvent(getRequest(), "error", {
-            code: "iteration_limit",
-            iterations: liveIteration,
-            limit: liveIterationLimit,
-          }));
-        }
-        const loopStoppedByExternal = liveAborted || loopCapped;
+        // R4: the only way out of the loop is the model's own stop or an abort
+        // from outside. Both are surfaced, so a run that ended because someone
+        // pressed stop is not recorded as a natural completion.
+        const loopStoppedByExternal = liveAborted;
         const surfacedBlockers =
           loopStoppedByExternal
             ? [
@@ -2428,10 +2649,8 @@ export class RuntimeEngine {
                 ...(terminalRuntimeBlocker ? [terminalRuntimeBlocker] : []),
                 {
                   source: "runtime" as const,
-                  code: liveAborted ? "run_aborted" : "iteration_limit",
-                  message: liveAborted
-                    ? "The run was aborted."
-                    : `The run reached the iteration cap of ${liveIterationLimit} model turns and was stopped.`,
+                  code: "run_aborted",
+                  message: "The run was aborted.",
                 },
               ]
             : terminalRuntimeBlocker
@@ -2449,7 +2668,7 @@ export class RuntimeEngine {
           toolResults: [...(state.toolResults ?? []), ...liveToolResults],
           ...(livePlanState !== state.planState ? { planState: livePlanState } : {}),
           ...(liveTodoState !== state.todoState ? { todoState: liveTodoState } : {}),
-          ...(loopStoppedByExternal ? { aborted: liveAborted, loopCapped } : {}),
+          ...(loopStoppedByExternal ? { aborted: liveAborted } : {}),
           iteration: state.iteration + liveIteration,
         } satisfies Partial<GraphState>;
       } catch (error) {
@@ -2493,13 +2712,21 @@ export class RuntimeEngine {
          * did not claim, so the text has to describe the failure without
          * assuming which kind it was.
          */
-        terminalRuntimeBlocker = {
-          source: "model",
-          code: "model_call_failed",
-          message:
-            `The model call failed and the run was stopped: ${message}\n`
-            + "Send the message again, or switch models in the composer.",
-        };
+        /*
+         * An account failure (out of credit, revoked key) is permanent and gets
+         * its own message, because "send the message again" is advice that
+         * cannot work. Everything else keeps the generic wording.
+         */
+        const account = classifyAccountError(error);
+        terminalRuntimeBlocker = account
+          ? { source: "model", code: account.code, message: account.message }
+          : {
+              source: "model",
+              code: "model_call_failed",
+              message:
+                `The model call failed and the run was stopped: ${message}\n`
+                + "Send the message again, or switch models in the composer.",
+            };
         return {
           plannedToolCalls: [],
           assistantMessage: "",
@@ -4726,6 +4953,50 @@ export function classifyMainAgentTransportError(error: unknown):
 }
 
 /**
+ * A provider failure that is the account's, not the request's.
+ *
+ * Quota and billing rejections — HTTP 402 ("Insufficient Balance"), a 403 for a
+ * revoked key, an exhausted plan — are terminal: no retry, no fallback model
+ * with the same key, and no edit to the prompt will change the outcome. They
+ * were unclassified, so a 402 fell through to the generic "The model call failed
+ * and the run was stopped" and a user whose balance ran dry was told to "send
+ * the message again". The message below names the cause and the fix so a long
+ * turn that dies this way explains itself rather than looking like a Reaper bug.
+ */
+export function classifyAccountError(error: unknown):
+  | { code: "provider_account_error"; message: string }
+  | undefined {
+  const message = error instanceof Error ? error.message : String(error);
+  const lower = message.toLowerCase();
+  const status = httpStatusOf(error, message);
+  const isAccount =
+    status === 402 ||
+    status === 403 ||
+    lower.includes("insufficient balance") ||
+    lower.includes("insufficient_balance") ||
+    lower.includes("insufficient quota") ||
+    lower.includes("quota exceeded") ||
+    lower.includes("exceeded your current quota") ||
+    lower.includes("billing") ||
+    lower.includes("payment required") ||
+    lower.includes("account is deactivated") ||
+    lower.includes("invalid api key") ||
+    lower.includes("incorrect api key");
+  if (!isAccount) return undefined;
+  return {
+    code: "provider_account_error",
+    message:
+      "The model provider rejected the request because of the account, not the message: "
+      + (status === 402 || lower.includes("balance") || lower.includes("quota") || lower.includes("billing")
+        ? "the provider account has run out of credit or quota."
+        : "the provider credentials were rejected.")
+      + `\n${message}\n`
+      + "Top up the account or reconnect the provider's key in Settings, then send the message again. "
+      + "Retrying or switching models will not help while the account is out of credit.",
+  };
+}
+
+/**
  * Detect a Provider-Token-Limit (PTL) error: the request body was too large
  * for the provider's context window. Distinct from a transport error: the
  * connection succeeded but the server rejected the request as too large.
@@ -6297,20 +6568,6 @@ function getBoundaryPivotInstruction(toolResults: ToolResult[]): { feedback: str
       `Do not continue repeated invasive edits to ${pathText}. Prefer an acceptance-first boundary implementation: wrapper, adapter, standalone executable/script, compatibility shim, or direct generation of required artifacts when that is valid for the task. Only return to those internals after proving no boundary path can satisfy the visible tests/specs.`,
   };
 }
-
-function getGraphRecursionLimit(): number {
-  const raw = getEngineTunables().langgraphRecursionLimit;
-  const parsed = Number(raw);
-  // Honor any sane positive configured value (the config default is 50 —
-  // the old `>= 100` gate silently discarded it and returned a hard-coded
-  // 8000, so the tunable was dead). Clamp to [1, 100000] to avoid a
-  // misconfigured 0/negative/gigantic value unbounding the live loop.
-  if (Number.isFinite(parsed) && parsed >= 1) {
-    return Math.min(100_000, Math.max(1, Math.floor(parsed)));
-  }
-  return 50;
-}
-
 
 function getMaxRescueAttemptsPerDiagnostic(): number {
   const raw = getEngineTunables().rescueMaxAttemptsPerDiagnostic;

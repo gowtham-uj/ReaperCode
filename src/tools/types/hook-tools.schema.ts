@@ -74,6 +74,18 @@ export const ListHooksArgsSchema = z
 export const UpdateHookArgsSchema = z
   .object({
     id: z.string().regex(ID_REGEX),
+    /*
+     * `description` and `event` are here because `update` accepts them.
+     *
+     * Both were reachable through the manager's flat enum, and neither had a
+     * field on this schema, so a typed `update` could not carry them and the
+     * lifecycle had no way to receive them. The result was an update that
+     * reported success and changed only `updatedAt`. A field the tool advertises
+     * has to exist on the shape the handler is typed against, or "accepted" is a
+     * claim the code does not honour.
+     */
+    description: z.string().min(1).max(240).optional(),
+    event: z.enum(HOOK_EVENTS).optional(),
     source: z.string().min(1).max(MAX_SOURCE_BYTES).optional(),
     matcher: z
       .object({

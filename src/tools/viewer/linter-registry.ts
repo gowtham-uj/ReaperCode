@@ -164,13 +164,22 @@ export class LinterRegistry {
     const extension = opts.extension.toLowerCase();
     const entry = await this.matchExtension(opts.workspaceRoot, extension);
     if (!entry) {
+      /*
+       * An empty extension is a file with no suffix, and the fallback has to say
+       * so rather than name a blank. Observed in the audit: `language: ""` with
+       * "no linter manifest entry for ; falling back to permissive pass", where
+       * the sentence reads as truncated because the thing it interpolates is the
+       * empty string. The verdict is still a pass, but the words should describe
+       * what actually happened.
+       */
+      const label = extension || "a file with no extension";
       return {
         totalElapsedMs: Date.now() - started,
         verdict: {
-          language: extension,
+          language: extension || "unknown",
           source: "fallback_permissive",
           ok: true,
-          message: `no linter manifest entry for ${extension}; falling back to permissive pass`,
+          message: `no linter manifest entry for ${label}; falling back to permissive pass`,
         },
       };
     }

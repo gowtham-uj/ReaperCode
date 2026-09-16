@@ -304,7 +304,24 @@ export function createContextEngineeringHooks(
                   ...(typeof m.is_error === "boolean" ? { is_error: m.is_error } : {}),
                 };
               })
-              .filter((m) => m.content.trim().length > 0 || (m as { tool_calls?: unknown[] }).tool_calls);
+              /*
+               * Drop empty messages, but never a tool result.
+               *
+               * This read `content.trim().length > 0 || tool_calls`, which
+               * removes a `tool` message whose output is an empty string while
+               * keeping the assistant message that announced the call. The
+               * result is a conversation the provider rejects:
+               *
+               *   HTTP 400 — An assistant message with 'tool_calls' must be
+               *   followed by tool messages responding to each 'tool_call_id'.
+               *
+               * A tool result with empty content is still a well-formed answer
+               * to its call, and it is the *pairing* that the provider checks,
+               * not the content. The gateway repairs any orphan that reaches it
+               * (see `model/repair-tool-pairing.ts`), but the cheapest place to
+               * not create one is here.
+               */
+              .filter((m) => m.role === "tool" || m.content.trim().length > 0 || (m as { tool_calls?: unknown[] }).tool_calls);
             if (prior.length > 0) {
               const stash: SessionResumeStash = {
                 resume: {

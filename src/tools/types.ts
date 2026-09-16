@@ -5,6 +5,7 @@ import { GlobArgsSchema } from "./glob.js";
 import { JobArgsSchema } from "./job.js";
 import { DiagnosticsArgsSchema } from "./diagnostics.js";
 import { EvalArgsSchema } from "./eval.js";
+import { BrowserUseArgsSchema } from "./browser/browser-use.js";
 import {
   CreateSkillArgsSchema,
   TestSkillArgsSchema,
@@ -126,10 +127,20 @@ export const GitDiffArgsSchema = z
   })
   .strict();
 
+/**
+ * The engines the tool actually has, and nothing else.
+ *
+ * The enum used to offer `brave`, which no backend implemented, so a caller who
+ * chose it got the union of the others with no sign the request was ignored.
+ * The same class of defect as the dead `job.start` value: an option that is
+ * accepted and then does nothing is worse than an option that is absent,
+ * because the caller cannot tell a silent fallback from a working choice.
+ */
 export const WebSearchArgsSchema = z
   .object({
     query: z.string().min(1),
-    engine: z.enum(["duckduckgo", "brave", "auto"]).optional(),
+    engine: z.enum(["duckduckgo", "mimo", "serper", "auto"]).optional()
+      .describe("Which backend to use. 'auto' (default) queries all configured backends and merges the results."),
     maxResults: z.number().int().min(10).max(20).optional(),
     scrapePages: z.number().int().min(10).max(20).optional(),
   })
@@ -293,7 +304,7 @@ export const ToolCallSchema = z.discriminatedUnion("name", [
   z.object({ id: z.string().min(1), name: z.literal("edit_file"), args: EditFileArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("delete_file"), args: DeleteFileArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("bash"), args: BashArgsSchema }).strict(),
-  z.object({ id: z.string().min(1), name: z.literal("browser_control"), args: BrowserControlArgsSchema }).strict(),
+  z.object({ id: z.string().min(1), name: z.literal("browser_use"), args: BrowserUseArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("activate_skill"), args: ActivateSkillArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("web_fetch"), args: WebFetchArgsSchema }).strict(),
   z.object({ id: z.string().min(1), name: z.literal("search_tools"), args: SearchToolsArgsSchema }).strict(),
@@ -322,6 +333,18 @@ export const ToolResultSchema = z
     durationMs: z.number().int().nonnegative(),
     args: z.unknown().optional(),
     output: z.unknown().optional(),
+    /**
+     * Advice a hook attached to this call, for the model to read.
+     *
+     * A non-enforcing `PreToolUse` hook is an observer: it cannot block, and its
+     * `message` is the whole point of it existing. The first implementation
+     * folded that message into the tool output under a `__hint` key, which
+     * worked only when the output was an object — for a string output the spread
+     * produced `{"0":"r","1":"e",…}` — and no reader anywhere looked for the key
+     * anyway, so the hook's advice reached nobody. A field on the result is what
+     * makes it survive to the model.
+     */
+    hint: z.string().min(1).optional(),
     error: z
       .object({
         code: z.string().min(1),

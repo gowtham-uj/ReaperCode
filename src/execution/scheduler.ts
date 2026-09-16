@@ -26,7 +26,18 @@ export async function executeToolCalls(
     }
 
     if (island.startsWithShellBarrier && recoverySession.hasPendingWrites()) {
-      await recoverySession.flushForBarrier();
+      /*
+       * Same recoverable treatment as the final flush below: a barrier that
+       * cannot apply its staged writes marks them rolled back and moves on
+       * rather than ending the turn. See the comment on the final flush.
+       */
+      try {
+        await recoverySession.flushForBarrier();
+      } catch (error) {
+        const cause = error instanceof Error ? error.message : String(error);
+        markRolledBack(results, pendingWriteResultIndexes, cause);
+        recoverySession.wal.rollback();
+      }
       pendingWriteResultIndexes = [];
     }
 
@@ -60,12 +71,31 @@ export async function executeToolCalls(
     try {
       await recoverySession.flushFinal();
     } catch (error) {
-      // Flush failure (e.g. merge conflict) means the staged writes were NOT
-      // applied to disk. Mark every pending write result rolled back so the
-      // model does not keep building on a file that never landed (V3).
+      /*
+       * A flush that cannot apply its staged writes — a genuine merge conflict
+       * between a file-tool edit and a bash write to the same lines — must not
+       * end the turn.
+       *
+       * It used to: this rethrew, and the rethrow reached the main-agent loop's
+       * catch, which reports anything it does not recognise as "The model call
+       * failed and the run was stopped". So an agent that edited a file and then
+       * ran a formatter over it had its whole turn killed mid-work with an error
+       * message blaming the provider. The invariant stated a few lines up is
+       * explicit — "Do not hard-stop a model turn because one tool failed ...
+       * every tool call the model emitted [must] receive the real tool
+       * result/error so the model can decide how to recover" — and this path was
+       * the exception that broke it.
+       *
+       * So the write results are marked rolled back (the model reads exactly
+       * what failed and why), the WAL is discarded so the same conflict is not
+       * retried on every later barrier, and the turn continues. The model can
+       * re-read the file and redo the edit, which is the right recovery and one
+       * it is now able to make.
+       */
       const cause = error instanceof Error ? error.message : String(error);
       markRolledBack(results, pendingWriteResultIndexes, cause);
-      throw error;
+      recoverySession.wal.rollback();
+      pendingWriteResultIndexes = [];
     }
   }
 

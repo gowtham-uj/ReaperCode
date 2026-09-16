@@ -2,12 +2,15 @@
  * The short list of things Code Mode will not do.
  *
  * Code Mode runs the model's JavaScript as real Node: `fs`, `child_process`,
- * the network, npm packages, worker threads, genuine parallelism. That is the
- * point of it, and the deliberate cost is that eval is no longer a security
- * boundary — a script that reads a file through `node:fs` bypasses the
- * permission and approval checks that `tools.read` would have applied.
+ * the network, npm packages, worker threads, genuine parallelism. A script that
+ * reads a file through `node:fs` bypasses the permission and approval checks
+ * that `tools.read` would have applied; what bounds it instead is the
+ * bubblewrap mount namespace the worker runs in, which contains only the
+ * thread's workspace and read-only system directories. So a script can read any
+ * file *in its workspace* the way the Reaper process could, and none outside
+ * it. See `transport.ts`.
  *
- * So this file is not a sandbox and should not be read as one. It is a guard
+ * This file is not that boundary and should not be read as one. It is a guard
  * against the handful of operations that are catastrophic and *never*
  * intentional: overwriting the operating system, deleting the root filesystem,
  * exfiltrating the credentials Reaper itself is holding. A model doing legitimate
@@ -178,6 +181,48 @@ export function isDangerousCommand(command: string): string | undefined {
     [/\bshutdown\b|\breboot\b|\bhalt\b|\bpoweroff\b/, "Code Mode will not power the machine down."],
     [/>\s*\/dev\/(sd|nvme|hd|disk)/, "Writing to a raw disk device overwrites the drive."],
     [/\bchmod\s+(-[a-zA-Z]+\s+)*777\s+\/(\s|$)/, "`chmod 777 /` opens every file on the machine."],
+
+    /*
+     * The other route to a browser. Reaper starts Steel and attaches to it;
+     * nothing else in a script should be fetching or starting a browser of its
+     * own, because a second one is not the one the live pane is showing and not
+     * the one holding the thread's logins.
+     *
+     * These are refusals with a route attached, not a boundary: `npx` can be
+     * spelled a dozen ways and a determined script can reach around any pattern.
+     * The point is that the obvious attempt fails clearly rather than quietly
+     * working, and that the failure names what to do instead.
+     */
+    [
+      /\bplaywright\s+install\b/,
+      "`playwright install` downloads a browser, and there is already one running. Use `browser_use`; Reaper starts and connects the browser for you.",
+    ],
+    [
+      /*
+       * Every package manager spells "install" differently: apt/dnf/yum/pacman
+       * say `install`, apk says `add`, brew says `install` but also `cask
+       * install`. Matching the verb per manager is what keeps `apk add chromium`
+       * from slipping through while `apt-get install -y curl` stays allowed.
+       */
+      /\b(apt-get|apt)\b[^|;&]*\binstall\b[^|;&]*\b(chromium|chrome|google-chrome|chromium-browser|firefox)\b/,
+      "That installs a browser, and there is already one running. Use `browser_use` instead of installing another.",
+    ],
+    [
+      /\bapk\b[^|;&]*\badd\b[^|;&]*\b(chromium|chrome|firefox)\b/,
+      "That installs a browser, and there is already one running. Use `browser_use` instead of installing another.",
+    ],
+    [
+      /\b(dnf|yum|pacman|zypper)\b[^|;&]*\b(-S|install|add)\b[^|;&]*\b(chromium|chrome|google-chrome|chromium-browser|firefox)\b/,
+      "That installs a browser, and there is already one running. Use `browser_use` instead of installing another.",
+    ],
+    [
+      /\bbrew\b[^|;&]*\b(install|cask)\b[^|;&]*\b(chromium|chrome|google-chrome|firefox)\b/,
+      "That installs a browser, and there is already one running. Use `browser_use` instead of installing another.",
+    ],
+    [
+      /\b(chrome|chromium|headless_shell|chrome-headless-shell)\b[^|;&]*\s--(remote-debugging-port|headless|user-data-dir)\b/,
+      "That starts a second browser. Reaper owns the browser process and there is already one attached; drive it with `browser_use`.",
+    ],
   ];
 
   for (const [pattern, reason] of patterns) {
@@ -189,7 +234,111 @@ export function isDangerousCommand(command: string): string | undefined {
 }
 
 /**
- * The two functions above, as text the worker can evaluate.
+ * Wrap a loaded `playwright` module so it cannot start a browser of its own.
+ *
+ * Reaper starts Steel and attaches to it, once. A script that calls
+ * `chromium.launch()` gets a second, unrelated browser: not the one the live
+ * pane is showing, not the one holding the thread's cookies, and a fresh login
+ * wall on every call. The refusal is therefore the operation, not the script.
+ *
+ * This patches the module object in place rather than replacing the require.
+ * Three reasons, all of them observed rather than assumed:
+ *
+ *   - The model's script reaches Playwright by at least three routes: the
+ *     `require` parameter, `await import(...)`, and `require` inside a helper
+ *     module it wrote. Only a module-level patch covers all three.
+ *   - `chromium` and friends are exported as getters on some builds, so a plain
+ *     assignment silently fails. `defineProperty` is used when assignment does.
+ *   - The module is cached, so the patch is applied once and every later require
+ *     of the same specifier gets the guarded copy for free.
+ *
+ * `connectOverCDP` is deliberately left alone against the configured endpoint
+ * and refused against any other. The thread's browser is the one we started;
+ * pointing Playwright at a different one is the same mistake as launching.
+ *
+ * Like everything else in this file this is a guard, not a boundary. A script
+ * can reach around it. The point is that the obvious attempt fails with a
+ * message naming the right thing to do instead of quietly half-working.
+ */
+export function guardPlaywrightModule(mod: unknown, allowedCdpUrl: string | undefined): void {
+  const refusal = (operation: string): Error => {
+    const error = new Error(
+      `REAPER_REFUSED: ${operation} would start a browser that Reaper is not managing. ` +
+        `One is already running and already connected to this thread, holding its pages and logins. ` +
+        `Use the \`browser\` object that is in scope: it is the same browser the live pane shows. ` +
+        `There is nothing to launch.`,
+    );
+    (error as Error & { code?: string }).code = "REAPER_REFUSED";
+    return error;
+  };
+
+  /*
+   * `defineProperty` when assignment does not stick, so a getter-only export
+   * does not defeat the guard silently. `configurable: true` keeps the module
+   * patchable by a later call without a TypeError.
+   */
+  const replace = (holder: Record<string, unknown>, key: string, value: unknown): void => {
+    if (!holder || (typeof holder !== "object" && typeof holder !== "function")) return;
+    try {
+      holder[key] = value;
+    } catch {
+      /* fall through to defineProperty */
+    }
+    if (holder[key] !== value) {
+      try {
+        Object.defineProperty(holder, key, { value, configurable: true, writable: true, enumerable: true });
+      } catch {
+        /* a frozen export cannot be patched; the command guard still covers the shell route */
+      }
+    }
+  };
+
+  const browsers = ["chromium", "firefox", "webkit"];
+  for (const name of browsers) {
+    const type = (mod as Record<string, unknown> | undefined)?.[name];
+    if (!type || typeof type !== "object") continue;
+    const record = type as Record<string, unknown>;
+    // Idempotent: the module is cached, so a second require must not double-wrap.
+    if (record.__reaperGuarded === true) continue;
+
+    replace(record, "launch", () => {
+      throw refusal(`${name}.launch()`);
+    });
+    replace(record, "launchPersistentContext", () => {
+      throw refusal(`${name}.launchPersistentContext()`);
+    });
+    replace(record, "launchServer", () => {
+      throw refusal(`${name}.launchServer()`);
+    });
+    replace(record, "executablePath", () => {
+      throw refusal(`${name}.executablePath()`);
+    });
+
+    /*
+     * `connect` speaks the Playwright wire protocol to a browser server, which
+     * is a different browser or none. Only `connectOverCDP` is meaningful here,
+     * and only against the endpoint we started.
+     */
+    replace(record, "connect", () => {
+      throw refusal(`${name}.connect()`);
+    });
+
+    const originalConnectOverCDP = record.connectOverCDP;
+    if (typeof originalConnectOverCDP === "function") {
+      replace(record, "connectOverCDP", function (this: unknown, url?: string, ...rest: unknown[]) {
+        if (allowedCdpUrl && typeof url === "string" && url !== allowedCdpUrl) {
+          throw refusal(`${name}.connectOverCDP(${url})`);
+        }
+        return (originalConnectOverCDP as (...args: unknown[]) => unknown).call(this, url, ...rest);
+      });
+    }
+
+    replace(record, "__reaperGuarded", true);
+  }
+}
+
+/**
+ * The three functions above, as text the worker can evaluate.
  *
  * The worker is started with `eval: true` and a source string, so it has no
  * module of its own to import from — anything it needs has to arrive inside
@@ -197,4 +346,4 @@ export function isDangerousCommand(command: string): string | undefined {
  * copy is what keeps the tested code and the running code identical; a copy
  * would drift the first time either list changed.
  */
-export const GUARD_SOURCE = `${isDangerousPath.toString()}\n${isDangerousCommand.toString()}`;
+export const GUARD_SOURCE = `${isDangerousPath.toString()}\n${isDangerousCommand.toString()}\n${guardPlaywrightModule.toString()}`;

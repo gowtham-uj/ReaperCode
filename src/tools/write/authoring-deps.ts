@@ -24,8 +24,10 @@
  * trees and an extension directory to find that out.
  */
 
-import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { isAbsolute, join } from "node:path";
 
+import { buildSandboxedShellCommand } from "../../policy/shell-sandbox.js";
 import { discoverSkills } from "../../skills/discovery.js";
 import { SkillLifecycle } from "../../skills/lifecycle.js";
 import { SkillRegistry } from "../../skills/registry.js";
@@ -183,7 +185,15 @@ export class AuthoringRuntime {
       }
 
       return {
-        lifecycle: new SkillLifecycle({ registry, memory, resolver, workspaceRoot, userHome, builtinRoot }),
+        lifecycle: new SkillLifecycle({
+          registry,
+          memory,
+          resolver,
+          workspaceRoot,
+          userHome,
+          builtinRoot,
+          runCommand: skillValidationRunner(workspaceRoot),
+        }),
         registry,
       };
     });
@@ -225,6 +235,65 @@ export class AuthoringRuntime {
     }));
     return this.hookDeps;
   }
+}
+
+/**
+ * Run a skill's `validation.commands` inside the workspace sandbox.
+ *
+ * Two defects meet in the function this replaces, and both were live:
+ *
+ * 1. **The wrong working directory.** `SkillLifecycle` calls its runner with the
+ *    command's own optional `cwd`, which is usually absent, and the default
+ *    runner passed that straight to `spawnSync`. With `cwd: undefined` the child
+ *    inherits Reaper's own `process.cwd()` — the Reaper checkout. A skill whose
+ *    validation was `require("./showcase/stats.js")` therefore failed with
+ *    `MODULE_NOT_FOUND ... requireStack: ['/work/[eval]']`, which reads as the
+ *    user's skill being broken. A probe skill running `pwd` printed `/work`.
+ *
+ * 2. **No confinement.** The same default ran the command as a plain child of
+ *    the Reaper process, so a validation command could read the implementation
+ *    directory, its `.env`, and its `node_modules` — a skill's validation line is
+ *    documented as an ordinary shell command and must not be a way out of the
+ *    workspace. This is the same boundary `bash` and `eval` already have, and a
+ *    third unconfined path around it is exactly what the sandbox exists to
+ *    prevent.
+ *
+ * So commands run through the same `buildSandboxedShellCommand` that `bash`
+ * uses, with the workspace as the working directory when the manifest names
+ * none. When bubblewrap is unavailable the command still runs, with the
+ * workspace as cwd — the same belt-off fallback `bash` makes, rather than
+ * refusing to validate a skill on a host without user namespaces.
+ */
+function skillValidationRunner(workspaceRoot: string) {
+  return (cmd: string, cwd?: string): { exitCode: number; stdout: string; stderr: string } => {
+    /*
+     * A manifest-supplied cwd is honoured only when it stays inside the
+     * workspace. A command that names `/` or an absolute path elsewhere is not
+     * a working directory this feature has any business using, and silently
+     * substituting the workspace is safer than passing it through.
+     */
+    const workingDirectory = cwd && isAbsolute(cwd) && cwd.startsWith(workspaceRoot) ? cwd : workspaceRoot;
+
+    const sandboxed = buildSandboxedShellCommand({
+      workspaceRoot,
+      workingDirectory,
+      shell: "/bin/sh",
+      shellArgs: ["-c", cmd],
+    });
+
+    try {
+      const result = sandboxed
+        ? spawnSync(sandboxed.command, sandboxed.args, { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 })
+        : spawnSync("/bin/sh", ["-c", cmd], { cwd: workingDirectory, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
+      return {
+        exitCode: result.status ?? -1,
+        stdout: result.stdout ?? "",
+        stderr: result.stderr ?? "",
+      };
+    } catch (error) {
+      return { exitCode: 127, stdout: "", stderr: error instanceof Error ? error.message : String(error) };
+    }
+  };
 }
 
 function attempt(label: string, build: () => unknown): { deps: unknown } | { error: Error } {

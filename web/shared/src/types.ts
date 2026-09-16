@@ -74,8 +74,28 @@ export type AppThreadItem =
   | {
       type: "fileChange";
       id: string;
-      changes: Array<{ path: string; kind: string; diff?: string }>;
+      changes: Array<{
+        path: string;
+        kind: string;
+        diff?: string;
+        /**
+         * Line counts, carried rather than counted from `diff`.
+         *
+         * The client can count `+` and `-` lines itself, and did, but only
+         * while the diff was complete: a long change is truncated on the
+         * server, and a truncated diff no longer contains every added line, so
+         * counting it under-reports the change on exactly the rows where the
+         * size matters most.
+         */
+        additions?: number;
+        removals?: number;
+        /** True when `diff` is a preview of a larger change. */
+        truncated?: boolean;
+      }>;
       status: ItemStatus;
+      /** Sandbox time for the call, so a thread loaded from history shows
+       *  timings too. Live calls also get a wall-clock figure from the client. */
+      durationMs?: number;
     }
   | {
       type: "dynamicToolCall";
@@ -181,6 +201,72 @@ export interface TokenUsage {
   modelContextWindow: number | null;
   /** Reaper's soft context budget, distinct from the model's window. */
   contextSoftCap?: number | undefined;
+  /**
+   * Prompt pressure, computed on the server. Optional because an older payload
+   * (or a run whose model limit could not be resolved) may not carry it; the
+   * meter falls back to the raw count rather than inventing a percentage.
+   */
+  contextUsage?: ContextUsage | undefined;
+}
+
+/**
+ * How full the context window is, as a first-class value.
+ *
+ * Computed on the server rather than in the client, so every surface renders
+ * the same number from the same inputs instead of each re-deriving a
+ * percentage and disagreeing about the denominator.
+ *
+ * ### Why this is not simply `last.totalTokens / window`
+ *
+ * The quantity that matters is *context pressure*: how much of the next
+ * request's prompt budget is already spoken for. Accounting counters are not
+ * that. Summing input, output, reasoning, and cache reads gives a number for
+ * how much was billed, which is not the same as how many tokens will occupy
+ * the prompt, and it is how a context meter ends up reporting over 100%.
+ *
+ * Two corrections make the difference:
+ *
+ *  - `reservedOutputTokens` is subtracted from the limit. A request declares a
+ *    maximum output length, and that reservation is part of the budget: a
+ *    200k window with a 32k output reservation holds about 168k of prompt. A
+ *    meter that divides by the raw window reports a window that is fuller
+ *    than it can actually be.
+ *  - `percent` is clamped to 100. A value above 100 is never information; it
+ *    means the accounting model is wrong, and showing it blames the user for
+ *    arithmetic they cannot see.
+ *
+ * ### `estimated`
+ *
+ * While a prompt is being assembled its size can only be tokenizer-estimated.
+ * Once the provider answers, its reported usage replaces the estimate. A
+ * renderer must distinguish the two, because a meter that silently mixes them
+ * makes an estimate look authoritative and a real count look uncertain.
+ */
+export interface ContextUsage {
+  /** The model this measurement belongs to, when known. */
+  model?: string | undefined;
+  /** Provider-reported prompt tokens, or the tokenizer estimate. */
+  promptTokens: number;
+  /**
+   * The budget the percentage is against: the model's context window minus any
+   * reserved output. `limitSource` says where the window came from.
+   */
+  contextLimit: number | null;
+  /** Portion of `contextLimit` held back for the model's own output. */
+  reservedOutputTokens: number;
+  /** Whole percent, 0 to 100, or null when the limit is unknown. */
+  percent: number | null;
+  /** `contextLimit - promptTokens`, floored at 0, or null when unknown. */
+  remaining: number | null;
+  /** True when `promptTokens` is a tokenizer estimate rather than a real count. */
+  estimated: boolean;
+  /**
+   * Where `contextLimit` came from. Resolved in this order, and `unknown` is a
+   * real answer: a meter with no limit must render as "unknown" rather than
+   * inventing a denominator, because a wrong window is worse than none. It
+   * shows a confidently wrong percentage that no one can trace.
+   */
+  limitSource: "config" | "catalog" | "registry" | "unknown";
 }
 
 /**
@@ -217,6 +303,12 @@ export interface AppThread {
   /** Tool names this thread's agent must not call. */
   disabledTools?: string[];
   /**
+   * Whether this thread's shell commands are confined to its workspace.
+   * Always stated by the server, so `undefined` means only that no snapshot
+   * has arrived yet.
+   */
+  filesystemSandbox?: boolean;
+  /**
    * Whether any turn has ever run here. A thread with none is an unused
    * scratch thread, which is what makes it safe to reuse instead of creating
    * another one on the next visit.
@@ -229,7 +321,7 @@ export interface AppThread {
   approvalPolicy?: string;
   /**
    * Latest browser surface for this thread, folded from the most recent
-   * `browser_control` tool completion. Present only after the agent has used
+   * `browser_use` tool completion. Present only after the agent has used
    * the browser; the Browser panel renders this without knowing which tool
    * produced it.
    */
@@ -299,8 +391,8 @@ export interface BrowserInteractiveElement {
 
 /**
  * The state a tab renders in the Browser panel — the clickable-overlay
- * surfacing of `browser_control`'s `describePage()`. It lives in `shared` so
- * the reducer can fold the `tool.completed` result for a `browser_control` call
+ * surfacing of a completed `browser_use`. It lives in `shared` so
+ * the reducer can fold the `tool.completed` result for a `browser_use` call
  * into it without the UI ever understanding which tool produced the data.
  */
 export interface BrowserSurface {
@@ -319,4 +411,4 @@ export interface BrowserSurface {
 }
 
 /** The tool name the shared reducer watches for browser surfacing. */
-export const BROWSER_SURFACE_TOOL = "browser_control";
+export const BROWSER_SURFACE_TOOL = "browser_use";

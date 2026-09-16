@@ -152,7 +152,7 @@ export class PermissionClassifier {
       return { outcome: "safe", reasoning: "Read-only tool", confidence: 1.0 };
     }
 
-    if (call.name === "browser_control") {
+    if (call.name === "browser_use") {
       if (this.mode === "accept_edits") {
         return { outcome: "safe", reasoning: "Browser UI control — auto-accepted", confidence: 0.85 };
       }

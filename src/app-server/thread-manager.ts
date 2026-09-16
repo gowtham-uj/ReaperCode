@@ -1,3 +1,4 @@
+import type { ProviderCredentialStore } from "../config/provider-credentials.js";
 import type { ToolApprovalDecision } from "../tools/approval.js";
 import type { PermissionMode } from "../policy/classifier.js";
 import type { ThreadEventSubscriber, ThreadReplay } from "./event-bus.js";
@@ -8,6 +9,7 @@ import {
   type StartManagedTurnInput,
 } from "./managed-thread.js";
 import { runManagedTurn, type ManagedTurnRunner, type ManagedTurnRunnerInput } from "./managed-turn-runner.js";
+import type { ThreadBrowsers } from "./thread-browsers.js";
 import {
   ThreadStore,
   type CreateThreadMetadataInput,
@@ -22,8 +24,21 @@ export interface ReaperThreadManagerOptions {
   maxSteeringMessages?: number;
   approvalTimeoutMs?: number;
   turnRunner?: ManagedTurnRunner;
+  /**
+   * The per-thread browser owner, when the server has one.
+   *
+   * Owned here so it is created once for the server and shared by every thread,
+   * rather than each thread reaching for a connection of its own.
+   */
+  threadBrowsers?: ThreadBrowsers | undefined;
   onApprovalRequested?: (request: ManagedApprovalRequest) => void | Promise<void>;
   onApprovalSettled?: (request: ManagedApprovalRequest, decision: ToolApprovalDecision) => void;
+  /** Credential source for turns, so an embedded server reads the home it was
+   *  given instead of the developer's real one. */
+  credentials?: ProviderCredentialStore;
+  /** User-settings home, so a turn's disabled-provider list comes from the
+   *  settings file the browser is showing rather than the real one. */
+  settingsHome?: string;
 }
 
 export class ReaperThreadManager {
@@ -164,6 +179,15 @@ export class ReaperThreadManager {
     return { metadata: thread.metadata, turnInFlight: outcome.turnInFlight };
   }
 
+  async setThreadFilesystemSandbox(
+    threadId: string,
+    enabled: boolean,
+  ): Promise<{ metadata: ThreadMetadata; turnInFlight: boolean }> {
+    const thread = await this.resumeThread(threadId);
+    const outcome = await thread.setFilesystemSandbox(enabled);
+    return { metadata: thread.metadata, turnInFlight: outcome.turnInFlight };
+  }
+
   async setThreadName(threadId: string, name: string): Promise<ThreadMetadata> {
     const thread = await this.resumeThread(threadId);
     await thread.setName(name);
@@ -230,6 +254,7 @@ export class ReaperThreadManager {
       metadata,
       store: this.store,
       runTurn: runWithPermit,
+      ...(this.options.threadBrowsers ? { threadBrowsers: this.options.threadBrowsers } : {}),
       ...(this.options.maxReplayEvents !== undefined
         ? { maxReplayEvents: this.options.maxReplayEvents }
         : {}),
@@ -245,6 +270,10 @@ export class ReaperThreadManager {
       ...(this.options.onApprovalSettled
         ? { onApprovalSettled: this.options.onApprovalSettled }
         : {}),
+      // Threaded through so a turn resolves credentials from the home this
+      // server was configured with, rather than from the real one.
+      ...(this.options.credentials ? { credentials: this.options.credentials } : {}),
+      ...(this.options.settingsHome ? { settingsHome: this.options.settingsHome } : {}),
     });
   }
 

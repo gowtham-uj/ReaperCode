@@ -170,9 +170,24 @@ test("DeepSeek stream includes usage so cache hit rate can be audited", async ()
 
     assert.equal(capturedBody.messages[0].role, "system");
     assert.equal(capturedBody.stream_options.include_usage, true);
+    /*
+     * The usage is the *normalized* shape, not DeepSeek's raw snake_case.
+     *
+     * The streaming path used to emit the raw payload while `generate()` emitted
+     * `deepSeekUsageToTokenUsage(usage)`, so the two paths handed callers
+     * different shapes for the same field, and streaming is the path a web chat
+     * uses. What is asserted here is the contract every consumer now gets:
+     *
+     *   prompt_cache_hit_tokens  -> cacheReadTokens (128, cached input)
+     *   prompt_cache_miss_tokens -> folded into inputTokens (32 + 0 prompt)
+     *
+     * DeepSeek does not report a cache-write, so the miss portion is counted as
+     * plain input rather than as a write, which would double-count against the
+     * input total.
+     */
     const end = events.find((event) => event.type === "message_end");
-    assert.equal((end?.data as any).usage.prompt_cache_hit_tokens, 128);
-    assert.equal((end?.data as any).usage.prompt_cache_miss_tokens, 32);
+    assert.equal((end?.data as any).usage.cacheReadTokens, 128);
+    assert.equal((end?.data as any).usage.inputTokens, 32);
   } finally {
     restoreEnv("DEEPSEEK_API_KEY", previousApiKey);
   }

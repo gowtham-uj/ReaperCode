@@ -450,8 +450,8 @@ export const TOOL_METADATA: Record<string, ToolMetadata> = {
   },
 
   // ---- Browser ----
-  browser_control: {
-    name: "browser_control",
+  browser_use: {
+    name: "browser_use",
     category: "browser",
     risk_level: "high",
     is_read_only: false,

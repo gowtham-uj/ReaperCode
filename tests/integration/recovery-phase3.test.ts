@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -210,4 +210,111 @@ test("runtime engine preserves successful writes when a sibling write fails", as
   assert.equal(result.toolResults[1]?.ok, false);
   assert.match(disk, /42/);
   assert.match(trajectory, /"status":"failed"/);
+});
+
+/*
+ * A file-tool edit and a bash write to the same file are merged, not fatal.
+ *
+ * The report: an agent editing files and running commands had its turn killed
+ * mid-work with "The model call failed and the run was stopped: Unable to flush
+ * WAL because of direct file conflicts". Nothing was wrong with the model. The
+ * WAL stages file-tool writes in memory while bash writes straight to disk, so
+ * the next flush found disk changed under the staged copy and threw a hard
+ * conflict — and the rethrow was reported as a model failure.
+ *
+ * Two things had to be true and this asserts both:
+ *
+ *   1. When the two writes touch different lines, the flush three-way-merges
+ *      them and writes the combined result, with no conflict at all.
+ *   2. When they genuinely overlap, the flush still reports a conflict (it must
+ *      never silently pick a winner and lose the other edit) — but the path is
+ *      recoverable rather than a thrown error that ends the turn.
+ */
+test("a bash write to a file the WAL staged is merged when the edits do not overlap", async () => {
+  const workspaceRoot = await createTempWorkspace();
+  const target = path.join(workspaceRoot, "src", "app.ts");
+  await writeFile(target, "alpha\nbeta\ngamma\n", "utf8");
+
+  const recovery = new RecoverySession({
+    workspaceRoot, runId: "run-merge", sessionId: "s", traceId: "t", logLevel: "info",
+  });
+  // The model edits line 1 through a file tool (staged, not on disk yet).
+  await recovery.wal.stageWrite("src/app.ts", "ALPHA-edited\nbeta\ngamma\n");
+  // Bash appends a line, straight to disk.
+  await writeFile(target, "alpha\nbeta\ngamma\ndelta\n", "utf8");
+
+  const outcome = await recovery.flushForBarrier();
+  assert.equal(outcome.written, 1, "the merged write must land");
+  const final = await readFile(target, "utf8");
+  assert.match(final, /ALPHA-edited/, "the model's edit must survive the merge");
+  assert.match(final, /delta/, "the bash write must survive the merge");
+});
+
+test("a genuine overlap stays a conflict and never silently drops an edit", async () => {
+  const workspaceRoot = await createTempWorkspace();
+  const target = path.join(workspaceRoot, "src", "app.ts");
+  await writeFile(target, "alpha\nbeta\ngamma\n", "utf8");
+
+  const recovery = new RecoverySession({
+    workspaceRoot, runId: "run-conflict", sessionId: "s", traceId: "t", logLevel: "info",
+  });
+  await recovery.wal.stageWrite("src/app.ts", "alpha\nOURS\ngamma\n");
+  await writeFile(target, "alpha\nTHEIRS\ngamma\n", "utf8");
+
+  await assert.rejects(
+    () => recovery.flushForBarrier(),
+    (error: unknown) => error instanceof MergeConflictError,
+    "an overlapping edit must be reported as a conflict, not resolved by guessing",
+  );
+  const final = await readFile(target, "utf8");
+  assert.match(final, /THEIRS/, "the conflict must leave the on-disk version untouched");
+  assert.doesNotMatch(final, /<<<<<<</, "conflict markers must never be written to the user's file");
+});
+
+/*
+ * A write staged for a file that was then deleted on disk is not a conflict.
+ *
+ * This is the live shape from a real thread. Inside one eval call the agent ran
+ * `fs.writeFileSync` (disk), `tools.edit_file` (staged in the WAL), then
+ * `fs.unlinkSync` (disk delete) — a create/edit/cleanup in a single script. At
+ * the next barrier the flush found the file gone and reported "Unable to flush
+ * WAL because of direct file conflicts" against a file the same call had just
+ * deleted, which rolled back the edit and (before the scheduler fix) ended the
+ * turn. The delete is the later action and it wins; there is nothing to write.
+ */
+test("a staged write for a file deleted on disk is dropped, not a conflict", async () => {
+  const workspaceRoot = await createTempWorkspace();
+  const target = path.join(workspaceRoot, "audit-edit-test.txt");
+  await writeFile(target, "ONE\nTWO\nTHREE\n", "utf8");
+
+  const recovery = new RecoverySession({
+    workspaceRoot, runId: "run-deleted", sessionId: "s", traceId: "t", logLevel: "info",
+  });
+  // `tools.edit_file` stages the change...
+  await recovery.wal.stageWrite("audit-edit-test.txt", "ONE\nTWO-EDITED\nTHREE\n");
+  // ...then the same script deletes the file from disk.
+  await rm(target, { force: true });
+
+  // Must not throw: the delete is the intended end state.
+  const outcome = await recovery.flushForBarrier();
+  assert.equal(outcome.written, 0, "nothing to write; the file was deleted");
+  await assert.rejects(
+    () => readFile(target, "utf8"),
+    "the deleted file must not be resurrected from the staged copy",
+  );
+});
+
+test("a staged delete whose file is already gone is satisfied, not a conflict", async () => {
+  const workspaceRoot = await createTempWorkspace();
+  const target = path.join(workspaceRoot, "audit-del-test.txt");
+  await writeFile(target, "content\n", "utf8");
+
+  const recovery = new RecoverySession({
+    workspaceRoot, runId: "run-dbl-delete", sessionId: "s", traceId: "t", logLevel: "info",
+  });
+  await recovery.wal.stageDelete("audit-del-test.txt");
+  await rm(target, { force: true });
+
+  const outcome = await recovery.flushForBarrier();
+  assert.equal(outcome.deleted, 0, "already gone; the staged delete needs no action");
 });

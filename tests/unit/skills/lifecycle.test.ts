@@ -3,7 +3,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SkillLifecycle } from "../../../src/skills/lifecycle.js";
@@ -93,6 +93,65 @@ test("LC2: createDraft lands in the user skills root, trusted and ready to use",
     "nothing should be written to drafts/ — that directory is why create was a dead end",
   );
   rmSync(env.userHome, { recursive: true, force: true });
+});
+
+/**
+ * Uninstall must clear the skill from the index file that actually holds it.
+ *
+ * `SkillMemoryRegistry.load()` returns the first index that exists (project
+ * before user), so with both present the in-memory copy is the project one.
+ * `forget` used to delete from that copy and save only its scope, so a skill
+ * living in the *user* index was left behind: its folder was deleted but
+ * `index.json` still named it, and `activate_skill` then failed with
+ * "registered in the registry but no on-disk file was found" for a skill the
+ * user had just uninstalled. This asserts the user entry is really gone from
+ * disk after removal.
+ */
+test("LC10: uninstall purges the user index when a project index also exists", () => {
+  const userHome = mkdtempSync(join(tmpdir(), "reaper-uninstall-"));
+  const workspaceRoot = join(userHome, "ws");
+  const userSkills = join(userHome, ".reaper", "skills");
+  const projectSkills = join(workspaceRoot, ".reaper", "skills");
+  mkdirSync(projectSkills, { recursive: true });
+  // A pre-existing, valid project index — this is what load() returns first.
+  writeFileSync(
+    join(projectSkills, "index.json"),
+    JSON.stringify({ version: 1, skills: {}, health: {}, usage: [], updatedAt: new Date().toISOString() }, null, 2),
+  );
+  try {
+    const builtin = builtinSkillsRoot();
+    const resolver = new TrustResolver({
+      builtinRoot: builtin,
+      userHomeSkillsDir: userSkills,
+      projectSkillsDir: projectSkills,
+    });
+    const memory = new SkillMemoryRegistry({ workspaceRoot, userHome });
+    const registry = new SkillRegistry({ builtinMetadata: EMPTY_META, memory });
+    const lc = new SkillLifecycle({
+      registry, memory, resolver, workspaceRoot, userHome, builtinRoot: builtin,
+      runCommand: () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    });
+
+    lc.createDraft({
+      name: "stale-skill", version: "0.1.0", description: "d", category: "bug-fixing",
+      whenToUse: "a", allowedTools: ["file_view"], trust: "user-trusted",
+    }, "# stale\n");
+    const userIndex = join(userSkills, "index.json");
+    assert.ok(
+      Object.keys((JSON.parse(readFileSync(userIndex, "utf8")) as { skills: Record<string, unknown> }).skills).includes("stale-skill"),
+      "the skill must be in the user index before removal",
+    );
+
+    const out = lc.uninstall("stale-skill", "user");
+    assert.equal(out.ok, true);
+    assert.equal(existsSync(join(userSkills, "stale-skill")), false, "the folder must be gone");
+
+    const after = JSON.parse(readFileSync(userIndex, "utf8")) as { skills: Record<string, unknown>; health: Record<string, unknown> };
+    assert.deepEqual(Object.keys(after.skills), [], "the user index must not still name an uninstalled skill");
+    assert.deepEqual(Object.keys(after.health), [], "and its health record must go with it");
+  } finally {
+    rmSync(userHome, { recursive: true, force: true });
+  }
 });
 
 test("LC3: testSkill runs validation commands and reports ok", async () => {
@@ -187,4 +246,76 @@ test("LC9: the default runCommand executes through a shell", async () => {
   } finally {
     rmSync(userHome, { recursive: true, force: true });
   }
+});
+
+/**
+ * A validation command's stdout is returned, not dropped.
+ *
+ * The result carried only `stderr`, so a command that reported through stdout
+ * — a test summary, a `printf` marker — came back as
+ * `{ id, exitCode: 0, stderr: "" }` with its output nowhere. The audit hit this
+ * with a `printf` that printed a marker and got nothing back. A passing command
+ * whose evidence is discarded is barely better than no validation at all.
+ */
+test("LC11: testSkill returns a validation command's stdout", async () => {
+  /*
+   * No injected runner, for the same reason LC9 has none: the property under
+   * test is that a *real* command's stdout reaches the caller, and the shared
+   * `setupEnv` runner is a stub that answers with an empty stdout, so it could
+   * never show it. The lifecycle is built here with the default runner.
+   */
+  const userHome = mkdtempSync(join(tmpdir(), "reaper-skill-stdout-"));
+  const builtin = builtinSkillsRoot();
+  const lc = new SkillLifecycle({
+    registry: new SkillRegistry({ builtinMetadata: EMPTY_META }),
+    memory: new SkillMemoryRegistry({ workspaceRoot: userHome, userHome }),
+    resolver: new TrustResolver({
+      builtinRoot: builtin,
+      userHomeSkillsDir: join(userHome, ".reaper", "skills"),
+      projectSkillsDir: join(userHome, "project", ".reaper", "skills"),
+    }),
+    workspaceRoot: userHome,
+    userHome,
+    builtinRoot: builtin,
+  });
+  lc.createDraft({
+    name: "stdout-skill",
+    version: "0.1.0",
+    description: "Prints to stdout",
+    category: "bug-fixing",
+    whenToUse: "always",
+    allowedTools: ["file_view"],
+    trust: "draft",
+    validation: { commands: [{ id: "print", command: "printf STDOUT-MARKER-777" }] },
+  }, "# stdout\n");
+  const out = await lc.testSkill("stdout-skill");
+  assert.equal(out.ok, true);
+  const first = out.results[0] as { stdout?: string } | undefined;
+  assert.match(first?.stdout ?? "", /STDOUT-MARKER-777/);
+  rmSync(userHome, { recursive: true, force: true });
+});
+
+/**
+ * A skill with nothing to validate is not a failed validation.
+ *
+ * The remark "no validation commands declared" used to travel in the `error`
+ * field, so a healthy skill read as broken to anything checking `ok` or
+ * scanning for a non-empty `error`. It belongs in `note`.
+ */
+test("LC12: a skill with no validation commands reports ok with a note, not an error", async () => {
+  const env = setupEnv();
+  env.lc.createDraft({
+    name: "no-validation-skill",
+    version: "0.1.0",
+    description: "Nothing to validate",
+    category: "bug-fixing",
+    whenToUse: "always",
+    allowedTools: ["file_view"],
+    trust: "draft",
+  }, "# none\n");
+  const out = await env.lc.testSkill("no-validation-skill");
+  assert.equal(out.ok, true);
+  assert.equal(out.error, undefined, "having nothing to validate must not be reported as an error");
+  assert.match(out.note ?? "", /no validation commands/i);
+  rmSync(env.userHome, { recursive: true, force: true });
 });

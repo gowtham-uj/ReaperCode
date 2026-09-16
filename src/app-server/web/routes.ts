@@ -16,6 +16,8 @@ import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { ensureGitRepo } from "../../workspace/git.js";
+
 /** `execFile`, not `exec` — arguments are argv elements, so a path containing
  *  shell metacharacters is data and can never become a command. */
 const run = promisify(execFile);
@@ -96,7 +98,7 @@ export interface BrowserScreenshot {
  * input, so it gets the same sandbox as every other file read — and then two
  * extra constraints:
  *
- * - only `.png` (the one format `browser_control` writes), so this route cannot
+ * - only `.png` (the one format the browser tool writes), so this route cannot
  *   become a generic binary-file read with a spoofed content type;
  * - a byte cap, so a client cannot ask this route to stream an arbitrarily
  *   large blob that merely happens to live inside the workspace.
@@ -179,29 +181,21 @@ export class UploadTooLargeError extends Error {
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 /**
- * Give a thread's folder a repo, if it is still empty enough to want one.
+ * Give a thread's folder a repo, if one is wanted and it does not have one.
  *
- * This is what used to happen at thread creation, and moving it here is what
- * makes `git clone <url> .` work in a thread folder: git refuses to clone into
- * a directory that already holds a repository, so initializing eagerly made
- * the single most normal thing to do with an empty folder impossible.
- *
- * The condition is deliberately narrow — only a directory with no `HEAD` and
- * no entries of its own gets one. A folder holding a clone (or any project)
- * already has a repo, either its own or an ancestor's, and adding one would
- * be the confusion this is meant to prevent rather than a fix for it. A folder
- * with files but no repo is a deliberate "no git here" and is left alone.
+ * This delegates to `ensureGitRepo`, which is the single place the decision
+ * lives. It used to be a local check here — "no `.git` and no entries at all" —
+ * and that condition was never true in practice, because every thread workspace
+ * holds `.reaper/` from its first turn. So the repo the Diff tab and the
+ * checkpoint tools need was never created. `ensureGitRepo` counts `.reaper/`
+ * as Reaper's own and initializes around it, which is the case this exists for.
  *
  * Best-effort throughout: a workspace that cannot be read, or a machine without
  * git, gets no repo and no error, because the Diff tab having nothing to show
  * is a far smaller problem than the workbench failing to load.
  */
 async function ensureRepoForEmptyDirectory(root: string): Promise<void> {
-  const hasRepo = await stat(path.join(root, ".git")).then(() => true).catch(() => false);
-  if (hasRepo) return;
-  const entries = await readdir(root).catch(() => undefined);
-  if (!entries || entries.length > 0) return;
-  await run("git", ["init", "--quiet"], { cwd: root }).catch(() => undefined);
+  await ensureGitRepo(root).catch(() => undefined);
 }
 
 export async function gitStatus(root: string): Promise<{ entries: Array<{ status: string; path: string }> }> {

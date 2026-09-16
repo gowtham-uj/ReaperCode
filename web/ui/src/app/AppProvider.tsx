@@ -21,7 +21,27 @@ import type { ThreadSummary } from "../ThreadList.jsx";
 export const BFF_HTTP = import.meta.env.VITE_BFF_URL ?? window.location.origin;
 export const BFF_WS = BFF_HTTP.replace(/^http/, "ws") + "/ws";
 
-export interface QueuedMessage { id: string; text: string; sent: boolean }
+/**
+ * When a queued message is handed to the agent.
+ *
+ *  - `next-step` steers the running turn: the agent reads the message after the
+ *    tool call it is on, so it can course-correct mid-work.
+ *  - `after-turn` waits: the message starts a fresh turn only once the agent has
+ *    finished everything for the current prompt, so it is a follow-up rather
+ *    than an interruption.
+ *
+ * Both are user-visible and user-choosable per message, because the right one
+ * depends on what the message is: "stop, wrong file" wants `next-step`, "now do
+ * X as well" wants `after-turn`.
+ */
+export type QueueMode = "next-step" | "after-turn";
+
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  sent: boolean;
+  mode: QueueMode;
+}
 
 export interface AppContextValue {
   transcriptStore: TranscriptStore;
@@ -48,8 +68,11 @@ export interface AppContextValue {
   createThread(input: { workspaceRoot?: string; title?: string }): Promise<void>;
   switchThread(id: string): Promise<void>;
   queued: QueuedMessage[];
-  sendMessage(text: string): void;
+  /** Queue a message. Defaults to `next-step` when no mode is given. */
+  sendMessage(text: string, mode?: QueueMode): void;
   dropQueued(id: string): void;
+  /** Change when a queued message is handed to the agent. */
+  setQueuedMode(id: string, mode: QueueMode): void;
   interrupt(): void;
 }
 
@@ -183,12 +206,27 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
     setQueued((entries) => entries.filter((entry) => entry.id !== id));
   }, []);
 
-  const flushOne = useCallback(async (entry: Pick<QueuedMessage, "id" | "text">): Promise<boolean> => {
+  /**
+   * Deliver one queued message, honoring its mode.
+   *
+   * Returns false when the message is not eligible *yet* — a `next-step`
+   * message with no turn to steer, or an `after-turn` message while a turn is
+   * still running. Ineligible is not an error: the entry stays queued and the
+   * effect below re-runs it when the turn state changes, which is what makes
+   * "after the model finishes" mean what it says instead of firing early.
+   */
+  const flushOne = useCallback(async (entry: QueuedMessage): Promise<boolean> => {
     const active = clientRef.current;
     const id = threadIdRef.current;
     if (!active || !id) return false;
     const running = activeTurnRef.current;
-    if (running) {
+    if (entry.mode === "next-step" && running) {
+      /*
+       * Steer the running turn: the agent reads this after the tool call it is
+       * on. Acceptance here means "queued server-side", not "in the model's
+       * context yet" — the server publishes it as a user message at the drain
+       * point, and the transcript shows it then.
+       */
       const result = await active.call<{ accepted?: boolean; reason?: string }>("turn/steer", {
         threadId: id,
         turnId: running.id,
@@ -201,7 +239,10 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
           : `Message not accepted: ${result.reason ?? "unknown"}`);
         return false;
       }
+      // The turn closed between the check and the call; fall through to start.
     }
+    // `after-turn` waits for the running turn to end before it is sent.
+    if (entry.mode === "after-turn" && running) return false;
     await active.call("turn/start", { threadId: id, prompt: entry.text });
     return true;
   }, []);
@@ -210,19 +251,28 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
     if (flushing.current) return;
     flushing.current = true;
     try {
-      for (;;) {
-        const next = queuedRef.current.find((entry) => !entry.sent);
-        if (!next) return;
-        let delivered = false;
-        try { delivered = await flushOne(next); }
-        catch (cause) {
-          setError(cause instanceof Error ? cause.message : "Message could not be delivered");
-          return;
-        }
-        if (!delivered) return;
-        setQueued((entries) => entries.map((entry) => entry.id === next.id ? { ...entry, sent: true } : entry));
-        queuedRef.current = queuedRef.current.map((entry) => entry.id === next.id ? { ...entry, sent: true } : entry);
+      /*
+       * One message per pass. Delivering a second would race the first: a
+       * `turn/start` does not update `activeTurnRef` synchronously, so the loop
+       * would see "no turn running" and start another, and the thread would
+       * have two turns in flight. Marking the first sent changes `queued`, which
+       * re-runs the effect, which runs the next eligible message — so the queue
+       * still drains, one turn at a time.
+       */
+      const running = activeTurnRef.current;
+      const next = queuedRef.current.find(
+        (entry) => !entry.sent && (entry.mode === "next-step" || !running),
+      );
+      if (!next) return;
+      let delivered = false;
+      try { delivered = await flushOne(next); }
+      catch (cause) {
+        setError(cause instanceof Error ? cause.message : "Message could not be delivered");
+        return;
       }
+      if (!delivered) return;
+      setQueued((entries) => entries.map((entry) => entry.id === next.id ? { ...entry, sent: true } : entry));
+      queuedRef.current = queuedRef.current.map((entry) => entry.id === next.id ? { ...entry, sent: true } : entry);
     } finally {
       flushing.current = false;
     }
@@ -235,23 +285,51 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
   useEffect(() => {
     const held = queued.filter((entry) => entry.sent);
     if (held.length === 0) return;
-    const landedText = new Set<string>();
+    /*
+     * Count occurrences, not membership.
+     *
+     * A Set of landed texts says "somewhere in the transcript there is a message
+     * with this text" — and re-sending the same words the user sent before (a
+     * repeated "continue", or a retry after a failure) matched an *earlier*
+     * turn, so the queued card vanished while it was still pending. Counting
+     * lets each queued entry claim a distinct landed occurrence: the nth queued
+     * "continue" is removed by the nth landed "continue", not the first.
+     */
+    const landedCounts = new Map<string, number>();
     for (const turn of turns) {
       for (const item of turn.items) {
         if (item.type !== "userMessage") continue;
-        for (const part of item.content) if (part.type === "text") landedText.add(part.text.trim());
+        for (const part of item.content) {
+          if (part.type !== "text") continue;
+          const key = part.text.trim();
+          landedCounts.set(key, (landedCounts.get(key) ?? 0) + 1);
+        }
       }
     }
-    const landedIds = held.filter((entry) => landedText.has(entry.text.trim())).map((entry) => entry.id);
+    const consume = [...held].sort((a, b) => a.id.localeCompare(b.id));
+    const landedIds: string[] = [];
+    for (const entry of consume) {
+      const key = entry.text.trim();
+      const left = landedCounts.get(key) ?? 0;
+      if (left <= 0) continue;
+      landedCounts.set(key, left - 1);
+      landedIds.push(entry.id);
+    }
     if (landedIds.length > 0) setQueued((entries) => entries.filter((entry) => !landedIds.includes(entry.id)));
   }, [queued, turns]);
 
-  const sendMessage = useCallback((raw: string): void => {
+  const sendMessage = useCallback((raw: string, mode: QueueMode = "next-step"): void => {
     const text = raw.trim();
     if (!text || !clientRef.current || !threadIdRef.current) return;
     setError(undefined);
     queueSeq.current += 1;
-    setQueued((entries) => [...entries, { id: `q-${queueSeq.current}`, text, sent: false }]);
+    setQueued((entries) => [...entries, { id: `q-${queueSeq.current}`, text, sent: false, mode }]);
+  }, []);
+
+  const setQueuedMode = useCallback((id: string, mode: QueueMode): void => {
+    // An already-delivered message cannot be re-routed; only pending ones can.
+    setQueued((entries) => entries.map((entry) => (entry.id === id && !entry.sent ? { ...entry, mode } : entry)));
+    queuedRef.current = queuedRef.current.map((entry) => (entry.id === id && !entry.sent ? { ...entry, mode } : entry));
   }, []);
 
   const value = useMemo<AppContextValue>(() => ({
@@ -280,12 +358,13 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
     queued,
     sendMessage,
     dropQueued,
+    setQueuedMode,
     interrupt,
   }), [
     transcriptStore, session, client, threadId, thread, turns, activeTurn,
     lastEditedPath, workspaceRevision, connectionLabel, error, approvals, decide, background,
     catalog, settings, threads, threadsLoading, refreshThreads, createThread,
-    switchThread, queued, sendMessage, dropQueued, interrupt,
+    switchThread, queued, sendMessage, dropQueued, setQueuedMode, interrupt,
   ]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

@@ -89,14 +89,39 @@ test("accepts web search with minimum ten-page scrape", () => {
   assert.equal(toolCall.name, "web_search");
 });
 
-test("accepts browser control tool calls", () => {
+test("accepts browser use tool calls", () => {
+  /*
+   * The arguments are a program and a revision, not a verb and a ref.
+   *
+   * The old shape carried an `action`, a `ref` like `e0`, and per-action extras.
+   * A ref was a position in a snapshot rather than an identity, so it could point
+   * at a different element after a re-render, and the model had no way to know.
+   */
   const browserCall = ToolCallSchema.parse({
     id: "browser-1",
-    name: "browser_control",
-    args: { action: "click", ref: "e0", screenshot: true, humanize: true, headless: true, maxInteractive: 20 },
+    name: "browser_use",
+    args: {
+      code: `await page.getByRole("button", { name: "Continue" }).click();`,
+      intent: "Submit the application form",
+      expected_revision: 4,
+    },
   });
 
-  assert.equal(browserCall.name, "browser_control");
+  assert.equal(browserCall.name, "browser_use");
+});
+
+test("a browser_use call with no code is valid, because looking is a call", () => {
+  // The model's first look at a page, and the one it makes whenever the receipt
+  // reports something it does not understand. A tool that only acts forces it to
+  // write Playwright against a page it has not seen.
+  const look = ToolCallSchema.parse({ id: "browser-look", name: "browser_use", args: {} });
+  assert.equal(look.name, "browser_use");
+});
+
+test("a browser_use call cannot carry the old verb and ref", () => {
+  // Strict, so the removed shape fails loudly rather than being ignored and
+  // leaving the model believing it asked for a click.
+  assert.throws(() => ToolCallSchema.parse({ id: "b", name: "browser_use", args: { action: "click", ref: "e0" } }));
 });
 
 /*

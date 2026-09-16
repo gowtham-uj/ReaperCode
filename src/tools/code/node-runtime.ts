@@ -8,12 +8,22 @@
  * looks like, and every one of those scripts failed. The decision was to give
  * eval the whole language and the whole platform, and to accept what that costs.
  *
- * **What it costs.** A script that reads a file through `node:fs` does not pass
- * through Reaper's permission checks, approval prompts, or audit log. Code Mode
- * is therefore no longer a security boundary, and anything relying on it to be
- * one is wrong. `tools.*` still goes through the real executor with every check
- * intact — so the audited path exists and is the better one — but it is now a
- * convenience rather than the only door.
+ * **Where it runs now.** The worker is no longer a thread of Reaper's own
+ * process. On a host where bubblewrap can run, a relay starts inside the same
+ * mount namespace a `bash` command gets and owns the worker, so a script sees
+ * exactly what a shell command sees: the thread's workspace and read-only
+ * system directories, and nothing else. The old caveat — that a script could
+ * read `/etc/passwd` or another thread's workspace through `node:fs` — no
+ * longer holds there, because those paths are not mounted. See `transport.ts`
+ * for the two modes and `sandbox-relay.ts` for the program that runs inside.
+ *
+ * **What still costs.** Even sandboxed, a script that reads a file through
+ * `node:fs` does not pass through Reaper's permission checks, approval prompts,
+ * or audit log — it just cannot reach anything outside the workspace to do it
+ * with. `tools.*` still goes through the real executor with every check intact,
+ * so the audited path remains the better one. On a host without user
+ * namespaces the fallback is the in-process worker, which is unconfined, and
+ * the result's `sandboxed: false` is how a caller can tell.
  *
  * **What survives.** Everything about *liveness*, which is what a worker thread
  * is actually good at:
@@ -35,13 +45,12 @@
  * written to make the runtime replaceable; this is it being replaced.
  */
 
-import { Worker } from "node:worker_threads";
-
 import { buildChildEnv } from "../child-env.js";
 
 import { aliasesForTool } from "../normalize.js";
+import { createWorkerTransport, type WorkerMessage, type WorkerTransport } from "./transport.js";
 import { CODE_MODE_WORKER_SOURCE } from "./worker-source.js";
-import { liftTrailingBlocks, splitTrailingExpression, wrapWithTail, wrapWithoutTail } from "./transform.js";
+import { liftTrailingBlocks, liftTrailingDeclaration, splitTrailingExpression, wrapWithTail, wrapWithoutTail } from "./transform.js";
 import { DEFAULT_CODE_RUNTIME_LIMITS } from "./types.js";
 import type {
   CodeConsoleEntry,
@@ -66,20 +75,19 @@ export interface NodeRuntimeRunOptions {
   workspace?: string | undefined;
 }
 
-/** What the worker sends us. Mirrors the postMessage shapes in worker-source. */
-type WorkerMessage =
-  | { type: "console"; level: CodeConsoleEntry["level"]; text: string }
-  | { type: "consoleTruncated" }
-  | { type: "tool"; id: number; name: string; args: unknown }
-  | { type: "model"; id: number; args: unknown }
-  | { type: "child"; pid: number }
-  | { type: "done"; value: unknown }
-  | { type: "failed"; error: { name: string; message: string; stack?: string; code?: string; tool?: string } };
-
 export class ReaperNodeRuntime {
   private readonly limits: CodeRuntimeLimits;
-  private worker: Worker | undefined;
+  private worker: WorkerTransport | undefined;
   private disposed = false;
+  /** The workspace this runtime confines its scripts to, when it has one. */
+  private readonly workspace: string | undefined;
+  /**
+   * Whether the most recent run executed inside the bubblewrap sandbox.
+   *
+   * Kept on the runtime because the transport is created per run and the result
+   * has to carry the answer; `undefined` until a run has happened.
+   */
+  private lastRunSandboxed: boolean | undefined;
 
   /**
    * Every child process any eval in this run has started, so the run can outlive
@@ -101,6 +109,17 @@ export class ReaperNodeRuntime {
    *
    * A `Set` because the worker reports a pid on every async spawn and the same
    * handle can be reported more than once.
+   *
+   * **Only meaningful on the unconfined fallback.** A sandboxed run gets its own
+   * pid namespace (`--unshare-pid`), so the pids a script reports are local to
+   * that namespace and mean nothing on the host — `sleep 600` was pid 9 inside
+   * and pid 290929 outside. Killing the host process with pid 9 would be killing
+   * whatever unrelated process holds it. Sandboxed children are also already
+   * cleaned up without this: the namespace dies with the relay, and bubblewrap
+   * ties the relay to its parent with `--die-with-parent`, so terminating the
+   * transport takes the whole tree with it. The set is kept for the in-process
+   * runtime, where the worker's children really are this process's children and
+   * the pids are host pids.
    */
   private readonly childPids = new Set<number>();
 
@@ -118,13 +137,14 @@ export class ReaperNodeRuntime {
   static readonly PERSISTENCE_NOTE =
     "Each eval runs in a fresh worker, so variables from a previous eval in this run are not visible. Keep what you need inside one script, or write it to a file with tools.write.";
 
-  private constructor(limits: CodeRuntimeLimits) {
+  private constructor(limits: CodeRuntimeLimits, workspace: string | undefined) {
     this.limits = limits;
+    this.workspace = workspace;
   }
 
   /** Matches the QuickJS runtime's factory so the session layer is unchanged. */
-  static async create(limits?: Partial<CodeRuntimeLimits>): Promise<ReaperNodeRuntime> {
-    return new ReaperNodeRuntime({ ...DEFAULT_CODE_RUNTIME_LIMITS, ...limits });
+  static async create(limits?: Partial<CodeRuntimeLimits>, workspace?: string): Promise<ReaperNodeRuntime> {
+    return new ReaperNodeRuntime({ ...DEFAULT_CODE_RUNTIME_LIMITS, ...limits }, workspace);
   }
 
   get alive(): boolean {
@@ -143,12 +163,17 @@ export class ReaperNodeRuntime {
    * Fire and forget. The caller is tearing down and has no use for a promise,
    * and a child that ignores SIGTERM should cost a `kill -9`'s delay in the
    * background rather than a teardown that hangs on it.
+   *
+   * The reaping is skipped for a sandboxed run — see `childPids` for why the
+   * pids would be the wrong ones to kill, and why they do not need killing
+   * anyway. `lastRunSandboxed` is `undefined` before any run has happened, and
+   * an unconfined run is the case that still needs the sweep.
    */
   dispose(): void {
     this.disposed = true;
     void this.worker?.terminate();
     this.worker = undefined;
-    if (this.childPids.size > 0) {
+    if (this.lastRunSandboxed !== true && this.childPids.size > 0) {
       const pids = [...this.childPids];
       this.childPids.clear();
       void reapChildren(pids);
@@ -225,85 +250,90 @@ export class ReaperNodeRuntime {
       }
     }
 
-    const worker = new Worker(CODE_MODE_WORKER_SOURCE, {
-      eval: true,
-      workerData: {
-        source: options.source,
-        compiled: plan.source,
-        tools: options.tools.map((tool) => ({ name: tool.name, description: tool.description })),
-        schemas,
-        // Only so `'read' in tools` agrees with `tools.read(...)` actually
-        // working. `tools.list()` stays canonical.
-        aliases,
-        workspace: options.workspace ?? process.cwd(),
-        limits: { maxConsoleBytes: limits.maxConsoleBytes },
-        // Undefined when the host offers no models; the worker binds `models`
-        // to nothing in that case, so `models.list()` fails loudly and locally.
-        models,
+    /*
+     * The transport decides where the worker runs. On a host where bubblewrap
+     * works it starts a relay inside the same mount namespace a `bash` command
+     * gets and the worker runs in there, so the script sees only the workspace
+     * and read-only system directories. Where it cannot, the worker is a thread
+     * of this process, exactly as it was before — and `sandboxed` records which
+     * happened, because the difference is a security property the result states
+     * rather than hides.
+     */
+    const { transport: worker, sandboxed } = await createWorkerTransport({
+      workspaceRoot: options.workspace ?? this.workspace,
+      request: {
+        workerSource: CODE_MODE_WORKER_SOURCE,
+        workerData: {
+          source: options.source,
+          compiled: plan.source,
+          tools: options.tools.map((tool) => ({ name: tool.name, description: tool.description })),
+          schemas,
+          // Only so `'read' in tools` agrees with `tools.read(...)` actually
+          // working. `tools.list()` stays canonical.
+          aliases,
+          workspace: options.workspace ?? process.cwd(),
+          limits: { maxConsoleBytes: limits.maxConsoleBytes },
+          // Undefined when the host offers no models; the worker binds `models`
+          // to nothing in that case, so `models.list()` fails loudly and locally.
+          models,
+          /*
+           * When this eval's budget runs out, as an absolute timestamp.
+           *
+           * The worker cannot compute it: the timer below is the host's, and the
+           * thread has no way to ask what it was set to. Its only use is to hand a
+           * deadline to a *synchronous* child process, which is the one thing
+           * `terminate()` cannot interrupt — a thread parked in a blocking syscall
+           * never reaches the safepoint where termination is checked, so a script
+           * calling `execSync('sleep 300')` ignored the 30-second limit entirely.
+           * Giving the child the remaining budget makes it exit, which unblocks
+           * the thread, which lets the termination finally land.
+           */
+          deadlineAt,
+        },
         /*
-         * When this eval's budget runs out, as an absolute timestamp.
-         *
-         * The worker cannot compute it: the timer below is the host's, and the
-         * thread has no way to ask what it was set to. Its only use is to hand a
-         * deadline to a *synchronous* child process, which is the one thing
-         * `terminate()` cannot interrupt — a thread parked in a blocking syscall
-         * never reaches the safepoint where termination is checked, so a script
-         * calling `execSync('sleep 300')` ignored the 30-second limit entirely.
-         * Giving the child the remaining budget makes it exit, which unblocks
-         * the thread, which lets the termination finally land.
+         * The memory ceiling, enforced by V8 rather than by us. Exceeding it
+         * raises an `ERR_WORKER_OUT_OF_MEMORY` exit on this thread alone — the
+         * host keeps running, which is the entire reason the script is over here
+         * and not on the main thread.
          */
-        deadlineAt,
+        resourceLimits: {
+          maxOldGenerationSizeMb: Math.max(16, Math.floor(limits.memoryBytes / (1024 * 1024))),
+          maxYoungGenerationSizeMb: 32,
+        },
+        /*
+         * The same environment a `bash` child gets, and for the same reason.
+         *
+         * A Worker inherits the parent's environment by default, which would
+         * hand the model's script `process.env` complete with Reaper's own
+         * provider keys — the ones the credential store exists to keep out of
+         * reach. `bash` has been sanitised since the beginning; Code Mode is the
+         * same class of surface (Reaper's own process running code Reaper did
+         * not write) and reaching it through `eval` instead of through a shell
+         * should not be the way around that.
+         *
+         * This is not a sandbox and is not meant to be one. Everything an
+         * ordinary child process sees — PATH, HOME, the project's own
+         * variables — still arrives. What is withheld is Reaper's credentials
+         * and anything else shaped like a secret. A script that genuinely needs
+         * a provider key should get it the way the model does: by asking for it.
+         */
+        env: buildChildEnv({ workspaceRoot: options.workspace ?? process.cwd() }).env,
+        /*
+         * `await import('node:fs')` is what the live model writes, and without
+         * this flag it fails with "A dynamic import callback was invoked without
+         * --experimental-vm-modules" — a message about vm internals, raised at
+         * the model's most natural line, that no amount of rewriting its script
+         * would fix.
+         *
+         * Set on the worker rather than on the host process: `execArgv` applies
+         * to this thread alone, so Code Mode gets the capability without Reaper
+         * itself having to be launched with an experimental flag.
+         */
+        execArgv: ["--experimental-vm-modules"],
       },
-      /*
-       * The memory ceiling, enforced by V8 rather than by us. Exceeding it
-       * raises an `ERR_WORKER_OUT_OF_MEMORY` exit on this thread alone — the
-       * host keeps running, which is the entire reason the script is over here
-       * and not on the main thread.
-       */
-      resourceLimits: {
-        maxOldGenerationSizeMb: Math.max(16, Math.floor(limits.memoryBytes / (1024 * 1024))),
-        maxYoungGenerationSizeMb: 32,
-      },
-      /*
-       * stdout/stderr stay with the parent so a `process.stdout.write` from the
-       * script — or from a package it imported — lands in Reaper's own output
-       * instead of vanishing. Console is captured separately and structured;
-       * this is the catch-all for everything that writes to the fd directly.
-       */
-      stdout: false,
-      stderr: false,
-      /*
-       * The same environment a `bash` child gets, and for the same reason.
-       *
-       * A Worker inherits the parent's environment by default, which would
-       * hand the model's script `process.env` complete with Reaper's own
-       * provider keys — the ones the credential store exists to keep out of
-       * reach. `bash` has been sanitised since the beginning; Code Mode is the
-       * same class of surface (Reaper's own process running code Reaper did
-       * not write) and reaching it through `eval` instead of through a shell
-       * should not be the way around that.
-       *
-       * This is not a sandbox and is not meant to be one. Everything an
-       * ordinary child process sees — PATH, HOME, the project's own
-       * variables — still arrives. What is withheld is Reaper's credentials
-       * and anything else shaped like a secret. A script that genuinely needs
-       * a provider key should get it the way the model does: by asking for it.
-       */
-      env: buildChildEnv({ workspaceRoot: options.workspace ?? process.cwd() }).env,
-      /*
-       * `await import('node:fs')` is what the live model writes, and without
-       * this flag it fails with "A dynamic import callback was invoked without
-       * --experimental-vm-modules" — a message about vm internals, raised at
-       * the model's most natural line, that no amount of rewriting its script
-       * would fix.
-       *
-       * Set on the worker rather than on the host process: `execArgv` applies
-       * to this thread alone, so Code Mode gets the capability without Reaper
-       * itself having to be launched with an experimental flag.
-       */
-      execArgv: ["--experimental-vm-modules"],
     });
     this.worker = worker;
+    this.lastRunSandboxed = sandboxed;
 
     /*
      * A worker holds the process open. Code Mode must not be the reason a CLI
@@ -381,7 +411,7 @@ export class ReaperNodeRuntime {
         resolve();
       };
 
-      worker.on("message", (message: WorkerMessage) => {
+      worker.onMessage((message: WorkerMessage) => {
         switch (message.type) {
           case "console":
             pushConsole(message.level, message.text);
@@ -547,7 +577,7 @@ export class ReaperNodeRuntime {
         }
       });
 
-      worker.on("error", (error: Error & { code?: string }) => {
+      worker.onError((error: Error & { code?: string }) => {
         /*
          * A worker `error` is the thread dying rather than the script throwing
          * — the script's own throw arrives as a `failed` message. The case that
@@ -569,7 +599,7 @@ export class ReaperNodeRuntime {
         finish();
       });
 
-      worker.on("exit", () => {
+      worker.onExit(() => {
         /*
          * Reached when the thread was terminated — timeout, cancellation, the
          * tool-call cap — since a clean finish has already resolved through
@@ -603,6 +633,34 @@ export class ReaperNodeRuntime {
      */
     if (status === "completed" && !plan.returnsValue) {
       note = "The script produced no value. The result is the last expression — end with the value you want back, not with a declaration or a loop.";
+    } else if (status === "completed" && bounded === undefined && plan.trailingConsoleCall) {
+      /*
+       * The other silent case, and the more common one in practice.
+       *
+       * `console.log(summary)` as the last statement *is* an expression, so the
+       * rewrite succeeds and `returnsValue` is true — but the value of a log
+       * call is `undefined`, so the model gets its output in the console array
+       * and nothing in the result, with no explanation. A model that has just
+       * printed what it wanted to say reasonably believes it returned it.
+       *
+       * Detected from the trailing expression rather than from the console
+       * array, because a script may log throughout and still end with a value;
+       * only the *last* statement decides what comes back. `bounded` must also
+       * be undefined, so a script that logs and then evaluates to something is
+       * left alone.
+       */
+      note = "The script printed output but produced no value. `console.log` returns undefined, so it cannot be the last statement if you want a result back — end with the value itself (or `log(x); x`).";
+    } else if (status === "completed" && bounded === undefined && plan.liftedBlock) {
+      /*
+       * The last silent case: a script ending in a block was rewritten so each
+       * branch returns, but the branch's final statement is a declaration, so
+       * it returns `undefined`. `try { const x = await f(); } catch {}` is the
+       * shape this happens to, and the rewrite is not wrong — there genuinely
+       * is no value there. Saying so is the point, because `returnsValue` is
+       * true after a successful lift and the model would otherwise get an empty
+       * result that looks like a bug in the tool.
+       */
+      note = "The script produced no value. Its last statement is a block, and the final line inside that block is a declaration rather than an expression — end it with the value you want back.";
     }
 
     return {
@@ -614,6 +672,7 @@ export class ReaperNodeRuntime {
       consoleTruncated,
       toolCalls,
       durationMs: Date.now() - started,
+      ...(this.lastRunSandboxed !== undefined ? { sandboxed: this.lastRunSandboxed } : {}),
       ...(failure ? { error: failure } : {}),
       ...(toolError ? { toolError } : {}),
       ...(note ? { note } : {}),
@@ -633,7 +692,7 @@ export class ReaperNodeRuntime {
     context: {
       host: CodeToolHost;
       limits: CodeRuntimeLimits;
-      worker: Worker;
+      worker: WorkerTransport;
       signal: AbortSignal | undefined;
       count: () => number;
       record: (entry: CodeToolCallRecord) => void;
@@ -725,7 +784,7 @@ export class ReaperNodeRuntime {
     message: { id: number; args: unknown },
     context: {
       host: CodeToolHost;
-      worker: Worker;
+      worker: WorkerTransport;
       signal: AbortSignal | undefined;
       record: (entry: CodeToolCallRecord) => void;
     },
@@ -822,7 +881,7 @@ export class ReaperNodeRuntime {
    * broken" rather than "your model call was rejected".
    */
   private recordModelFailure(
-    context: { worker: Worker; record: (entry: CodeToolCallRecord) => void },
+    context: { worker: WorkerTransport; record: (entry: CodeToolCallRecord) => void },
     id: number,
     started: number,
     error: { code: string; message: string },
@@ -901,7 +960,32 @@ async function reapChildren(pids: number[]): Promise<void> {
   await Promise.all(stubborn.map((pid) => kill(pid, "SIGKILL")));
 }
 
-function planCompletion(source: string): { source: string; returnsValue: boolean } {
+/**
+ * Whether a trailing expression is a `console.*` call.
+ *
+ * Only the last statement matters, because that is the one whose value the
+ * runtime returns. Matched on the call rather than on `console.` appearing
+ * anywhere, so a script that logs throughout and ends with a real expression is
+ * not flagged.
+ */
+function isTrailingConsoleCall(tail: string): boolean {
+  return /^\s*(?:await\s+)?console\s*\.\s*(?:log|info|warn|error|debug|trace|dir)\s*[(`]/.test(tail);
+}
+
+interface CompletionPlan {
+  source: string;
+  /** Whether the rewrite produced something to return. False means the script
+   *  ran as written and its value is whatever a bare script yields: nothing. */
+  returnsValue: boolean;
+  /** The trailing expression is a `console.*` call, whose value is `undefined`
+   *  however much it printed. */
+  trailingConsoleCall: boolean;
+  /** The script was rewritten by lifting a trailing block, so `returnsValue` is
+   *  true but the value comes from inside that block. */
+  liftedBlock: boolean;
+}
+
+function planCompletion(source: string): CompletionPlan {
   const verify = (candidate: string): boolean => {
     try {
       new Function(candidate);
@@ -918,7 +1002,14 @@ function planCompletion(source: string): { source: string; returnsValue: boolean
    * candidates pass here and behave differently there.
    */
   const split = splitTrailingExpression(source, (candidate) => verify(`return ${wrapWithoutTail(candidate)};`));
-  if (split) return { source: wrapWithTail(split.prefix, split.tail), returnsValue: true };
+  if (split) {
+    return {
+      source: wrapWithTail(split.prefix, split.tail),
+      returnsValue: true,
+      trailingConsoleCall: isTrailingConsoleCall(split.tail),
+      liftedBlock: false,
+    };
+  }
 
   /*
    * The awkward shape: a script ending in `try { … } catch { … }`, where the
@@ -928,8 +1019,24 @@ function planCompletion(source: string): { source: string; returnsValue: boolean
    * `await` and `return` that cannot compile on its own.
    */
   const lifted = liftTrailingBlocks(source, (candidate) => verify(`return ${wrapWithoutTail(candidate)};`));
-  if (lifted) return { source: wrapWithoutTail(lifted), returnsValue: true };
-  return { source: wrapWithoutTail(source), returnsValue: false };
+  if (lifted) {
+    return { source: wrapWithoutTail(lifted), returnsValue: true, trailingConsoleCall: false, liftedBlock: true };
+  }
+
+  /*
+   * A script whose last statement is a declaration — `const { matches } = await
+   * tools.grep_search(…)` — is not an expression, so the split above cannot
+   * recover it, and it is not a block, so the lift above cannot either. It is
+   * the single most common way a model loses a result, and the codemode skill
+   * calls it out by name, yet it produced nothing back. This appends a
+   * `return <binding>;` after the untouched source, so the value the model
+   * already computed comes back instead of a "produced no value" note.
+   */
+  const liftedDeclaration = liftTrailingDeclaration(source, verify);
+  if (liftedDeclaration) {
+    return { source: liftedDeclaration, returnsValue: true, trailingConsoleCall: false, liftedBlock: false };
+  }
+  return { source: wrapWithoutTail(source), returnsValue: false, trailingConsoleCall: false, liftedBlock: false };
 }
 
 /** The sentence that explains a non-`completed` status to the model. */

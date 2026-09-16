@@ -89,6 +89,9 @@ interface TunablesCache {
     bashTailPreviewChars: number;
     /** When outputs > this many chars they get persisted to disk (default 30K). */
     bashPersistThresholdChars: number;
+    /** A user prompt larger than this many chars is spilled to a file instead
+     *  of entering the conversation (default 20K, ~5K tokens). */
+    promptSpillChars: number;
     /** Threshold ratios for context-warning-state telemetry. */
     warningThresholdRatio: number;
     errorThresholdRatio: number;
@@ -141,43 +144,44 @@ interface TunablesCache {
   browser: {
     executablePath: string;
     headless: boolean;
-  };
-  computer: {
-    autoApprove: boolean;
-    enableGlobalHook: boolean;
+    /**
+     * The CDP endpoint of the browser Reaper attaches to.
+     *
+     * Configuration rather than a constant because it is the one thing that
+     * changes if the arrangement does: `:9222` is Chrome's own remote-debugging
+     * port, `:9223` is Steel's nginx forwarding to the same Chrome, and if Steel
+     * ever became launcher-only this would point straight at Chrome. All three
+     * are the same browser from Playwright's side.
+     */
+    cdpUrl: string;
+    /**
+     * Close a thread's browser after this long without use, in milliseconds.
+     *
+     * A browser per thread is memory held per thread, and a chat someone
+     * abandoned an hour ago should not keep a page open forever. Ten minutes is
+     * long enough that a conversation with a pause in it does not lose its
+     * login.
+     */
+    idleCloseMs: number;
   };
   concurrency: {
     queueMaxConcurrency: number;
     tuiNoQueue: boolean;
   };
   engine: {
-    langgraphRecursionLimit: number;
     liveModelTimeoutMs: number;
     mainAgentTransportRetryLimit: number;
     modelCallTimeoutMs: number;
-    modelRouterLlmDecisions: boolean;
     permissionMode: "yolo" | "accept_edits" | "auto" | "strict";
     printReasoning: boolean;
     progressGuardV2: boolean;
     rescueMaxAttemptsPerDiagnostic: number;
     rescueMaxStagnantTurns: number;
     streamIdleTimeoutMs: number;
-    strictCompletionGate: boolean;
     strictTempCleanup: boolean;
     swarmDebug: boolean;
-    unattendedRetry: boolean;
-  };
-  retry: {
-    baseDelayMs: number;
-    deadlineHeadroomMs: number;
-    fallbackAfterOverloaded: boolean;
-    keepAliveMs: number;
-    maxDelayMs: number;
-    maxRetries: number;
-    runDeadlineEpochMs: number;
   };
   sandbox: {
-    tbenchComposeProject: string;
     tbenchContainerName: string;
     tbenchHostWorkspace: string;
     workspacePathAliases: string;
@@ -223,6 +227,7 @@ const DEFAULTS: TunablesCache = {
     bashHeadPreviewChars: 1_200,
     bashTailPreviewChars: 1_200,
     bashPersistThresholdChars: 25_000,
+    promptSpillChars: 20_000,
     modelPromotionEnabled: true,
     modelPromotionThresholdRatio: 0.5,
     modelPromotionTargetRole: "secondary_model" as string | null,
@@ -246,37 +251,22 @@ const DEFAULTS: TunablesCache = {
     maxOutputLines: 5_000,
     termGraceMs: 5_000,
   },
-  browser: { executablePath: "", headless: true },
-  computer: { autoApprove: false, enableGlobalHook: false },
+  browser: { executablePath: "", headless: true, cdpUrl: "http://127.0.0.1:9222", idleCloseMs: 600_000 },
   concurrency: { queueMaxConcurrency: 4, tuiNoQueue: false },
   engine: {
-    langgraphRecursionLimit: 50,
     liveModelTimeoutMs: 60_000,
     mainAgentTransportRetryLimit: 2,
     modelCallTimeoutMs: 120_000,
-    modelRouterLlmDecisions: false,
     permissionMode: "yolo",
     printReasoning: false,
     progressGuardV2: true,
     rescueMaxAttemptsPerDiagnostic: 1,
     rescueMaxStagnantTurns: 8,
     streamIdleTimeoutMs: 30_000,
-    strictCompletionGate: true,
     strictTempCleanup: true,
     swarmDebug: false,
-    unattendedRetry: true,
-  },
-  retry: {
-    baseDelayMs: 500,
-    deadlineHeadroomMs: 5_000,
-    fallbackAfterOverloaded: true,
-    keepAliveMs: 1_500,
-    maxDelayMs: 8_000,
-    maxRetries: 3,
-    runDeadlineEpochMs: 0,
   },
   sandbox: {
-    tbenchComposeProject: "",
     tbenchContainerName: "",
     tbenchHostWorkspace: "",
     workspacePathAliases: "",
@@ -328,6 +318,7 @@ function buildTunables(config: ReaperConfig): TunablesCache {
       bashHeadPreviewChars: Number(cm.bashHeadPreviewChars ?? 1_200),
       bashTailPreviewChars: Number(cm.bashTailPreviewChars ?? 1_200),
       bashPersistThresholdChars: Number(cm.bashPersistThresholdChars ?? 25_000),
+      promptSpillChars: Number(cm.promptSpillChars ?? 20_000),
       modelPromotionEnabled: Boolean(cm.modelPromotionEnabled ?? true),
       modelPromotionThresholdRatio: Number(cm.modelPromotionThresholdRatio ?? 0.5),
       modelPromotionTargetRole: ((): string | null => {
@@ -357,37 +348,22 @@ function buildTunables(config: ReaperConfig): TunablesCache {
       maxOutputLines: rt.bgMaxOutputLines,
       termGraceMs: rt.bgTermGraceMs,
     },
-    browser: { executablePath: rt.browserExecutablePath, headless: rt.browserHeadless },
-    computer: { autoApprove: rt.computerAutoApprove, enableGlobalHook: rt.computerEnableGlobalHook },
+    browser: { executablePath: rt.browserExecutablePath, headless: rt.browserHeadless, cdpUrl: rt.browserCdpUrl, idleCloseMs: rt.browserIdleCloseMs },
     concurrency: { queueMaxConcurrency: rt.queueMaxConcurrency, tuiNoQueue: rt.tuiNoQueue },
     engine: {
-      langgraphRecursionLimit: rt.langgraphRecursionLimit,
       liveModelTimeoutMs: rt.liveModelTimeoutMs,
       mainAgentTransportRetryLimit: rt.mainAgentTransportRetryLimit,
       modelCallTimeoutMs: rt.modelCallTimeoutMs,
-      modelRouterLlmDecisions: rt.modelRouterLlmDecisions,
       permissionMode: rt.permissionMode,
       printReasoning: rt.printReasoning,
       progressGuardV2: rt.progressGuardV2,
       rescueMaxAttemptsPerDiagnostic: rt.rescueMaxAttemptsPerDiagnostic,
       rescueMaxStagnantTurns: rt.rescueMaxStagnantTurns,
       streamIdleTimeoutMs: rt.streamIdleTimeoutMs,
-      strictCompletionGate: rt.strictCompletionGate,
       strictTempCleanup: rt.strictTempCleanup,
       swarmDebug: rt.swarmDebug,
-      unattendedRetry: rt.unattendedRetry,
-    },
-    retry: {
-      baseDelayMs: rt.retryBaseDelayMs,
-      deadlineHeadroomMs: rt.retryDeadlineHeadroomMs,
-      fallbackAfterOverloaded: rt.retryFallbackAfterOverloaded,
-      keepAliveMs: rt.retryKeepAliveMs,
-      maxDelayMs: rt.retryMaxDelayMs,
-      maxRetries: rt.retryMaxRetries,
-      runDeadlineEpochMs: rt.runDeadlineEpochMs,
     },
     sandbox: {
-      tbenchComposeProject: rt.tbenchComposeProject,
       tbenchContainerName: rt.tbenchContainerName,
       tbenchHostWorkspace: rt.tbenchHostWorkspace,
       workspacePathAliases: rt.workspacePathAliases,
@@ -426,16 +402,8 @@ export function getEngineTunables(): Readonly<TunablesCache["engine"]> {
   return getTunables().engine;
 }
 
-export function getRetryTunables(): Readonly<TunablesCache["retry"]> {
-  return getTunables().retry;
-}
-
 export function getSandboxTunables(): Readonly<TunablesCache["sandbox"]> {
   return getTunables().sandbox;
-}
-
-export function getComputerTunables(): Readonly<TunablesCache["computer"]> {
-  return getTunables().computer;
 }
 
 export function getBrowserTunables(): Readonly<TunablesCache["browser"]> {

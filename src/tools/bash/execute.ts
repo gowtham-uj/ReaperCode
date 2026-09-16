@@ -41,6 +41,11 @@ export interface BashExecutionContext {
    * would otherwise strip them. Default empty.
    */
   childEnvAllowlist?: ReadonlyArray<string>;
+  /**
+   * Whether the command runs inside this thread's filesystem sandbox.
+   * Defaults to on; `false` is the thread's explicit opt-out.
+   */
+  sandbox?: boolean | undefined;
 }
 
 export interface BashExecutionResult extends BashOutput {
@@ -127,6 +132,7 @@ export async function executeBashCommand(
     timeoutMs,
     ...(description ? { summary: description } : {}),
     ...(input.run_in_background ? { isBackground: true } : {}),
+    ...(ctx.sandbox === false ? { sandbox: false } : {}),
   };
 
   // The bounded accumulator lives for the duration of the call. When

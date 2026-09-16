@@ -47,6 +47,8 @@ export interface SettingsReadResult {
   pinnedSkills: string[];
   /** Skills the user has switched off (`runtimeTunables.disabledSkills`). */
   disabledSkills: string[];
+  /** Providers the user has switched off (`runtimeTunables.disabledProviders`). */
+  disabledProviders: string[];
   /** Browser-facing settings are applied by the app-server immediately. */
   restartsRequired: boolean;
 }
@@ -76,6 +78,8 @@ export interface SettingsWriteParams {
    * state neither asked for. An empty array means "nothing is switched off".
    */
   disabledSkills?: string[] | undefined;
+  /** Providers switched off, replaced wholesale. */
+  disabledProviders?: string[] | undefined;
 }
 
 /**
@@ -155,8 +159,24 @@ export function readSettings(_workspaceRoot: string, options: SettingsStoreOptio
      */
     pinnedSkills: normalizePinnedNames(tunables.pinnedSkills),
     disabledSkills: normalizePinnedNames(tunables.disabledSkills),
+    disabledProviders: normalizePinnedNames(tunables.disabledProviders),
     restartsRequired: false,
   };
+}
+
+/**
+ * The provider ids the user has switched off, read straight from settings.
+ *
+ * A narrow reader rather than `readSettings(...).disabledProviders` because the
+ * callers that need it — the `provider/list` handler and the turn runner —
+ * want only this one field and should not build the whole settings summary to
+ * get it. Shares `normalizePinnedNames` with the read/write paths so all three
+ * agree on what the list is.
+ */
+export function readDisabledProviders(options: SettingsStoreOptions = {}): string[] {
+  const { raw } = readRawUserSettings(settingsHome(options));
+  const tunables = isPlainObject(raw.runtimeTunables) ? raw.runtimeTunables : {};
+  return normalizePinnedNames(tunables.disabledProviders);
 }
 
 export function writeSettings(workspaceRoot: string, input: SettingsWriteParams, options: SettingsStoreOptions = {}): SettingsReadResult {
@@ -195,6 +215,13 @@ export function writeSettings(workspaceRoot: string, input: SettingsWriteParams,
       next.runtimeTunables = {
         ...(isPlainObject(next.runtimeTunables) ? next.runtimeTunables : {}),
         disabledSkills: normalizePinnedNames(input.disabledSkills).slice(0, MAX_DISABLED_SKILLS),
+      };
+    }
+
+    if (input.disabledProviders !== undefined) {
+      next.runtimeTunables = {
+        ...(isPlainObject(next.runtimeTunables) ? next.runtimeTunables : {}),
+        disabledProviders: normalizePinnedNames(input.disabledProviders),
       };
     }
 

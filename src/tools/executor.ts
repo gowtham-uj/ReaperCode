@@ -28,7 +28,8 @@ import { skimFileTool } from "./read/skim-file.js";
 import { inspectEnvironmentTool } from "./read/inspect-env.js";
 import { activateSkillTool } from "./read/activate-skill.js";
 import { webSearchTool, type WebSearchArgs } from "./read/web-search.js";
-import { ComputerBrowserController } from "./browser/computer-browser.js";
+import type { ThreadBrowserRuntime } from "../browser/thread-runtime.js";
+import { executeBrowserUse } from "./browser/execute-browser-use.js";
 import { CORE_TOOL_NAMES, toolRegistry } from "./registry.js";
 import { assertDeletablePath, assertDeletableTarget, deleteFileTool } from "./write/delete-file.js";
 import { applyEditFileContent, editFileTool } from "./write/edit-file.js";
@@ -103,6 +104,15 @@ export interface ToolExecutorOptions {
    */
   callerRole?: string;
   /**
+   * The thread's browser, when one is available.
+   *
+   * Absent in tests and in direct construction, which is deliberate: the tool
+   * then fails with a clear message rather than hanging on a connection that
+   * does not exist. One browser per thread, owned by the app-server, so pages
+   * and logins survive between calls.
+   */
+  threadBrowser?: ThreadBrowserRuntime | undefined;
+  /**
    * When true, the run is inside a trusted sandbox and high-risk shell
    * commands / approval-required tools skip the per-call approval gate.
    * Default false (fail closed for direct callers).
@@ -110,6 +120,13 @@ export interface ToolExecutorOptions {
   trustedSandbox?: boolean;
   /** Sandbox mode. When set, SandboxPolicy gates mutating tools/shell. */
   sandboxMode?: SandboxMode;
+  /**
+   * Whether shell commands run inside a kernel-enforced filesystem sandbox
+   * confined to `workspaceRoot`. Defaults to on. The thread's own setting is
+   * the only thing that turns it off, and it is read per turn so switching it
+   * takes effect on the next command rather than requiring a new thread.
+   */
+  filesystemSandbox?: boolean;
   /**
    * Tool names this thread has switched off.
    *
@@ -355,10 +372,28 @@ export class ToolExecutor {
   private localRulesHash?: string;
   private readonly backgroundProcessManager: BackgroundProcessManager;
   private unsubscribeBackgroundOutput: (() => void) | undefined;
-  private computerBrowserController: ComputerBrowserController | undefined;
   private currentWorkingDirectory: string;
   private consecutiveUnknownTools = 0;
   private lastUnknownToolName?: string;
+  /**
+   * How deep the executor currently is inside Code Mode's `eval`.
+   *
+   * A script's `tools.*` calls come back through this same executor, and
+   * without this they were journalled as if the *model* had called them: each
+   * one wrote a top-level `tool_call` row whose `decision_id` was the script's
+   * own call id (a bare `"1"`, `"2"`, `"3"`), which the journal projection turns
+   * into a `role: "tool"` message. Nothing in the top-level assistant turn
+   * announced those ids, so on resume they rehydrated as orphans and the
+   * gateway dropped them — 38 of them in one live session, silently, because
+   * the pairing repair keeps the request sendable and the loss is only visible
+   * in a log line.
+   *
+   * They do not belong at the top level. An inner call is part of the eval's
+   * execution, and the eval's own result already carries a `toolCalls` record
+   * of every call it made, inside the row that owns them. Zero means "not
+   * nested"; every `eval` dispatch increments it around the call.
+   */
+  private codeModeDepth = 0;
   /** Workflow 3: permission mode and child-env allowlist (typed enum,
    *  not arbitrary string). Used by the classifier enforcement and the
    *  sanitized child environment builder. */
@@ -530,6 +565,26 @@ export class ToolExecutor {
     return undefined;
   }
 
+  /**
+   * Write a `tool_call` trajectory row, unless this call is Code Mode's own.
+   *
+   * A top-level tool call belongs in the journal: the projection turns it into
+   * the `role: "tool"` message that answers the assistant's `tool_calls`, and
+   * that pairing is what resume replays. A call a *script* made inside `eval`
+   * is not that. It is part of the eval's execution, reported inside the eval's
+   * own result, and journalling it at the top level created a `role: "tool"`
+   * row whose id no assistant turn ever announced — 38 orphans in one live
+   * session that the gateway then dropped on every request, silently.
+   *
+   * Suppressing the row when nested loses nothing: the inner calls are still in
+   * the eval's `toolCalls` record, in the transcript, and in the runtime events.
+   * What goes away is a duplicate that only ever corrupted the pairing.
+   */
+  private async writeToolCallTrail(entry: { kind: "tool_call" } & Record<string, unknown>): Promise<void> {
+    if (this.codeModeDepth > 0) return;
+    await this.trajectoryLogger.write(entry as never);
+  }
+
   private async writePolicyDeny(
     decisionId: string,
     policyId: string,
@@ -676,10 +731,14 @@ export class ToolExecutor {
   }
 
   async cleanupBackgroundProcesses(reason = "cleanup"): Promise<void> {
-    if (this.computerBrowserController) {
-      await this.computerBrowserController.close();
-      this.computerBrowserController = undefined;
-    }
+    /*
+     * No browser teardown here, deliberately.
+     *
+     * The old controller owned its own browser and closed it with the run. The
+     * thread's browser is owned by the app-server and outlives every run, so
+     * closing it here would destroy the logins the next turn depends on. What a
+     * run ends is its *processes*, and that is what this method does.
+     */
     // Unsubscribe before terminating: the exit notifications the kill produces
     // belong to a turn that is already over, and forwarding them would push
     // events into a sink whose turn has closed.
@@ -755,7 +814,7 @@ export class ToolExecutor {
           : `Unknown tool '${call.name}'.${suggestionText} Offered right now: ${this.offeredToolNames()}. Other installed tools are reachable with search_tools.`,
         code: this.consecutiveUnknownTools >= 3 ? "UNKNOWN_TOOL_LOOP" : "UNKNOWN_TOOL",
       };
-      await this.trajectoryLogger.write({
+      await this.writeToolCallTrail({
         event_id: randomUUID(),
         run_id: this.options.runId,
         session_id: this.options.sessionId,
@@ -833,7 +892,7 @@ export class ToolExecutor {
         );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        await this.trajectoryLogger.write({
+        await this.writeToolCallTrail({
           event_id: randomUUID(),
           run_id: this.options.runId,
           session_id: this.options.sessionId,
@@ -892,7 +951,7 @@ export class ToolExecutor {
           (this.fileWriteCounts.get(dirForViewer) ?? 0) + 1,
         );
       }
-      await this.trajectoryLogger.write({
+      await this.writeToolCallTrail({
         event_id: randomUUID(),
         run_id: this.options.runId,
         session_id: this.options.sessionId,
@@ -921,7 +980,7 @@ export class ToolExecutor {
         output: r.output,
         ...(r.error ? { error: r.error } : {}),
       };
-      await this.trajectoryLogger.write({
+      await this.writeToolCallTrail({
         event_id: randomUUID(),
         run_id: this.options.runId,
         session_id: this.options.sessionId,
@@ -972,7 +1031,7 @@ export class ToolExecutor {
       const toolName = typeof normalizedCall.name === "string" ? normalizedCall.name : call.name;
       const args = normalizedCall.args ?? call.args;
       const message = `Invalid params for '${toolName}': ${errors}`;
-      await this.trajectoryLogger.write({
+      await this.writeToolCallTrail({
         event_id: randomUUID(),
         run_id: this.options.runId,
         session_id: this.options.sessionId,
@@ -1000,7 +1059,7 @@ export class ToolExecutor {
     }
     const parsedCall = parsed.data;
 
-    await this.trajectoryLogger.write({
+    await this.writeToolCallTrail({
       event_id: randomUUID(),
       run_id: this.options.runId,
       session_id: this.options.sessionId,
@@ -1143,16 +1202,17 @@ export class ToolExecutor {
       }
 
       const normalizedOutput = await this.maybeStoreArtifact(parsedCall.name, output);
-      // If a PreToolUse handler attached a hint, fold it into the result
-      // so the model sees it alongside the tool output.
-      const finalOutput = preHookMessage ? { ...((normalizedOutput as object) ?? {}), __hint: preHookMessage } : normalizedOutput;
       const result: ToolResult = {
         toolCallId: parsedCall.id,
         name: parsedCall.name,
         ok: true,
         durationMs: Date.now() - start,
         args: parsedCall.args,
-        output: finalOutput,
+        output: normalizedOutput,
+        // A non-enforcing hook's advice travels as its own field rather than
+        // folded into the output, so it reaches the model whatever shape the
+        // output has. See the note on `ToolResultSchema.hint`.
+        ...(preHookMessage ? { hint: preHookMessage } : {}),
       };
 
       // Keep a bounded recent-tools window for the governance ordering
@@ -1160,7 +1220,7 @@ export class ToolExecutor {
       this.recentTools.push(parsedCall.name);
       if (this.recentTools.length > 16) this.recentTools.shift();
 
-      await this.trajectoryLogger.write({
+      await this.writeToolCallTrail({
         event_id: randomUUID(),
         run_id: this.options.runId,
         session_id: this.options.sessionId,
@@ -1173,7 +1233,7 @@ export class ToolExecutor {
         decision_id: decisionId,
         status: "completed",
         args: parsedCall.args,
-        output: finalOutput,
+        output: normalizedOutput,
         duration_ms: Date.now() - start,
         is_error: false,
       });
@@ -1230,7 +1290,7 @@ export class ToolExecutor {
         },
       };
 
-      await this.trajectoryLogger.write({
+      await this.writeToolCallTrail({
         event_id: randomUUID(),
         run_id: this.options.runId,
         session_id: this.options.sessionId,
@@ -1379,6 +1439,25 @@ export class ToolExecutor {
     return parentRelative ? `${parentRelative}/${exactCaseInsensitive.name}` : exactCaseInsensitive.name;
   }
 
+  /**
+   * git_status, git_diff, create_checkpoint and restore_checkpoint all shell
+   * out to a real `git` process against the files on disk. Under a recovery
+   * session, write_file/edit_file/delete_file stage their changes in the WAL
+   * instead of writing them straight to disk (so hasPendingWrites()/rollback
+   * stay accurate), and disk only catches up at the next barrier flush. A
+   * git-backed read taken in between sees the pre-write tree and silently
+   * omits the change for the rest of the turn, and a checkpoint taken in
+   * between captures an empty diff for it. Flushing here before the git
+   * process runs is the same durability step a shell barrier would trigger,
+   * just pulled forward so these tools observe the workspace as it actually
+   * is right now instead of one flush behind.
+   */
+  private async flushPendingWritesForGitRead(): Promise<void> {
+    if (this.recoverySession?.hasPendingWrites()) {
+      await this.recoverySession.flushForBarrier();
+    }
+  }
+
   private async executeInner(call: ToolCall, decisionId: string): Promise<unknown> {
     /*
      * Viewer names are handled in `executeInternal` before it reaches here, so
@@ -1464,6 +1543,7 @@ export class ToolExecutor {
         return inspectEnvironmentTool(this.options.workspaceRoot);
       case "create_checkpoint": {
         const args = toolRegistry.create_checkpoint.argsSchema.parse(call.args);
+        await this.flushPendingWritesForGitRead();
         return createCheckpoint({
           workspaceRoot: this.options.workspaceRoot,
           reason: args.reason,
@@ -1472,13 +1552,16 @@ export class ToolExecutor {
       }
       case "restore_checkpoint": {
         const args = toolRegistry.restore_checkpoint.argsSchema.parse(call.args);
+        await this.flushPendingWritesForGitRead();
         return restoreCheckpoint(this.options.workspaceRoot, args.checkpointId);
       }
       case "git_status":
         toolRegistry.git_status.argsSchema.parse(call.args);
+        await this.flushPendingWritesForGitRead();
         return getGitStatusState(this.options.workspaceRoot);
       case "git_diff": {
         const args = toolRegistry.git_diff.argsSchema.parse(call.args);
+        await this.flushPendingWritesForGitRead();
         const diffState = await getGitDiffState(this.options.workspaceRoot, {
           ...(args.staged !== undefined ? { staged: args.staged } : {}),
           ...(args.path !== undefined ? { path: args.path } : {}),
@@ -1525,10 +1608,22 @@ export class ToolExecutor {
           // real pending mutation and rollback/abort can actually undo it.
           if (this.recoverySession) {
             await this.recoverySession.wal.stageWrite(targetPath, args.content);
+            /*
+             * `pendingWrite`, not `staged`.
+             *
+             * The old name said "staged", which a reader takes to mean git
+             * staging — and an audit of the tool surface called it out exactly
+             * that way: "write_file returned staged:true but git status showed
+             * the file as untracked and git diff --cached was empty". The
+             * field was true about the WAL and misleading about git. It means
+             * the write is held in the write-ahead log and reaches disk at the
+             * next barrier; naming it for that is the honest version.
+             */
             return {
               path: normalizeWorkspacePath(this.options.workspaceRoot, targetPath),
               bytesWritten: Buffer.byteLength(args.content, "utf8"),
-              staged: true,
+              pendingWrite: true,
+              note: "Written to the pending-write log; it reaches disk at the next flush (a barrier, or the end of the turn).",
             };
           }
           return writeFileTool(this.options.workspaceRoot, args);
@@ -1550,7 +1645,8 @@ export class ToolExecutor {
               path: normalizeWorkspacePath(this.options.workspaceRoot, args.path),
               appliedEdits: applied.appliedEdits,
               skippedAlreadyApplied: applied.skippedAlreadyApplied,
-              staged: true,
+              pendingWrite: true,
+              note: "Applied to the pending-write log; it reaches disk at the next flush (a barrier, or the end of the turn).",
             };
           }
           return editFileTool(this.options.workspaceRoot, args);
@@ -1570,7 +1666,12 @@ export class ToolExecutor {
             // survive the fix for the direct path.
             await assertDeletableTarget(this.options.workspaceRoot, absolutePath, args.path);
             await this.recoverySession.wal.stageDelete(args.path);
-            return { path: absolutePath, deleted: true, staged: true };
+            return {
+              path: absolutePath,
+              deleted: true,
+              pendingWrite: true,
+              note: "Removal held in the pending-write log; it takes effect at the next flush (a barrier, or the end of the turn).",
+            };
           }
           return deleteFileTool(this.options.workspaceRoot, args);
         }
@@ -1688,6 +1789,7 @@ export class ToolExecutor {
           },
           ...(shellOutputSink ? { onOutput: shellOutputSink } : {}),
           ...(this.childEnvAllowlist.length > 0 ? { childEnvAllowlist: this.childEnvAllowlist } : {}),
+          ...(this.options.filesystemSandbox === false ? { sandbox: false } : {}),
         };
 
         if (this.options.shellRunner && isHostOnlyReaperArtifactInspectionCommand(effectiveCommand, this.options.workspaceRoot)) {
@@ -1820,9 +1922,9 @@ export class ToolExecutor {
           await view.cleanup();
         }
       }
-      case "browser_control": {
-        const args = toolRegistry.browser_control.argsSchema.parse(call.args);
-        return this.getComputerBrowserController().browserControl(args, this.toolRuntimeMetadata(call.id));
+      case "browser_use": {
+        const args = toolRegistry.browser_use.argsSchema.parse(call.args);
+        return executeBrowserUse(this.requireThreadBrowser(), args, this.toolRuntimeMetadata(call.id));
       }
       case "web_fetch": {
         const fetchArgs = toolRegistry.web_fetch.argsSchema.parse(call.args);
@@ -1866,6 +1968,29 @@ export class ToolExecutor {
       }
       case "diagnostics": {
         const diagArgs = toolRegistry.diagnostics.argsSchema.parse(call.args);
+        /*
+         * Flush staged writes first, because diagnostics reads the file *from
+         * disk*.
+         *
+         * A `write_file` or `edit_file` only reaches disk at a barrier, and
+         * inside one `eval` script every inner call goes straight through this
+         * dispatcher — the scheduler's island boundary, which is where the
+         * barrier flush lives, is not between two statements of a script. So
+         * `await tools.edit_file(...)` followed by `await tools.diagnostics()`
+         * in the same script handed tsc the pre-edit file and reported a clean
+         * `ok: true, diagnostics: []` for a file that had just been given a
+         * type error; the error only appeared in the *next* eval, after the
+         * write had flushed. A clean bill of health from a stale read is worse
+         * than no answer, because the model believes it.
+         *
+         * `list_directory` and `grep_search` already read through the WAL so a
+         * pending write is visible to them; diagnostics shells out to a real
+         * tool that reads the filesystem, so the only correct answer is to make
+         * disk match the WAL before it runs.
+         */
+        if (this.recoverySession?.hasPendingWrites()) {
+          await this.recoverySession.flushForBarrier();
+        }
         return executeDiagnostics(diagArgs.path, this.options.workspaceRoot, diagArgs.kind);
       }
       /* ----------------------------------------------------------------
@@ -1932,13 +2057,32 @@ export class ToolExecutor {
               });
             }
           : undefined;
-        return evaluateScript({
-          args: evalArgs,
-          toolCallId: call.id,
-          runId: this.options.runId,
-          host: new ReaperToolBridge({
+        /*
+         * Everything from here to the matching `finally` is the script's
+         * execution, so any `tools.*` call that comes back through this
+         * executor is nested. The depth counter is what tells them apart from
+         * the model's own calls: it suppresses their journal rows, which would
+         * otherwise be top-level `role: "tool"` messages no assistant turn
+         * announced. See `writeToolCallTrail`.
+         */
+        this.codeModeDepth += 1;
+        try {
+          return await evaluateScript({
+            args: evalArgs,
+            toolCallId: call.id,
+            runId: this.options.runId,
+            host: new ReaperToolBridge({
             executor: this,
             disabledTools: this.disabledTools(),
+            /*
+             * Hand the bridge the same extension registry the executor
+             * dispatches from, so a script's `tools.list()` and `tools.x()` see
+             * the tools the executor will actually run. Without it the bridge
+             * consulted only the static registry and refused every extension
+             * tool with `TOOL_NOT_EXPOSED`, even though dispatch would have
+             * accepted the identical call a line later.
+             */
+            ...(this.options.extensionTools ? { extensionTools: this.options.extensionTools } : {}),
             ...(this.options.codeModelRunner && this.options.codeModels
               ? { models: this.options.codeModels, callModel: this.options.codeModelRunner }
               : {}),
@@ -1951,11 +2095,14 @@ export class ToolExecutor {
            * `fs.readFileSync('src/sample/x.json')` reads the wrong tree, or
            * misses a file that is sitting right there in the workspace.
            */
-          workspace: this.options.workspaceRoot,
-          ...(this.options.abortSignal ? { signal: this.options.abortSignal } : {}),
-          ...(stream ? { onOutput: stream } : {}),
-          ...(crossings ? { onToolCall: crossings } : {}),
-        });
+            workspace: this.options.workspaceRoot,
+            ...(this.options.abortSignal ? { signal: this.options.abortSignal } : {}),
+            ...(stream ? { onOutput: stream } : {}),
+            ...(crossings ? { onToolCall: crossings } : {}),
+          });
+        } finally {
+          this.codeModeDepth -= 1;
+        }
       }
       /* ----------------------------------------------------------------
        * Authoring tools — 3 tools, each a manager over one store.
@@ -2021,11 +2168,20 @@ export class ToolExecutor {
   }
 
 
-  private getComputerBrowserController(): ComputerBrowserController {
-    if (!this.computerBrowserController) {
-      this.computerBrowserController = new ComputerBrowserController();
+  /**
+   * The thread's browser runtime, or a clear failure.
+   *
+   * Failing loudly is the point. A `browser_use` call with no browser attached
+   * is a configuration mistake, and returning an empty result would read to the
+   * model as a page with nothing on it rather than as a browser that is missing.
+   */
+  private requireThreadBrowser(): ThreadBrowserRuntime {
+    if (!this.options.threadBrowser) {
+      throw new Error(
+        "browser_use needs a browser, and none is attached to this run. The app-server owns the browser lifecycle; in a direct-construction context there is none.",
+      );
     }
-    return this.computerBrowserController;
+    return this.options.threadBrowser;
   }
 
   private toolRuntimeMetadata(toolCallId: string) {

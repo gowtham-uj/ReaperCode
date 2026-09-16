@@ -77,6 +77,8 @@ export interface CreateHookInput {
 
 export interface UpdateHookInput {
   id: string;
+  description?: string;
+  event?: HookEventName;
   source?: string;
   matcher?: HookMatcher | null;
   timeout_ms?: number;
@@ -148,7 +150,7 @@ export class HookLifecycle {
         } catch {
           continue;
         }
-        const r = recordFromDisk(parsed, id);
+        const r = recordFromDisk(parsed, id, raw);
         if (!r) continue;
         seen.add(r.id);
         this.records.set(r.id, r);
@@ -291,6 +293,20 @@ export class HookLifecycle {
       r.source = input.source;
       this.compiled.set(r.id, compile.handler);
     }
+    /*
+     * Apply every field the caller supplied, not just the ones with a live
+     * side effect.
+     *
+     * `description` reached the tool schema and the handler built `input` with
+     * it, but `UpdateHookInput` had no `description` field and this method never
+     * read one — so `update_hook({... description: "new"})` returned `ok: true`
+     * with the description silently unchanged. Mutating a record and dropping
+     * the caller's field is worse than refusing it: the tool answered as though
+     * the edit landed. `event` has the same shape, and it is the more dangerous
+     * of the two because the matcher is interpreted per event.
+     */
+    if (input.description !== undefined) r.description = input.description;
+    if (input.event !== undefined) r.event = input.event;
     if (input.matcher !== undefined) r.matcher = input.matcher;
     if (input.timeout_ms !== undefined) r.timeout_ms = clampTimeout(input.timeout_ms);
     if (input.enforce !== undefined) r.enforce = input.enforce;
@@ -447,6 +463,30 @@ function clampTimeout(ms: number): number {
   return Math.min(MAX_TIMEOUT_MS, Math.max(100, Math.floor(ms)));
 }
 
+/**
+ * The value a matcher reads, wherever the envelope happens to carry it.
+ *
+ * The tool-call envelope reports the tool under `toolName` and its arguments
+ * under `args`, so a path lives at `payload.args.path`, not at `payload.path`.
+ * The first version of this function read the top level, which meant a
+ * `path_glob` matcher never matched anything: the field it looked at was always
+ * absent, `matcherAllows` returned false on every call, and the hook silently
+ * never fired. Nested first, then top level, so a payload that flattens its
+ * fields (the extension bus does) still matches.
+ */
+function payloadValue(payload: Record<string, unknown>, ...keys: string[]): string | undefined {
+  const args = payload.args;
+  for (const key of keys) {
+    if (args && typeof args === "object") {
+      const nested = (args as Record<string, unknown>)[key];
+      if (typeof nested === "string") return nested;
+    }
+    const direct = payload[key];
+    if (typeof direct === "string") return direct;
+  }
+  return undefined;
+}
+
 function matcherAllows(
   m: HookMatcher,
   env: { event: string; payload: Record<string, unknown>; blockable: boolean },
@@ -456,27 +496,70 @@ function matcherAllows(
     if (toolName !== m.tool_name) return false;
   }
   if (m.path_glob) {
-    const p = typeof env.payload.path === "string" ? env.payload.path : "";
+    // Every field a file tool might name its target in. `read_file` and
+    // `write_file` use `path`, the patch tools use `file_path`, and the search
+    // tools use `include` or a bare `path`; matching any of them is what "the
+    // path this call touches" means to the person writing the matcher.
+    const p = payloadValue(env.payload, "path", "file_path", "target", "filename");
     if (!p) return false;
     if (!globMatch(m.path_glob, p)) return false;
   }
   if (m.cmd_pattern) {
-    const cmd = typeof env.payload.cmd === "string" ? env.payload.cmd : "";
+    const cmd = payloadValue(env.payload, "cmd", "command");
     let re: RegExp;
     try { re = new RegExp(m.cmd_pattern); } catch { return false; }
+    if (cmd === undefined) return false;
     if (!re.test(cmd)) return false;
   }
   return true;
 }
 
-function globMatch(glob: string, path: string): boolean {
-  // Minimal glob: ** matches any, * matches one segment.
-  const escaped = glob
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\\\*\\\*/g, "::DOUBLESTAR::")
-    .replace(/\\\*/g, "[^/]*")
-    .replace(/::DOUBLESTAR::/g, ".*");
-  return new RegExp(`^${escaped}$`).test(path);
+/**
+ * Glob to regular expression, for the `path_glob` matcher.
+ *
+ * The previous version escaped the pattern's special characters *first*, which
+ * escaped the wrong set: it escaped `. + ^ $ { } ( ) | [ ] \` and left `*`
+ * alone, then tried to replace `\*` and `\*\*` — sequences that no longer
+ * existed because `*` had never been escaped. So a glob containing a star either
+ * produced an invalid regex (`**` is "nothing to repeat") or, worse, produced a
+ * *valid but wrong* one: `src/*.ts` compiled to `^src/*\.ts$`, where the star is
+ * a quantifier on `/`, so it matched `src.ts`, `src//.ts`, and never
+ * `src/index.ts`. Every `path_glob` hook built on this silently never fired.
+ *
+ * The translation now walks the glob once and builds the regex directly, which
+ * is the only way to get the escaping right: `*` and `?` become wildcards,
+ * every other character is literal. A malformed pattern is caught here and
+ * treated as no-match rather than thrown, because a matcher that throws takes
+ * the hook with it.
+ */
+function globMatch(glob: string, candidate: string): boolean {
+  let out = "^";
+  for (let i = 0; i < glob.length; i += 1) {
+    const ch = glob[i]!;
+    if (ch === "*") {
+      // `**` crosses directory separators, a lone `*` stays within one segment.
+      if (glob[i + 1] === "*") {
+        out += ".*";
+        i += 1;
+      } else {
+        out += "[^/]*";
+      }
+      continue;
+    }
+    if (ch === "?") {
+      out += "[^/]";
+      continue;
+    }
+    // Everything else is literal, escaped so a `.` or `(` in a filename is not
+    // read as regex syntax.
+    out += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  out += "$";
+  try {
+    return new RegExp(out).test(candidate);
+  } catch {
+    return false;
+  }
 }
 
 function recordToDisk(r: HookRecord): Record<string, unknown> {
@@ -495,7 +578,7 @@ function recordToDisk(r: HookRecord): Record<string, unknown> {
   };
 }
 
-function recordFromDisk(parsed: unknown, fallbackId: string): HookRecord | null {
+function recordFromDisk(parsed: unknown, fallbackId: string, rawText?: string): HookRecord | null {
   if (!parsed || typeof parsed !== "object") return null;
   const o = parsed as Record<string, unknown>;
   const id = typeof o.id === "string" ? o.id : fallbackId;
@@ -515,6 +598,17 @@ function recordFromDisk(parsed: unknown, fallbackId: string): HookRecord | null 
     trust: o.trust === "user-trusted" ? "user-trusted" : o.trust === "project-untrusted" ? "project-untrusted" : "draft",
     createdAt: typeof o.createdAt === "number" ? o.createdAt : 0,
     updatedAt: typeof o.updatedAt === "number" ? o.updatedAt : 0,
-    manifestSha256: "",
+    /*
+     * Recomputed from the file's own bytes rather than left blank.
+     *
+     * `recordToDisk` does not persist `manifestSha256`, so this was hardcoded
+     * `""` — and because every manager action re-runs `discover()` first, a
+     * hook's hash was wiped on the next call. The audit saw it as `approve`
+     * "corrupting" the record: `create` returned a real hash, `approve` returned
+     * the same record with the hash blank. It was blank in both; `create` had
+     * only just computed it. Hashing the text we already read restores the field
+     * to the value `persist` would have written.
+     */
+    manifestSha256: rawText !== undefined ? createHash("sha256").update(rawText).digest("hex") : "",
   };
 }

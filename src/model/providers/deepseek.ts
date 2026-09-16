@@ -294,7 +294,18 @@ export class DeepSeekClient implements ProviderModelClient {
       data: {
         finishReason: finishReason ?? "stop",
         promptCache: describeDeepSeekPromptCache(profile),
-        ...(usage ? { usage } : {}),
+        /*
+         * Normalised, matching the non-streaming path above.
+         *
+         * This emitted the raw snake_case `usage` while `generate()` emitted
+         * `deepSeekUsageToTokenUsage(usage)`, so the two DeepSeek paths handed
+         * their callers different shapes for the same field — and the streaming
+         * one is the path a web chat uses. The consumer now normalises
+         * defensively as well, but sending a consistent shape from the provider
+         * is the first line of defence and the one that keeps every other
+         * consumer correct.
+         */
+        ...(usage ? { usage: deepSeekUsageToTokenUsage(usage) } : {}),
       },
     };
   }

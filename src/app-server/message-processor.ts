@@ -63,7 +63,7 @@ import {
   parseAppServerMessage,
 } from "./protocol.js";
 import { readFilePolicy, writeFilePolicy } from "./file-policy.js";
-import { readSettings, writeSettings } from "./settings-surface.js";
+import { readDisabledProviders, readSettings, writeSettings } from "./settings-surface.js";
 import { listAgentTools } from "./tool-inventory.js";
 import { listWorkspaceExtensions, listWorkspaceSkills } from "./workspace-inventory.js";
 import { ProviderCredentialStore } from "../config/provider-credentials.js";
@@ -490,6 +490,14 @@ export class AppServerMessageProcessor {
           );
           toolsInFlight = outcome.turnInFlight;
         }
+        let sandboxInFlight = false;
+        if (params.filesystemSandbox !== undefined) {
+          const outcome = await this.options.manager.setThreadFilesystemSandbox(
+            params.threadId,
+            params.filesystemSandbox,
+          );
+          sandboxInFlight = outcome.turnInFlight;
+        }
         const read = await this.options.manager.readThread(params.threadId);
         const thread = projectThread(read.metadata);
         /*
@@ -503,13 +511,20 @@ export class AppServerMessageProcessor {
           threadId: params.threadId,
           systemPrompt: thread.systemPrompt ?? null,
           disabledTools: thread.disabledTools ?? [],
+          filesystemSandbox: thread.filesystemSandbox !== false,
         });
         return {
           thread,
           systemPrompt: thread.systemPrompt ?? null,
           disabledTools: thread.disabledTools ?? [],
+          filesystemSandbox: thread.filesystemSandbox !== false,
+          /*
+           * The sandbox is not in the "next turn" bucket the other two are in.
+           * It is read per shell command rather than snapshotted at turn
+           * start, so a change made during a run applies to that run.
+           */
           appliesTo: promptInFlight || toolsInFlight ? "nextTurn" : "nextRequest",
-          turnInFlight: promptInFlight || toolsInFlight,
+          turnInFlight: promptInFlight || toolsInFlight || sandboxInFlight,
         };
       }
       case "thread/permission/set": {
@@ -600,7 +615,11 @@ export class AppServerMessageProcessor {
          */
         return {
           providers: this.providers.list(),
-          defaultSelection: resolveDefaultSelection(this.credentials) ?? null,
+          defaultSelection: resolveDefaultSelection(
+            this.credentials,
+            undefined,
+            readDisabledProviders(this.options.settingsHome ? { home: this.options.settingsHome } : {}),
+          ) ?? null,
         };
       }
       case "provider/models/list": {

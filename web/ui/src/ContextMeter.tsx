@@ -1,73 +1,121 @@
 import type { TokenUsage } from "@reaper/web-shared";
 
-const WARNING_RATIO = 0.70;
-const ERROR_RATIO = 0.85;
+/**
+ * Context pressure, in the shape the reference agents use.
+ *
+ * The design follows Goose rather than OpenCode, deliberately:
+ *
+ *  - Goose's thresholds are `<50%` green, `50-85%` yellow, `>85%` red. They
+ *    line up with Reaper's own compaction trigger at the soft cap, so the
+ *    colour change means "compaction is close" rather than being decorative.
+ *  - Goose puts the percentage *first*, as the primary number. It is the
+ *    quantity a reader is asking about; "84K / 200K" is the supporting detail.
+ *  - Goose shows the counts on hover, which keeps the resting state small
+ *    enough for a composer row.
+ *
+ * What is *not* taken from OpenCode is its accounting. It sums input, output,
+ * reasoning, and cache reads and divides by the context limit, which is a
+ * measure of tokens billed rather than of prompt occupancy, and is why its
+ * meter has been reported reading over 100%. `contextUsage` on the server does
+ * the sum that means something and clamps the result; this component only
+ * renders it.
+ */
+
+const WARNING_PERCENT = 50;
+const ERROR_PERCENT = 85;
 
 function formatTokens(value: number): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
   return String(value);
 }
 
-/**
- * How full the model's context window is right now.
- *
- * What this meter shows was wrong in a way that made it useless: it divided the
- * *cumulative* token count for the whole session by the *per-call* soft cap. A
- * session that had made twenty calls read "2.4M / 270k" and sat pinned at 100%,
- * which is not a number a user can act on — 2.4M tokens were never in the
- * window at once, they were paid for one call at a time, and the window was
- * never full. Any session long enough to matter showed a permanently full bar.
- *
- * The right quantity is the size of the *last* request, because that is what has
- * to fit. `usage.last.totalTokens` is that number, and the denominator is the
- * soft cap that request was measured against.
- *
- * The cumulative figure is still worth showing, because it is what a session has
- * cost. It moves to the tooltip and is labelled as a total, so the two numbers
- * can no longer be read as one fraction.
- */
+function formatExact(value: number): string {
+  return value.toLocaleString("en-US");
+}
+
+function levelFor(percent: number | null): "ok" | "warning" | "error" | "unknown" {
+  if (percent === null) return "unknown";
+  if (percent >= ERROR_PERCENT) return "error";
+  if (percent >= WARNING_PERCENT) return "warning";
+  return "ok";
+}
+
 export function ContextMeter({ usage }: { usage: TokenUsage | undefined }) {
   if (!usage) return null;
 
-  const cap = typeof usage.contextSoftCap === "number" && usage.contextSoftCap > 0
-    ? usage.contextSoftCap
-    : undefined;
+  const pressure = usage.contextUsage;
   /*
-   * `last.totalTokens` is the provider's input count plus the output it
-   * generated, so it can exceed the cap slightly on a call that ran right up to
-   * it. Clamped, because a bar that can read 103% is a bar that looks broken.
+   * No `contextUsage` means this payload predates it, or the server could not
+   * resolve a limit. Either way the meter must not invent a denominator: it
+   * falls back to showing the raw count with no percentage, which is a true
+   * statement, rather than a fraction against a window nobody can name.
    */
-  const used = Math.min(usage.last.totalTokens, cap ?? usage.last.totalTokens);
-  const ratio = cap ? Math.min(1, used / cap) : 0;
-  const level = ratio >= ERROR_RATIO ? "error" : ratio >= WARNING_RATIO ? "warning" : "ok";
+  const percent = pressure?.percent ?? null;
+  const level = levelFor(percent);
+  const promptTokens = pressure?.promptTokens ?? usage.last.inputTokens;
 
-  const parts = cap
-    ? [`${formatTokens(used)} of ${formatTokens(cap)} tokens in the last request`]
-    : [`${formatTokens(used)} tokens in the last request`];
-  if (typeof usage.modelContextWindow === "number") {
-    parts.push(`model window ${formatTokens(usage.modelContextWindow)}`);
+  /*
+   * The tooltip carries the arithmetic. Hover is where a reader who wants to
+   * check the number goes, and the counts are exact there because a tooltip
+   * has room for them in a way the composer row does not.
+   */
+  const details: string[] = [];
+  if (pressure && pressure.contextLimit !== null) {
+    details.push(`${formatExact(promptTokens)} / ${formatExact(pressure.contextLimit)} tokens`);
+    if (pressure.reservedOutputTokens > 0) {
+      details.push(`${formatExact(pressure.reservedOutputTokens)} reserved for output`);
+    }
+    if (pressure.remaining !== null) details.push(`${formatExact(pressure.remaining)} remaining`);
+  } else {
+    details.push(`${formatExact(promptTokens)} tokens in the last request`);
   }
-  // The session total, named as a total so it is never read as the numerator.
-  parts.push(`${formatTokens(usage.total.totalTokens)} tokens spent this session`);
+  if (pressure?.model) details.push(pressure.model);
+  if (pressure?.estimated) details.push("estimated");
+  if (typeof usage.modelContextWindow === "number" && pressure?.contextLimit != null && pressure.contextLimit !== usage.modelContextWindow) {
+    details.push(`model window ${formatExact(usage.modelContextWindow)}`);
+  }
+  details.push(`${formatTokens(usage.total.totalTokens)} spent this session`);
+
+  // One decimal is kept as-is from the server; the integer case is rendered
+  // without a trailing ".0" so the common reading stays short.
+  const label = percent === null
+    ? formatTokens(promptTokens)
+    : `${Number.isInteger(percent) ? percent : percent.toFixed(1)}%`;
 
   return (
     <div
       className="context-meter"
       data-level={level}
-      title={parts.join(" · ")}
+      title={details.join(" · ")}
       role="meter"
       aria-valuemin={0}
-      aria-valuemax={cap ?? used}
-      aria-valuenow={used}
-      aria-label={`Context window: ${parts.join(", ")}`}
+      aria-valuemax={100}
+      aria-valuenow={percent ?? undefined}
+      aria-valuetext={percent === null ? `${formatExact(promptTokens)} tokens used, limit unknown` : `${percent}% of the context window used`}
+      aria-label={`Context window: ${details.join(", ")}`}
     >
       <div className="context-meter-bar" aria-hidden="true">
-        <div className="context-meter-fill" style={{ width: `${(ratio * 100).toFixed(1)}%` }} />
+        <div
+          className="context-meter-fill"
+          style={{ width: percent === null ? "0" : percent <= 0 ? "0" : `max(2px, ${percent}%)` }}
+        />
       </div>
+      {/*
+        The percentage is the label, and the counts sit beside it at a size
+        that keeps the row quiet. `estimated` is marked with a tilde rather
+        than a word: a tokenizer estimate and a provider count are different
+        kinds of number, and a reader should be able to tell which they are
+        looking at without opening the tooltip.
+      */}
       <span className="context-meter-label">
-        {formatTokens(used)}{cap ? ` / ${formatTokens(cap)}` : ""}
+        {percent !== null && pressure?.estimated ? "~" : ""}{label}
       </span>
+      {pressure?.contextLimit != null && (
+        <span className="context-meter-counts" aria-hidden="true">
+          {formatTokens(promptTokens)}/{formatTokens(pressure.contextLimit)}
+        </span>
+      )}
     </div>
   );
 }

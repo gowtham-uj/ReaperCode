@@ -165,8 +165,8 @@ test("the removed native computer tools have no governance metadata", () => {
   }
 });
 
-test("browser_control is browser-role-only", () => {
-  const m = getToolMetadata("browser_control");
+test("browser_use is browser-role-only", () => {
+  const m = getToolMetadata("browser_use");
   assert.ok(m);
   assert.deepEqual([...m.allowed_in_roles], ["browser"]);
 });

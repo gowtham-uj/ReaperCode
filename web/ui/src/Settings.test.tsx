@@ -27,6 +27,7 @@ function settingsStore(): SettingsStore {
       models: [{ role: "coding", provider: "deepseek", model: "deepseek-chat", thinking: "enabled" }],
       pinnedSkills: [],
       disabledSkills: [],
+      disabledProviders: [],
       restartsRequired: false,
     },
     skills: [],
@@ -98,7 +99,7 @@ function SettingsRouter({ initial = "/settings" }: { initial?: string }) {
         <Route path="/" element={<div>Workspace</div>} />
         <Route path="/settings" element={<SettingsLayout settings={settings} client={client} />}>
           <Route index element={<Navigate to="providers" replace />} />
-          <Route path="providers" element={<ProvidersSettings catalog={models} client={client} />} />
+          <Route path="providers" element={<ProvidersSettings catalog={models} settings={settings} client={client} />} />
           <Route path="models" element={<ModelsSettings settings={settings} catalog={models} client={client} />} />
           <Route path="permissions" element={<PermissionsSettings settings={settings} client={client} />} />
           <Route path="policy" element={<div>Command policy</div>} />
@@ -133,7 +134,10 @@ describe("routed Settings", () => {
     const options = (await screen.findAllByRole("radio")).map((el) => el.getAttribute("value"));
     expect(options.sort()).toEqual(["black", "dark", "reaper"]);
 
-    expect(screen.getByRole("radio", { name: /^Dark/ }).hasAttribute("checked")).toBe(true);
+    // The stored-preference-free default is Reaper, not the vendored sheet's
+    // blue `dark`. Asserted here as well as in theme.test.ts because this is
+    // the screen where a wrong default is actually visible.
+    expect(screen.getByRole("radio", { name: /^Reaper/ }).hasAttribute("checked")).toBe(true);
     await user.click(screen.getByRole("radio", { name: /^Black/ }));
     expect(document.body.hasAttribute("data-ds-black-theme")).toBe(true);
     // Black layers on the dark sheet; without this the alias tokens fall back
@@ -165,7 +169,7 @@ describe("routed Settings", () => {
   it("searches supported providers and submits a write-only API key flow", async () => {
     const user = userEvent.setup();
     const models = catalog([fixtureProvider]);
-    render(<ProvidersSettings catalog={models} client={client} />);
+    render(<ProvidersSettings catalog={models} settings={settingsStore()} client={client} />);
 
     await user.click(screen.getByRole("button", { name: "Add provider" }));
     const search = screen.getByRole("searchbox", { name: "Search providers" });
@@ -193,7 +197,7 @@ describe("routed Settings", () => {
       httpStatus: 401,
       checkedAt: "2026-01-01T00:00:00.000Z",
     }));
-    render(<ProvidersSettings catalog={models} client={client} />);
+    render(<ProvidersSettings catalog={models} settings={settingsStore()} client={client} />);
 
     await user.click(screen.getByRole("button", { name: "Add provider" }));
     await user.type(screen.getByRole("searchbox", { name: "Search providers" }), "fixture");
@@ -210,7 +214,7 @@ describe("routed Settings", () => {
   it("re-checks a connected provider's stored credential on demand", async () => {
     const user = userEvent.setup();
     const models = catalog([{ ...fixtureProvider, configured: true, authStatus: "connected", authType: "api", connectionSource: "stored", keyHint: "…9f2c" }]);
-    render(<ProvidersSettings catalog={models} client={client} />);
+    render(<ProvidersSettings catalog={models} settings={settingsStore()} client={client} />);
 
     await user.click(screen.getByRole("button", { name: "Test connection" }));
 
@@ -235,10 +239,108 @@ describe("routed Settings", () => {
       runnable: false,
       npm: "@ai-sdk/invented-by-a-future-refresh",
     }]);
-    render(<ProvidersSettings catalog={models} client={client} />);
+    render(<ProvidersSettings catalog={models} settings={settingsStore()} client={client} />);
 
     expect(await screen.findByText(/no transport for `@ai-sdk\/invented-by-a-future-refresh`/)).toBeTruthy();
-    // Still connectable and disconnectable — unrunnable is not unmanaged.
-    expect(screen.getByRole("button", { name: "Disconnect" })).toBeTruthy();
+    // Still manageable — unrunnable is not unmanaged.
+    expect(screen.getByRole("button", { name: "Disable" })).toBeTruthy();
+  });
+
+  /*
+   * Disable replaces Disconnect.
+   *
+   * Disconnect called `provider/remove`, which deletes the stored credential:
+   * the wrong verb for "hide this from the picker for now", and a one-click way
+   * to lose a key the user would then have to re-enter. Disable keeps the key
+   * and only withholds the provider from the model picker. These tests assert
+   * the button is present on every configured provider (environment-configured
+   * ones included, since disabling is Reaper's own preference, not a change to
+   * a credential it does not own) and that clicking it writes the disabled
+   * list rather than removing anything.
+   */
+  it("offers Disable on a configured provider and writes disabledProviders on click", async () => {
+    const user = userEvent.setup();
+    const store = settingsStore();
+    const models = catalog([{
+      ...fixtureProvider,
+      configured: true,
+      authStatus: "connected",
+      authType: "api",
+      connectionSource: "stored",
+      keyHint: "…9f2c",
+      envKeyPresent: false,
+    }]);
+    render(<ProvidersSettings catalog={models} settings={store} client={client} />);
+
+    const disable = await screen.findByRole("button", { name: "Disable" });
+    await user.click(disable);
+    expect(store.saveSettings).toHaveBeenCalledWith(client, { disabledProviders: ["fixture"] });
+    // Nothing removed the credential: disabling is not disconnecting.
+    expect(models.disconnect).not.toHaveBeenCalled();
+    expect(models.removeKey).not.toHaveBeenCalled();
+  });
+
+  it("shows Enable for a disabled provider and toggles it back off the disabled list", async () => {
+    const user = userEvent.setup();
+    const store = settingsStore();
+    if (store.settings) store.settings.disabledProviders = ["fixture"];
+    const models = catalog([{
+      ...fixtureProvider,
+      configured: true,
+      authStatus: "connected",
+      authType: "api",
+      connectionSource: "stored",
+      keyHint: "…9f2c",
+      envKeyPresent: false,
+    }]);
+    render(<ProvidersSettings catalog={models} settings={store} client={client} />);
+
+    expect(await screen.findByText(/hidden from the model picker/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Enable" }));
+    expect(store.saveSettings).toHaveBeenCalledWith(client, { disabledProviders: [] });
+  });
+
+  it("explains an environment-configured provider instead of offering to remove it", async () => {
+    /*
+     * `provider/remove` deletes a *stored* credential, and a provider configured
+     * by `DEEPSEEK_API_KEY` has none. A button wired to it would get
+     * `{ removed: false }` and appear to work while changing nothing. Disabling
+     * is different — it is Reaper's own preference about what to offer, not an
+     * edit to a credential it does not own — so the row keeps the Disable
+     * control and adds a note naming the variable, which is the thing the user
+     * would actually change to disconnect for real.
+     */
+    const models = catalog([{
+      ...fixtureProvider,
+      configured: true,
+      authStatus: "connected",
+      authType: "environment",
+      connectionSource: "environment",
+      envKeyPresent: true,
+    }]);
+    render(<ProvidersSettings catalog={models} settings={settingsStore()} client={client} />);
+
+    expect(await screen.findByText(/Configured by FIXTURE_API_KEY/)).toBeTruthy();
+    expect(screen.getByText(/Unset it in the environment to/)).toBeTruthy();
+    // The two controls that do work here are offered, and so is Disable.
+    expect(screen.getByRole("button", { name: "Test connection" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Replace login" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Disable" })).toBeTruthy();
+  });
+
+  it("does not explain the environment when the credential is stored", async () => {
+    const models = catalog([{
+      ...fixtureProvider,
+      configured: true,
+      authStatus: "connected",
+      authType: "api",
+      connectionSource: "stored",
+      keyHint: "…9f2c",
+      envKeyPresent: false,
+    }]);
+    render(<ProvidersSettings catalog={models} settings={settingsStore()} client={client} />);
+
+    expect(await screen.findByRole("button", { name: "Disable" })).toBeTruthy();
+    expect(screen.queryByText(/Configured by/)).toBeNull();
   });
 });

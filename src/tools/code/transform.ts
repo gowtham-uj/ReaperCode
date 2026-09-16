@@ -465,6 +465,89 @@ export function wrapWithTail(prefix: string, tail: string): string {
 }
 
 /**
+ * The opening of a declaration-lift wrapper. Same line-preserving rule as
+ * `WRAP_OPEN`: no newline, so the model's first line stays line 1.
+ */
+const DECL_LIFT_OPEN = WRAP_OPEN;
+
+/**
+ * The name a declaration statement binds, when there is exactly one and it can
+ * be returned by that name: `const x = …`, `const { a } = …`, `const [a] = …`.
+ *
+ * Deliberately conservative. A multi-binding destructure (`const { a, b } = …`)
+ * has no single obvious return value, and a defaulted binding
+ * (`const { a = 1 } = …`) is more syntax than this needs to read, so both return
+ * undefined and the script is left for the model to fix. The common shape the
+ * skill names as the most frequent mistake — `const x = await tools.…` — is the
+ * one this exists to recover.
+ */
+export function declarationBinding(statement: string): string | undefined {
+  const trimmed = trimTail(statement).trim();
+  const keyword = /^(?:const|let|var)\s+/.exec(trimmed);
+  if (!keyword) return undefined;
+  const rest = trimmed.slice(keyword[0].length);
+
+  // `const x = …`
+  const simple = /^([A-Za-z_$][\w$]*)\s*=/.exec(rest);
+  if (simple?.[1]) return simple[1];
+
+  // `const { name } = …`, `const { key: local } = …`, and the multi-line form
+  // `const {\n  name,\n} = …` with its trailing comma. A destructure of two or
+  // more names has no single value to return, so it deliberately does not match.
+  const objectSingle = /^\{\s*([A-Za-z_$][\w$]*)\s*(?::\s*([A-Za-z_$][\w$]*))?\s*,?\s*\}\s*=/.exec(rest);
+  if (objectSingle?.[1]) return objectSingle[2] ?? objectSingle[1];
+
+  // `const [first] = …`
+  const arraySingle = /^\[\s*([A-Za-z_$][\w$]*)\s*\]\s*=/.exec(rest);
+  if (arraySingle?.[1]) return arraySingle[1];
+
+  return undefined;
+}
+
+/**
+ * Lift a trailing *declaration* into a return.
+ *
+ * `splitTrailingExpression` recovers a trailing expression and `liftTrailingBlocks`
+ * recovers one inside a trailing block, but a script ending in
+ * `const { matches } = await tools.grep_search(...)` — a declaration, so not an
+ * expression — fell through both and produced no value at all. The codemode
+ * skill names this exact shape as "the single most common way to lose a result",
+ * and it is the one the model keeps writing, which is why the "produced no
+ * value" note kept firing even with the skill loaded.
+ *
+ * The rewrite does not move any of the model's code: the source runs exactly as
+ * written, and a `return <name>;` is appended after it in the same function body
+ * where the binding is in scope. Every candidate is compiled before use, so a
+ * declaration this mis-reads (a multi-line destructure split at the wrong
+ * boundary, say) is rejected rather than run.
+ */
+export function liftTrailingDeclaration(
+  source: string,
+  verify: (candidate: string) => boolean,
+): string | undefined {
+  const body = trimTail(source);
+  if (body.trim().length === 0) return undefined;
+  const boundaries = statementBoundaries(body);
+  /*
+   * Latest boundary first. For a single-line declaration the last boundary is
+   * its start; for a multi-line one (`const {\n  matches,\n} = …`) the latest
+   * boundary slices only the tail of it, which yields no binding, and the next
+   * boundary up is the real start. Trying them newest-first finds the longest
+   * suffix that reads as a whole declaration.
+   */
+  for (let i = boundaries.length - 1; i >= 0; i -= 1) {
+    const statement = body.slice(boundaries[i]!.index);
+    const name = declarationBinding(statement);
+    if (!name) continue;
+    // The source runs untouched; the return is appended on its own line so
+    // none of the model's line numbers move.
+    const candidate = `${DECL_LIFT_OPEN}${source}\n; return ${name}; })()`;
+    if (verify(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+/**
  * The line the model's source occupies, from a position the engine reported.
  *
  * The `eval.js` filename is the QuickJS runtime's; the worker names itself

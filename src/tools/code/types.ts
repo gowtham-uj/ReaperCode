@@ -276,6 +276,17 @@ export interface CodeRuntimeResult {
   /** Set when the JS error was caused by a Reaper tool rejecting. */
   toolError?: { code: string; message: string; toolName: string };
   /**
+   * Whether the script ran inside the bubblewrap sandbox.
+   *
+   * `false` means it ran as a thread of the Reaper process and could see the
+   * whole machine, which is what eval did before the sandbox existed and what
+   * it still does on a host where bubblewrap cannot run. It is reported rather
+   * than assumed because the difference is a security property, and a caller
+   * (or a model) that needs to know whether a script could have read something
+   * outside its workspace has to be able to ask.
+   */
+  sandboxed?: boolean;
+  /**
    * Non-fatal information about the run that the model needs and cannot infer.
    *
    * The motivating case: a script that needed the async wrapper for its

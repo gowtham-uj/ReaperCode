@@ -38,7 +38,7 @@ export const MUTATING_TOOLS: ReadonlySet<string> = new Set([
 
   // Existing runtime mutation surfaces.
   "delete_file",
-  "browser_control",
+  "browser_use",
   "create_skill",
   "test_skill",
   "approve_skill",

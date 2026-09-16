@@ -43,9 +43,33 @@ function toLegacyRequest(
   input: ProviderCallInput,
   model: ResolvedModel,
 ): { role: ModelRole; payload: Parameters<ProviderModelClient["generate"]>[0] } {
+  /*
+   * `tool_calls` and `tool_call_id` must survive this rebuild.
+   *
+   * Stripping them (which `{ role, content }` did) leaves an assistant turn
+   * with no calls and a `tool` result with nothing to answer, which the
+   * provider rejects. The wire shape differs from `ProviderToolCall`
+   * (`{ id, name, args }`), so the conversion is explicit.
+   */
   const messages = input.messages
     .filter((m) => m.role !== "system")
-    .map((m) => ({ role: m.role, content: m.content }));
+    .map((m) => ({
+      role: m.role,
+      content: m.content,
+      ...(m.toolCalls && m.toolCalls.length > 0
+        ? {
+            tool_calls: m.toolCalls.map((call) => ({
+              id: call.id,
+              type: "function" as const,
+              function: {
+                name: call.name,
+                arguments: typeof call.args === "string" ? call.args : JSON.stringify(call.args ?? {}),
+              },
+            })),
+          }
+        : {}),
+      ...(m.toolCallId ? { tool_call_id: m.toolCallId } : {}),
+    }));
   const tools = (input.tools ?? []).map((t) => ({
     name: t.name,
     description: t.description,

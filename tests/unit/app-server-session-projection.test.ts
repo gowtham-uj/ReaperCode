@@ -465,3 +465,153 @@ test("a delta for a call that does not exist is ignored, not invented", () => {
   const notes = emit(withTs({ type: "command.output.delta", toolCallId: "ghost", stream: "stdout", text: "x" }));
   assert.deepEqual(notes, [], "an unknown toolCallId must not create an item out of nothing");
 });
+
+test("an edit call projects a diff, its counts, and its duration", () => {
+  /*
+   * The end-to-end version of the bug this fixed: the projection used to record
+   * only a path and a tool name, so a live edit card rendered as "Updated
+   * notes.md" with nothing under it. The call is the only place the before and
+   * after text exist, so this is the assertion that the projection now reads
+   * them.
+   */
+  const projection = new SessionProjection();
+  const emit = (event: ThreadEventRecord["event"]) =>
+    projection.project(record({ threadId: "fix-auth", turnId: "turn-1", event }), metadata);
+
+  /*
+   * A turn has to exist before an item can join it: `tool.completed` returns
+   * nothing when it cannot find the turn, which is why these tests start one
+   * rather than only emitting tool events.
+   */
+  emit(withTs({ type: "turn.started", runId: "turn-1", sessionId: "fix-auth" }));
+  const call = {
+    id: "edit-1",
+    name: "edit_file" as const,
+    args: { path: "src/auth/session.ts", edits: [{ oldString: "in memory", newString: "persisted" }] },
+  };
+  emit(withTs({ type: "tool.started", toolCall: call }));
+  const finished = emit(withTs({
+    type: "tool.completed",
+    toolCall: call,
+    result: { name: "edit_file", toolCallId: "edit-1", ok: true, durationMs: 42, output: { path: "src/auth/session.ts", appliedEdits: 1 } },
+  }));
+
+  /*
+   * `tool.completed` emits an `item/completed` note carrying the item itself,
+   * not a fresh turn. Reading the item out of the note is what a client does.
+   */
+  const item = finished
+    .map((note) => note.params.item as { type: string; durationMs?: number; changes?: Array<{ path: string; diff?: string; additions?: number; removals?: number }> } | undefined)
+    .find((entry) => entry?.type === "fileChange");
+  assert.ok(item, "the edit did not project as a fileChange");
+  assert.equal(item!.durationMs, 42, "no duration reached the card, so real runs show no timing");
+  assert.equal(item!.changes?.length, 1);
+  const change = item!.changes![0]!;
+  assert.equal(change.path, "src/auth/session.ts");
+  assert.equal(change.additions, 1);
+  assert.equal(change.removals, 1);
+  assert.match(change.diff!, /-in memory/);
+  assert.match(change.diff!, /\+persisted/);
+});
+
+test("a patch tool projects as a file change, not as an opaque tool call", () => {
+  /*
+   * `apply_patch_edit` is the registered name, and the projection's old list
+   * said `apply_patch`. Every patch call therefore fell through to
+   * `dynamicToolCall`, which is the shape a generic tool card renders: no diff,
+   * no counts, and an argument dump. This pins the name that is actually
+   * registered.
+   */
+  const projection = new SessionProjection();
+  const emit = (event: ThreadEventRecord["event"]) =>
+    projection.project(record({ threadId: "fix-auth", turnId: "turn-1", event }), metadata);
+
+  emit(withTs({ type: "turn.started", runId: "turn-1", sessionId: "fix-auth" }));
+  const patch = "--- a/gone.ts\n+++ b/gone.ts\n@@ -1,2 +1,2 @@\n-old one\n-old two\n+new one\n+new two\n";
+  const call = { id: "patch-1", name: "apply_patch_edit" as const, args: { patch } };
+  emit(withTs({ type: "tool.started", toolCall: call }));
+  const finished = emit(withTs({
+    type: "tool.completed",
+    toolCall: call,
+    result: { name: "apply_patch_edit", toolCallId: "patch-1", ok: true, durationMs: 7, output: { applied: true } },
+  }));
+
+  const item = finished
+    .map((note) => note.params.item as { type: string; changes?: Array<{ path: string; additions?: number }> } | undefined)
+    .find((entry) => entry?.type === "fileChange");
+  assert.ok(item, "the patch did not project as a fileChange");
+  assert.equal(finished.filter((note) => (note.params.item as { type?: string } | undefined)?.type === "dynamicToolCall").length, 0);
+  const change = item!.changes![0]!;
+  assert.equal(change.path, "gone.ts");
+  assert.equal(change.additions, 2);
+});
+
+test("a failed edit keeps the diff it was trying to write", () => {
+  /*
+   * A refused edit is exactly when a reader wants to see the change, so the
+   * failure path must not discard what the call described. `tool.failed` does
+   * not route through `completeToolItem`, so this is a separate code path and
+   * worth its own assertion.
+   */
+  const projection = new SessionProjection();
+  const emit = (event: ThreadEventRecord["event"]) =>
+    projection.project(record({ threadId: "fix-auth", turnId: "turn-1", event }), metadata);
+
+  emit(withTs({ type: "turn.started", runId: "turn-1", sessionId: "fix-auth" }));
+  const call = {
+    id: "edit-2",
+    name: "edit_file" as const,
+    args: { path: "src/a.ts", edits: [{ oldString: "one", newString: "two" }] },
+  };
+  emit(withTs({ type: "tool.started", toolCall: call }));
+  const failed = emit(withTs({
+    type: "tool.failed",
+    toolCall: call,
+    error: { name: "edit_file", message: "oldString not found" },
+  }));
+
+  const item = failed
+    .map((note) => note.params.item as { type: string; status?: string; changes?: Array<{ diff?: string }> } | undefined)
+    .find((entry) => entry?.type === "fileChange");
+  assert.ok(item, "the failed edit lost its fileChange item");
+  assert.equal(item!.status, "failed");
+  assert.match(item!.changes![0]!.diff!, /\+two/);
+});
+
+/*
+ * A rebuilt transcript must match what was streamed, including reasoning.
+ *
+ * `projectHistory` only knew `user`, `assistant`, and `tool`, so a thread
+ * reopened after a restart lost every thinking block — the journal stores them
+ * as `role: "thinking"` and there was no mapping. It also projected every
+ * assistant row as an agent message, so a session full of tool calls had its
+ * real answers buried among empty bubbles (an assistant row with no text is a
+ * tool-call carrier, not a reply), and it echoed engine bookkeeping rows like
+ * `[session-resume] …` into the transcript as if the model had said them.
+ */
+test("history projection keeps reasoning, drops empty carriers, and hides internal rows", () => {
+  const turns = projectHistory([
+    { role: "user", content: "do the thing" },
+    { role: "thinking", content: "I should read the file first." },
+    { role: "assistant", content: "", tool_calls: [{ id: "c1", name: "file_view", args: { path: "a.ts" } }] },
+    { role: "tool", content: "contents", tool_call_id: "c1", name: "file_view" },
+    { role: "assistant", content: "Done — the file says contents." },
+    { role: "assistant", content: "[session-resume] prepended re-anchor (2 turns, 0 summaries)" },
+  ]);
+
+  const items = turns.flatMap((turn) => turn.items);
+
+  const reasoning = items.filter((item) => item.type === "reasoning");
+  assert.equal(reasoning.length, 1, "the thinking block must survive a rebuild");
+  assert.match((reasoning[0] as { content: string[] }).content[0] ?? "", /read the file first/);
+
+  const agents = items.filter((item) => item.type === "agentMessage") as Array<{ text: string }>;
+  assert.equal(agents.length, 1, "only the real answer is an agent message");
+  assert.match(agents[0]!.text, /the file says contents/);
+
+  assert.equal(
+    items.some((item) => item.type === "agentMessage" && /^\[session-resume\]/.test((item as { text: string }).text)),
+    false,
+    "engine bookkeeping must not appear as a model message",
+  );
+});

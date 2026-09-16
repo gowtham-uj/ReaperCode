@@ -346,15 +346,28 @@ export const RuntimeTunablesConfigSchema = z
     bgTermGraceMs: z.number().int().nonnegative().default(5_000),
     browserExecutablePath: z.string().default(""),
     browserHeadless: z.boolean().default(true),
-    computerAutoApprove: z.boolean().default(false),
-    computerEnableGlobalHook: z.boolean().default(false),
+    /*
+     * Where the browser Reaper attaches to is listening.
+     *
+     * `:9222` is Chrome's own remote-debugging port and `:9223` is Steel's nginx
+     * forwarding to the same Chrome; either works, which is why it is a setting
+     * rather than a constant. Playwright attaches to whatever is here, and Steel
+     * owns the process.
+     */
+    browserCdpUrl: z.string().default("http://127.0.0.1:9222"),
+    /** Close a thread's browser after this long unused, in milliseconds. */
+    browserIdleCloseMs: z.number().int().positive().default(600_000),
+    /**
+     * Chars above which a pasted prompt is written to a file and referenced
+     * instead of entering the conversation. 20,000 is about 5,000 tokens.
+     * Raise it to keep more pastes inline; lower it to spill sooner.
+     */
+    promptSpillChars: z.number().int().nonnegative().default(20_000),
     queueMaxConcurrency: z.number().int().nonnegative().default(4),
     tuiNoQueue: z.boolean().default(false),
-    langgraphRecursionLimit: z.number().int().positive().default(50),
     liveModelTimeoutMs: z.number().int().positive().default(60_000),
     mainAgentTransportRetryLimit: z.number().int().nonnegative().default(2),
     modelCallTimeoutMs: z.number().int().positive().default(120_000),
-    modelRouterLlmDecisions: z.boolean().default(false),
     permissionMode: z.enum(["yolo", "accept_edits", "auto", "strict"]).default("yolo"),
     /**
      * Skills whose full body goes into every turn, not just on demand.
@@ -387,23 +400,24 @@ export const RuntimeTunablesConfigSchema = z
      * a skill was deleted.
      */
     disabledSkills: z.array(z.string().min(1).max(200)).default([]),
+    /**
+     * Providers the user has switched off, by id.
+     *
+     * Distinct from removing the credential: disabling keeps the stored key (or
+     * leaves the environment variable alone) but takes the provider out of the
+     * chat composer's model picker until it is enabled again. Like
+     * `disabledSkills` this is a user-global list of *references*, resolved
+     * against the provider registry — a name that resolves to nothing is
+     * ignored, so a provider that was uninstalled later cannot wedge a turn.
+     */
+    disabledProviders: z.array(z.string().min(1).max(200)).default([]),
     printReasoning: z.boolean().default(false),
     progressGuardV2: z.boolean().default(true),
     rescueMaxAttemptsPerDiagnostic: z.number().int().nonnegative().default(1),
     rescueMaxStagnantTurns: z.number().int().nonnegative().default(8),
-    retryBaseDelayMs: z.number().int().nonnegative().default(500),
-    retryDeadlineHeadroomMs: z.number().int().nonnegative().default(5_000),
-    retryFallbackAfterOverloaded: z.boolean().default(true),
-    retryKeepAliveMs: z.number().int().nonnegative().default(1_500),
-    retryMaxDelayMs: z.number().int().nonnegative().default(8_000),
-    retryMaxRetries: z.number().int().nonnegative().default(3),
-    runDeadlineEpochMs: z.number().int().nonnegative().default(0),
     streamIdleTimeoutMs: z.number().int().nonnegative().default(30_000),
-    strictCompletionGate: z.boolean().default(true),
     strictTempCleanup: z.boolean().default(true),
     swarmDebug: z.boolean().default(false),
-    unattendedRetry: z.boolean().default(true),
-    tbenchComposeProject: z.string().default(""),
     tbenchContainerName: z.string().default(""),
     tbenchHostWorkspace: z.string().default(""),
     workspacePathAliases: z.string().default(""),

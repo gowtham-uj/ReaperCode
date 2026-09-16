@@ -8,6 +8,8 @@ import type { PermissionMode } from "../policy/classifier.js";
 import type { ToolApprovalDecision, ToolApprovalRequest, ToolApprovalRequester } from "../tools/approval.js";
 import { ThreadEventBus, type ThreadEventSubscriber, type ThreadReplay } from "./event-bus.js";
 import type { ManagedTurnRunner, ManagedTurnRunnerInput } from "./managed-turn-runner.js";
+import type { ThreadBrowsers } from "./thread-browsers.js";
+import type { ProviderCredentialStore } from "../config/provider-credentials.js";
 import { ThreadStore, type ManagedTurnStatus, type ThreadMetadata } from "./thread-store.js";
 
 export interface ManagedTurnSummary {
@@ -40,6 +42,14 @@ export interface ManagedThreadOptions {
   metadata: ThreadMetadata;
   store: ThreadStore;
   runTurn: ManagedTurnRunner;
+  /**
+   * The server's per-thread browser owner, when there is one.
+   *
+   * Absent in tests, which is why every browser-dependent test constructs its own
+   * runtime: a test that needs a browser should say so rather than depending on a
+   * server having started one.
+   */
+  threadBrowsers?: ThreadBrowsers | undefined;
   maxReplayEvents?: number;
   maxSteeringMessages?: number;
   approvalTimeoutMs?: number;
@@ -51,6 +61,22 @@ export interface ManagedThreadOptions {
    * has already stopped waiting on.
    */
   onApprovalSettled?: (request: ManagedApprovalRequest, decision: ToolApprovalDecision) => void;
+  /**
+   * Where credentials are read from, passed down to the turn runner.
+   *
+   * Carried through the thread rather than re-created per turn so a server
+   * configured with an explicit home reads keys from that home. Without it the
+   * turn runner built its own store rooted at the real `~/.reaper`, and a
+   * server pointed elsewhere authenticated with credentials it was never given.
+   */
+  credentials?: ProviderCredentialStore;
+  /**
+   * Where user settings are read from, passed down to the turn runner so its
+   * disabled-provider list matches the one the browser is showing. Same
+   * reasoning as `credentials`: the home the server was configured with decides
+   * which settings file it reads.
+   */
+  settingsHome?: string;
 }
 
 interface ActiveTurn {
@@ -286,6 +312,23 @@ export class ManagedReaperThread implements ToolApprovalRequester {
     return { turnInFlight: this.activeTurn !== undefined };
   }
 
+  /**
+   * Turn this thread's workspace confinement on or off.
+   *
+   * Unlike the model and prompt settings, this one is not snapshotted at the
+   * start of a turn: `executeTurn` reads the metadata when it builds the
+   * runner input, and the runner passes it to the executor, which reads it
+   * again for every command. So a turn already running picks the new value up
+   * at its next shell call rather than at its next turn, which is what the
+   * setting has to mean to be worth having — a thread doing something
+   * unexpected is exactly the thread you want to confine now.
+   */
+  async setFilesystemSandbox(enabled: boolean): Promise<{ turnInFlight: boolean }> {
+    this.metadataValue = { ...this.metadataValue, filesystemSandbox: enabled };
+    await this.persist();
+    return { turnInFlight: this.activeTurn !== undefined };
+  }
+
   async close(): Promise<void> {
     if (this.metadataValue.status === "closed") return;
     const active = this.activeTurn;
@@ -404,12 +447,24 @@ export class ManagedReaperThread implements ToolApprovalRequester {
         ? { disabledTools: this.metadataValue.disabledTools }
         : {}),
       permissionMode: this.metadataValue.permissionMode,
+      filesystemSandbox: this.metadataValue.filesystemSandbox !== false,
       abortSignal: active.abortController.signal,
       eventSink: (event: RuntimeEvent) => {
         this.eventBus.publish(event, active.turnId);
       },
       turnControl: active.control,
       approvalRequester: this,
+      ...(this.options.credentials ? { credentials: this.options.credentials } : {}),
+      ...(this.options.settingsHome ? { settingsHome: this.options.settingsHome } : {}),
+      /*
+       * The thread's own browser, resolved per turn rather than captured once.
+       *
+       * Resolved here because the owner is keyed by thread id and this is the
+       * place that knows it. Handing over the runtime rather than a connection
+       * means a thread that has been idle past the reap window gets a fresh
+       * attachment on its next turn without anything above knowing that happened.
+       */
+      ...(this.options.threadBrowsers ? { threadBrowser: this.options.threadBrowsers.forThread(this.threadId) } : {}),
     };
 
     try {

@@ -43,6 +43,12 @@ export interface SettingsState {
   pinnedSkills: string[];
   /** Skills switched off, by name. Empty is meaningful. */
   disabledSkills: string[];
+  /**
+   * Providers switched off, by id. A disabled provider keeps its stored
+   * credential but is withheld from the chat model picker, which is the
+   * difference between "off for now" and "disconnect" (which deletes the key).
+   */
+  disabledProviders: string[];
   restartsRequired: boolean;
 }
 
@@ -66,6 +72,27 @@ export interface SettingsWriteInput {
    * and out of the always-on resolution.
    */
   disabledSkills?: string[];
+  /**
+   * Replace the switched-off provider set wholesale, like `disabledSkills`.
+   * A provider id here is withheld from the chat model picker; its credential
+   * stays stored so switching it back on needs no re-authentication.
+   */
+  disabledProviders?: string[];
+}
+
+/**
+ * The next `disabledProviders` list after flipping one provider on or off.
+ *
+ * Normalised the same way the server normalises on write (sorted, unique, no
+ * empties) so the value this returns equals the value a re-read will produce:
+ * a list that differed only by order would make the UI look like it changed
+ * something that did not survive the round trip.
+ */
+export function toggleDisabledProvider(current: string[], providerId: string, disabled: boolean): string[] {
+  const set = new Set(current.filter((id) => id.length > 0));
+  if (disabled) set.add(providerId);
+  else set.delete(providerId);
+  return [...set].sort();
 }
 
 export type SkillTrust = "builtin" | "user-trusted" | "project-untrusted" | "extension-inherited" | "draft";

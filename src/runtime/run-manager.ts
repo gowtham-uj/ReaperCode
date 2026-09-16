@@ -3,7 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { AgentRequestEnvelope } from "../connection/schemas.js";
-import { getNewReaperSessionDir, getReaperScratchpadPaths } from "../workspace/scratchpad.js";
+import { getReaperLogDir, getNewReaperSessionDir, getReaperScratchpadPaths } from "../workspace/scratchpad.js";
 import { isReaperDevMode } from "./dev-mode.js";
 
 export interface ReaperRunContext {
@@ -38,12 +38,26 @@ export function createReaperRunContext(
     (isPlaceholderRunId(requestTraceId) ? createRunId() : requestTraceId ?? createRunId());
   const sessionId = isPlaceholderSessionId(request.session_id) ? `session-${runId}` : request.session_id;
   /*
-   * New runs always use `.reaper/sessions`. `getReaperLogDir` has a legacy
-   * fallback for opening an old thread, and using it here would make the
-   * existence of `.reaper/logs/<id>` decide where a *new* run writes — which is
-   * exactly the migration split the explicit new-path helper exists to avoid.
+   * A NAMED session resumes into the directory that already holds its journal;
+   * an anonymous run always starts a new one.
+   *
+   * This forced the new path for both, and for a named session that was the bug.
+   * The run directory is reserved with `mkdir` at boot, and `getReaperLogDir` —
+   * which the journal writer and reader both go through — then saw that empty
+   * new directory and preferred it over a populated `.reaper/logs/<id>`. So a
+   * thread created before the `sessions/` rename had its journal shadowed by an
+   * empty directory on its very next turn, and the conversation read back as
+   * empty. Routing a named session through `getReaperLogDir` means boot reserves
+   * the same directory the writer will use, and a session with an existing
+   * journal is opened rather than duplicated.
+   *
+   * An anonymous run keeps the explicit new path: there is no prior session for
+   * its generated id to resume, so the legacy fallback can only ever pick up an
+   * unrelated directory.
    */
-  const runDir = getNewReaperSessionDir(workspaceRoot, runId);
+  const runDir = namedSession
+    ? getReaperLogDir(workspaceRoot, runId)
+    : getNewReaperSessionDir(workspaceRoot, runId);
   return {
     runId,
     sessionId,

@@ -35,6 +35,7 @@ function store(
     models: [],
     pinnedSkills,
     disabledSkills,
+    disabledProviders: [],
     restartsRequired: false,
   };
   return {

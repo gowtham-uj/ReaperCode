@@ -45,7 +45,7 @@
     "marked": "^14.1.4",
     "p-queue": "^9.2.0",
     "picocolors": "^1.1.1",
-    "playwright": "^1.59.1",
+    "playwright": "1.63.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-router-dom": "^7.18.3",

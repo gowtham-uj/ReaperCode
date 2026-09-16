@@ -41,6 +41,14 @@ export const ThreadMetadataSchema = z.object({
    * as-is and read through the same helper.
    */
   disabledTools: z.array(z.string().min(1).max(128)).max(200).optional(),
+  /**
+   * Whether this thread's shell commands are confined to its workspace by the
+   * kernel. Absent means on, so every thread that existed before this setting
+   * was added is sandboxed without a migration, and the stored `false` is the
+   * only way to be outside the sandbox — which is the right default for a
+   * boundary whose absence is invisible until something walks through it.
+   */
+  filesystemSandbox: z.boolean().optional(),
   status: ThreadStatusSchema,
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),

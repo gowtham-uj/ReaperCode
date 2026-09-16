@@ -367,45 +367,73 @@ body[data-ds-black-theme] {
  * whole alias sheet and overrides only what it changes. Adding a token to the
  * dark sheet cannot leave this one missing it.
  *
- * The ramp is not neutral grey. Sampling the image gives a near-black ground
- * with a blue cast (#080010, #100020) and a violet body climbing through
- * #180828 → #281848 → #402878, so each elevation step here carries the same
- * violet shift rather than only getting lighter. The steps stay ~9 points
- * apart, which is what `black` uses and what the elevation shadows were
- * tuned against — a theme that changed the *spacing* as well as the hue
- * would need the shadows re-tuned with it.
+ * The palette is measured off `reaper.png`, not read off it by eye. Counting
+ * every pixel gives an image that is 11% pure black, 81% of it carries visible
+ * colour, and 75% of the coloured pixels sit in a single hue band of 290-310
+ * degrees. So there is exactly one hue in this theme, and the whole job is
+ * decided by how much of it each surface gets.
  *
- * Contrast is the constraint. Body text sits on the label tokens from the dark
- * sheet, which are unchanged, so text contrast is whatever it was; the sampled
- * mid-violets are far too dark to carry text and appear only as fills,
- * borders, and the accent ramp.
+ * The first version got that wrong in a way worth recording. It sampled the
+ * brightest violet in the artwork, `rgb(43, 33, 61)`, and used it for
+ * `bg-module-platform` — but that colour is 0.5% of the image, the rare hot
+ * edge of the glow, and painting it on every card made the *raised* surfaces
+ * the most saturated thing on screen. In OKLCH the old ramp ran from chroma
+ * 0.022 at the ground to 0.064 at the top, tripling as it climbed, while the
+ * accent sat at 0.169 in the same hue. Everything was violet, nothing
+ * outranked anything, and the window read as one purple wash.
+ *
+ * So the surfaces here hold chroma flat at 0.030 across every stop and move
+ * lightness alone, which is what every dark palette in the design reference
+ * does and what makes an accent read as an accent. The violet is present
+ * everywhere and saturated nowhere.
+ *
+ * The lightness steps are the ones `black` uses, because the elevation shadows
+ * were tuned against that spacing and a theme that changed the spacing as well
+ * as the hue would need them re-tuned with it. Reaper's luminance lands within
+ * 0.001 of black's at every stop, so the shadows carry over untouched.
  */
 body[data-ds-reaper-theme] {
-  --dsw-static-neutral-bluish-950: rgb(6, 4, 12);
-  --dsw-static-neutral-bluish-900: rgb(15, 11, 24);
-  --dsw-static-neutral-bluish-875: rgb(24, 18, 36);
-  --dsw-static-neutral-bluish-850: rgb(33, 25, 48);
-  --dsw-static-neutral-bluish-800: rgb(43, 33, 61);
-  --dsw-static-neutral-bluish-750: rgb(58, 46, 80);
-  --dsw-static-neutral-bluish-700: rgb(84, 70, 108);
+  --dsw-static-neutral-bluish-950: rgb(2, 1, 8);
+  --dsw-static-neutral-bluish-900: rgb(10, 7, 20);
+  --dsw-static-neutral-bluish-875: rgb(19, 16, 31);
+  --dsw-static-neutral-bluish-850: rgb(29, 26, 41);
+  --dsw-static-neutral-bluish-800: rgb(39, 36, 52);
+  --dsw-static-neutral-bluish-750: rgb(55, 51, 68);
+  --dsw-static-neutral-bluish-700: rgb(79, 75, 94);
+  /*
+   * The two tokens above the surface ramp, which the dark sheet uses for
+   * `label-caption` and `bg-overlay`, follow the same hue. They also carry the
+   * one contrast fix in this block: the inherited caption is `rgb(129, 133,
+   * 140)`, which measures 3.29:1 on `bg-module-platform` and 4.08:1 on
+   * `bg-layer-3` — under the 4.5:1 floor for body text in both cases, and
+   * failing today rather than as a result of this change. A caption has to be
+   * legible on the card it labels, so it moves up to 4.81:1 and 5.42:1
+   * respectively. It stays a grey rather than taking colour: a caption is
+   * metadata, and the accent is spent on state.
+   */
+  --dsw-static-neutral-bluish-600: rgb(147, 143, 163);
 
   /*
    * The aura, for the accent ramp.
    *
-   * `-400` is the working accent (the violet the image's energy reads as at
-   * full strength) and `-450` its hover neighbour. The pale lavender from the
-   * hot core of the glow — sampled at #f0d8f8 — is reserved for `-100`/`-50`,
-   * which is what the sheet uses for text and icons *on* the accent, so the
-   * brightest part of the image lands on the "this is active" state.
+   * The image's most chromatic 2% averages hue 294 at lightness 0.53, and 75%
+   * of all its colour lives between 290 and 310, so the ramp is built at the
+   * measured hue rather than at a round number near it. Chroma at each stop is
+   * 80% of what sRGB can hold there, which keeps the violet vivid without
+   * clipping: `-400` comes out at chroma 0.205 against the old 0.169.
+   *
+   * `-400` is the working accent and `-450` its hover neighbour. `-50`/`-100`
+   * are what the sheet paints text and icons with *on* the accent, so they are
+   * the near-white end, where the image's glow core lands anyway.
    */
-  --dsw-static-deepseek-50: rgb(250, 244, 254);
-  --dsw-static-deepseek-100: rgb(240, 224, 250);
-  --dsw-static-deepseek-200: rgb(224, 196, 246);
-  --dsw-static-deepseek-300: rgb(196, 156, 238);
-  --dsw-static-deepseek-400: rgb(168, 118, 232);
-  --dsw-static-deepseek-450: rgb(150, 100, 222);
-  --dsw-static-deepseek-500: rgb(132, 84, 208);
-  --dsw-static-deepseek-600: rgb(108, 64, 178);
-  --dsw-static-deepseek-800: rgb(64, 40, 112);
-  --dsw-static-deepseek-900: rgb(40, 24, 72);
+  --dsw-static-deepseek-50: rgb(244, 242, 253);
+  --dsw-static-deepseek-100: rgb(231, 226, 251);
+  --dsw-static-deepseek-200: rgb(209, 200, 246);
+  --dsw-static-deepseek-300: rgb(174, 153, 239);
+  --dsw-static-deepseek-400: rgb(150, 106, 250);
+  --dsw-static-deepseek-450: rgb(137, 87, 237);
+  --dsw-static-deepseek-500: rgb(125, 67, 228);
+  --dsw-static-deepseek-600: rgb(103, 48, 193);
+  --dsw-static-deepseek-800: rgb(57, 24, 112);
+  --dsw-static-deepseek-900: rgb(39, 14, 80);
 }

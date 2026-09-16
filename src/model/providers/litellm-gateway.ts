@@ -1,3 +1,5 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type {
   EmbeddingRequest,
   EmbeddingResult,
@@ -48,6 +50,32 @@ export interface LiteLLMAttemptEvent {
   retrying: boolean;
 }
 
+/**
+ * Write the exact JSON body sent to the provider, when REAPER_DUMP_REQUESTS is
+ * set to a directory.
+ *
+ * Off by default and never logs to stdout: the body is the whole conversation,
+ * so it belongs in a file the operator chose to create, not in a terminal or a
+ * shared log. This exists because "the model answered nothing" is not
+ * diagnosable from a token count. Two separate investigations were spent
+ * re-deriving the outbound request from the journal, and both re-derivations
+ * differed from what was actually sent.
+ *
+ * Best-effort: a failure to write must never fail a model call.
+ */
+function dumpProviderRequest(body: unknown, profile: ResolvedModelProfile): void {
+  const dir = process.env.REAPER_DUMP_REQUESTS;
+  if (!dir) return;
+  try {
+    const stamp = `${Date.now()}-${process.pid}-${Math.round(Math.random() * 1e6)}`;
+    const name = `${stamp}-${profile.provider}-${profile.model.replace(/[^a-zA-Z0-9._-]/g, "_")}.json`;
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, name), JSON.stringify(body, null, 2));
+  } catch {
+    // Diagnostics must not be able to break a turn.
+  }
+}
+
 export class LiteLLMProviderClient implements ProviderModelClient {
   private readonly fetchImpl: typeof fetch;
   private readonly dispatcher: unknown | undefined;
@@ -64,6 +92,7 @@ export class LiteLLMProviderClient implements ProviderModelClient {
     // The original used response.text() which caused OOM crashes with reasoning models
     // that produce 8K-32K tokens of reasoning_content.
     const body = mapGenerateRequestToLiteLLM({ ...request, maxTokens }, profile);
+    dumpProviderRequest(body, profile);
     const makeFetchInit = (streamBody: boolean): RequestInit & { dispatcher?: unknown } => ({
       method: "POST",
       headers: this.buildHeaders(profile),
@@ -247,13 +276,15 @@ export class LiteLLMProviderClient implements ProviderModelClient {
     // and compose the caller's abort signal with the retry signal so a user
     // cancel actually interrupts an in-flight streaming call.
     const maxTokens = getEffectiveMaxOutputTokens(profile, request.maxTokens);
+    const streamBody = mapStreamRequestToLiteLLM({ ...request, maxTokens }, profile);
+    dumpProviderRequest(streamBody, profile);
     const response = await this.fetchWithRetries(
       (signal) => {
         const composed = composeAbortSignals(signal, request.abortSignal);
         return this.fetchImpl(this.resolveUrl(profile, "/chat/completions"), {
           method: "POST",
           headers: this.buildHeaders(profile),
-          body: JSON.stringify(mapStreamRequestToLiteLLM({ ...request, maxTokens }, profile)),
+          body: JSON.stringify(streamBody),
           ...(composed ? { signal: composed } : {}),
           ...(this.dispatcher ? { dispatcher: this.dispatcher as NonNullable<Parameters<typeof fetch>[1]> extends { dispatcher?: infer D } ? D : never } : {}),
         });

@@ -151,3 +151,56 @@ test("Phase 3: parsePatch parses a simple diff", () => {
   assert.equal(parsed[0]?.hunks[0]?.lines.filter((l) => l.type === "add").length, 1);
   assert.equal(parsed[0]?.hunks[0]?.lines.filter((l) => l.type === "context").length, 2);
 });
+
+/**
+ * A patch that ends in a trailing blank line must apply, not be rejected.
+ *
+ * This is the shape a model produces when it terminates its patch with a
+ * newline after the final content line, which is the ordinary way to end a
+ * text block. The split left a synthetic empty context line at the end of the
+ * last hunk, that line counted toward the hunk's old/new totals, and validation
+ * failed with "consumes N new line(s); malformed hunk" — for a patch that was
+ * perfectly well formed. The same patch without the trailing blank applied
+ * cleanly, so the rejection was about the terminator rather than the content.
+ */
+test("parsePatch accepts a patch whose text ends in a trailing blank line", () => {
+  const body = `--- a/f.txt
++++ b/f.txt
+@@ -1,2 +1,3 @@
+ alpha
+ beta
++gamma`;
+  for (const [name, patch] of [["no trailing newline", body], ["one trailing newline", `${body}\n`], ["trailing blank line", `${body}\n\n`]] as const) {
+    const parsed = parsePatch(patch);
+    assert.equal(parsed.length, 1, name);
+    assert.equal(parsed[0]?.hunks.length, 1, name);
+    assert.equal(parsed[0]?.hunks[0]?.lines.length, 3, `${name}: the blank line must not become a context line`);
+    assert.equal(parsed[0]?.hunks[0]?.lines.filter((l) => l.type === "add").length, 1, name);
+  }
+});
+
+/**
+ * A blank line that is genuinely part of the hunk's content stays.
+ *
+ * The fix drops trailing empty context lines only while a hunk is over its
+ * declared count, so an interior blank line — which the header accounts for —
+ * is untouched. Without that guard the fix would corrupt any patch over a file
+ * that contains a blank line.
+ */
+test("parsePatch keeps an interior blank context line", () => {
+  const patch = `--- a/f.txt
++++ b/f.txt
+@@ -1,4 +1,4 @@
+ alpha
+
+-beta
++BETA
+ delta
+`;
+  const parsed = parsePatch(patch);
+  const lines = parsed[0]?.hunks[0]?.lines ?? [];
+  // alpha, the blank context line, -beta, +BETA, delta.
+  assert.equal(lines.length, 5);
+  assert.equal(lines[1]?.type, "context");
+  assert.equal(lines[1]?.content, "");
+});

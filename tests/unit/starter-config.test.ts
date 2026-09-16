@@ -38,7 +38,6 @@ test("buildStarterConfig: every required field is set, no implicit defaults", ()
   const rt = cfg["runtimeTunables"] as Record<string, unknown>;
   assert.equal(typeof rt["bashDefaultTimeoutMs"], "number");
   assert.equal(typeof rt["maxShellOutputBytes"], "number");
-  assert.equal(typeof rt["retryMaxRetries"], "number");
   assert.equal(typeof rt["permissionMode"], "string");
 
   // Required secrets: API keys are read from env vars (e.g.

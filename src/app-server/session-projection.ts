@@ -4,6 +4,8 @@ import type { PlanStep, TodoItem } from "../runtime/plan-state.js";
 import type { ToolCall, ToolResult } from "../tools/types.js";
 import type { ThreadEventRecord } from "./event-bus.js";
 import type { ThreadMetadata } from "./thread-store.js";
+import { computeContextUsage } from "../model/context-usage.js";
+import { changesFromToolCall } from "../diff/from-tool-call.js";
 
 export type AppTurnStatus = "inProgress" | "completed" | "interrupted" | "failed";
 
@@ -12,7 +14,30 @@ export type AppThreadItem =
   | { type: "agentMessage"; id: string; text: string; phase: "commentary" | "final_answer" }
   | { type: "reasoning"; id: string; summary: string[]; content: string[] }
   | { type: "commandExecution"; id: string; command: string; cwd?: string; status: "inProgress" | "completed" | "failed"; aggregatedOutput?: string; exitCode?: number; durationMs?: number }
-  | { type: "fileChange"; id: string; changes: Array<{ path: string; kind: string; diff?: string }>; status: "inProgress" | "completed" | "failed" }
+  | {
+      type: "fileChange";
+      id: string;
+      changes: Array<{
+        path: string;
+        kind: string;
+        diff?: string;
+        /**
+         * Line counts, carried rather than counted from `diff`.
+         *
+         * The client can count `+` and `-` lines itself, and did, but only
+         * while the diff was complete: a long change is truncated on the
+         * server, and a truncated diff no longer contains every added line, so
+         * counting it under-reports the change on exactly the rows where the
+         * size matters most.
+         */
+        additions?: number;
+        removals?: number;
+        /** True when `diff` is a preview of a larger change. */
+        truncated?: boolean;
+      }>;
+      status: "inProgress" | "completed" | "failed";
+      durationMs?: number;
+    }
   | {
       type: "dynamicToolCall";
       id: string;
@@ -83,6 +108,8 @@ export interface AppThread {
   systemPrompt?: string;
   /** Tool names this thread's agent must not call. */
   disabledTools?: string[];
+  /** Whether shell commands are confined to `cwd` by the kernel. */
+  filesystemSandbox: boolean;
   /** Whether any turn has ever run here — see `projectThread`. */
   hasTurns: boolean;
   approvalPolicy?: string;
@@ -431,6 +458,33 @@ export class SessionProjection {
         // meter can draw its thresholds without the client guessing.
         this.cumulativeInputTokens += event.inputTokens;
         this.cumulativeOutputTokens += event.outputTokens;
+        const modelContextWindow = typeof event.modelContextWindow === "number" ? event.modelContextWindow : null;
+        /*
+         * Context pressure, computed here rather than in the browser.
+         *
+         * The prompt side is `inputTokens`, which is what the provider counted
+         * for the request that just ran. Output tokens are deliberately not
+         * folded in: they were generated *from* this prompt and are not part
+         * of the budget it consumed. That sum is the mistake that produces a
+         * meter reading over 100%.
+         *
+         * The limit is the soft cap when there is one, because reaching the cap
+         * is what triggers compaction and is therefore the number that changes
+         * behaviour. The model's window is the outer bound and is reported
+         * beside it so the two are never confused.
+         */
+        const usage = computeContextUsage({
+          promptTokens: event.inputTokens,
+          window: typeof event.contextSoftCap === "number" && event.contextSoftCap > 0
+            ? event.contextSoftCap
+            : modelContextWindow,
+          source: typeof event.contextSoftCap === "number" && event.contextSoftCap > 0 ? "config" : "catalog",
+          reservedOutputTokens: typeof event.reservedOutputTokens === "number" ? event.reservedOutputTokens : 0,
+          // A provider count, not an estimate: this event is emitted from real
+          // usage after the call returned.
+          estimated: false,
+          ...(typeof event.model === "string" ? { model: event.model } : {}),
+        });
         return [{
           method: "thread/tokenUsage/updated",
           params: {
@@ -442,8 +496,9 @@ export class SessionProjection {
                 totalTokens: this.cumulativeInputTokens + this.cumulativeOutputTokens,
               },
               last: { inputTokens: event.inputTokens, outputTokens: event.outputTokens, totalTokens: event.inputTokens + event.outputTokens },
-              modelContextWindow: typeof event.modelContextWindow === "number" ? event.modelContextWindow : null,
+              modelContextWindow,
               contextSoftCap: typeof event.contextSoftCap === "number" ? event.contextSoftCap : undefined,
+              contextUsage: usage,
             },
           },
         }];
@@ -628,6 +683,10 @@ export function projectThread(metadata: ThreadMetadata, turns?: AppTurn[]): AppT
     ...(metadata.reasoningEffort ? { reasoningEffort: metadata.reasoningEffort } : {}),
     ...(metadata.systemPrompt ? { systemPrompt: metadata.systemPrompt } : {}),
     ...(metadata.disabledTools?.length ? { disabledTools: metadata.disabledTools } : {}),
+    // Stated on every thread, including the ones that never set it, because
+    // the settings toggle needs a value to render and "absent" would draw as
+    // off — the opposite of what absent means here.
+    filesystemSandbox: metadata.filesystemSandbox !== false,
     approvalPolicy: metadata.permissionMode,
     /*
      * Whether any turn has ever run here. `lastTurn` is written by the first
@@ -645,11 +704,44 @@ export function projectThread(metadata: ThreadMetadata, turns?: AppTurn[]): AppT
 }
 
 export function projectHistory(messages: SessionMessage[]): AppTurn[] {
+  /*
+   * Rows that are engine bookkeeping, not things the user said or the model
+   * answered. The journal records them as messages (a resume marker, a runtime
+   * notice, a swallowed-error row), and projecting them verbatim put internal
+   * strings like `[session-resume] prepended re-anchor` in the transcript as if
+   * the model had said them — the same "reveal the plumbing" mistake this
+   * surface exists to avoid. They are dropped here, not hidden by the renderer,
+   * so every client agrees on what a turn contains.
+   */
+  const isInternalRow = (text: string): boolean =>
+    /^\[(session-resume|resume|summary-applied|main_agent_error|runtime notice)\b/.test(text);
+
+  /*
+   * The assistant's tool calls, keyed by id, so each `tool` result can be
+   * rebuilt into the SAME item the live path would have shown.
+   *
+   * A tool result row carries only the output; the arguments live on the
+   * assistant row that announced the call, joined by `tool_call_id`. The old
+   * code ignored that join and emitted a bare `dynamicToolCall` with
+   * `arguments: {}` and the result as a raw string — so a rebuilt thread lost
+   * every eval's script, every file diff, every command string, and every
+   * Code Mode ledger, leaving one empty row where live had shown the whole card.
+   * The transcript is supposed to be identical whether streamed or replayed.
+   */
+  const callsById = new Map<string, { name: string; args: unknown }>();
+  for (const message of messages) {
+    if (message.role !== "assistant" || !Array.isArray(message.tool_calls)) continue;
+    for (const call of message.tool_calls) {
+      if (call?.id) callsById.set(call.id, { name: call.name, args: call.args });
+    }
+  }
+
   const turns: AppTurn[] = [];
   let current: AppTurn | undefined;
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index]!;
     if (message.role === "user") {
+      if (isInternalRow(message.content ?? "")) continue;
       current = {
         id: `history-turn-${turns.length + 1}`,
         status: "completed",
@@ -667,21 +759,78 @@ export function projectHistory(messages: SessionMessage[]): AppTurn[] {
       turns.push(current);
     }
     if (message.role === "assistant") {
+      /*
+       * An assistant row with no text is a tool-call carrier, not an answer.
+       *
+       * Most assistant rows in a real session are exactly that — the model
+       * announced a tool call and said nothing — and projecting them all as
+       * agent messages filled the rebuilt transcript with empty bubbles between
+       * every tool call. The call itself is already its own item (the `tool`
+       * row that follows), so the carrier adds nothing and hides the answers
+       * among blanks. Skipped unless it carries text; an internal row is skipped
+       * unconditionally.
+       */
+      const text = message.content ?? "";
+      if (isInternalRow(text)) continue;
+      if (text.trim().length > 0) {
+        current.items.push({
+          type: "agentMessage",
+          id: `history-item-${index + 1}`,
+          text,
+          phase: "final_answer",
+        });
+      }
+    } else if (message.role === "thinking") {
+      /*
+       * The journal records the model's reasoning as a `thinking` message, and
+       * this loop only knew `user`, `assistant`, and `tool` — so every thinking
+       * block was dropped the moment a thread was rebuilt from disk. Live,
+       * reasoning arrives as an `assistant.reasoning.*` event and becomes a
+       * `{ type: "reasoning" }` item; on reload there was no equivalent, and a
+       * resumed conversation lost its reasoning entirely. Mapping the persisted
+       * role onto the same item type is what makes the transcript identical
+       * whether it was streamed or replayed.
+       *
+       * `content` carries the text and `summary` stays empty, matching how the
+       * live path builds the item from `assistant.reasoning.completed`.
+       */
       current.items.push({
-        type: "agentMessage",
+        type: "reasoning",
         id: `history-item-${index + 1}`,
-        text: message.content ?? "",
-        phase: "final_answer",
+        summary: [],
+        content: [message.content ?? ""],
       });
     } else if (message.role === "tool") {
-      current.items.push({
-        type: "dynamicToolCall",
-        id: `history-item-${index + 1}`,
-        tool: message.name ?? "tool",
-        arguments: {},
-        status: "completed",
-        result: message.content,
-      });
+      const call = typeof message.tool_call_id === "string" ? callsById.get(message.tool_call_id) : undefined;
+      /*
+       * Rebuild through the live item builders rather than a generic row.
+       *
+       * `toolItem` decides the shape from the tool name (a bash call is a
+       * commandExecution, an edit is a fileChange with a diff, everything else a
+       * dynamicToolCall carrying its arguments); `completeToolItem` then folds
+       * the result in. Using them here is what makes a replayed transcript
+       * match the streamed one instead of collapsing to one opaque row per call.
+       *
+       * The result is parsed from the stored JSON string before it is handed
+       * over: `readCodeModeResult` (and the file-diff refinement) expect the
+       * object, and a raw string made every eval card render as "no report" —
+       * which is exactly the "only one card, and empty" the user saw. Falling
+       * back to the string keeps a non-JSON output readable rather than
+       * dropping it.
+       */
+      const name = call?.name ?? message.name ?? "tool";
+      const args = asRecord(call?.args) ?? {};
+      const parsed = parseToolOutput(message.content);
+      const toolCall = { id: message.tool_call_id ?? `history-item-${index + 1}`, name, args } as ToolCall;
+      const result = {
+        name,
+        toolCallId: toolCall.id,
+        ok: message.is_error !== true,
+        output: parsed,
+        durationMs: typeof message.duration_ms === "number" ? message.duration_ms : 0,
+        ...(message.is_error === true ? { error: { message: String(message.content ?? "") } } : {}),
+      } as ToolResult;
+      current.items.push(completeToolItem(toolItem(toolCall, "completed"), toolCall, result));
     }
   }
   return turns;
@@ -705,15 +854,19 @@ function toolItem(call: ToolCall, status: "inProgress" | "completed" | "failed")
       status,
     };
   }
-  if (["write_file", "edit_file", "file_edit", "apply_patch", "delete_file"].includes(call.name)) {
-    const args = asRecord(call.args) ?? {};
-    const candidate = args.path ?? args.file_path;
-    return {
-      type: "fileChange",
-      id: call.id,
-      changes: typeof candidate === "string" ? [{ path: candidate, kind: call.name }] : [],
-      status,
-    };
+  /*
+   * A file change is derived from the call, not from a name list kept here.
+   *
+   * The list that used to live at this line named `apply_patch`, which is not a
+   * registered tool: the registered name is `apply_patch_edit`. A patch call
+   * therefore fell through to `dynamicToolCall` and rendered as an opaque tool
+   * row with no diff at all. Moving the membership test into the diff module
+   * means the names a tool is recognised by are next to the code that reads its
+   * arguments, so the two cannot drift apart again.
+   */
+  const changes = changesFromToolCall(call.name, call.args);
+  if (changes !== undefined) {
+    return { type: "fileChange", id: call.id, changes, status };
   }
   return { type: "dynamicToolCall", id: call.id, tool: call.name, arguments: asRecord(call.args) ?? {}, status };
 }
@@ -729,6 +882,28 @@ function completeToolItem(existing: AppThreadItem | undefined, call: ToolCall, r
     if (typeof record?.exitCode === "number") item.exitCode = record.exitCode;
   } else if (item.type === "fileChange") {
     item.status = result.ok ? "completed" : "failed";
+    /*
+     * Re-derive the change now that the result is available.
+     *
+     * The item was built when the call started, from the arguments alone. Some
+     * tools only tell the whole story at completion: `file_edit` reads the file
+     * it is about to change and reports the text it replaced, which is the only
+     * source for the before side when the model omitted `expected_content`. The
+     * result wins over the arguments for exactly that reason, and the args-only
+     * version stands in when it does not.
+     *
+     * A failed call keeps the arguments' version, which is what a reader wants
+     * when an edit is refused: the change it was trying to make.
+     */
+    const refined = result.ok ? changesFromToolCall(call.name, call.args, result.output) : undefined;
+    if (refined !== undefined && refined.length > 0) item.changes = refined;
+    /*
+     * `durationMs` comes from the result, which is the sandbox's own timing and
+     * excludes queueing. The client measures its own wall clock for calls it
+     * watched live; this is what a transcript loaded from history has, and
+     * without it a reloaded thread showed no timings at all.
+     */
+    item.durationMs = result.durationMs;
   } else if (item.type === "dynamicToolCall") {
     item.status = result.ok ? "completed" : "failed";
     item.result = result.output;
@@ -754,4 +929,26 @@ function userFingerprint(turn: AppTurn): string | undefined {
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+/**
+ * A stored tool result back into the object it was serialized from.
+ *
+ * The journal keeps a tool result as a JSON string. Handed to the view as a
+ * string, every eval card read as "no report" and every file diff lost its
+ * refinements, because those readers narrow on the object. Parsing it back is
+ * what restores a replayed transcript to what was streamed. A string that is
+ * not JSON (a plain error message, say) is returned as-is so it still shows.
+ */
+function parseToolOutput(raw: unknown): unknown {
+  if (typeof raw !== "string") return raw;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return raw;
+  const first = trimmed[0];
+  if (first !== "{" && first !== "[") return raw;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return raw;
+  }
 }

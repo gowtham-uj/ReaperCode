@@ -117,18 +117,186 @@ code, pre, [data-diff], [data-read], [data-terminal] { font-family: var(--ds-fon
 .conversation-title { overflow: hidden; max-width: 340px; padding: 4px 7px; font-size: 14px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .conversation-header-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; min-width: 0; }
 .conversation-body { display: flex; flex: 1; min-height: 0; }
-.conversation-scroll { flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
-.chat-column { display: flex; flex-direction: column; width: 100%; max-width: var(--dsh-chat-content-width); min-height: 100%; margin: 0 auto; padding: 24px 16px 170px; }
+/*
+ * The scroll region is a flex column so the composer sits at the bottom without
+ * being counted twice.
+ *
+ * `chat-column` and `dsh-composer-seat` are siblings in here, and the seat is
+ * `position: sticky; bottom: 0`: it is in flow *and* pinned to the viewport
+ * bottom. The column used to be `min-height: 100%` with 170px of bottom padding,
+ * which is the layout for a seat that overlays the scroll area rather than one
+ * that occupies it. Both applied at once meant the column reserved 170px for a
+ * seat that also took 131px of its own, so every thread was 131px taller than
+ * the viewport and the auto-scroll to the bottom pushed the first message off
+ * the top. A short thread also opened with a third of a screen of empty column
+ * under it.
+ *
+ * Growing the column instead of fixing its height solves both: when the thread
+ * is short it flexes to the space left over and the seat lands at the bottom of
+ * the viewport with nothing cut off; when it is long it grows past and scrolls
+ * as before. The seat's height is whatever its contents need (it also holds the
+ * jump-to-latest control and the sticky approval bar), so a fixed padding could
+ * never have tracked it.
+ */
+.conversation-scroll { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
+.chat-column { display: flex; flex: 1 0 auto; flex-direction: column; width: 100%; max-width: var(--dsh-chat-content-width); min-height: 0; margin: 0 auto; padding: 24px 16px 32px; }
 .recovery-banner { margin: 0; padding: 7px 18px; border-bottom: .5px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-state-warn-tertiary); color: var(--dsw-alias-state-warn-label); font-size: 12px; }
 .chat-error { margin: 8px 0; padding: 9px 12px; border-radius: 9px; background: var(--dsw-alias-interactive-bg-hover-danger); color: var(--dsw-alias-state-error-primary); font-size: 13px; }
 .turn { padding: 4px 0; }
-.turn + .turn { margin-top: 18px; padding-top: 22px; border-top: .5px solid var(--dsw-alias-border-l2); }
+/*
+ * A byline rather than a rule between turns.
+ *
+ * The rule was doing the separating and saying nothing. Once every agent turn
+ * announces itself, the divider is redundant with the byline directly under it,
+ * and removing it is what lets a long session breathe: twelve turns had twelve
+ * horizontal lines across the column.
+ */
+.turn + .turn { margin-top: 14px; }
+/* A continued turn is the same reply, so it gets no gap and no new byline. */
+.turn[data-continued] + .turn, .turn[data-continued] { margin-top: 0; }
+.turn-byline { display: flex; align-items: center; gap: 8px; margin: 4px 0 6px; }
+.turn-avatar { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent); color: var(--dsw-alias-state-business-primary); }
+.turn-speaker { color: var(--dsw-alias-label-primary); font-size: 13px; font-weight: 600; }
 .step { padding: 5px 0; }
 .step-tools { margin: 4px 0 0 11px; padding-left: 14px; border-left: .5px solid var(--dsw-alias-border-l3); }
 /* These two were carried in the markup but never given a rule, so neither had
  * any spacing contribution of its own — the continuation line and the group of
  * tool rows below a collapsed summary relied entirely on the UA's defaults. */
 .exploration-step { padding-bottom: 0; }
+
+/*
+ * A step, as a card.
+ *
+ * The card is what turns a forty-row turn into "six things the agent did". Its
+ * header carries the whole summary — what the step was doing, how many actions,
+ * how long, and whether it is still going — so a reader can decide whether to
+ * open it without opening it.
+ *
+ * It sits one level above `.tool-card` and has to read that way, so it is a
+ * shade lighter than the page and the cards inside it are transparent rather
+ * than boxed: nesting a bordered box inside a bordered box at the same value is
+ * what made the first attempt look like a stack of receipts.
+ */
+.step-card { margin: 8px 0; border: .5px solid var(--dsw-alias-border-l2); border-radius: 14px; background: var(--dsw-alias-bg-module-platform); overflow: hidden; }
+.step-card[data-failed] { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 34%, var(--dsw-alias-border-l2)); }
+.step-card-head { display: flex; align-items: center; gap: 10px; width: 100%; padding: 11px 14px; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+/* The step's icon: bare, accent-coloured, no tile. The filled tiles in a
+   cluster belong to the actions that changed something. */
+.step-card-icon { flex: none; display: grid; place-items: center; width: 20px; height: 20px; color: var(--dsw-alias-state-business-primary); }
+.step-card-icon[data-tone="failed"] { color: var(--dsw-alias-state-error-primary); }
+.step-card-head:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.step-card[data-open] .step-card-head { border-bottom: .5px solid var(--dsw-alias-border-l1); }
+.step-card-title { flex: none; color: var(--dsw-alias-label-primary); font-size: 13px; font-weight: 600; }
+.step-card-count { min-width: 0; overflow: hidden; color: var(--dsw-alias-label-caption); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.step-card-count::before { content: "— "; }
+.step-card-badge { flex: none; display: inline-flex; align-items: center; gap: 6px; margin-left: auto; padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 500; white-space: nowrap; }
+/*
+ * The running badge writes the accent rather than painting with it.
+ *
+ * It was using `state-business-primary` for both, which is the fill-strength
+ * accent, and measured 3.50:1 on its own tinted background in reaper and 3.72:1
+ * in the default dark theme — under the 4.5:1 floor at 12px, in both. The
+ * accent cannot do both jobs at one lightness: as a fill it has to be dark
+ * enough to carry a white glyph (3.66:1 against white, which is why it is that
+ * value), and a colour dark enough to do that cannot also be 4.5:1 against a
+ * dark card. `-300` is the light variant for text, which is the split the dark
+ * mode rule asks for, and it clears 5.25:1 here and 5.98:1 on the default theme.
+ */
+.step-card-badge[data-tone="running"] { background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 13%, transparent); color: var(--dsw-static-deepseek-300); }
+/* The failed badge is the same split as the running one: the error hue paints
+   the background, a lighter red carries the word. `state-error-primary` on its
+   own tint measures 3.15:1 in the default theme and 3.86:1 in the others, and
+   the token has to stay where it is because it is also the fill behind the red
+   discs. */
+.step-card-badge[data-tone="failed"] { background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, transparent); color: rgb(255, 150, 150); }
+.step-card-pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: reasoning-pulse 1.4s ease-in-out infinite; }
+/*
+ * The body. Cards inside a step lose their own border and background so the
+ * step's card is the only box, and the rail below is what separates one action
+ * from the next.
+ */
+/*
+ * The execution rail, drawn once for the whole cluster.
+ *
+ * It used to be a pseudo element on each row, stretched 10px past its own box in
+ * both directions. That works for a list of equal 20px rows and falls apart the
+ * moment an inset card is 300px tall: the line runs 10px past the card head,
+ * stops, and picks up again at the next row, so the cluster reads as a column of
+ * disconnected stubs rather than one sequence.
+ *
+ * One line on the container instead, with the status marks painted over it. The
+ * first and last marks still knock out their half so the rail begins and ends at
+ * a mark rather than in mid-air.
+ */
+.step-card-body { position: relative; padding: 4px 0; }
+/* 19px is the mark's own centre: the head's 11px left padding plus half the
+   16px rail column. The rich cards resolve to the same x through their 34px
+   margin and -23px rail offset, which is what keeps one line through both. */
+.step-card-body::before { content: ""; position: absolute; left: 19px; top: 14px; bottom: 14px; width: 1px; margin-left: -.5px; background: var(--dsw-alias-border-l2); }
+.step-card-body[data-peek]::before { display: none; }
+/* The per-row stub is now redundant; the marks keep their opaque backing so the
+   container line passes behind them rather than through them. */
+.step-card-body .tool-rail::before { display: none; }
+.step-card-body .tool-card { margin: 0; border: 0; border-radius: 0; background: transparent; }
+.step-card-body .tool-card + .tool-card { margin-top: 0; }
+.step-card-body .tool-card[data-status="failed"] { border-left: 0; background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 5%, transparent); }
+/*
+ * A rich action inside a cluster gets its box back.
+ *
+ * The reference draws its five searches and reads as flat rows and then draws
+ * "Updated src/auth/session.ts" and "Run tests" as bordered cards inset within
+ * the same cluster. That inset is the signal: the flat rows are a list of
+ * things looked at, and the boxes are the two things that happened. Stripping
+ * every card to a flat row, which is what this did, gave a step of fifteen
+ * calls fifteen identical rows and no shape at all.
+ *
+ * The rail mark still sits outside the box, in its own column, so the sequence
+ * reads straight down past the inset cards rather than stepping around them.
+ */
+/* `overflow: visible` is load-bearing: the rail mark is positioned outside the
+   card's own box so the sequence reads straight down the cluster, and the base
+   rule's `overflow: hidden` clipped it away entirely. The head keeps the top
+   corners rounded so its hover fill still respects the border. */
+.step-card-body .tool-card[data-weight="rich"] { margin: 7px 13px 7px 34px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 12px; background: var(--dsw-alias-bg-layer-1); overflow: visible; }
+.step-card-body .tool-card[data-weight="rich"] > .tool-card-head { position: relative; padding: 9px 11px; border-radius: 11px 11px 0 0; }
+.step-card-body .tool-card[data-weight="rich"]:not([data-open]) > .tool-card-head { border-radius: 11px; }
+.step-card-body .tool-card[data-weight="rich"] .tool-rail { position: absolute; left: -23px; top: 50%; margin-top: -10px; }
+.step-card-body .tool-card[data-weight="rich"] .tool-rail > * { background: var(--dsw-alias-bg-module-platform); }
+.step-card-body .tool-card[data-weight="rich"][data-status="failed"] { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary) 40%, var(--dsw-alias-border-l2)); }
+/* Light rows are separated by a rule; the inset cards separate themselves. */
+.step-card-body .tool-card[data-weight="light"] + .tool-card[data-weight="light"] { border-top: .5px solid var(--dsw-alias-border-l1); }
+/*
+ * The one row still running gets a filled pill and an accent path.
+ *
+ * The reference does this and it is the difference between a cluster you read
+ * and a cluster you watch: with fifteen identical rows the eye has to find the
+ * spinner glyph to know where the run is, and the spinner is 13px. A filled row
+ * is findable at a glance from across the desk. It is inset from the rail so the
+ * sequence still reads straight down, and it stops at the row rather than
+ * tinting the whole cluster, because only this one call is live.
+ *
+ * Colour is not doing this alone: the row still carries the ring glyph and the
+ * "Running…" note, so the state survives a monochrome display.
+ */
+.step-card-body .tool-card[data-weight="light"][data-status="inProgress"] { border-top-color: transparent; }
+/* The pill starts clear of the rail mark (centred at 19px, 13px wide, so its
+   right edge is 26px) and its own 6px padding puts the icon tile back at 36px,
+   which is where every other row's tile lands. The pill must draw attention to
+   the column, not move it. */
+.step-card-body .tool-card[data-weight="light"][data-status="inProgress"] > .tool-card-head { position: relative; margin: 1px 13px 1px 30px; padding-left: 6px; width: auto; border-radius: 9px; background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 13%, var(--dsw-alias-bg-module-platform)); }
+.step-card-body .tool-card[data-weight="light"][data-status="inProgress"] .tool-rail { position: absolute; left: -19px; }
+.step-card-body .tool-card[data-weight="light"][data-status="inProgress"] .tool-rail > * { background: var(--dsw-alias-bg-module-platform); }
+/* The live row's facts are text, so they take the light accent like every other
+   accent-as-text use. At fill strength this measured 3.50:1 on the tinted pill;
+   the -300 variant measures 5.26:1 against the same background. */
+.step-card-body .tool-card[data-weight="light"][data-status="inProgress"] .tool-card-paths { color: var(--dsw-static-deepseek-300); }
+.step-card-body .tool-card[data-weight="light"][data-status="inProgress"] .tool-card-note[data-tone="running"] { color: var(--dsw-static-deepseek-300); }
+.step-card-body .agent-message, .step-card-body .reasoning { padding: 2px 13px; }
+/* The one live row peeking out of a folded card. Separated by the same rule the
+   header uses when open, so it reads as attached to the card rather than as a
+   second card, and its rail stub is trimmed to itself. */
+.step-card-body[data-peek] { border-top: .5px solid var(--dsw-alias-border-l1); }
+.step-card-body[data-peek] .tool-rail::before { display: none; }
 .tool-block { display: flex; flex-direction: column; }
 .tool-block + .tool-block { margin-top: 1px; }
 .user-message { align-self: flex-end; width: fit-content; max-width: 86%; margin: 9px 0 12px auto; padding: 10px 14px; border-radius: 18px 18px 5px 18px; background: var(--dsw-specific-bubble); white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -155,7 +323,10 @@ code, pre, [data-diff], [data-read], [data-terminal] { font-family: var(--ds-fon
 .md-rule { margin: 14px 0; border: 0; border-top: .5px solid var(--dsw-alias-border-l2); }
 /* Inline code reads as a chip so it is distinguishable from prose at a glance. */
 .md-code { padding: 1px 5px; border-radius: 4px; background: var(--dsw-alias-markdown-code-block); color: var(--dsw-alias-label-secondary); font-family: var(--ds-font-family-code); font-size: .92em; }
-.md-link { color: var(--dsw-static-deepseek-500); text-decoration: none; }
+/* A link is text before it is an accent, so it takes the light variant for the
+   same reason the running badge does — at fill strength it measured 4.31:1 on
+   the default dark base and 3.76:1 in reaper, both under 4.5:1. */
+.md-link { color: var(--dsw-static-deepseek-300); text-decoration: none; }
 .md-link:hover { text-decoration: underline; }
 
 /*
@@ -219,11 +390,224 @@ code, pre, [data-diff], [data-read], [data-terminal] { font-family: var(--ds-fon
 .context-fact dt { color: var(--dsw-alias-label-caption); font-size: 10px; }
 .context-fact dd { margin: 0; color: var(--dsw-alias-label-secondary); font-size: 11px; font-variant-numeric: tabular-nums; }
 
+/* ── Tool cards ─────────────────────────────────────────────────────────────
+ *
+ * The reference interface's shape: a head row of [icon tile] [title] [meta],
+ * then the call's input and output as separately collapsible sections in boxes.
+ *
+ * The card replaces a flat row with a disclosure under it. The reason is
+ * scanability. A transcript is a list of actions and a reader runs an eye down
+ * it looking for two things, "did anything fail" and "what is still running",
+ * and a flat row gives neither an anchor: the state was a bare glyph at the far
+ * right whose position moved with the length of the command. A fixed icon
+ * column plus a labelled pill gives both a fixed column to run down.
+ *
+ * The card is quiet by default: a 1px rule and a slightly raised surface. Tool
+ * calls are the middle ground between the model's prose, which is the point of
+ * the transcript, and the raw output, which is evidence. Anything louder would
+ * make a tool-heavy turn read as a wall of boxes.
+ */
+.tool-card { display: flex; flex-direction: column; margin: 6px 0; border: .5px solid var(--dsw-alias-border-l2); border-radius: 12px; background: var(--dsw-alias-bg-module-platform); overflow: hidden; }
+.tool-card + .tool-card { margin-top: 6px; }
+/* A failure keeps its left edge marked after the row scrolls past, so a failed
+   call several screens up is still findable when scanning. */
+.tool-card[data-status="failed"] { border-left: 2px solid var(--dsw-alias-state-error-primary); }
+/*
+ * The head is a button, so it needs the button reset. `text-align: left` and
+ * `font: inherit` are the two that matter: without them a collapsed row renders
+ * centred in the UA's form font, which is visible at a glance and was the first
+ * thing wrong when these rows became clickable.
+ */
+.tool-card-head { display: flex; align-items: center; gap: 9px; width: 100%; min-width: 0; padding: 7px 11px; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.tool-card-head:disabled { cursor: default; }
+.tool-card-head:not(:disabled):hover { background: var(--dsw-alias-interactive-bg-hover); }
+.tool-card-title { flex: none; color: var(--dsw-alias-label-primary); font-size: 13px; font-weight: 500; }
+/*
+ * Inside a cluster the light rows are a list, and a list wants one left edge for
+ * its subjects. Without this the path after "Grep search" starts three
+ * characters further right than the path after "File view", so five rows have
+ * five different indents and the column of filenames the reader is actually
+ * scanning does not exist. A min-width rather than a fixed one: a longer label
+ * pushes its own row out instead of being clipped.
+ */
+.step-card-body .tool-card[data-weight="light"] .tool-card-title { min-width: 7.2rem; }
+.tool-card-paths { min-width: 0; overflow: hidden; color: var(--dsw-alias-label-tertiary); font-family: var(--ds-font-family-code); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.tool-card-inline { flex: none; display: flex; align-items: center; gap: 7px; font-family: var(--ds-font-family-code); font-size: 12px; font-variant-numeric: tabular-nums; }
+.tool-card-meta { flex: none; display: flex; align-items: center; gap: 10px; margin-left: auto; padding-left: 10px; }
+.tool-card-duration { color: var(--dsw-alias-label-caption); font-size: 12px; font-variant-numeric: tabular-nums; }
+/*
+ * The result note: "8 matches", "exit 1". It sits where the status pill used
+ * to, and says more. The pill reported a fact the rail already carries in the
+ * left column; this reports what the call found, which nothing else on a folded
+ * row does.
+ */
+.tool-card-note { color: var(--dsw-alias-label-tertiary); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tool-card-note[data-tone="failed"] { color: var(--dsw-alias-state-error-primary); }
+/* Same split as the running badge: the accent marks the state, the light
+   variant carries the word. At fill strength this is 4.13:1 on the card. */
+.tool-card-note[data-tone="running"] { color: var(--dsw-static-deepseek-300); }
+/*
+ * The body is indented to the title's column, not the card's edge.
+ *
+ * 16px rail plus 22px tile plus two 9px gaps is where the title starts, and an
+ * expanded body that starts at the card edge instead reads as a new section
+ * rather than as this row's detail — which is exactly wrong inside a step,
+ * where the row above it is a sibling action. Aligning it under the title is
+ * what keeps the rail a straight, unbroken column.
+ */
+.tool-card-body { padding: 0 11px 8px 57px; }
+.step > .tool-card > .tool-card-body, .tool-block > .tool-card > .tool-card-body { padding-left: 47px; }
+/*
+ * A rich action's body clears the title column and takes the card's width.
+ *
+ * A diff and a terminal are content read left to right at a fixed character
+ * width, and indenting them 57px to line up under a label costs four columns of
+ * every line of code in the transcript for an alignment nobody reads. The
+ * reference puts both flush inside their card. Light actions keep the indent:
+ * their bodies are argument rows, which are exactly the thing that should hang
+ * off the title.
+ */
+/* 10px all round. The diff and the terminal block both carry their own border,
+   so the card's job here is an even margin, not a bottom gutter sized for a
+   footnote that is no longer in the flow. */
+.tool-card[data-weight="rich"] > .tool-card-body { padding: 0 10px 10px; }
+.tool-card-body .tool-section + .tool-section { margin-top: 4px; }
+.tool-card-body .tool-section-head { padding: 4px 0; }
+.tool-card-body .tool-section-body { padding: 0; }
+
+/*
+ * The rail. A fixed 16px column of status marks down the left of a step's
+ * actions, joined by a connector, so "did any of these fail, and where" is one
+ * glance rather than twenty reads. The connector is drawn with a pseudo-element
+ * rather than a border on the row, because it has to stop at the first and last
+ * mark instead of running the full height of the card.
+ */
+.tool-rail { position: relative; flex: none; display: grid; place-items: center; width: 16px; height: 20px; }
+.tool-rail::before { content: ""; position: absolute; left: 50%; top: -10px; bottom: -10px; width: 1px; margin-left: -.5px; background: var(--dsw-alias-border-l2); }
+.tool-rail > * { position: relative; z-index: 1; background: var(--dsw-alias-bg-module-platform); }
+.step-card-body .tool-card:first-child .tool-rail::before { top: 50%; }
+.step-card-body .tool-card:last-child .tool-rail::before { bottom: 50%; }
+/* Outside a step there is no sequence to connect, so there is no connector. */
+.step > .tool-card .tool-rail::before, .tool-block > .tool-card .tool-rail::before { display: none; }
+
+/*
+ * The icon tile: a fixed 22px column, so every head row lines up.
+ *
+ * Two tones, and the difference between them is the transcript's whole visual
+ * hierarchy. A light action — a search, a read — is an icon on the background
+ * in caption grey, which is how the reference draws the five rows of its
+ * activity cluster. An action that changed something gets a filled accent tile,
+ * which is why "Updated src/auth/session.ts" is the first thing the eye finds
+ * in a screen of twenty rows. Giving every row a filled chip, which is what
+ * this did, flattens that back out: twenty equally loud rows are twenty rows
+ * nobody scans.
+ */
+.tool-tile { flex: none; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 7px; line-height: 1; }
+.tool-tile[data-tone="plain"] { background: transparent; color: var(--dsw-alias-label-caption); }
+.tool-tile[data-tone="accent"] { background: var(--dsw-alias-state-business-primary); color: #fff; }
+.tool-tile[data-tone="success"] { background: var(--dsw-alias-state-success-primary); color: #fff; }
+.tool-tile[data-tone="failed"] { background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 16%, transparent); color: var(--dsw-alias-state-error-primary); }
+/*
+ * The glyph takes the tile's colour, and this rule is what lets it.
+ *
+ * `.tool-icon` sets its own caption grey, which is right in a text row and
+ * wrong inside a filled tile: it beat the tile's `color: #fff` on specificity,
+ * so the white pencil the reference draws on violet came out grey-green and the
+ * tile read as a smudge. The tile owns the pairing, so the glyph defers to it.
+ */
+.tool-tile .tool-icon { width: auto; color: inherit; }
+.tool-tile[data-tone="accent"] .tool-icon { stroke-width: 1.6; }
+
+/* The status pill: glyph plus word, so the state survives a greyscale
+   screenshot and a colourblind reader alike. */
+
+/* Collapsible sections inside a card. */
+.tool-section + .tool-section { border-top: .5px solid var(--dsw-alias-border-l1); }
+.tool-section-head { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; padding: 6px 11px; border: 0; background: transparent; color: var(--dsw-alias-label-caption); font-size: 11px; text-align: left; cursor: pointer; }
+.tool-section-head:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-secondary); }
+.tool-section-title { flex: none; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; }
+.tool-section-hint { flex: none; color: var(--dsw-alias-state-error-primary); font-size: 11px; text-transform: none; letter-spacing: 0; }
+.tool-section-trailing { flex: none; margin-left: auto; }
+.tool-section-body { padding: 0 11px 9px; }
+.tool-section-note { color: var(--dsw-alias-label-caption); font-size: 12px; }
+/* The command and the output are both code, but they read differently: the
+   command wraps and is emphasised, the output scrolls and is not. */
+.tool-code { display: block; padding: 7px 9px; border-radius: 8px; background: var(--dsw-alias-markdown-code-block); color: var(--dsw-alias-label-primary); font-family: var(--ds-font-family-code); font-size: 12px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.tool-output { max-height: 22rem; margin: 0; padding: 10px 12px; overflow: auto; border: .5px solid var(--dsw-alias-border-l1); border-radius: 10px; background: var(--dsw-alias-markdown-code-block); color: var(--dsw-alias-label-secondary); font-family: var(--ds-font-family-code); font-size: 12px; line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* The echoed prompt line. Brighter than the output below it and marked with the
+   shell's own "> ", so the block reads as a terminal session rather than as a
+   quotation with a stray character at the top. */
+.tool-output-cmd { color: var(--dsw-alias-label-primary); }
+
+/* "Showing the last 40 of 1,482 lines" / "View the full diff". A link rather
+   than a button shape: it is a footnote on the content above it, and giving it
+   a border would make it compete with the section header for attention. */
+.tool-more { display: block; margin: 0 0 5px; padding: 0; border: 0; background: none; color: var(--dsw-alias-state-business-primary); font: inherit; font-size: 11px; text-align: left; cursor: pointer; }
+.tool-more:hover { text-decoration: underline; }
+/*
+ * "Preview only", under a diff the server capped.
+ *
+ * A footnote rather than a warning: nothing is wrong, the change is simply
+ * larger than a transcript should carry. It renders in the caption colour so it
+ * reads as part of the diff rather than as an alert beside it, and it is a `p`
+ * rather than a button because there is no action here, only a fact.
+ */
+.diff-truncated { margin: 0 0 5px; color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; }
+
+/* "Earlier, at line 1,301: ERROR ...". The one line from the hidden part of a
+   log that says the run failed. Error-tinted but not alarming, because it is a
+   pointer to the failure rather than the failure itself. */
+.tool-buried { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin: 0 0 6px; padding: 6px 9px; border-radius: 7px; background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, transparent); }
+.tool-buried-label { flex: none; color: var(--dsw-alias-state-error-primary); font-size: 12px; }
+.tool-buried code { min-width: 0; color: var(--dsw-alias-label-secondary); font-family: var(--ds-font-family-code); font-size: 12px; overflow-wrap: anywhere; }
+
+/* The raw call. Sits at the bottom of every card, closed, and stays quiet
+   until it is wanted: caption colour, no border, no chevron of its own beyond
+   the marker the browser draws. */
+.tool-raw { margin-top: 2px; }
+.tool-raw-summary { padding: 5px 0; color: var(--dsw-alias-label-caption); font-size: 12px; cursor: pointer; list-style: none; }
+/*
+ * On a rich card the raw call was the last thing on screen under every diff and
+ * every terminal block, so a run of three cards ended in three "⋯ View raw call"
+ * lines the reference does not have. It is chrome for the one reader in fifty
+ * who wants the arguments, and it fades in on hover or keyboard focus instead of
+ * sitting in the flow. `:focus-within` is the half that matters: tabbing to it
+ * reveals it, so it is still reachable without a mouse.
+ *
+ * Opacity rather than `display`, so the card's height does not change under the
+ * pointer and the rows below it stay where the reader left them.
+ */
+.tool-card[data-weight="rich"] .tool-raw-summary { height: 0; padding: 0; overflow: hidden; opacity: 0; transition: opacity 120ms ease; }
+.tool-card[data-weight="rich"]:hover .tool-raw-summary,
+.tool-card[data-weight="rich"] .tool-raw[open] .tool-raw-summary,
+.tool-card[data-weight="rich"] .tool-raw-summary:focus-visible { height: auto; padding: 5px 0; overflow: visible; opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .tool-card[data-weight="rich"] .tool-raw-summary { transition: none; }
+}
+.tool-raw-summary::-webkit-details-marker { display: none; }
+.tool-raw-summary::before { content: "⋯ "; }
+.tool-raw-summary:hover { color: var(--dsw-alias-label-secondary); }
+.tool-raw-list { display: grid; grid-template-columns: minmax(64px, max-content) minmax(0, 1fr); gap: 4px 10px; margin: 4px 0 8px; }
+.tool-raw-list dt { color: var(--dsw-alias-label-caption); font-size: 12px; text-align: right; }
+.tool-raw-list dd { min-width: 0; margin: 0; color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.tool-raw-list code { font-family: var(--ds-font-family-code); overflow-wrap: anywhere; }
+.tool-raw-json { max-height: 18rem; margin: 0; padding: 8px 9px; overflow: auto; border-radius: 7px; background: var(--dsw-alias-markdown-code-block); font-family: var(--ds-font-family-code); font-size: 12px; line-height: 17px; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Argument rows: a fixed key column so values line up down the card. */
+.tool-args { display: flex; flex-direction: column; gap: 5px; margin: 0; }
+.tool-arg { display: grid; grid-template-columns: minmax(64px, max-content) minmax(0, 1fr); gap: 10px; align-items: start; }
+.tool-arg-key { color: var(--dsw-alias-label-caption); font-family: var(--ds-font-family-code); font-size: 12px; line-height: 18px; text-align: right; }
+.tool-arg-value { min-width: 0; margin: 0; }
+.tool-arg-scalar { color: var(--dsw-alias-label-primary); font-family: var(--ds-font-family-code); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.tool-arg-block { max-height: 16rem; margin: 0; padding: 8px 9px; overflow: auto; border-radius: 7px; background: var(--dsw-alias-markdown-code-block); color: var(--dsw-alias-label-secondary); font-family: var(--ds-font-family-code); font-size: 12px; line-height: 17px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tool-running { display: flex; align-items: center; gap: 7px; color: var(--dsw-alias-label-caption); font-size: 12px; }
+.tool-running::before { content: ""; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--dsw-alias-state-business-primary); animation: reasoning-pulse 1.4s ease-in-out infinite; }
+
 .tool-row { display: flex; align-items: baseline; gap: 7px; min-width: 0; padding: 5px 0; color: var(--dsw-alias-label-tertiary); font-size: 13px; }
-.tool-icon { flex: none; width: 16px; color: var(--dsw-alias-label-caption); font-family: var(--ds-font-family-code); font-size: 11px; }
+.tool-icon { flex: none; width: 16px; color: var(--dsw-alias-label-caption); font-family: var(--ds-font-family-code); font-size: 12px; }
 .tool-label { flex: none; font-weight: 500; }
 .tool-detail { min-width: 0; overflow: hidden; color: var(--dsw-alias-label-tertiary); font-family: var(--ds-font-family-code); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.tool-meta { flex: none; margin-left: auto; color: var(--dsw-alias-label-caption); font-size: 11px; font-variant-numeric: tabular-nums; }
+.tool-meta { flex: none; margin-left: auto; color: var(--dsw-alias-label-caption); font-size: 12px; font-variant-numeric: tabular-nums; }
 /* The per-row status was the one element in `.tool-*` without a rule, so the
  * "✕" also inherited `.tool-row`'s caption colour and read as decoration
  * rather than failure. A fixed width stops the row content from shifting
@@ -259,14 +643,157 @@ code, pre, [data-diff], [data-read], [data-terminal] { font-family: var(--ds-fon
  * `--font-mono` and pre-wrap for the same reason the message contains one: a
  * provider error ends in a JSON body, and that body has to keep its shape. */
 .transcript-error { width: auto; max-width: 74ch; align-self: flex-start; margin: 8px 0 2px; font-size: 13px; font-weight: 400; line-height: 19px; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; }
-.output, .file-contents { max-height: 24rem; margin: 5px 0; padding: 10px 12px; overflow: auto; border: .5px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-markdown-code-block); color: var(--dsw-alias-label-secondary); font-size: 11px; line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
-.diff { max-height: 34rem; margin: 6px 0; overflow: auto; border: .5px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-markdown-code-block); font-family: var(--ds-font-family-code); font-size: 11px; line-height: 18px; }
-.diff-line { min-width: max-content; padding: 0 12px; white-space: pre; }
-.diff-line[data-kind="add"] { background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent); color: var(--dsw-alias-state-success-primary); }
-.diff-line[data-kind="del"] { background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent); color: var(--dsw-alias-state-error-primary); }
-.diff-line[data-kind="meta"] { color: var(--dsw-alias-label-caption); }
+.output, .file-contents { max-height: 24rem; margin: 5px 0; padding: 10px 12px; overflow: auto; border: .5px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-markdown-code-block); color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.diff { max-height: 34rem; margin: 0; overflow: auto; border: .5px solid var(--dsw-alias-border-l1); border-radius: 10px; background: var(--dsw-alias-markdown-code-block); font-family: var(--ds-font-family-code); font-size: 12px; line-height: 19px; }
+/*
+ * A diff row: two number gutters, a sign column, then the code.
+ *
+ * Grid rather than a padded string, so the numbers stay in their own columns
+ * when the code scrolls sideways and the sign never shifts the first character
+ * of a line. The code column is the one that grows.
+ */
+.diff-line { display: grid; grid-template-columns: 3.2em 3.2em 1.2em minmax(max-content, 1fr); min-width: max-content; white-space: pre; }
+/* The gutter is a strip, not two columns of grey text. The reference shades it,
+   and the shade is what stops a long run of unchanged lines from reading as one
+   undifferentiated block: the eye follows the edge down instead of the numbers.
+   It sits under the row tint rather than replacing it, so an added line is still
+   green all the way across. */
+/*
+ * The line numbers, at a solid colour rather than a faded one.
+ *
+ * `opacity: .75` here was the worst contrast failure in the sheet and it was
+ * invisible to every earlier audit: the fade multiplies the caption grey into
+ * the row tint behind it, and on an added or removed row that tint is green or
+ * red, so the numbers landed at 1.97:1 in the default theme. They were reported
+ * as 4.27:1 by a probe that composited the backgrounds but not the alpha.
+ *
+ * `label-tertiary` is used at full strength instead. The gutter still recedes,
+ * because of the wash above it rather than because the text is see-through, and
+ * the number is legible on the tinted rows where it matters most.
+ */
+.diff-num { padding-right: 8px; background: color-mix(in srgb, var(--dsw-alias-label-caption) 7%, transparent); color: var(--dsw-alias-label-tertiary); text-align: right; font-variant-numeric: tabular-nums; }
+.diff-num + .diff-num { box-shadow: inset -1px 0 var(--dsw-alias-border-l1); }
+.diff-sign { padding-left: 4px; text-align: center; }
+.diff-text { padding-right: 12px; color: var(--dsw-alias-label-secondary); }
+.diff-line[data-kind="add"] { background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 14%, transparent); }
+.diff-line[data-kind="del"] { background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); }
+/* The sign and text colours are set further down, next to the lighter text pair
+   they use; the row colours above stay as the fill-strength tokens, because
+   they are also what the rail disc and the terminal marks are drawn with. */
+/* The hunk header spans the row: it names a range, so it has no line of its own
+   to sit beside. */
+.diff-line[data-kind="meta"] { grid-template-columns: 1fr; padding: 2px 12px; color: var(--dsw-alias-label-caption); }
+.diff-line[data-kind="meta"] .diff-num, .diff-line[data-kind="meta"] .diff-sign { display: none; }
+/*
+ * Syntax colours, five of them.
+ *
+ * Muted on purpose. A diff already carries two background tints and a sign
+ * column, so a full-saturation palette on top of that fights the add/remove
+ * signal that is the more important of the two. These sit a step below the body
+ * text in loudness and only separate the classes of token.
+ *
+ * On an added or removed line the row's own colour wins for comments and plain
+ * text, because "this line is new" outranks "this word is a keyword".
+ */
+/* Not a `color-mix` with `transparent`: that composites toward whatever is
+   behind it, and behind a diff row is a near-black code surface, so the comment
+   measured 1.19:1 and was effectively invisible. A solid stop instead. */
+/*
+ * The syntax classes are tokens rather than literals because the keyword colour
+ * is theme-dependent.
+ *
+ * These four were raw hex, which is fine while every theme's accent is blue and
+ * wrong as soon as one is not. The keyword violet sits 45 degrees from the blue
+ * accent, so it reads as its own class; reaper's accent is violet at hue 294,
+ * only 12 degrees away, which would make a keyword look like a dimmed accent
+ * instead. The reaper block below moves it to magenta, 48 degrees clear.
+ *
+ * The defaults here are the values that were already in the sheet, so `dark` and
+ * `black` render byte-for-byte as they did.
+ */
+body {
+  --syntax-string: #9ecb8a;
+  --syntax-number: #d6a26a;
+  --syntax-keyword: #b48ae0;
+  --syntax-function: #7fb2e5;
+  /* Diff text is the one pair that differs from the row mark it sits on; see the
+     note above the rules that use it. */
+  --diff-add-text: rgb(140, 228, 166);
+  --diff-del-text: rgb(255, 150, 150);
+}
+/* Reaper's accent is violet, so violet cannot also mean "keyword". Magenta holds
+   the same role at hue 342: 48 degrees from the accent, 93 from the function
+   blue, and 7.55:1 on the code surface, against a 7.26:1 literal it replaces. */
+body[data-ds-reaper-theme] { --syntax-keyword: #dc82bb; }
+
+.hl-com { color: var(--dsw-static-neutral-bluish-500); font-style: italic; }
+.hl-str { color: var(--syntax-string); }
+.hl-num { color: var(--syntax-number); }
+.hl-kw { color: var(--syntax-keyword); }
+.hl-fn { color: var(--syntax-function); }
+/*
+ * Diff text sits on its own tint, so it needs lighter variants than the row
+ * colour.
+ *
+ * `state-success-primary` and `state-error-primary` are fill-strength tokens:
+ * they are the colour of the rail discs and the terminal pass/fail marks, and
+ * they have to stay dark enough to carry a white glyph. On the 14% and 12% row
+ * tints they measure 4.22:1 and 3.23:1 as text in the default theme, both under
+ * the floor, and the comment line on top of that was the worst case in the
+ * sheet at 2.53:1.
+ *
+ * So the diff uses its own pair, solved at the lightness where they clear 4.5:1
+ * on the tint in every theme: 5.33:1 and 4.74:1 at worst, 7.05:1 and 5.86:1 in
+ * reaper. The fill tokens are untouched, so the discs and the terminal marks do
+ * not move. The two variables are declared on `body` further up with the other
+ * theme-level tokens.
+ */
+.diff-line[data-kind="add"] .diff-sign, .diff-line[data-kind="add"] .diff-text { color: var(--diff-add-text); }
+.diff-line[data-kind="del"] .diff-sign, .diff-line[data-kind="del"] .diff-text { color: var(--diff-del-text); }
+/* The comment keeps the row's own colour at reduced strength, which now clears
+   the floor because the colour it inherits is the lighter one. */
+.diff-line[data-kind="add"] .hl-com, .diff-line[data-kind="del"] .hl-com { color: inherit; opacity: .8; }
+
+/* Terminal lines worth finding. */
+.term-pass { color: var(--dsw-alias-state-success-primary); }
+.term-fail { color: var(--dsw-alias-state-error-primary); }
+.tool-output-gap { color: var(--dsw-alias-label-caption); }
+
 .stat-add { color: var(--dsw-alias-state-success-primary); }
 .stat-del { color: var(--dsw-alias-state-error-primary); }
+
+/*
+ * ── Contrast floor ─────────────────────────────────────────────────────────
+ *
+ * Measured, not guessed. `scripts/contrast.mts` renders the transcript, reads
+ * every text element's computed colour against the surface it actually composes
+ * over, and reports the WCAG ratio. Seven elements came back under 4.5:1, and
+ * every one of them was a caption-weight label sitting on an elevated card
+ * rather than on the page ground: the token is fine where it was designed to
+ * sit, and too dim one layer up.
+ *
+ * So the fix belongs here, at the transcript's own roles, and not in the
+ * vendored token sheet — changing `--dsw-alias-label-caption` globally would
+ * move every caption in the app to fix a problem that only exists on cards.
+ *
+ * `-500` rather than `-400`: it clears 4.5:1 on the card surfaces while staying
+ * clearly below the body text, which is the whole point of a caption. The
+ * measurements after this change are in the commit message.
+ */
+.tool-raw-summary,
+.tool-raw-list dt { color: var(--dsw-static-neutral-bluish-500); }
+/* The cluster header is the most elevated surface in the transcript, so its own
+   captions need the next stop up again to clear the same 4.5:1. */
+.step-card-count,
+.tool-card-duration,
+.chevron { color: var(--dsw-static-neutral-bluish-400); }
+/*
+ * The failure mark is red on a tinted red card, which is the worst case for a
+ * hue that is already dark. The lighter stop is the one that reads.
+ */
+.tool-card[data-status="failed"] .tool-status,
+.step-card[data-status="failed"] .tool-status,
+.step-card-body .tool-card[data-status="failed"] .tool-card-note { color: rgb(255, 138, 138); }
 
 /* ── Code Mode ─────────────────────────────────────────────────────────────
  *
@@ -308,7 +835,7 @@ code, pre, [data-diff], [data-read], [data-terminal] { font-family: var(--ds-fon
 
 /* The script, with its line numbers pinned in their own column. */
 .code-block { display: grid; max-height: 26rem; margin: 0; overflow: auto; border: .5px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-markdown-code-block); }
-.code-line { display: flex; gap: 10px; padding: 0 12px; font-family: var(--ds-font-family-code); font-size: 11px; line-height: 18px; }
+.code-line { display: flex; gap: 10px; padding: 0 12px; font-family: var(--ds-font-family-code); font-size: 12px; line-height: 18px; }
 .code-line:first-child { padding-top: 8px; }
 .code-line:last-child { padding-bottom: 8px; }
 .code-gutter { flex: none; width: 3ch; color: var(--dsw-alias-label-caption); text-align: right; user-select: none; font-variant-numeric: tabular-nums; }
@@ -317,7 +844,7 @@ code, pre, [data-diff], [data-read], [data-terminal] { font-family: var(--ds-fon
 /* Live output. The `data-terminal` attribute it borrows from the shell view
  * brings the monospace face and the no-autospace rule; everything else is
  * here, because a stream needs a different overflow policy than a command. */
-.code-mode-stream { display: flex; flex-direction: column; max-height: 15rem; margin: 0; padding: 8px 12px; overflow: auto; border: .5px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-markdown-code-block); font-size: 11px; line-height: 18px; }
+.code-mode-stream { display: flex; flex-direction: column; max-height: 15rem; margin: 0; padding: 8px 12px; overflow: auto; border: .5px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-markdown-code-block); font-size: 12px; line-height: 18px; }
 .code-mode-stream-line { color: var(--dsw-alias-label-secondary); white-space: pre-wrap; overflow-wrap: anywhere; }
 .code-mode-stream-line[data-kind="warn"] { color: var(--dsw-alias-state-warn-label); }
 .code-mode-stream-line[data-kind="error"] { color: var(--dsw-alias-state-error-primary); }
@@ -362,10 +889,23 @@ code, pre, [data-diff], [data-read], [data-terminal] { font-family: var(--ds-fon
 @media (prefers-reduced-motion: reduce) { .turn-status { animation: none; background: none; color: var(--dsw-alias-label-secondary); } }
 @keyframes status-shimmer { to { background-position: -150% 0; } }
 
-.queued-message { align-self: flex-end; width: min(86%, 620px); margin: 8px 0 8px auto; padding: 10px 13px; border: 1px dashed var(--dsw-alias-border-l4); border-radius: 16px 16px 5px 16px; color: var(--dsw-alias-label-secondary); }
-.queued-message[data-sent] { border-style: solid; }
+/* A message typed while the agent works: visible, clickable, and holding an
+   explicit delivery setting. Accent left border so it reads as "held", not as
+   part of the conversation yet. */
+.queued-message { align-self: flex-end; width: min(86%, 620px); margin: 8px 0 8px auto; padding: 10px 13px; border: 1px dashed var(--dsw-alias-border-l4); border-left: 3px solid var(--dsw-alias-state-business-primary); border-radius: 16px 16px 5px 16px; color: var(--dsw-alias-label-secondary); }
+.queued-message[data-sent] { border-style: solid; border-left-color: var(--dsw-alias-border-l4); }
+.queued-message-text { display: block; width: 100%; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; white-space: pre-wrap; }
+.queued-message-text:hover { color: var(--dsw-alias-label-primary); }
 .queued-message footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 5px; color: var(--dsw-alias-label-caption); font-size: 11px; }
 .queued-message footer button { padding: 0; border: 0; background: transparent; color: var(--dsw-alias-state-business-primary); cursor: pointer; }
+.queued-message-mode { display: grid; gap: 6px; margin: 9px 0 0; padding: 9px 0 0; border: 0; border-top: 1px solid var(--dsw-alias-border-l4); }
+.queued-message-mode legend { padding: 0; color: var(--dsw-alias-label-caption); font-size: 11px; }
+.queued-message-mode label { display: flex; gap: 8px; align-items: flex-start; padding: 6px 8px; border: 1px solid transparent; border-radius: 8px; cursor: pointer; }
+.queued-message-mode label[data-selected] { border-color: var(--dsw-alias-border-l3); background: var(--dsw-alias-bg-l2); }
+.queued-message-mode label input { margin-top: 2px; }
+.queued-message-mode label span { display: grid; gap: 1px; }
+.queued-message-mode label strong { color: var(--dsw-alias-label-primary); font-size: 12px; font-weight: 500; }
+.queued-message-mode label small { color: var(--dsw-alias-label-caption); font-size: 11px; }
 
 /* Approval takeover adapted from DeepSeek ApprovalPanel. */
 .approval-root { display: flex; flex-direction: column; align-items: center; padding: 8px 0 12px; }
@@ -445,10 +985,33 @@ code, pre, [data-diff], [data-read], [data-terminal] { font-family: var(--ds-fon
 .menu-error { color: var(--dsw-alias-state-error-primary); }
 .context-meter { display: flex; align-items: center; gap: 6px; }
 .context-meter-bar { width: 56px; height: 4px; overflow: hidden; border-radius: 3px; background: var(--dsw-specific-selector); }
-.context-meter-fill { height: 100%; border-radius: 3px; background: var(--dsw-alias-state-success-primary); }
+/*
+ * The counts sit beside the percentage at a quieter weight, so the row reads
+ * "42%  84K/200K" rather than two numbers competing for the same glance. Hidden
+ * on the narrowest layouts, where the percentage alone is what fits.
+ */
+.context-meter-counts { color: var(--dsw-alias-label-caption); font-size: 10px; white-space: nowrap; font-variant-numeric: tabular-nums; opacity: .75; }
+@media (max-width: 720px) { .context-meter-counts { display: none; } }
+/*
+ * The fill animates its width, and that is a correctness detail rather than
+ * polish. Token counts arrive several times a second during a turn and each
+ * step is small; without a transition the bar jumps by sub-pixel amounts that
+ * read as no movement at all, which is the "it is not updating" report. Easing
+ * between positions makes a series of small steps visible as motion.
+ */
+.context-meter-fill { height: 100%; border-radius: 3px; background: var(--dsw-alias-state-success-primary); transition: width 240ms ease-out, background-color 240ms ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .context-meter-fill { transition: none; }
+}
 .context-meter[data-level="warning"] .context-meter-fill { background: var(--dsw-alias-state-warn-primary); }
 .context-meter[data-level="error"] .context-meter-fill { background: var(--dsw-alias-state-error-primary); }
-.context-meter-label { color: var(--dsw-alias-label-caption); font-size: 10px; white-space: nowrap; }
+/* An unresolvable limit shows a muted bar rather than a green one: the colour
+   must not imply "plenty of room" when the room is simply not known. */
+.context-meter[data-level="unknown"] .context-meter-fill { background: transparent; }
+.context-meter[data-level="unknown"] .context-meter-label { opacity: .7; }
+/* Tabular figures: without them a percentage that ticks 1.9% -> 2.0% shifts the
+ * whole label sideways on every update, which is distracting during a stream. */
+.context-meter-label { color: var(--dsw-alias-label-caption); font-size: 10px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 
 /* Plans and verification are quiet dock cards on the shared chat axis. */
 .checklist, .verification { margin-bottom: 12px; padding: 12px 14px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 14px; background: var(--dsw-alias-bg-module-platform); }
@@ -583,6 +1146,18 @@ code, pre, [data-diff], [data-read], [data-terminal] { font-family: var(--ds-fon
 .theme-swatch[data-theme="dark"] .theme-swatch-raised { background: rgb(35, 35, 36); }
 .theme-swatch[data-theme="black"] .theme-swatch-surface { background: rgb(0, 0, 0); }
 .theme-swatch[data-theme="black"] .theme-swatch-raised { background: rgb(20, 20, 21); }
+/*
+ * The reaper swatch, and it has to be written out rather than left to inherit.
+ *
+ * The other two rows pin their own greys, but reaper had no rule at all, so its
+ * surface and raised chips rendered transparent and the preview showed a bare
+ * accent square beside two grey themes. These are the same two values the
+ * theme's own block sets for `bg-base` and `bg-layer-1`, written literally
+ * because a swatch exists to show the palette and reading it from the live
+ * tokens would make every row look like whichever theme is currently applied.
+ */
+.theme-swatch[data-theme="reaper"] .theme-swatch-surface { background: rgb(2, 1, 8); }
+.theme-swatch[data-theme="reaper"] .theme-swatch-raised { background: rgb(19, 16, 31); }
 .theme-option[data-selected] .theme-swatch { box-shadow: 0 0 0 1px var(--dsw-alias-border-l3); }
 .section-count { min-width: 28px; padding: 3px 8px; border-radius: 12px; background: var(--dsw-specific-selector); color: var(--dsw-alias-label-secondary); font-size: 11px; text-align: center; }
 .settings-card { padding: 16px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 14px; background: var(--dsw-alias-bg-layer-1); }
@@ -608,6 +1183,11 @@ code, pre, [data-diff], [data-read], [data-terminal] { font-family: var(--ds-fon
 .provider-state[data-tone="ready"] { color: var(--dsw-alias-state-success-primary); }
 .provider-actions { display: flex; gap: 4px; margin-left: auto; }
 .provider-models { margin: 7px 0 0 45px; color: var(--dsw-alias-label-caption); font-size: 11px; }
+/* Why an environment-configured provider has no Disconnect button, and what to
+   do instead. Indented to the same column as the model count so the row reads
+   as one stack of facts, and capped in width so the explanation stays a note
+   rather than becoming the row's headline. */
+.provider-note { max-width: 62ch; margin: 5px 0 0 45px; color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; }
 .provider-health { margin: 7px 0 0 45px; font-size: 11px; line-height: 1.5; color: var(--dsw-alias-label-caption); }
 .provider-health strong { display: inline-block; margin-right: 4px; font-weight: 500; }
 .provider-health[data-tone="ready"] strong { color: var(--dsw-alias-state-success-primary); }
@@ -824,6 +1404,23 @@ code, pre, [data-diff], [data-read], [data-terminal] { font-family: var(--ds-fon
 /* Same dot as the header control, positioned inline rather than absolutely. */
 .dsh-thread-settings-chip { position: relative; }
 .dsh-thread-settings-chip .thread-settings-dot { position: static; margin-left: 2px; }
+
+/* "Jump to latest", floating above the composer. Centred and self-sized rather
+   than full width, so it reads as a transient control over the transcript
+   rather than as another row of chrome attached to the composer. */
+.jump-latest {
+  align-self: center;
+  margin-bottom: 8px;
+  padding: 6px 13px;
+  border: .5px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-l1);
+  box-shadow: 0 4px 14px rgb(0 0 0 / .28);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+.jump-latest:hover { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l1); }
 
 .dsh-composer-seat {
   position: sticky;
@@ -1198,6 +1795,31 @@ code, pre, [data-diff], [data-read], [data-terminal] { font-family: var(--ds-fon
 }
 
 .thread-settings-summary .button { margin-left: auto; min-height: 26px; padding: 2px 8px; font-size: 12px; }
+
+/* The sandbox switch. A real checkbox with `role="switch"` rather than a
+   styled div, so the keyboard, the screen reader, and the form all get the
+   control they already know how to handle. */
+.thread-settings-switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-secondary);
+  border-radius: 10px;
+  background: var(--dsw-specific-selector);
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.thread-settings-switch:focus-within {
+  border-color: var(--dsw-alias-border-accent, var(--dsw-alias-border-primary));
+}
+
+.thread-settings-switch input { width: 16px; height: 16px; margin: 0; cursor: pointer; }
+.thread-settings-switch input:disabled { cursor: progress; }
+.thread-settings-switch:has(input:disabled) { opacity: 0.6; }
 
 .thread-settings-toolgroup h3 {
   margin: 0 0 4px;

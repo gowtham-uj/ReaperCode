@@ -30,11 +30,13 @@ export type {
 } from "./jsonrpc-client.js";
 export { browserTransport, JsonRpcClient, JsonRpcError } from "./jsonrpc-client.js";
 
-export type { ItemSummary } from "./summarize.js";
+export type { ItemSummary, ToolArgRow } from "./summarize.js";
 export {
   CONTEXT_TECHNIQUE_LABELS,
   contextTechniqueLabel,
+  describeToolArgs,
   formatSavedChars,
+  formatToolOutput,
   summarizeContextRun,
   summarizeExplorationStep,
   summarizeItem,

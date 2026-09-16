@@ -67,17 +67,17 @@ test("critic cannot run shell", () => {
   assert.equal(roleAllowsTool("critic", "bash"), false);
 });
 
-test("browser is the only role allowed to call browser_control", () => {
+test("browser is the only role allowed to call browser_use", () => {
   for (const role of listRoleNames()) {
     if (role === "browser") continue;
     // At the role-profile level root is allowed (root has the
     // full allowlist), but the *metadata* forbids root from
-    // calling browser_control. The full policy engine enforces
+    // calling browser_use. The full policy engine enforces
     // this; roleAllowsTool alone does not.
     if (role === "root") continue;
-    assert.equal(roleAllowsTool(role, "browser_control"), false, `${role} should not be allowed to call browser_control`);
+    assert.equal(roleAllowsTool(role, "browser_use"), false, `${role} should not be allowed to call browser_use`);
   }
-  assert.equal(roleAllowsTool("browser", "browser_control"), true);
+  assert.equal(roleAllowsTool("browser", "browser_use"), true);
 });
 
 

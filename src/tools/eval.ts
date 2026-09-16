@@ -23,9 +23,12 @@
  *
  * 3. Nothing here is a permission check. `ReaperToolBridge` re-validates every
  *    inner call against the registry and hands it to the normal executor, and
- *    the runtime is only *offered* tools the bridge will accept. What the
- *    script does with raw Node — `fs`, `fetch`, `exec` — is outside that
- *    path by design: see the note in `node-runtime.ts` for the tradeoff.
+ *    the runtime is only *offered* tools the bridge will accept. Raw Node —
+ *    `fs`, `fetch`, `exec` — bypasses that path by design, and is bounded
+ *    instead by where the script runs: inside a bubblewrap namespace containing
+ *    only the thread's workspace and read-only system directories. A script
+ *    cannot read outside the workspace because those paths are not mounted.
+ *    See `node-runtime.ts` and `transport.ts`.
  */
 
 import { z } from "zod";
@@ -153,11 +156,11 @@ export const EVAL_TOOL_DESCRIPTION =
   "Use eval when the user asks for it, or when the task needs what a single call cannot express: the same operation over many items, a loop or fan-out, filtering or aggregating a large result to a small answer, or dependent steps that chain with no reasoning needed between them.\n" +
   "It is a real Node runtime, and Reaper's own tools are available inside it through `tools.*` — every tool this agent can call, including any whose schema is not in your context, with nothing to unlock first. Use whichever fits each step; reading with `tools.file_view` and parsing with a package is one script, not two styles. `tools.search_tools({ query })` finds a tool by capability, `tools.describe(name)` gives its arguments, `tools.list()` gives the catalogue. `eval` itself is the one exception: a script cannot call eval.\n" +
   "`await models.call({ messages: [...] })` reaches this thread's chat model, and `Promise.all` over several is real concurrency — for when one program needs several answers to compare or combine.\n" +
-  "End with the value: the result is the last *expression*'s value, and a trailing declaration, loop, or `console.log` returns nothing even when the work succeeded. `const r = await tools.grep_search(…); r.matches.length` works; stopping after the `const` does not. Keep intermediate data in JavaScript and return a compact final result.\n" +
+  "End with the value: the result is the last *expression*'s value, so a trailing declaration, loop, or `console.log(x)` returns nothing (`log` gives `undefined` however much it printed). `const r = await tools.grep_search(…); r.matches.length` works; stopping after the `const` does not. Keep intermediate data in JavaScript and return a compact final result.\n" +
   "A `tools.*` call carries the workspace, the permission checks, and the audit log, so it is the better choice when one does the job — and when none does, write the code.\n" +
-  "Load the `codemode` skill with activate_skill before writing a script that loops or batches more than a couple of calls: it has the return semantics, the tools.* and models.* APIs, and worked examples.\n" +
+  "Load the `codemode` skill with activate_skill before writing a script that loops or batches more than a couple of calls: it has the return semantics, the APIs, and worked examples.\n" +
   "Pass `timeout_ms` if the script waits on something slow: the default is 2 minutes and a model call can take a minute.\n" +
-  "Each eval starts with a fresh environment, so variables from an earlier eval are not visible here. The script runs with your access and its effects are real, so writes outside the workspace are refused. Destructive operations are irreversible.";
+  "Each eval starts with a fresh environment, so variables from an earlier eval are not visible here. The script is confined to the workspace: only it is writable, and paths outside it do not resolve. Destructive writes there are irreversible.";
 
 export interface ExecuteEvalOptions {
   args: EvalArgs;
@@ -309,6 +312,7 @@ function shapeOutput(result: CodeRuntimeResult, surfaceChanged: boolean): Record
     ...(result.toolError ? { failedTool: result.toolError.toolName } : {}),
     ...(result.note ? { note: result.note } : {}),
     ...(surfaceChanged ? { note: surfaceChangedNote() } : {}),
+    ...(result.sandboxed === false ? { sandboxed: false } : {}),
   };
 
   /*

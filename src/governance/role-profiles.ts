@@ -142,7 +142,7 @@ export const ROLE_PROFILES: Record<PolicyRole, RoleProfile> = {
       ...HOOK_AUTHORING_TOOLS,
       "advance_step",
     ],
-    forbidden_tools: ["browser_control", "approve_skill", "uninstall_skill", "enable_extension", "trust_extension", "uninstall_extension", "approve_hook", "update_hook", "uninstall_hook"],
+    forbidden_tools: ["browser_use", "approve_skill", "uninstall_skill", "enable_extension", "trust_extension", "uninstall_extension", "approve_hook", "update_hook", "uninstall_hook"],
     can_write: true,
     can_run_commands: true,
     shell_risk_tolerance: "medium", // high still requires approval
@@ -164,7 +164,7 @@ export const ROLE_PROFILES: Record<PolicyRole, RoleProfile> = {
       "list_hooks",
       "advance_step",
     ],
-    forbidden_tools: ["browser_control", "create_skill", "approve_skill", "uninstall_skill", "create_extension", "enable_extension", "trust_extension", "uninstall_extension", "create_hook", "update_hook", "approve_hook", "uninstall_hook"],
+    forbidden_tools: ["browser_use", "create_skill", "approve_skill", "uninstall_skill", "create_extension", "enable_extension", "trust_extension", "uninstall_extension", "create_hook", "update_hook", "approve_hook", "uninstall_hook"],
     can_write: true,
     can_run_commands: true,
     shell_risk_tolerance: "medium",
@@ -176,7 +176,7 @@ export const ROLE_PROFILES: Record<PolicyRole, RoleProfile> = {
     role: "reviewer",
     description: "Reviews the diff. Read-only; cannot edit files. May run read-only or test commands.",
     allowed_tools: [...READ_ONLY_TOOLS, "bash"],
-    forbidden_tools: ["write_file", "file_edit", "edit_file", "delete_file", "advance_step", "browser_control"],
+    forbidden_tools: ["write_file", "file_edit", "edit_file", "delete_file", "advance_step", "browser_use"],
     can_write: false,
     can_run_commands: true, // for tests / inspection
     shell_risk_tolerance: "medium",
@@ -188,7 +188,7 @@ export const ROLE_PROFILES: Record<PolicyRole, RoleProfile> = {
     role: "critic",
     description: "Adversarially challenges the solution. Strictly read-only.",
     allowed_tools: READ_ONLY_TOOLS,
-    forbidden_tools: [...WRITE_TOOLS, "advance_step", "browser_control"],
+    forbidden_tools: [...WRITE_TOOLS, "advance_step", "browser_use"],
     can_write: false,
     can_run_commands: false,
     shell_risk_tolerance: "low-only",
@@ -198,7 +198,7 @@ export const ROLE_PROFILES: Record<PolicyRole, RoleProfile> = {
   /* 7) Browser — web/browser-only task profile. */
   browser: {
     role: "browser",
-    description: "Specialized for web tasks: web search, web fetch, browser_control, screen inspection. No file edits.",
+    description: "Specialized for web tasks: web search, web fetch, browser_use, screen inspection. No file edits.",
     allowed_tools: [
       "file_view",
       "list_directory",
@@ -208,7 +208,7 @@ export const ROLE_PROFILES: Record<PolicyRole, RoleProfile> = {
       "web_search",
       "web_fetch",
       "search_tools",
-      "browser_control",
+      "browser_use",
       "activate_skill",
     ],
     forbidden_tools: ["write_file", "file_edit", "edit_file", "delete_file", "bash", "advance_step"],

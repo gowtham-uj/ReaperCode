@@ -242,3 +242,96 @@ export function summarizeItem(item: AppThreadItem): ItemSummary {
 export function summarizeExplorationStep(count: number): string {
   return `${count} exploration ${count === 1 ? "action" : "actions"}`;
 }
+
+/**
+ * A tool call's arguments, as rows a person reads.
+ *
+ * The one-line summary above answers "what is this call about" for a head row.
+ * This answers "what exactly did it ask for", which is the question a reader has
+ * when a call's *output* is surprising — a grep that returned nothing is
+ * explained by its pattern, and a write to the wrong path is visible in the
+ * path. The reference interface shows the same thing as a JSON block beside the
+ * command; rows are used here because they carry the label/value relationship
+ * that a bare JSON blob makes the reader infer.
+ *
+ * Values are rendered the way the model wrote them rather than JSON-escaped:
+ * a newline in file content is shown as content, not as `\n`, because the
+ * reader is checking the content and not the encoding.
+ */
+export interface ToolArgRow {
+  key: string;
+  /** Set when the value is a single short scalar, shown on one line. */
+  value?: string;
+  /** Set when the value is long or multi-line, shown as a block. */
+  block?: string;
+  /** Set when the value is not text: objects, arrays, numbers, booleans, null. */
+  structured?: string;
+}
+
+/** Above this, a string value becomes a scrollable block rather than a line. */
+const ARG_LINE_LIMIT = 120;
+
+export function describeToolArgs(args: Record<string, unknown> | undefined): ToolArgRow[] {
+  if (!args) return [];
+  const rows: ToolArgRow[] = [];
+  for (const [key, raw] of Object.entries(args)) {
+    if (raw === undefined) continue;
+    if (typeof raw === "string") {
+      if (raw.includes("\n") || raw.length > ARG_LINE_LIMIT) {
+        rows.push({ key, block: raw });
+      } else {
+        rows.push({ key, value: raw });
+      }
+      continue;
+    }
+    if (typeof raw === "number" || typeof raw === "boolean" || raw === null) {
+      rows.push({ key, value: String(raw) });
+      continue;
+    }
+    /*
+     * Structured values are pretty-printed rather than hidden or summarized.
+     * An `apply_patch_edit` patch or a `browser_use` program is
+     * exactly the argument a reader needs in full, and a summary of it would be
+     * the summary of the thing they came to check.
+     */
+    try {
+      rows.push({ key, structured: JSON.stringify(raw, null, 2) });
+    } catch {
+      rows.push({ key, structured: String(raw) });
+    }
+  }
+  return rows;
+}
+
+/**
+ * A tool's output, as one string ready to display.
+ *
+ * Handles the shapes the executor actually produces rather than assuming a
+ * string: `bash` returns `{ stdout, stderr, exitCode }`, several tools return a
+ * record, and a few return a bare string. `String(output)` on a record produced
+ * `[object Object]`, which is what made a tool card's body useless for every
+ * tool that returns structured data.
+ */
+export function formatToolOutput(output: unknown): string {
+  if (output === undefined || output === null) return "";
+  if (typeof output === "string") return output;
+  if (typeof output === "number" || typeof output === "boolean") return String(output);
+  if (typeof output === "object") {
+    const record = output as Record<string, unknown>;
+    // The shell shape first: it is the common one and its two streams deserve
+    // their own order (stdout, then stderr) rather than an alphabetical dump.
+    if (typeof record.stdout === "string" || typeof record.stderr === "string") {
+      const out = typeof record.stdout === "string" ? record.stdout : "";
+      const err = typeof record.stderr === "string" ? record.stderr : "";
+      const code = typeof record.exitCode === "number" ? `exit code ${record.exitCode}` : "";
+      const body = [out, err].filter((part) => part.length > 0).join(out && err ? "\n" : "");
+      return code ? `${body}${body ? "\n" : ""}(${code})` : body;
+    }
+    try {
+      return JSON.stringify(output, null, 2);
+    } catch {
+      return String(output);
+    }
+  }
+  return String(output);
+}

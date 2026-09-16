@@ -40,10 +40,42 @@ function toLegacyRequest(
   input: ProviderCallInput,
   model: ResolvedModel,
 ): { role: ModelRole; payload: Parameters<ProviderModelClient["generate"]>[0] } {
-  const messages: Array<{ role: string; content: string }> = [];
+  /*
+   * Carry `tool_calls` and `tool_call_id` through, in the wire shape.
+   *
+   * This rebuilt each message from `{ role, content }` alone, dropping both
+   * pairing fields — even though `ProviderMessage` declares them. An assistant
+   * turn that announced tool calls reached the wire with none, and every `tool`
+   * result that followed became unattributable, which the provider rejects with
+   * "Messages with role 'tool' must be a response to a preceding message with
+   * 'tool_calls'". The gateway's repair cannot help here: this mapping runs
+   * *below* the gateway, so it undid a list the repair had already made valid.
+   *
+   * `ProviderToolCall` is `{ id, name, args }`; the wire wants
+   * `{ id, type: "function", function: { name, arguments } }` with arguments as
+   * a JSON string, so the conversion is explicit rather than a pass-through of
+   * a differently-shaped object.
+   */
+  const messages: Array<{ role: string; content: string; tool_calls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>; tool_call_id?: string }> = [];
   if (input.system) messages.push({ role: "system", content: input.system });
   for (const m of input.messages) {
-    messages.push({ role: m.role, content: m.content });
+    messages.push({
+      role: m.role,
+      content: m.content,
+      ...(m.toolCalls && m.toolCalls.length > 0
+        ? {
+            tool_calls: m.toolCalls.map((call) => ({
+              id: call.id,
+              type: "function" as const,
+              function: {
+                name: call.name,
+                arguments: typeof call.args === "string" ? call.args : JSON.stringify(call.args ?? {}),
+              },
+            })),
+          }
+        : {}),
+      ...(m.toolCallId ? { tool_call_id: m.toolCallId } : {}),
+    });
   }
   const tools = (input.tools ?? []).map((t) => ({
     type: "function",

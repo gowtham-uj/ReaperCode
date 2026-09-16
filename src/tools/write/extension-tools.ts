@@ -165,10 +165,34 @@ export async function handleCreateExtension(
   };
 }
 
+/**
+ * `list` — inventory plus the refused registrations.
+ *
+ * The authoring skill tells an author to run `extension_manager list` to see
+ * the `refused` list after creating an extension, but the action was never in
+ * the enum, so the tool rejected the call it was documented to serve. The
+ * refused list is the only durable record of "your tool was dropped, and here is
+ * why" — `register` logs the failure to a sink that is undefined outside an
+ * interactive session — so the action the doc depends on is the right thing to
+ * add, not the line to delete.
+ */
+export async function handleListExtensions(
+  deps: ExtensionToolDeps,
+): Promise<{ ok: true; extensions: Array<{ id: string; trust: string; status: string; description: string }>; refused: Array<{ name: string; error: string }> }> {
+  const extensions = deps.registry.list().map((e) => ({
+    id: e.id,
+    trust: e.trust,
+    status: e.status,
+    description: e.manifest.description ?? "",
+  }));
+  const refused = deps.registry.getToolRegistry().refusedRegistrations();
+  return { ok: true, extensions, refused };
+}
+
 export async function handleValidateExtension(
   args: ValidateExtensionArgs,
   deps: ExtensionToolDeps,
-): Promise<{ ok: boolean; id: string; results: Array<{ id: string; exitCode: number; stderr: string }>; error?: string }> {
+): Promise<{ ok: boolean; id: string; results: Array<{ id: string; exitCode: number; stdout: string; stderr: string }>; error?: string; note?: string }> {
   return deps.lifecycle.validate(args.id);
 }
 
@@ -178,9 +202,25 @@ export async function handleEnableExtension(
 ): Promise<{ ok: boolean; id: string; activated: boolean; error?: string }> {
   const r = deps.registry.get(args.id);
   if (!r) return { ok: false, id: args.id, activated: false, error: `extension "${args.id}" not loaded` };
-  if (r.trust !== "user-trusted") {
-    return { ok: false, id: args.id, activated: false, ...(true ? { error: `cannot enable untrusted extension (trust=${r.trust}); call trust_extension first` } : {}) };
-  }
+  /*
+   * No trust gate.
+   *
+   * This refused anything whose trust was not `user-trusted` and told the caller
+   * to "call trust_extension first" — an action that does not exist (the action
+   * is `trust`). And for a project-scope extension the gate could never be
+   * satisfied at all: `trust_` only flips the in-memory flag, `discover()` (which
+   * every manager action runs first) rebuilds that flag from disk, and the trust
+   * resolver deliberately refuses to persist a `user-trusted` record under the
+   * project directory. So the whole path was: create reports `trust:
+   * project-untrusted`, trust reports success but is discarded, enable fails and
+   * names a verb that is not in the enum. An extension could be created and
+   * never used.
+   *
+   * `activateAll` already dropped this gate with the same reasoning — "there are
+   * no trust tiers: an installed extension activates when it is enabled" — and
+   * left `enable` behind. This is that check catching up. `disable`/`enable`
+   * remain, because switching something off is a real user intent.
+   */
   const en = deps.registry.enable(args.id);
   if (!en.ok) return { ok: false, id: args.id, activated: false, ...(en.error ? { error: en.error } : {}) };
   const activated = await deps.registry.activateOne(r);
@@ -264,6 +304,8 @@ export async function handleExtensionManager(
       }
       return handleCreateExtension(parsed.data, deps);
     }
+    case "list":
+      return handleListExtensions(deps);
     case "validate":
       return handleValidateExtension(requireId(args, "validate"), deps);
     case "enable":

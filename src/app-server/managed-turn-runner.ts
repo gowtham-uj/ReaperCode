@@ -1,7 +1,9 @@
+import type { ThreadBrowserRuntime } from "../browser/thread-runtime.js";
 import { buildConfig, buildConfigForProvider } from "../adaptive/exec-runner.js";
 import { ProviderCredentialStore } from "../config/provider-credentials.js";
 import { ConfiguredModelGateway } from "../model/gateway.js";
 import { resolveDefaultSelection } from "../model/provider/default-selection.js";
+import { readDisabledProviders } from "./settings-surface.js";
 import { ProviderMultiplexerClient } from "../model/providers/provider-client.js";
 import type { PermissionMode } from "../policy/classifier.js";
 import { RuntimeEngine, type RuntimeEngineResult } from "../runtime/engine.js";
@@ -18,13 +20,42 @@ export interface ManagedTurnRunnerInput {
   model?: string;
   reasoningEffort?: "low" | "medium" | "high";
   permissionMode: PermissionMode;
+  /** Whether shell commands are confined to the workspace. Default true. */
+  filesystemSandbox?: boolean;
   abortSignal: AbortSignal;
   eventSink: RuntimeEventSink;
   turnControl: RuntimeTurnControl;
   approvalRequester: ToolApprovalRequester;
+  /**
+   * The thread's browser, when the server owns one.
+   *
+   * Passed in rather than constructed here, because a browser per turn would
+   * lose every login at the end of the turn, which is the one thing the
+   * attached-browser design exists to prevent. Absent in tests and in any
+   * embedded server that did not create one, and `browser_use` then reports that
+   * no browser is attached rather than hanging on a connection that cannot exist.
+   */
+  threadBrowser?: ThreadBrowserRuntime;
   /** Snapshotted from the thread's metadata when the turn starts. */
   systemPrompt?: string;
   disabledTools?: string[];
+  /**
+   * Where credentials are read from.
+   *
+   * Passed down rather than constructed here so a server configured with a
+   * specific home resolves keys from that home. Absent means the real
+   * `~/.reaper/providers.json`, which is right for a normal run and wrong for
+   * every test and every embedded server that named its own.
+   */
+  credentials?: ProviderCredentialStore;
+  /**
+   * Where user settings are read from, for the disabled-provider list.
+   *
+   * Threaded for the same reason `credentials` is: a server told to read
+   * settings from a specific home must resolve the user's switches from that
+   * home, not the real one. Absent means the real `~/.reaper/settings.json`.
+   */
+  settingsHome?: string;
 }
 
 export type ManagedTurnRunner = (input: ManagedTurnRunnerInput) => Promise<RuntimeEngineResult>;
@@ -44,20 +75,39 @@ export type ManagedTurnRunner = (input: ManagedTurnRunnerInput) => Promise<Runti
 export function selectTurnModel(
   input: Pick<ManagedTurnRunnerInput, "provider" | "model">,
   credentials: Pick<ProviderCredentialStore, "list" | "secretFor">,
+  /**
+   * Providers the user switched off, so the implicit fallback skips them the
+   * same way the picker withholds them. An explicit thread selection still
+   * wins: a thread already pinned to a provider keeps it, and switching that
+   * provider off later does not silently move the thread to a different one.
+   * Disable is about what a new choice offers, not about rewriting a choice
+   * already made.
+   */
+  disabledProviders: readonly string[] = [],
 ): { provider: string; model?: string } | undefined {
   if (input.provider) {
     return { provider: input.provider, ...(input.model ? { model: input.model } : {}) };
   }
-  return resolveDefaultSelection(credentials);
+  return resolveDefaultSelection(credentials, undefined, disabledProviders);
 }
 
 /** Creates one fresh engine while reusing the thread's named-session journal. */
 export const runManagedTurn: ManagedTurnRunner = async (input) => {
-  // Read the store once per turn, not once per process: a key added in
-  // Settings has to work for the very next turn without a server restart.
-  // Resolution stays per-profile, so a turn whose fallback lives on a
-  // different provider gets that provider's key rather than the primary's.
-  const credentials = new ProviderCredentialStore();
+  /*
+   * The store the caller provided, or the real one.
+   *
+   * This used to construct `new ProviderCredentialStore()` unconditionally,
+   * which meant the store the app-server was configured with was ignored for
+   * every turn: a server told to read credentials from a test home silently
+   * read the developer's `~/.reaper/providers.json` instead, and a turn could
+   * authenticate as a provider nobody had configured for it.
+   *
+   * Read once per turn rather than once per process, so a key added in
+   * Settings works for the very next turn without a restart. Resolution stays
+   * per-profile, so a turn whose fallback lives on a different provider gets
+   * that provider's key rather than the primary's.
+   */
+  const credentials = input.credentials ?? new ProviderCredentialStore();
   /*
    * A thread that names no provider is not a thread that should run on
    * `anthropic` — it is a thread whose provider has not been decided. See
@@ -65,7 +115,11 @@ export const runManagedTurn: ManagedTurnRunner = async (input) => {
    * `buildConfig` here made every new chat fail for a user who had configured
    * a different provider.
    */
-  const selected = selectTurnModel(input, credentials);
+  const selected = selectTurnModel(
+    input,
+    credentials,
+    readDisabledProviders(input.settingsHome ? { home: input.settingsHome } : {}),
+  );
   const baseConfig = selected
     ? buildConfigForProvider({
         workspaceRoot: input.workspaceRoot,
@@ -136,6 +190,8 @@ export const runManagedTurn: ManagedTurnRunner = async (input) => {
       // save that lands mid-run cannot change the prompt this run already sent.
       ...(input.systemPrompt ? { systemPromptSuffix: input.systemPrompt } : {}),
       ...(input.disabledTools?.length ? { disabledTools: input.disabledTools } : {}),
+      ...(input.filesystemSandbox === false ? { filesystemSandbox: false } : {}),
+      ...(input.threadBrowser ? { threadBrowser: input.threadBrowser } : {}),
     });
     return await engine.run();
   } finally {

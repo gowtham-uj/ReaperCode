@@ -70,7 +70,7 @@ function catalog(
   };
 }
 
-function renderPicker(models: ModelCatalog): void {
+function renderPicker(models: ModelCatalog, disabledProviders?: readonly string[]): void {
   render(
     <ModelPicker
       catalog={models}
@@ -79,6 +79,7 @@ function renderPicker(models: ModelCatalog): void {
       provider={undefined}
       model={undefined}
       turnActive={false}
+      disabledProviders={disabledProviders}
       onSetup={() => undefined}
       onError={() => undefined}
     />,
@@ -194,5 +195,27 @@ describe("composer model picker and unavailable transports", () => {
     );
 
     expect(screen.getByRole("button", { name: /pinned-model/ })).toBeTruthy();
+  });
+
+  /*
+   * A provider switched off in Settings must not be offered here.
+   *
+   * The whole point of Disable (as opposed to the Disconnect it replaced) is
+   * that the provider keeps its credential but stops appearing as a choice. If
+   * the picker still offered it, the switch would be invisible where it is
+   * supposed to act, and the user would keep picking a provider they believed
+   * they had turned off.
+   */
+  it("withholds a disabled provider from the picker", async () => {
+    const user = userEvent.setup();
+    const catalogWith = catalog(
+      [provider({ providerId: "fixture" }), provider({ providerId: "other", label: "Other AI" })],
+      [model({ id: "fixture-model" })],
+    );
+    renderPicker(catalogWith, ["fixture"]);
+
+    await user.click(screen.getByRole("button", { name: /Choose model/ }));
+    expect(screen.queryByRole("group", { name: "Fixture AI" })).toBeNull();
+    expect(screen.getByRole("group", { name: "Other AI" })).toBeTruthy();
   });
 });

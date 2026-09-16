@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -48,8 +49,9 @@ export async function createCheckpoint(input: CreateCheckpointInput): Promise<Ch
     restoreAvailable: false,
   };
 
+  let status: Awaited<ReturnType<typeof getGitStatusState>> | undefined;
   if (await isGitRepository(input.workspaceRoot)) {
-    const status = await getGitStatusState(input.workspaceRoot);
+    status = await getGitStatusState(input.workspaceRoot);
     checkpoint.baseRevision = status.baseRevision;
     checkpoint.dirtyFilesBefore = status.entries.map(entryToDirtyFile);
     checkpoint.restoreAvailable = status.baseRevision !== "unavailable";
@@ -62,6 +64,29 @@ export async function createCheckpoint(input: CreateCheckpointInput): Promise<Ch
     try {
       await writeGitPatch(input.workspaceRoot, checkpointDir, "staged.patch", ["diff", "--cached", "--binary"]);
       await writeGitPatch(input.workspaceRoot, checkpointDir, "worktree.patch", ["diff", "--binary"]);
+      /*
+       * A third patch, built from a throwaway index, so untracked files are in
+       * the snapshot too.
+       *
+       * `git diff` cannot describe an untracked file: it compares against the
+       * index, and a path the index has never seen has no other side. So the two
+       * patches above are silent about one, and restore was a partial undo — a
+       * file that was untracked at checkpoint time and then edited came back
+       * with the edit intact. Reproduced directly: checkpoint, append to an
+       * untracked `showcase/stats.js`, restore, and the edit was still there.
+       *
+       * The fix uses git rather than a parallel copy scheme. `GIT_INDEX_FILE`
+       * points a scratch index outside the workspace, `read-tree HEAD` seeds it
+       * from the base revision, and `add -A` stages the whole working tree into
+       * it — untracked files included, ignored files excluded, because `add`
+       * honours `.gitignore` exactly as it always does. `diff --cached` against
+       * that index is then a complete picture of the workspace at checkpoint
+       * time, in the format `git apply` already knows how to restore.
+       *
+       * The real index is never touched: `GIT_INDEX_FILE` redirects every index
+       * operation for the child, so the user's staged changes stay staged.
+       */
+      await writeUntrackedInclusivePatch(input.workspaceRoot, checkpointDir, status?.entries ?? []);
     } catch (error) {
       // Oversized parent repo or pathological diffs: keep a metadata-only checkpoint
       // so the engine can continue, but do not advertise it as restorable.
@@ -88,10 +113,103 @@ export async function restoreCheckpoint(workspaceRoot: string, checkpointId: str
   }
 
   const dirtyBefore = new Set(checkpoint.dirtyFilesBefore);
-  await runGit(workspaceRoot, ["reset", "--hard", checkpoint.baseRevision]);
-  await removeNewUntrackedFiles(workspaceRoot, dirtyBefore);
-  await applyPatchIfPresent(workspaceRoot, getCheckpointPatchPath(workspaceRoot, checkpoint.id, "staged.patch"), ["apply", "--cached", "--binary"]);
-  await applyPatchIfPresent(workspaceRoot, getCheckpointPatchPath(workspaceRoot, checkpoint.id, "worktree.patch"), ["apply", "--binary"]);
+  const preRestoreHead = await runGit(workspaceRoot, ["rev-parse", "HEAD"]);
+
+  // Ordering matters here. This used to reset --hard to the checkpoint base
+  // and only then try to reapply the saved patches: if the reapply failed
+  // (e.g. the trailing-newline bug above, or any other corrupt patch) the
+  // tree was already wiped to base and the user's pre-restore edits were
+  // gone for good, with no way back. The invariant we need is that a failed
+  // restore leaves the working tree exactly as it was before the call.
+  //
+  // Verifying the patches against a throwaway checkout would avoid touching
+  // the real tree at all, but that means a second full checkout of the base
+  // revision on every restore. Instead, stash the current tree (tracked
+  // changes and untracked files, `.reaper/` excluded so we don't sweep away
+  // the checkpoint data we're about to read) before doing anything
+  // destructive. On success the stash is dropped. On failure, resetting back
+  // to `preRestoreHead` and popping the stash reproduces the pre-call tree
+  // exactly, because the stash's base commit *is* `preRestoreHead`.
+  const stashed = await stashWorkingTree(workspaceRoot);
+  // Where new untracked files are parked (not deleted) so a failed restore can
+  // put them back. Lives under the checkpoint dir, which the untracked walk
+  // skips because it is inside `.reaper/`.
+  const quarantineDir = path.join(getCheckpointDir(workspaceRoot, checkpoint.id), "quarantine");
+  try {
+    await runGit(workspaceRoot, ["reset", "--hard", checkpoint.baseRevision]);
+    /*
+     * Every untracked path is moved aside, not just the new ones.
+     *
+     * This used to skip paths listed in `dirtyFilesBefore` — untracked files
+     * that already existed at checkpoint time — on the reasoning that quarantine
+     * exists to remove files created *after* the checkpoint. That left them in
+     * place with whatever edits had happened since, and the patches could not
+     * correct them: `git diff` has no side to compare an untracked file
+     * against, so a file the model edited after the checkpoint came back
+     * unchanged. The audit reproduced it — checkpoint, edit an untracked
+     * `showcase/stats.js`, restore, and the edit was still there.
+     *
+     * Moving them all aside makes the two paths symmetric: `untracked.patch`
+     * recreates the pre-existing ones from the checkpoint's own record, and the
+     * ones created since (which the patch does not mention, because they did not
+     * exist when it was taken) stay aside and are dropped on success. It also
+     * sidesteps `git apply`'s refusal to create a file that already exists,
+     * without needing a `git clean` that would have to re-derive which paths are
+     * safe.
+     */
+    await quarantineNewUntrackedFiles(workspaceRoot, quarantineDir);
+    /*
+     * `--index`, not `--cached`.
+     *
+     * The two patches are ordered: `staged.patch` is HEAD→index and
+     * `worktree.patch` is index→worktree, so the second is a diff *against the
+     * files the first creates* and expects them to be present on disk.
+     * `--cached` writes only the index — the tree stays empty — so the worktree
+     * patch then failed with `edit_probe.txt: No such file or directory` and the
+     * restore aborted on a checkpoint it had reported as restorable. `--index`
+     * applies to the index and the working tree together, which is what makes
+     * the second patch applicable and leaves the tree in the checkpoint's exact
+     * state.
+     */
+    await applyPatchIfPresent(workspaceRoot, getCheckpointPatchPath(workspaceRoot, checkpoint.id, "staged.patch"), ["apply", "--index", "--binary"]);
+    await applyPatchIfPresent(workspaceRoot, getCheckpointPatchPath(workspaceRoot, checkpoint.id, "worktree.patch"), ["apply", "--binary"]);
+    /*
+     * Then the untracked patch, which recreates the files the quarantine above
+     * moved aside.
+     *
+     * It goes last so it is the final writer: a path that appears in both a
+     * tracked patch and this one ends at the checkpoint's own recorded content
+     * rather than at the patch's reconstruction of it.
+     */
+    await applyPatchIfPresent(
+      workspaceRoot,
+      getCheckpointPatchPath(workspaceRoot, checkpoint.id, "untracked.patch"),
+      ["apply", "--binary"],
+    );
+  } catch (error) {
+    /*
+     * Undo in the reverse order of the forward steps: put the quarantined
+     * untracked files back, return tracked files to the pre-restore revision,
+     * then pop the tracked safety stash. The result is the working tree exactly
+     * as it was before the call.
+     */
+    await restoreQuarantinedFiles(workspaceRoot, quarantineDir);
+    await runGit(workspaceRoot, ["reset", "--hard", preRestoreHead]);
+    if (stashed) {
+      await runGit(workspaceRoot, ["stash", "pop"]);
+    }
+    throw error;
+  }
+
+  // Success: the quarantined files were never part of the checkpoint state, so
+  // they are dropped now. Dropping them here (rather than deleting in place) is
+  // what made their recovery possible on the failure path above.
+  await rm(quarantineDir, { recursive: true, force: true }).catch(() => undefined);
+
+  if (stashed) {
+    await runGit(workspaceRoot, ["stash", "drop"]);
+  }
+
   const statusAfterRestore = (await getGitStatusState(workspaceRoot)).statusShort;
 
   return {
@@ -99,6 +217,32 @@ export async function restoreCheckpoint(workspaceRoot: string, checkpointId: str
     restored: true,
     statusAfterRestore,
   };
+}
+
+// Snapshots the current *tracked* tree (staged + unstaged edits) into the git
+// stash so a failed restore can undo its changes to tracked files. Returns
+// false when there was nothing to stash (a clean tracked tree), so the caller
+// knows a bare HEAD reset is enough to roll back.
+//
+// It deliberately does NOT use `--include-untracked`. It used to, and that was
+// the data-loss bug: `--include-untracked` moves untracked files out of the
+// working tree into the stash, and on a *successful* restore the stash is
+// dropped — taking those files with it. The files lost were exactly the ones
+// the checkpoint had recorded as `dirtyFilesBefore`, the pre-existing untracked
+// files a restore is supposed to leave alone, so the exclusion in the removal
+// walk below could never save them: they were already gone, moved into the
+// stash by this call and deleted with it. Untracked files are handled on their
+// own now, by quarantine (moved aside, recoverable), and the safety stash only
+// needs to cover tracked changes.
+async function stashWorkingTree(workspaceRoot: string): Promise<boolean> {
+  const countStashes = async (): Promise<number> => {
+    const list = await runGit(workspaceRoot, ["stash", "list"]);
+    return list.length === 0 ? 0 : list.split("\n").length;
+  };
+  const before = await countStashes();
+
+  await runGit(workspaceRoot, ["stash", "push", "--message", "reaper-restore-checkpoint-safety"]);
+  return (await countStashes()) > before;
 }
 
 export async function readCheckpoint(workspaceRoot: string, checkpointId: string): Promise<Checkpoint> {
@@ -156,9 +300,109 @@ function entryToDirtyFile(entry: GitStatusEntry): string {
   return entry.originalPath ? `${entry.originalPath} -> ${entry.path}` : entry.path;
 }
 
+
+/**
+ * A patch that includes untracked files, built from a throwaway index.
+ *
+ * `git diff` cannot describe a file the index has never seen, so an untracked
+ * file produces no hunk and the restore misses it. Pointing `GIT_INDEX_FILE` at
+ * a scratch index outside the workspace and staging the entire working tree
+ * into it solves that with git's own machinery rather than a parallel copy
+ * scheme: `add -A` picks up untracked files and skips ignored ones exactly as a
+ * user's `git add -A` would, and `diff --cached` then yields one patch
+ * describing the whole workspace, in the format `git apply` restores.
+ *
+ * The scratch index lives in the checkpoint directory rather than the workspace
+ * so it cannot appear in a status listing or be swept into a commit. The real
+ * index is untouched: `GIT_INDEX_FILE` redirects index access for the child
+ * process only.
+ *
+ * Ignored files are deliberately absent. A checkpoint is about the work the
+ * agent is doing, and `node_modules` is not that; `.gitignore` is the user's own
+ * statement of what does not belong in the repository, and this honours it
+ * instead of inventing a second opinion.
+ */
+async function writeUntrackedInclusivePatch(
+  workspaceRoot: string,
+  checkpointDir: string,
+  entries: GitStatusEntry[],
+): Promise<void> {
+  // Nothing untracked means the two patches above already cover the tree, and a
+  // third would be an empty file.
+  if (!entries.some((entry) => entry.code === "??")) return;
+
+  const indexPath = path.join(checkpointDir, "untracked.index");
+  await rm(indexPath, { force: true });
+  try {
+    const env = { GIT_INDEX_FILE: indexPath };
+    await runGitWithEnv(workspaceRoot, ["read-tree", "HEAD"], env);
+    /*
+     * `.reaper/` is excluded by pathspec, not left to `.gitignore`.
+     *
+     * Reaper's own scratch lives there, and a workspace that does not gitignore
+     * it — a fresh one before Reaper writes its default `.gitignore`, or a
+     * fixture that never had one — would otherwise sweep the checkpoint's own
+     * patch files into the patch. Restoring that patch then fails with
+     * "already exists in working directory" for `staged.patch` and
+     * `worktree.patch`, because it is trying to recreate the files it is
+     * reading from. Excluding the path makes the patch describe only the work,
+     * whatever the repository's ignore rules happen to say.
+     */
+    await runGitWithEnv(workspaceRoot, ["add", "-A", "--", ".", ":(exclude).reaper"], env);
+    const patch = await runGitRawWithEnv(workspaceRoot, ["diff", "--cached", "--binary"], env);
+    if (patch.trim().length === 0) return;
+    const normalized = patch.endsWith("\n") ? patch : `${patch}\n`;
+    await writeFile(path.join(checkpointDir, "untracked.patch"), normalized, "utf8");
+  } finally {
+    // The index is a build artifact of this function, not state worth keeping;
+    // the patch it produced is the durable part.
+    await rm(indexPath, { force: true }).catch(() => undefined);
+  }
+}
+
 async function writeGitPatch(workspaceRoot: string, checkpointDir: string, fileName: string, args: string[]): Promise<void> {
-  const patch = await runGit(workspaceRoot, args);
-  await writeFile(path.join(checkpointDir, fileName), patch, "utf8");
+  // `runGit` trimEnds its output for display/plumbing callers, which strips the
+  // trailing newline `git diff` puts on the last line. `git apply` rejects a
+  // patch whose final line is unterminated ("corrupt patch at line N"), so a
+  // trimmed patch could never be reapplied on restore. Patch bytes must be
+  // captured raw and, defensively, end with a newline even if some future git
+  // version or flag combination ever omits one.
+  const patch = await runGitRaw(workspaceRoot, args);
+  const normalized = patch.length > 0 && !patch.endsWith("\n") ? `${patch}\n` : patch;
+  await writeFile(path.join(checkpointDir, fileName), normalized, "utf8");
+}
+
+/**
+ * `runGit` with extra environment, for the scratch-index operations.
+ *
+ * A separate function rather than an option on `runGit` because the environment
+ * it injects (`GIT_INDEX_FILE`) changes what git *means* — every index read and
+ * write goes somewhere else — and that is worth being visible at the call site
+ * rather than hidden behind a parameter.
+ */
+async function runGitWithEnv(workspaceRoot: string, args: string[], env: Record<string, string>): Promise<string> {
+  return String(await runGitRawWithEnv(workspaceRoot, args, env)).trimEnd();
+}
+
+/** As `runGitRaw`, with extra environment (see `runGitWithEnv`). */
+async function runGitRawWithEnv(
+  workspaceRoot: string,
+  args: string[],
+  extraEnv: Record<string, string>,
+): Promise<string> {
+  const { stdout } = await execFileAsync("git", args, {
+    cwd: workspaceRoot,
+    env: {
+      ...process.env,
+      ...extraEnv,
+      GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME ?? "Reaper Tests",
+      GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL ?? "reaper-tests@example.com",
+      GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME ?? "Reaper Tests",
+      GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL ?? "reaper-tests@example.com",
+    },
+    maxBuffer: 1024 * 1024 * 1024,
+  });
+  return String(stdout);
 }
 
 async function applyPatchIfPresent(workspaceRoot: string, patchPath: string, args: string[]): Promise<void> {
@@ -167,16 +411,71 @@ async function applyPatchIfPresent(workspaceRoot: string, patchPath: string, arg
   await runGit(workspaceRoot, [...args, patchPath]);
 }
 
-async function removeNewUntrackedFiles(workspaceRoot: string, dirtyFilesBefore: Set<string>): Promise<void> {
+/**
+ * Move every untracked file aside, clearing the way for the patches.
+ *
+ * Two jobs, and they are why it takes all of them rather than only the new
+ * ones. A restore returns the tree to the checkpoint's moment, so a file that
+ * did not exist then must not exist afterwards — and a file that *did* exist
+ * then must come back with its checkpoint content, not the version on disk now.
+ * `untracked.patch` recreates the ones the checkpoint recorded; this clears the
+ * disk so that apply can create them, since `git apply` refuses a path that
+ * already exists.
+ *
+ * Moving rather than deleting keeps a failed restore recoverable: this runs
+ * before the patches, and `restoreQuarantinedFiles` puts everything back if one
+ * fails. A file that survived the quarantine step but not the restore is only
+ * dropped on success, when the patch has already recreated the checkpoint's
+ * version.
+ *
+ * `.reaper/` is skipped so a restore never sweeps away the checkpoint store it
+ * is reading from.
+ */
+async function quarantineNewUntrackedFiles(workspaceRoot: string, quarantineDir: string): Promise<void> {
   const status = await runGit(workspaceRoot, ["status", "--short", "--untracked-files=all"]);
   const untracked = parseGitStatusShort(status).filter((entry) => entry.code === "??");
   for (const entry of untracked) {
-    if (dirtyFilesBefore.has(entry.path) || entry.path.startsWith(".reaper/")) continue;
-    await rm(path.join(workspaceRoot, entry.path), { force: true, recursive: true });
+    if (entry.path.startsWith(".reaper/")) continue;
+    const src = path.join(workspaceRoot, entry.path);
+    const dst = path.join(quarantineDir, entry.path);
+    // Guard against a path that would escape the workspace (a hostile filename
+    // or a crafted status line); moving outside the tree is never intended.
+    if (!dst.startsWith(quarantineDir + path.sep)) continue;
+    await mkdir(path.dirname(dst), { recursive: true });
+    await rename(src, dst);
   }
 }
 
+/** Move everything in `quarantineDir` back into the workspace, then remove it. */
+async function restoreQuarantinedFiles(workspaceRoot: string, quarantineDir: string): Promise<void> {
+  if (!existsSync(quarantineDir)) return;
+  const walk = async (rel: string): Promise<void> => {
+    const abs = path.join(quarantineDir, rel);
+    const entries = await readdir(abs, { withFileTypes: true });
+    for (const dirent of entries) {
+      const childRel = rel ? path.join(rel, dirent.name) : dirent.name;
+      if (dirent.isDirectory()) {
+        await walk(childRel);
+      } else {
+        const dst = path.join(workspaceRoot, childRel);
+        await mkdir(path.dirname(dst), { recursive: true });
+        await rename(path.join(quarantineDir, childRel), dst);
+      }
+    }
+  };
+  await walk("");
+  await rm(quarantineDir, { recursive: true, force: true }).catch(() => undefined);
+}
+
 async function runGit(workspaceRoot: string, args: string[]): Promise<string> {
+  return String(await runGitRaw(workspaceRoot, args)).trimEnd();
+}
+
+// Like `runGit`, but preserves stdout exactly as git produced it. Only use
+// this for output that will be reapplied byte-for-byte later (patch files);
+// everything else should go through `runGit` so callers don't have to deal
+// with trailing-newline noise.
+async function runGitRaw(workspaceRoot: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", args, {
     cwd: workspaceRoot,
     env: {
@@ -188,5 +487,5 @@ async function runGit(workspaceRoot: string, args: string[]): Promise<string> {
     },
     maxBuffer: 1024 * 1024 * 1024,
   });
-  return String(stdout).trimEnd();
+  return String(stdout);
 }

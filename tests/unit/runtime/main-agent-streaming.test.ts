@@ -153,3 +153,33 @@ test("normalizeToolCall maps reference-style name to canonical name", () => {
     assert.equal(parsed.data.name, "write_file");
   }
 });
+
+/*
+ * Usage is normalised whatever shape the provider sent.
+ *
+ * The consumer read only `promptTokens`/`inputTokens`, and the test above only
+ * ever fed it that camelCase shape — which is why the bug survived: DeepSeek and
+ * every OpenAI-compatible stream report `prompt_tokens`/`completion_tokens`, so
+ * the real provider produced 0/0 and the context meter never moved for an entire
+ * conversation. Each spelling a provider actually uses is asserted here, so the
+ * one that matters (the snake_case a real stream sends) cannot regress unseen.
+ */
+for (const [label, usage, expected] of [
+  ["snake_case (DeepSeek / OpenAI-compatible)", { prompt_tokens: 1234, completion_tokens: 56 }, { inputTokens: 1234, outputTokens: 56 }],
+  ["anthropic snake_case", { input_tokens: 100, output_tokens: 50 }, { inputTokens: 100, outputTokens: 50 }],
+  ["camelCase (already normalised)", { inputTokens: 7, outputTokens: 3 }, { inputTokens: 7, outputTokens: 3 }],
+] as const) {
+  test(`stream usage is read from the ${label} shape`, async () => {
+    const gateway = new FakeStreamingGateway();
+    (gateway as unknown as { stream: (r: GenerateRequest) => AsyncIterable<StreamEvent> }).stream = async function* () {
+      yield { type: "message_start", data: { provider: "fake", model: "fake-model" } };
+      yield { type: "message_end", data: { finishReason: "stop", usage } };
+    };
+    const result = await streamMainAgentResponse(gateway, {
+      role: "secondary_model",
+      source: "main_agent",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    assert.deepEqual(result.usage, expected);
+  });
+}

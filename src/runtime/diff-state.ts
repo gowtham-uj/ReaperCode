@@ -84,9 +84,34 @@ export function parseGitStatusShort(statusShort: string): GitStatusEntry[] {
     });
 }
 
+/**
+ * The one-line summary above the diff.
+ *
+ * Two counts, not one, and the distinction is the fix for a misleading line.
+ * `git diff` says nothing about untracked files — they have no committed
+ * version to diff against — so a workspace holding eight new files that git has
+ * never seen produced `diff: ""` and `diffStat: ""` beneath a header reading
+ * "8 changed files". The reader concludes the diff was elided; the truth is
+ * that there is no diff, because the files are additions the index does not
+ * know about yet.
+ *
+ * So the tracked count comes from the diff itself, and untracked files are
+ * reported separately as what they are. "3 changed files, 8 untracked" tells
+ * the reader both what is in the diff below and what is not.
+ */
 export function summarizeGitDiffState(state: GitDiffState): string {
-  const filesChanged = state.status.entries.length;
-  const cleanText = state.status.clean ? "clean" : `${filesChanged} changed file${filesChanged === 1 ? "" : "s"}`;
+  const untracked = state.status.entries.filter((entry) => entry.code.includes("?")).length;
+  const tracked = state.status.entries.length - untracked;
+
+  const parts: string[] = [];
+  if (tracked === 0 && untracked === 0) {
+    parts.push("clean");
+  } else {
+    if (tracked > 0) parts.push(`${tracked} changed file${tracked === 1 ? "" : "s"}`);
+    if (untracked > 0) parts.push(`${untracked} untracked file${untracked === 1 ? "" : "s"} (no diff until added)`);
+    if (tracked === 0) parts.push("nothing tracked has changed");
+  }
+  const cleanText = parts.join(", ");
   const stat = state.diffStat.trim();
   return stat ? `${cleanText}\n${stat}` : cleanText;
 }

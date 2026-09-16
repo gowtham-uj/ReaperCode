@@ -203,12 +203,17 @@ export class ExtensionRegistry {
   }
 
   /**
-   * `trust` — a no-op that reports success.
+   * `trust` — a semantic no-op, kept so an old caller still works.
    *
    * There are no trust tiers: an extension is trusted when it is installed, so
-   * there is nothing to promote. Kept because a caller written against the old
-   * workflow still calls it, and reporting success for an already-satisfied
-   * step is better than an error that implies something is missing.
+   * there is nothing for this to promote and nothing for `enable` to gate on.
+   * The flag is set in memory for callers that read it back within the same
+   * action, but it is deliberately NOT persisted for a project-scope extension:
+   * `ExtensionTrustResolver.loadCached` refuses a `trust.json` under the project
+   * directory, because that directory is writable by the very model the trust
+   * flag would be protecting against, so a record there cannot grant trust.
+   * That rule is why the real bug was never here — it was `enable` enforcing a
+   * gate this method could not satisfy. See `handleEnableExtension`.
    */
   trust_(id: string, _note?: string): { ok: boolean; error?: string } {
     const r = this.loaded.get(id);

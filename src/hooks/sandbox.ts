@@ -30,7 +30,11 @@
 export interface CompiledHookHandler {
   /**
    * The compiled handler. `event` is a HookEvent (name + payload + blockable).
-   * Returns `{allow, message?, reason?}`.
+   *
+   * The author may return a bare boolean or `{allow, message?, reason?}`; the
+   * compiler's own wrapper normalizes both to the object form, so what a caller
+   * of this type sees is always the object. That normalization is why a
+   * `return false` handler blocks instead of silently passing.
    */
   (event: { name: string; payload: Record<string, unknown>; blockable: boolean }):
     | { allow: boolean; message?: string; reason?: string }
@@ -119,9 +123,20 @@ export function compileHookSource(source: string, opts: CompileOptions = {}): Co
 }
 
 function capResult(
-  result: { allow: boolean; message?: string; reason?: string } | undefined,
+  result: { allow: boolean; message?: string; reason?: string } | boolean | undefined,
   maxOutput: number,
 ): { allow: boolean; message?: string; reason?: string } {
+  /*
+   * `return false` is a block, and so is `return true` an allow.
+   *
+   * The documented contract is `{ allow: false }`, but a handler that returns a
+   * bare boolean is the natural reading of "its result decides the outcome",
+   * and it used to be a silent no-op: `capResult` saw a non-object, answered
+   * `{ allow: true }`, and an enforcing hook that meant to block let the call
+   * through with no error anywhere. Accepting the boolean is the honest fix;
+   * the alternative is a hook that appears to work and does nothing.
+   */
+  if (typeof result === "boolean") return { allow: result };
   if (!result || typeof result !== "object") {
     return { allow: true };
   }
@@ -157,9 +172,12 @@ export function smokeTestHandler(
         error: "handler is async; the smoke test only supports sync handlers — use the runtime path for async",
       };
     }
+    // A bare boolean is a valid decision, matching `capResult`; anything else
+    // has to carry a boolean `allow` or the handler has told us nothing.
+    if (typeof raw === "boolean") return { ok: true, result: { allow: raw } };
     const r = raw as { allow: boolean; message?: string; reason?: string };
-    if (typeof r.allow !== "boolean") {
-      return { ok: false, error: `handler returned non-boolean allow (got ${typeof r.allow})` };
+    if (!r || typeof r.allow !== "boolean") {
+      return { ok: false, error: `handler must return a boolean or { allow: boolean } (got ${typeof r?.allow})` };
     }
     return { ok: true, result: r };
   } catch (e) {

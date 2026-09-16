@@ -21,11 +21,13 @@
        Kept in sync with src/theme.ts (storage key `reaper.theme`, values
        "dark" / "black" / "reaper"). The values are listed here rather than
        derived, because this script runs before any module loads and must not
-       wait on the bundle to know what a valid theme is. -->
+       wait on the bundle to know what a valid theme is. The initial value is
+       `reaper`, matching DEFAULT_THEME there, so a browser with no stored
+       preference gets the product's own palette instead of the blue one. -->
   <body>
     <script>
       (function () {
-        var theme = "dark";
+        var theme = "reaper";
         try {
           var stored = localStorage.getItem("reaper.theme");
           if (stored === "black" || stored === "reaper") theme = stored;

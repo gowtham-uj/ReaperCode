@@ -236,32 +236,24 @@ export function normalizeToolCall(input: unknown): unknown {
           ...(typeof record.reason === "string" ? { reason: record.reason } : {}),
         };
         break;
-      case "browser_control":
+      case "browser_use":
+        /*
+         * Only the arguments the tool actually takes.
+         *
+         * The old `browser_control` case mapped an `action` verb and a dozen
+         * per-action fields. `browser_use` takes a program, so the mapping is
+         * three fields and the aliases that a model is likely to write for each:
+         * `code`/`script`/`program` for the program, and `intent`/`goal` for the
+         * sentence that goes in the journal.
+         */
         args = {
-          ...(typeof record.action === "string" ? { action: record.action } : {}),
-          ...(typeof record.url === "string" ? { url: record.url } : {}),
-          ...(typeof record.selector === "string" ? { selector: record.selector } : {}),
-          ...(typeof record.ref === "string" ? { ref: record.ref } : {}),
-          ...(typeof record.text === "string" ? { text: record.text } : {}),
-          ...(typeof record.key === "string" ? { key: record.key } : {}),
-          ...(typeof record.value === "string" ? { value: record.value } : {}),
-          ...(typeof record.x === "number" ? { x: record.x } : {}),
-          ...(typeof record.y === "number" ? { y: record.y } : {}),
-          ...(typeof record.deltaX === "number" ? { deltaX: record.deltaX } : {}),
-          ...(typeof record.deltaY === "number" ? { deltaY: record.deltaY } : {}),
-          ...(typeof record.button === "string" ? { button: record.button } : {}),
-          ...(typeof record.clear === "boolean" ? { clear: record.clear } : {}),
-          ...(typeof record.submit === "boolean" ? { submit: record.submit } : {}),
-          ...(typeof record.humanize === "boolean" ? { humanize: record.humanize } : {}),
-          ...(typeof record.headless === "boolean" ? { headless: record.headless } : {}),
-          ...(typeof record.width === "number" ? { width: record.width } : {}),
-          ...(typeof record.height === "number" ? { height: record.height } : {}),
-          ...(typeof record.screenshot === "boolean" ? { screenshot: record.screenshot } : {}),
-          ...(typeof record.fullPage === "boolean" ? { fullPage: record.fullPage } : {}),
-          ...(typeof record.maxTextChars === "number" ? { maxTextChars: record.maxTextChars } : {}),
-          ...(typeof record.maxInteractive === "number" ? { maxInteractive: record.maxInteractive } : {}),
-          ...(typeof record.waitUntil === "string" ? { waitUntil: record.waitUntil } : {}),
-          ...(typeof record.timeoutMs === "number" ? { timeoutMs: record.timeoutMs } : {}),
+          ...(typeof record.code === "string" ? { code: record.code } : {}),
+          ...(typeof record.script === "string" ? { code: record.script } : {}),
+          ...(typeof record.program === "string" ? { code: record.program } : {}),
+          ...(typeof record.intent === "string" ? { intent: record.intent } : {}),
+          ...(typeof record.goal === "string" ? { intent: record.goal } : {}),
+          ...(typeof record.expected_revision === "number" ? { expected_revision: record.expected_revision } : {}),
+          ...(typeof record.timeout_ms === "number" ? { timeout_ms: record.timeout_ms } : {}),
         };
         break;
       /*
@@ -371,10 +363,9 @@ function normalizeContainerWorkspacePath(value: string | undefined): string | un
  */
 export const TOOL_ALIASES: Readonly<Record<string, string>> = {
     bash: "bash",
-    browser: "browser_control",
-    browser_use: "browser_control",
-    browser_action: "browser_control",
-    browser_control: "browser_control",
+    browser: "browser_use",
+    browser_use: "browser_use",
+    browser_action: "browser_use",
     /*
      * Native-desktop synonyms are deliberately *not* mapped onto
      * `browser_control`. A model that asks for `computer_use` or `screenshot`

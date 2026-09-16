@@ -207,14 +207,32 @@ export function usableProviders(providers: CatalogProvider[]): CatalogProvider[]
 }
 
 /**
- * Providers a turn can actually be sent with: connected *and* servable.
+ * Providers a turn can actually be sent with: connected, servable, and switched on.
  *
  * `configured` alone is not enough. A refreshed catalog can name a transport
  * this build has no package for, and offering it in the composer produces a
  * turn that dies importing a missing module.
+ *
+ * `disabledProviders` is the user's own switch, kept separate from the
+ * credential: disabling hides the provider from the composer while leaving the
+ * key stored, so switching it back on costs nothing. It has to be filtered
+ * here, in the one function the composer builds its list from, or a disabled
+ * provider would still be offered and the Disable button would do nothing
+ * visible.
  */
-export function sendableProviders(providers: CatalogProvider[]): CatalogProvider[] {
-  return providers.filter((provider) => provider.configured && provider.runnable !== false);
+export function sendableProviders(
+  providers: CatalogProvider[],
+  disabledProviders: readonly string[] = [],
+): CatalogProvider[] {
+  const disabled = disabledProviders.length > 0 ? new Set(disabledProviders) : undefined;
+  return providers.filter(
+    (provider) => provider.configured && provider.runnable !== false && !disabled?.has(provider.providerId),
+  );
+}
+
+/** Whether the user has switched this provider off in Settings. */
+export function isProviderDisabled(provider: CatalogProvider, disabledProviders: readonly string[]): boolean {
+  return disabledProviders.includes(provider.providerId);
 }
 
 /** Whether a listed model can be sent to at all. */

@@ -183,6 +183,32 @@ export function parsePatch(patchText: string): FilePatch[] {
   // silently write corrupt output.
   for (const patch of patches) {
     for (const hunk of patch.hunks) {
+      /*
+       * A patch whose text ends in a blank line leaves one synthetic empty
+       * context line at the end of the final hunk, which inflates its count and
+       * fails validation. That is the shape a model produces when it ends its
+       * patch with a newline after the last content line, and it is common
+       * enough that rejecting it is a bug rather than strictness: the same
+       * patch without the trailing blank applies cleanly.
+       *
+       * Only *trailing* empty context lines are dropped, and only while the
+       * hunk is over its declared count, so a blank line that is genuinely part
+       * of the file's content in the middle of a hunk is untouched. The
+       * `\ No newline at end of file` marker is the disambiguator git uses for
+       * the trailing case, and it is already skipped during parsing.
+       */
+      while (
+        hunk.lines.length > 0
+        && hunk.lines[hunk.lines.length - 1]!.type === "context"
+        && hunk.lines[hunk.lines.length - 1]!.content === ""
+        && (
+          hunk.lines.filter((entry) => entry.type === "context" || entry.type === "remove").length > hunk.oldCount
+          || hunk.lines.filter((entry) => entry.type === "context" || entry.type === "add").length > hunk.newCount
+        )
+      ) {
+        hunk.lines.pop();
+      }
+
       const consumedOld = hunk.lines.filter((entry) => entry.type === "context" || entry.type === "remove").length;
       const consumedNew = hunk.lines.filter((entry) => entry.type === "context" || entry.type === "add").length;
       if (consumedOld !== hunk.oldCount) {

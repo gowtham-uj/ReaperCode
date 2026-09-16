@@ -122,9 +122,15 @@ export async function handleCreateSkill(
 export async function handleTestSkill(
   args: TestSkillArgs,
   deps: SkillToolDeps,
-): Promise<{ ok: boolean; name: string; results: Array<{ id: string; exitCode: number; stderr: string }>; error?: string }> {
+): Promise<{ ok: boolean; name: string; results: Array<{ id: string; exitCode: number; stdout: string; stderr: string }>; error?: string; note?: string }> {
   const out = await deps.lifecycle.testSkill(args.name);
-  return { ok: out.ok, name: args.name, results: out.results, ...(out.error ? { error: out.error } : {}) };
+  return {
+    ok: out.ok,
+    name: args.name,
+    results: out.results,
+    ...(out.error ? { error: out.error } : {}),
+    ...(out.note ? { note: out.note } : {}),
+  };
 }
 
 /**

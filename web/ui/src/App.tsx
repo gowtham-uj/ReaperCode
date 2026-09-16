@@ -13,6 +13,7 @@ import { AppProvider, BFF_HTTP, useApp } from "./app/AppProvider.jsx";
 import { AppearanceSettings, ProvidersSettings, ModelsSettings, PermissionsSettings, SettingsLayout } from "./Settings.jsx";
 import { ThreadList, threadLabel, threadWorkspaceLabel } from "./ThreadList.jsx";
 import { ThreadSettingsDialog } from "./ThreadSettings.jsx";
+import { TranscriptGallery } from "./dev/TranscriptGallery.jsx";
 import { TuneIcon } from "./icons.jsx";
 import { parseSkillsCommand, skillInvocationSuffix } from "./skills-command.js";
 import { SkillsOverlay } from "./SkillsOverlay.jsx";
@@ -22,6 +23,20 @@ import { Workbench, type WorkbenchMode } from "./Workbench.jsx";
 import { WorkspaceInventory } from "./WorkspaceInventory.jsx";
 
 export function App() {
+  /*
+   * A fixture transcript, reachable only on the dev server.
+   *
+   * The transcript's correctness is visual, and checking it against a live
+   * model costs a provider round trip per look and returns different content
+   * every time, so two screenshots are never comparable and a spacing change
+   * cannot be told apart from a different answer. This renders the real
+   * components against fixed items. `import.meta.env.DEV` is replaced with
+   * `false` at build time, so the branch and the module with it are dropped
+   * from a production bundle.
+   */
+  if (import.meta.env.DEV && window.location.pathname === "/__gallery") {
+    return <TranscriptGallery />;
+  }
   return (
     <AppProvider>
       <Routes>
@@ -41,11 +56,26 @@ export function App() {
   );
 }
 
+/**
+ * Scroll a transcript to the bottom, animated only if the reader allows motion.
+ *
+ * `behavior: "smooth"` over a long thread is a full-viewport slide, which is
+ * the exact motion `prefers-reduced-motion` exists to suppress, and CSS cannot
+ * suppress it: the setting is honoured by `scroll-behavior` in a stylesheet,
+ * not by a `behavior` passed to `scrollTo`, which wins outright. So the check
+ * has to happen here.
+ */
+function scrollToLatest(element: HTMLElement | null): void {
+  if (element === null) return;
+  const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  element.scrollTo({ top: element.scrollHeight, behavior: still ? "auto" : "smooth" });
+}
+
 function SettingsBoundary() {
   const { settings, client } = useApp();
   return <SettingsLayout settings={settings} client={client} />;
 }
-function ProvidersRoute() { const { catalog, client } = useApp(); return <ProvidersSettings catalog={catalog} client={client} />; }
+function ProvidersRoute() { const { catalog, settings, client } = useApp(); return <ProvidersSettings catalog={catalog} settings={settings} client={client} />; }
 function ModelsRoute() { const { settings, catalog, client } = useApp(); return <ModelsSettings settings={settings} catalog={catalog} client={client} />; }
 function PermissionsRoute() { const { settings, client } = useApp(); return <PermissionsSettings settings={settings} client={client} />; }
 function PolicyRoute() { const { settings, client } = useApp(); return <PolicyEditor store={settings} client={client} />; }
@@ -56,7 +86,19 @@ function WorkspacePage() {
   const navigate = useNavigate();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [threadCreationRequest, setThreadCreationRequest] = useState(0);
-  const [detailsOpen, setDetailsOpen] = useState(true);
+  /*
+   * The workspace panel starts closed.
+   *
+   * It held the file tree, diffs, terminal, preview and browser, which is a lot
+   * of chrome beside a transcript and it competed with it for attention on every
+   * turn. The user's call is to hide it for now and decide later how those
+   * surfaces are shown, so the default is closed and the toggle still opens it.
+   *
+   * Closed rather than removed: every mode still works, the toggle is still in
+   * the header, and re-enabling is one boolean rather than restoring what was
+   * deleted.
+   */
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [detailsWidth, setDetailsWidth] = useState(520);
   const [draft, setDraft] = useState("");
   const [workbenchMode, setWorkbenchMode] = useState<WorkbenchMode>("files");
@@ -96,12 +138,23 @@ function WorkspacePage() {
    * surprising the threshold — which is exactly the case that was broken.
    */
   const followTranscript = useRef(true);
+  /*
+   * The same fact as `followTranscript`, as state, so the jump button can
+   * render. It is a second copy rather than a replacement because the ref is
+   * read inside a scroll handler and on every content change, and making that
+   * a state read would put a re-render on the scrolling path. This one is only
+   * written when the answer *changes*, which is a handful of times per session
+   * rather than once per scroll event.
+   */
+  const [detached, setDetached] = useState(false);
 
   useEffect(() => {
     const element = transcriptRef.current;
     if (!element) return;
     const onScroll = (): void => {
-      followTranscript.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+      const following = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+      followTranscript.current = following;
+      setDetached((previous) => (previous === !following ? previous : !following));
     };
     // Passive: this listener only reads, and saying so keeps it off the
     // scrolling critical path.
@@ -122,11 +175,19 @@ function WorkspacePage() {
     });
   }, [app.turns, app.queued, app.approvals]);
 
+  /*
+   * Deliberately not opening the workspace panel on an edit any more.
+   *
+   * This forced the panel open every time the agent wrote a file, so a turn
+   * that edited anything pushed the transcript narrower mid-read. With the panel
+   * closed by default that would have made the default meaningless: the first
+   * edit of every turn would undo it.
+   *
+   * The mode is still switched, so opening the panel by hand later lands on the
+   * file it just changed.
+   */
   useEffect(() => {
-    if (app.lastEditedPath) {
-      setDetailsOpen(true);
-      setWorkbenchMode("files");
-    }
+    if (app.lastEditedPath) setWorkbenchMode("files");
   }, [app.lastEditedPath]);
 
   /**
@@ -260,6 +321,7 @@ function WorkspacePage() {
             provider={app.thread?.modelProvider}
             model={app.thread?.model}
             turnActive={Boolean(app.activeTurn)}
+            disabledProviders={app.settings.settings?.disabledProviders}
             onSetup={() => navigate("/settings/providers")}
             onError={(message) => app.setError(message)}
           />
@@ -398,12 +460,28 @@ function WorkspacePage() {
                     turn that is finished.
                   */}
                   <Transcript turns={app.turns} {...(app.activeTurn ? { activeTurnId: app.activeTurn.id } : {})} />
-                  {app.queued.map((entry) => <QueuedMessage key={entry.id} entry={entry} onCancel={() => app.dropQueued(entry.id)} />)}
+                  {app.queued.map((entry) => <QueuedMessage key={entry.id} entry={entry} onCancel={() => app.dropQueued(entry.id)} onMode={(mode) => app.setQueuedMode(entry.id, mode)} />)}
                   {app.approvals.map((request) => <ApprovalVisibility key={request.approvalId} onVisibilityChange={setApprovalVisible}><ApprovalCard request={request} onDecide={app.decide} /></ApprovalVisibility>)}
                   {app.activeTurn && <WorkingIndicator turn={app.activeTurn} />}
                 </div>
                 <div className="dsh-composer-seat" data-composer-seat>
-                  {pendingApproval && !approvalVisible && <StickyApprovalBar request={pendingApproval} onDecide={app.decide} onReveal={() => transcriptRef.current?.scrollTo({ top: transcriptRef.current.scrollHeight, behavior: "smooth" })} />}
+                  {/*
+                    Shown only while a turn is running and the reader has
+                    scrolled away from the bottom. Those two conditions together
+                    are what make it a useful control rather than clutter: a
+                    finished thread the reader is scrolling back through has
+                    nothing below to jump to, and a reader already at the bottom
+                    is being followed automatically.
+                  */}
+                  {detached && app.activeTurn && (
+                    <button
+                      className="jump-latest"
+                      onClick={() => scrollToLatest(transcriptRef.current)}
+                    >
+                      <span aria-hidden="true">↓</span> Jump to latest
+                    </button>
+                  )}
+                  {pendingApproval && !approvalVisible && <StickyApprovalBar request={pendingApproval} onDecide={app.decide} onReveal={() => scrollToLatest(transcriptRef.current)} />}
                   {composer}
                 </div>
               </>
@@ -430,6 +508,7 @@ function WorkspacePage() {
         thread={app.thread}
         threadId={app.threadId}
         catalog={app.catalog}
+        disabledProviders={app.settings.settings?.disabledProviders}
         onError={(message) => app.setError(message)}
         /*
          * The dialog shows the permission mode but deliberately does not offer
@@ -500,6 +579,21 @@ function EmptyHero({ connected }: { connected: boolean }) {
  * active, which is close enough to when the model call started that the number
  * means what a person thinks it means.
  */
+/**
+ * The line that says the agent is still going.
+ *
+ * Its rule is "has the agent finished", not "has the agent said anything yet",
+ * and the difference is what made a continued thread look dead. The previous
+ * version hid the indicator as soon as the turn contained any agent text or
+ * reasoning, and a turn carries its own whole history: the moment a thread had
+ * one earlier reply, every later turn suppressed the indicator immediately and
+ * the transcript showed nothing at all while the model worked. The stop button
+ * was the only sign anything was happening, and it is easy to miss.
+ *
+ * A turn that has stopped talking without finishing is also worth showing,
+ * which is why a trailing tool call still counts as working: the agent waiting
+ * on a shell command has not answered yet.
+ */
 function WorkingIndicator({ turn }: { turn: AppTurn }) {
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
@@ -509,28 +603,79 @@ function WorkingIndicator({ turn }: { turn: AppTurn }) {
   }, []);
 
   /*
-   * Suppressed once the turn has produced something readable. `deriveSteps` is
-   * the same function the transcript uses, so "has anything arrived" is judged
-   * by the same rules that decide what is rendered.
+   * What the agent is doing right now, from the last thing it did.
+   *
+   * Read off the tail rather than the whole turn: a turn's items accumulate, so
+   * only the final one says what is happening at this moment.
    */
-  const hasContent = useMemo(
-    () => turn.items.some((item: AppThreadItem) =>
-      (item.type === "agentMessage" && item.text.trim().length > 0)
-      || (item.type === "reasoning" && item.content.join("").trim().length > 0),
-    ),
-    [turn.items],
-  );
-  if (hasContent) return null;
+  const activity = useMemo(() => {
+    const items = turn.items;
+    for (let i = items.length - 1; i >= 0; i--) {
+      const item = items[i]!;
+      if (item.type === "userMessage") continue;
+      if (item.type === "agentMessage") return item.text.trim().length > 0 ? "Writing a reply" : "Thinking";
+      if (item.type === "reasoning") return "Thinking";
+      if (item.type === "commandExecution") return "Running a command";
+      if (item.type === "fileChange") return "Editing files";
+      if (item.type === "dynamicToolCall") return "Using a tool";
+      if (item.type === "contextManagement") return "Managing context";
+    }
+    return "Thinking";
+  }, [turn.items]);
+
+  const isRunning = turn.status === "inProgress";
+  if (!isRunning) return null;
 
   return (
     <div className="turn-status" role="status" aria-live="polite">
-      Reaper is working… <span className="turn-elapsed">{Math.floor(elapsed / 1000)}s</span>
+      Reaper is working… <span className="turn-elapsed">{activity} · {Math.floor(elapsed / 1000)}s</span>
     </div>
   );
 }
 
-function QueuedMessage({ entry, onCancel }: { entry: { text: string; sent: boolean }; onCancel(): void }) {
-  return <div className="queued-message" data-sent={entry.sent || undefined}><div>{entry.text}</div><footer><span>{entry.sent ? "Handed to the agent — waits for the next step" : "Queued for the next step"}</span>{!entry.sent && <button onClick={onCancel}>Cancel</button>}</footer></div>;
+/**
+ * A message the user typed while the agent was working.
+ *
+ * It stays in the transcript, not a toast, so the user can see it is held and
+ * open it to decide when it lands. Clicking the card reveals the one setting
+ * that matters: hand it over after the agent's next tool call, or wait until the
+ * agent has finished everything for the current prompt. A message typed during a
+ * turn used to disappear the instant it was steered, which read as "my message
+ * was eaten" — this keeps it visible with an explicit state until the server
+ * confirms it is in the transcript.
+ */
+function QueuedMessage({ entry, onCancel, onMode }: {
+  entry: { id: string; text: string; sent: boolean; mode: "next-step" | "after-turn" };
+  onCancel(): void;
+  onMode(mode: "next-step" | "after-turn"): void;
+}) {
+  const [open, setOpen] = useState(false);
+  const nextStep = entry.mode === "next-step";
+  const status = entry.sent
+    ? (nextStep ? "Handed to the agent — it will read this after the current tool call" : "Held — it will send once the agent finishes this prompt")
+    : (nextStep ? "Queued for the agent's next tool call" : "Queued for after the agent finishes");
+  return (
+    <div className="queued-message" data-sent={entry.sent || undefined} data-open={open || undefined}>
+      <button className="queued-message-text" type="button" aria-expanded={open} onClick={() => setOpen((v) => !v)}>{entry.text}</button>
+      <footer>
+        <span className="queued-message-status">{status}</span>
+        {!entry.sent && <button type="button" onClick={onCancel}>Cancel</button>}
+      </footer>
+      {open && (
+        <fieldset className="queued-message-mode">
+          <legend>Send this message…</legend>
+          <label data-selected={nextStep || undefined}>
+            <input type="radio" name={`queuemode-${entry.id}`} checked={nextStep} disabled={entry.sent} onChange={() => onMode("next-step")} />
+            <span><strong>After the next tool call</strong><small>Steer the running turn — useful to correct course mid-work.</small></span>
+          </label>
+          <label data-selected={!nextStep || undefined}>
+            <input type="radio" name={`queuemode-${entry.id}`} checked={!nextStep} disabled={entry.sent} onChange={() => onMode("after-turn")} />
+            <span><strong>After the agent finishes</strong><small>Wait for the current prompt to complete, then send this as a new turn.</small></span>
+          </label>
+        </fieldset>
+      )}
+    </div>
+  );
 }
 
 function ApprovalVisibility({ children, onVisibilityChange }: { children: ReactNode; onVisibilityChange(visible: boolean): void }) {

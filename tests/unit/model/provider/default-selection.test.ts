@@ -118,6 +118,35 @@ test("an unknown provider id is skipped without throwing", () => {
   });
 });
 
+/**
+ * A provider the user switched off must not come back as the fallback.
+ *
+ * The picker withholds disabled providers, so if the default-selection path did
+ * not, the composer would label a fresh thread with a model the user had turned
+ * off and cannot choose — the switch appearing not to work. The skip is the
+ * same shape as the transport skip above: move to the next candidate, and
+ * report nothing when every candidate is disabled.
+ */
+test("a disabled provider is skipped in favor of an enabled one", () => {
+  withStore((store) => {
+    store.setApi({ providerId: "deepinfra", key: "first-key" });
+    store.setApi({ providerId: "groq", key: "second-key" });
+    const selected = resolveDefaultSelection(store, undefined, ["deepinfra"]);
+    assert.equal(selected?.provider, "groq", "the disabled provider must be skipped, not returned first");
+  });
+});
+
+test("every provider disabled yields no selection rather than a disabled one", () => {
+  withStore((store) => {
+    store.setApi({ providerId: "deepinfra", key: "first-key" });
+    assert.equal(
+      resolveDefaultSelection(store, undefined, ["deepinfra"]),
+      undefined,
+      "with the only provider disabled there is no valid default",
+    );
+  });
+});
+
 test("the first configured provider wins, and stays winning", () => {
   /*
    * Credential-file order is append order, so it is stable across restarts.

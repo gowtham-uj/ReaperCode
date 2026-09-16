@@ -103,6 +103,15 @@ export type RuntimeEventData =
       modelContextWindow?: number;
       /** Reaper's soft context budget (tokens). Defaults to the 270k hard cap. */
       contextSoftCap?: number;
+      /**
+       * The maximum output the request asked for, when it declared one.
+       * Subtracted from the limit before computing pressure: the reservation
+       * is part of the budget, so a 200k window with a 32k reservation holds
+       * about 168k of prompt.
+       */
+      reservedOutputTokens?: number;
+      /** The model this usage is for, so the meter can name it. */
+      model?: string;
     }
   | { type: "approval.requested"; approvalId: string; toolCallId: string; toolName: string; reason: string }
   | { type: "approval.resolved"; approvalId: string; toolCallId: string; decision: "approved" | "denied" | "cancelled" | "timeout" }

@@ -1,11 +1,70 @@
 import { readdir, readFile, stat, writeFile, rm, mkdir, cp, symlink } from "node:fs/promises";
 import path from "node:path";
+import { applyPatch, merge as mergePatchesRaw, structuredPatch, type ParsedDiff } from "diff";
 
 import { normalizeWorkspacePath, relativeWorkspacePath } from "../policy/paths.js";
 import { collectGrepMatches, compileGrepPattern } from "../tools/read/grep-search.js";
 import { assertDeletableTarget } from "../tools/write/delete-file.js";
 import { replaceExactString, replaceLineRange } from "../tools/write/replace-in-file.js";
 import { findOwningRoot } from "../workspace/roots.js";
+
+/*
+ * The runtime `merge` takes two parsed patches and a base and returns a merged
+ * patch; the shipped `@types/diff` still declares the older
+ * `(mine: string, theirs: string, base: string): ParsedDiff` shape, which does
+ * not match the installed jsdiff v7. The cast is to the real runtime signature,
+ * verified by calling it: two non-overlapping hunks combine, an overlap leaves
+ * conflict markers.
+ */
+const mergePatches = mergePatchesRaw as unknown as (
+  mine: ParsedDiff,
+  theirs: ParsedDiff,
+  base: string,
+) => ParsedDiff;
+
+/**
+ * Try to reconcile two independent changes to the same file.
+ *
+ * The situation this exists for: the model edits a file with `file_edit`
+ * (staged in the WAL, not yet on disk), then runs `bash` that also writes that
+ * file — a heredoc, `sed -i`, a formatter, a codegen step. Bash is not routed
+ * through the WAL, so disk now holds the bash version while `baseContent` holds
+ * the pre-edit version and `stagedContent` holds the model's edit. The old flush
+ * called that a hard conflict and threw, and the model-loop catch reported it as
+ * "the model call failed and the run was stopped" — a turn killed mid-work for
+ * two edits that in fact touched different lines.
+ *
+ * A three-way merge says whether they *actually* conflict. Both sides are turned
+ * into a patch against `base`; jsdiff's `merge` combines non-overlapping hunks
+ * and, where they overlap, emits the usual conflict markers, which
+ * `applyPatch` then refuses. So a clean merge returns the combined text, and a
+ * real overlap throws — which is exactly the distinction the caller needs.
+ *
+ * Returns undefined when either side produced no textual patch (a pure
+ * create/delete, or a binary/unmergeable pair) so the caller keeps its
+ * conflict path rather than guessing.
+ */
+function tryMergeText(base: string, ours: string, theirs: string): { merged: string } | { conflict: string } | undefined {
+  try {
+    const oursPatch = structuredPatch("f", "f", base, ours, "", "", { context: 3 });
+    const theirsPatch = structuredPatch("f", "f", base, theirs, "", "", { context: 3 });
+    const combined = mergePatches(oursPatch, theirsPatch, base);
+    const applied = applyPatch(base, combined, { fuzzFactor: 0 });
+    if (typeof applied !== "string") return undefined;
+    /*
+     * `applyPatch` returns the text with conflict markers left in when the
+     * "patch" was an unresolved merge — it does not throw for that. Markers are
+     * the signal that the two edits really did touch the same lines, and they
+     * must not be written to the user's file.
+     */
+    if (applied.includes("<<<<<<<") || applied.includes(">>>>>>>")) {
+      return { conflict: applied };
+    }
+    return { merged: applied };
+  } catch {
+    return undefined;
+  }
+}
 
 export class MergeConflictError extends Error {
   constructor(
@@ -245,6 +304,16 @@ export class WriteAheadLog {
     for (const entry of this.entries.values()) {
       const current = await this.readDiskOrNull(entry.path);
       if (entry.stagedContent === null) {
+        /*
+         * A staged delete whose file is already gone is satisfied, not
+         * conflicted. `rm` in bash after `delete_file` staged the removal, or a
+         * cleanup step, leaves disk null — the intended end state exactly. Only
+         * a file that is still present *and changed* is a real delete conflict,
+         * because then the staged delete would discard edits it never saw.
+         */
+        if (current === null) {
+          continue;
+        }
         if (entry.baseContent !== current) {
           conflicts.push({
             path: entry.path,
@@ -257,7 +326,35 @@ export class WriteAheadLog {
         continue;
       }
 
+      /*
+       * The file was deleted on disk after the write was staged.
+       *
+       * The delete wins. It is the later action — the caller removed the file
+       * on purpose — and resurrecting it from a staged in-memory copy would be
+       * the surprising outcome, not the safe one. This is the live shape that
+       * fired in a real thread: an eval did `writeFileSync` → `tools.edit_file`
+       * (staged) → `unlinkSync`, and the flush reported a phantom "direct file
+       * conflict" against a file the same call had just deleted. Not a
+       * conflict, and nothing to write.
+       */
+      if (current === null && entry.baseContent !== null) {
+        continue;
+      }
+
       if (current !== entry.baseContent && current !== entry.stagedContent) {
+        /*
+         * Disk moved under the staged write. This is the normal case when bash
+         * and a file tool both touched the same file, and it is usually not a
+         * real conflict — the two edits are on different lines. Merge them. Only
+         * a genuine overlap (or a merge we cannot represent) stays a conflict.
+         */
+        if (entry.baseContent !== null && current !== null) {
+          const merged = tryMergeText(entry.baseContent, entry.stagedContent, current);
+          if (merged && "merged" in merged) {
+            plans.push({ type: "write", path: entry.path, content: merged.merged });
+            continue;
+          }
+        }
         conflicts.push({
           path: entry.path,
           summary: "Write conflict: file changed on disk after staging",

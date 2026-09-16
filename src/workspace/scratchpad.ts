@@ -100,15 +100,29 @@ export function getLegacyReaperSessionRoot(workspaceRoot: string): string {
 /**
  * Directory for one named session or anonymous run.
  *
- * A new path wins. If it does not exist and a legacy `.reaper/logs/<id>` does,
- * return the legacy path so a thread written by an older build remains readable
- * and any resumed writes stay beside its journal rather than splitting one run
- * across two directories.
+ * The journal is the thing being looked for, so the decision is made about the
+ * journal, not about a directory. This used to return the new path whenever the
+ * new *directory* existed — and the run boot reserves that directory before the
+ * trajectory writer resolves its path, so a thread whose journal lived at the
+ * legacy `.reaper/logs/<id>` was shadowed by an empty `.reaper/sessions/<id>`
+ * the moment its first turn started. Every read then resolved to the empty
+ * directory and the conversation looked gone: the model answered the next
+ * prompt as if nothing had been said. The user's words for it were "why does it
+ * need to create another session when rehydrating the old session".
+ *
+ * So preference follows `session.jsonl`: whichever location actually holds the
+ * journal wins. Only when neither holds one (a genuinely new session) does the
+ * order matter, and then the new location is preferred.
  */
 export function getReaperLogDir(workspaceRoot: string, id: string): string {
   const current = path.join(getReaperScratchpadPaths(workspaceRoot).sessions, id);
-  if (existsSync(current)) return current;
   const legacy = getLegacyReaperLogDir(workspaceRoot, id);
+  if (existsSync(path.join(current, "session.jsonl"))) return current;
+  if (existsSync(path.join(legacy, "session.jsonl"))) return legacy;
+  // No journal either side yet (a fresh session, or one that died before its
+  // first write). Keep the reserved directory if it is there so a caller mid-run
+  // stays consistent; otherwise fall back to legacy if that is what exists.
+  if (existsSync(current)) return current;
   return existsSync(legacy) ? legacy : current;
 }
 
