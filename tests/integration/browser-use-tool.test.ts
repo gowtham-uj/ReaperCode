@@ -293,3 +293,61 @@ test("two threads cannot see each other's pages", { skip }, async () => {
     await other.close();
   }
 });
+
+test("scoping a look to a locator reads only that region", { skip }, async () => {
+  /*
+   * The bug this pins: `view(page.locator("form"))` passed a Locator, the
+   * runtime only recognised a Page, and everything else fell through to the
+   * active page. The call *succeeded* and returned the whole page, so a program
+   * that scoped a look to save tokens paid for all of it and never learned why.
+   *
+   * Asserted on content rather than on length, because length is the symptom:
+   * what must not appear is the navigation, which is outside the form.
+   */
+  const rt = await runtime();
+  const { page } = await rt.ensureReady();
+  await page.goto(`${site!.origin}/basic`, { waitUntil: "domcontentloaded" });
+  await rt.view();
+
+  const scoped = await executeBrowserUse(
+    rt,
+    { code: `return await view(page.locator("form"))`, observe: "none" } as never,
+    metadata,
+  );
+  assert.equal(scoped.outcome, "SUCCESS", scoped.output);
+
+  /*
+   * The RETURNED section, not the whole output.
+   *
+   * The receipt also carries the page diff since the last look, which is the
+   * whole page and correctly contains the navigation. What is being asserted is
+   * that the program's *scoped read* returned the region, so the assertion is
+   * anchored after RETURNED rather than to the output as a whole. Getting this
+   * wrong is how the test failed first time while the behaviour was right.
+   */
+  const returned = scoped.output.slice(scoped.output.indexOf("RETURNED:"));
+  assert.match(returned, /Continue/, "the form's own contents must be there");
+  assert.doesNotMatch(returned, /\/react/, "and the navigation outside it must not");
+});
+
+test("scoping by a role that does not exist fails loudly", { skip }, async () => {
+  /*
+   * A bare `<form>` has no ARIA `form` role, so `getByRole("form")` matches
+   * nothing. The skill used to recommend exactly that, and the failure is worth
+   * keeping loud: a scoped look that silently matches nothing would report an
+   * empty region, which reads as "the form is gone" rather than "your locator is
+   * wrong".
+   */
+  const rt = await runtime();
+  const { page } = await rt.ensureReady();
+  await page.goto(`${site!.origin}/basic`, { waitUntil: "domcontentloaded" });
+  await rt.view();
+
+  const wrong = await executeBrowserUse(
+    rt,
+    { code: `return await view(page.getByRole("form"))`, observe: "none" } as never,
+    metadata,
+  );
+  assert.notEqual(wrong.outcome, "SUCCESS", wrong.output);
+  assert.match(wrong.output, /does not match any element/, "and it must say why");
+});

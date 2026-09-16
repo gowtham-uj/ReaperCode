@@ -86,19 +86,26 @@ element with `[data-testid="submit"]` in the outline is
 about a region, ask for it:
 
 ```js
-return await view(page.getByRole("form"));
 return await view(page.getByRole("main"));
+return await view(page.locator("form"));      // the first <form>
+return await view(page.locator("#apply"));    // by id
 ```
 
 That is the difference between 25,000 tokens of page and 500 for the form you
 are actually filling.
+
+Scope by *role* only where the role is real. A bare `<form>` has no ARIA `form`
+role — that role exists only when the form is named — so `getByRole("form")`
+matches nothing and the call fails. The same is true of `getByRole("region")`
+on an unnamed section. `locator("form")` or an id always works; use a role when
+the outline shows that role with a name.
 
 ## Understand one thing deeply
 
 When a form or a component confuses you, get its detail rather than the page:
 
 ```js
-const form = page.getByRole("form");
+const form = page.locator("form").first();
 return await form.ariaSnapshot({ mode: "ai" });   // real Playwright, no wrapper
 ```
 

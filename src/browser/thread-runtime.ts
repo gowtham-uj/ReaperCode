@@ -318,12 +318,19 @@ export class ThreadBrowserRuntime {
   async view(options: PageViewOptions = {}): Promise<{ text: string; truncated: boolean; stats: SnapshotStats; contentMeta: PageContentMeta }> {
     const active = await this.ensureReady();
     /*
-     * The page the caller named, when it named one. A program that opened a tab
-     * and wants to look at it should not have to switch the active page to do so,
-     * and switching would change what its bare `page` means halfway through.
+     * What to read, in order of specificity: a locator the caller passed, then a
+     * selector, then a named page, then the active page.
+     *
+     * The locator case is the one that was wrong. `view(page.getByRole("main"))`
+     * passes a Locator, and the first version only recognised a Page, so anything
+     * else fell through to the active page and rendered the WHOLE page. The call
+     * succeeded and the model got the wrong thing, which is the worst shape a bug
+     * can take here: a program that scopes a look to one region to save tokens
+     * silently pays for the whole page and never learns why.
      */
+    const scoped = isLocator(options.page) ? options.page : undefined;
     const page = isPage(options.page) ? options.page : active.page;
-    const target = options.selector ? page.locator(options.selector).first() : page;
+    const target = scoped ?? (options.selector ? page.locator(options.selector).first() : page);
     const snapshot = await target.ariaSnapshot({
       mode: "ai",
       ...(options.depth ? { depth: options.depth } : {}),
@@ -624,13 +631,26 @@ async function targetIdOf(page: Page): Promise<string | undefined> {
  *
  * Structural because Playwright's classes are internal-prefixed and an
  * `instanceof` against a type imported across a version boundary is fragile. The
- * two fields checked are the ones `isPage`-style checks use everywhere: a
- * `_channel` for the connection and a `goto` for the page API.
+ * two fields checked are the ones a page has and a locator does not: `goto` and
+ * `url`.
  */
 function isPage(value: unknown): value is Page {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Record<string, unknown>;
   return typeof candidate["goto"] === "function" && typeof candidate["url"] === "function";
+}
+
+/**
+ * True when a value is a Playwright Locator.
+ *
+ * Distinguished from a Page by `ariaSnapshot` plus the absence of `goto`: a
+ * locator can snapshot itself and cannot navigate. Checked in that order because
+ * a Page also has `ariaSnapshot`, so the page test has to run first.
+ */
+function isLocator(value: unknown): value is import("playwright").Locator {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate["ariaSnapshot"] === "function" && typeof candidate["goto"] !== "function";
 }
 
 /** How long a single browser program may run before it is cut off. */
