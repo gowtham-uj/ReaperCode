@@ -202,7 +202,7 @@ export const toolRegistry = {
   },
   extension_manager: {
     description:
-      "Author and manage extensions (JavaScript only). Actions: create (writes `extension.json` + `main.js` to `.reaper/extensions/<id>/`), list (inventory plus the tools an activation refused, with reasons), validate (runs `validation.commands` when the manifest carries them; the current manifest schema does not expose that field, so in practice this reports that there is nothing to validate, which is a success and not a failure), trust (records a trust decision), enable (marks enabled and runs `default.activate(ctx)`; the extension then takes effect immediately), uninstall (removes from registry and disk).",
+      "Author and manage extensions (JavaScript only). Actions: create (writes `extension.json` + `main.js` to `.reaper/extensions/<id>/`), list (inventory plus the tools an activation refused, with reasons), validate (runs the sandboxed `validation_commands` declared at create time and fails fast on the first non-zero exit), trust (records a trust decision), enable (marks enabled and runs `default.activate(ctx)`; the extension then takes effect immediately), uninstall (removes from registry and disk).",
     argsSchema: ExtensionManagerArgsSchema,
   },
   hook_manager: {

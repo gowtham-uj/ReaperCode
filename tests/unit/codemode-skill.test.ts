@@ -111,7 +111,16 @@ test("the argument names the prose tells the model to expect are the real ones",
    * from the code blocks because that sentence is the part a model reads
    * before it writes anything.
    */
-  const shape = (name: string) => Object.keys(toolRegistry[name as keyof typeof toolRegistry]?.argsSchema?.shape ?? {});
+  const shape = (name: string) => {
+    /*
+     * Most tools are one Zod object. Managers may be discriminated unions so
+     * their action-specific required fields survive into tools.describe; this
+     * test only names the ordinary object tools below, so read the object shape
+     * structurally rather than claiming every registry entry has one.
+     */
+    const schema = toolRegistry[name as keyof typeof toolRegistry]?.argsSchema as unknown as { shape?: Record<string, unknown> } | undefined;
+    return Object.keys(schema?.shape ?? {});
+  };
 
   assert.ok(shape("bash").includes("cmd"), "bash takes `cmd`; the skill says so and must stay true");
   assert.ok(shape("file_view").includes("path"));

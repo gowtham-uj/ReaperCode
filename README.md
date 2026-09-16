@@ -414,9 +414,20 @@ looks like, and a runtime that refuses it is a runtime the model works around.
 
 A script runs in the same bubblewrap mount namespace a `bash` command gets, so it
 sees its thread's workspace and the read-only system directories, and nothing
-else. An absolute path outside the workspace does not resolve: reading
-`/etc/passwd` or another thread's files fails with a filesystem error, not a
-permission dialog. `/tmp` is writable and persists between turns, the same as
+else. Two consequences, and the difference between them is worth being exact
+about because an earlier version of this file was not.
+
+The workspace is mounted read-write and is what a relative path resolves against.
+Anything outside the workspace that is not a system path is unmounted: from a
+workspace at `/tmp/ws-abc`, `fs.existsSync("/work")` is `false`, and another
+thread's files are unreachable the same way.
+
+The system paths are mounted **read-only, on purpose**: `/usr`, `/bin`, `/lib`
+and `/etc` are what let a dynamic linker, DNS and TLS work at all, so
+`/etc/passwd` is readable. That is not a leak and it is not private either. The
+same is true of `bash` in this repository, so the three agree.
+
+`/tmp` is writable and persists between turns, the same as
 for `bash`. On a host where bubblewrap cannot run, the script falls back to a
 thread of the Reaper process and the result carries `sandboxed: false` so the
 difference is visible rather than assumed.

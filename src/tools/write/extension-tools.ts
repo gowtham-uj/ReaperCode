@@ -123,6 +123,17 @@ export async function handleCreateExtension(
     engines: { reaper: args.engines_reaper },
     permissions: args.permissions,
     ...(Object.keys(contributes).length > 0 ? { contributes } : {}),
+    ...(args.validation_commands !== undefined
+      ? {
+          validation: {
+            commands: args.validation_commands.map((command) => ({
+              id: command.id,
+              command: command.command,
+              ...(command.cwd !== undefined ? { cwd: command.cwd } : {}),
+            })),
+          },
+        }
+      : {}),
   };
 
   // Stage the extension in a tmp dir so ExtensionRegistry.install

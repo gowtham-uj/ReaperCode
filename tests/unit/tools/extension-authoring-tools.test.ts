@@ -200,24 +200,27 @@ test("validate_extension runs validation.commands and reports exit codes", async
         engines_reaper: "^1.0.0",
         permissions: [],
         source: MINIMAL_SOURCE,
+        validation_commands: [
+          { id: "cwd", command: "pwd" },
+          { id: "marker", command: "printf VALIDATED" },
+        ],
         scope: "project",
       },
       ctx.deps,
     );
     const r = await handleValidateExtension({ id: "validateable" }, ctx.deps);
     /*
-     * No validation.commands declared. That is a successful call with nothing
-     * to do, not a failed validation.
-     *
-     * It used to answer `ok: false` with the remark in `error`, which read as
-     * "this extension is invalid" for a freshly created, perfectly valid one —
-     * the audit hit exactly that. The remark travels in `note` now, and `ok` is
-     * true because nothing went wrong.
+     * The commands came through the *create tool*, not through a hand-written
+     * manifest. That is the regression this pins: validate existed before the
+     * model-callable schema had any field that could declare commands, so every
+     * extension created by the tool validated as a guaranteed no-op.
      */
-    assert.equal(r.ok, true);
-    assert.equal(r.error, undefined, "having nothing to validate is not an error");
-    assert.match(r.note ?? "", /no validation commands/i);
-    assert.deepEqual(r.results, []);
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.error, undefined);
+    assert.equal(r.note, undefined, "real commands ran, so this is not the no-op path");
+    assert.equal(r.results.length, 2);
+    assert.match(r.results[0]!.stdout, /validateable/, "the default cwd is the extension's own root");
+    assert.equal(r.results[1]!.stdout, "VALIDATED");
   } finally {
     ctx.cleanup();
   }

@@ -182,7 +182,7 @@ export async function handleHookManager(
 }
 
 function requireHookId(args: HookManagerArgs, action: string): ApproveHookArgs & UninstallHookArgs {
-  const id = typeof args.id === "string" ? args.id : "";
+  const id = "id" in args && typeof args.id === "string" ? args.id : "";
   if (!id) throw new Error(`hook_manager action="${action}" requires "id"`);
   return { id };
 }
@@ -196,7 +196,7 @@ function requireHookId(args: HookManagerArgs, action: string): ApproveHookArgs &
  * the handler. This validates the id and otherwise returns the args unchanged.
  */
 function withRequiredHookId(args: HookManagerArgs, action: string): UpdateHookArgs {
-  const id = typeof args.id === "string" ? args.id : "";
+  const id = "id" in args && typeof args.id === "string" ? args.id : "";
   if (!id) throw new Error(`hook_manager action="${action}" requires "id"`);
   return args as UpdateHookArgs;
 }

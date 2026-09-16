@@ -153,6 +153,7 @@ export function normalizeExtensionManifest(value: unknown): ExtensionManifest {
     }
   }
 
+  const validation = normalizeValidation(o.validation);
   const out: ExtensionManifest = {
     id: o.id,
     version: o.version,
@@ -161,11 +162,51 @@ export function normalizeExtensionManifest(value: unknown): ExtensionManifest {
     engines: { reaper: eng.reaper },
     permissions,
     contributes,
+    ...(validation !== undefined ? { validation } : {}),
   };
   if (typeof o.minimumReaperVersion === "string") out.minimumReaperVersion = o.minimumReaperVersion;
   if (typeof o.author === "string") out.author = o.author;
   if (typeof o.license === "string") out.license = o.license;
   return out;
+}
+
+/**
+ * Validate the optional command list used by extension validation.
+ *
+ * Kept deliberately small. Commands are shell lines, ids label their result,
+ * and cwd is relative to the extension root. Absolute and escaping cwd values
+ * are rejected by the lifecycle when they are resolved, because that is where
+ * the real install path is known.
+ */
+function normalizeValidation(value: unknown): ExtensionManifest["validation"] {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ExtensionValidationError("validation", "ETYPE", "must be an object");
+  }
+  const commandsValue = (value as Record<string, unknown>)["commands"];
+  if (!Array.isArray(commandsValue)) {
+    throw new ExtensionValidationError("validation.commands", "ETYPE", "must be an array");
+  }
+  const commands: Array<{ id: string; command: string; cwd?: string | undefined }> = [];
+  for (let index = 0; index < commandsValue.length; index++) {
+    const value = commandsValue[index];
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new ExtensionValidationError(`validation.commands[${index}]`, "ETYPE", "must be an object");
+    }
+    const command = value as Record<string, unknown>;
+    if (typeof command["id"] !== "string" || command["id"].length === 0) {
+      throw new ExtensionValidationError(`validation.commands[${index}].id`, "EREQUIRED", "id is required");
+    }
+    if (typeof command["command"] !== "string" || command["command"].length === 0) {
+      throw new ExtensionValidationError(`validation.commands[${index}].command`, "EREQUIRED", "command is required");
+    }
+    commands.push({
+      id: command["id"],
+      command: command["command"],
+      ...(typeof command["cwd"] === "string" ? { cwd: command["cwd"] } : {}),
+    });
+  }
+  return { commands };
 }
 
 function normalizeTools(value: unknown): ExtensionToolContribution[] {

@@ -90,12 +90,40 @@ export class SkillMemoryRegistry {
     this.index = this.load();
   }
 
+  /**
+   * Read the skill's body from its source file on every access.
+   *
+   * The index is metadata: trust switches, health, usage and where the skill
+   * lives. It used to also be the source of the body, which made it a stale
+   * content cache. Editing `src/skills/built-in/codemode/SKILL.md` changed the
+   * file and left callers reading the old body from `.reaper/skills/index.json`
+   * until a separate sync happened. A skill is a file, so the file is the source
+   * of truth and there is no cache invalidation problem to solve.
+   *
+   * The indexed body is retained only as a last-resort compatibility fallback
+   * for a legacy record whose source file no longer exists. New and healthy
+   * records always read disk.
+   */
+  private fresh(skill: ReaperSkill): ReaperSkill {
+    try {
+      if (skill.sourcePath && existsSync(skill.sourcePath)) {
+        return { ...skill, body: readFileSync(skill.sourcePath, "utf8") };
+      }
+    } catch {
+      // A transient read failure should not erase a skill that is still in the
+      // registry. The fallback is explicitly legacy compatibility, not a cache
+      // preference: the next access tries the file again.
+    }
+    return skill;
+  }
+
   getSkill(name: string): ReaperSkill | null {
-    return this.index.skills[name] ?? null;
+    const skill = this.index.skills[name];
+    return skill ? this.fresh(skill) : null;
   }
 
   listSkills(scope?: SkillScope): ReaperSkill[] {
-    const all = Object.values(this.index.skills);
+    const all = Object.values(this.index.skills).map((skill) => this.fresh(skill));
     return scope ? all.filter((s) => s.scope === scope) : all;
   }
 

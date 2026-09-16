@@ -486,12 +486,44 @@ function browserSurfaceFromItem(item: AppThreadItem): BrowserSurface | undefined
   if (!surface || typeof surface.url !== "string") return undefined;
 
   const viewport = asRecord(surface.viewport);
+  /*
+   * The interactive boxes are read from the result rather than dropped.
+   *
+   * They were hardcoded to an empty array here, with a comment saying the
+   * coordinates were gone with the refs they belonged to. That was true of the
+   * producer at the time and it left the pane structurally unable to draw its
+   * overlay: the type said the field existed, the renderer drew it, and this
+   * line guaranteed it was always empty. The tool reports them again now, so
+   * they are read, and anything malformed is filtered rather than trusted.
+   */
+  const interactive = Array.isArray(surface.interactive)
+    ? surface.interactive.flatMap((entry, position) => {
+        const box = asRecord(entry);
+        if (!box) return [];
+        const nums = [box.x, box.y, box.width, box.height];
+        if (!nums.every((n) => typeof n === "number" && Number.isFinite(n))) return [];
+        return [{
+          ref: typeof box.ref === "string" ? box.ref : "",
+          // The producer numbers them; the position is the honest fallback,
+          // because the pane only ever reads them as an identity for React keys
+          // and a label in the list.
+          index: typeof box.index === "number" ? box.index : position + 1,
+          tag: typeof box.tag === "string" ? box.tag : "",
+          text: typeof box.text === "string" ? box.text : "",
+          x: box.x as number,
+          y: box.y as number,
+          width: box.width as number,
+          height: box.height as number,
+          ...(typeof box.role === "string" ? { role: box.role } : {}),
+          ...(typeof box.type === "string" ? { type: box.type } : {}),
+        }];
+      })
+    : [];
   return {
     url: surface.url,
     title: typeof surface.title === "string" ? surface.title : "",
-    // Coordinates are gone with the refs they belonged to, so the overlay list
-    // is empty rather than populated with positions that no longer mean anything.
-    interactive: [],
+    interactive,
+    ...(typeof surface.screenshotPath === "string" ? { screenshotPath: surface.screenshotPath } : {}),
     ...(viewport && typeof viewport.width === "number" && typeof viewport.height === "number"
       ? { viewport: { width: viewport.width, height: viewport.height } }
       : {}),

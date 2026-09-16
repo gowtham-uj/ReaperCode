@@ -62,6 +62,24 @@ export const CreateExtensionArgsSchema = z
       .array(z.object({ event: z.string().min(1), timeout_ms: z.number().int().positive().optional() }))
       .optional(),
     slash_commands: z.array(z.object({ name: z.string().min(1), description: z.string().min(1) })).optional(),
+    /**
+     * Commands `extension_manager(action="validate")` runs after creation.
+     *
+     * This field did not exist while the validate action did, which made
+     * validation a guaranteed no-op: the lifecycle could read
+     * `manifest.validation.commands`, but no model-callable schema could write
+     * it. The action and the authoring path now meet on the same shape.
+     */
+    validation_commands: z
+      .array(
+        z.object({
+          id: z.string().min(1).max(64),
+          command: z.string().min(1).max(4096),
+          /** Path relative to the extension root. */
+          cwd: z.string().min(1).max(512).optional(),
+        }).strict(),
+      )
+      .optional(),
     scope: z.enum(["project", "user"]).default("project"),
   })
   .strict();

@@ -150,6 +150,13 @@ export interface ExtensionManifest {
   permissions: ExtensionPermission[];
   /** What the extension contributes. */
   contributes?: ExtensionContributions;
+  /**
+   * Commands used by `extension_manager validate`.
+   *
+   * Part of the manifest rather than an authoring-only field, so an extension
+   * installed from disk and one created through the tool validate identically.
+   */
+  validation?: { commands: Array<{ id: string; command: string; cwd?: string | undefined }> } | undefined;
   /** Minimum Reaper version (semver). */
   minimumReaperVersion?: string;
   author?: string;

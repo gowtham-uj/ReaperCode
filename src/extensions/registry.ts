@@ -113,14 +113,55 @@ export class ExtensionRegistry {
     return [...dedup.values()];
   }
 
-  /** Get a LoadedExtension by id. */
-  get(id: string): LoadedExtension | null {
-    return this.loaded.get(id) ?? null;
+  /**
+   * Refresh one extension's manifest from disk without discarding live status.
+   *
+   * The registry is a runtime state table, not a content cache. Keeping the
+   * `loaded` map is necessary because it records whether an extension is active,
+   * failed or disabled, but keeping its manifest there forever made hand-edited
+   * `extension.json` stale until a separate reload action. There is no reload
+   * action on the model surface now, and there should not need to be one: a read
+   * of an extension reads its file.
+   *
+   * Trust and activation status are runtime state, not extension content, so
+   * they are preserved. What is never cached is the manifest: edit
+   * `extension.json` and the next `get()`/`list()` sees it. This distinction is
+   * what keeps an explicitly trusted project extension trusted for the session
+   * while removing the stale-content problem the user asked to remove.
+   */
+  private refreshRecord(record: LoadedExtension): LoadedExtension {
+    const manifestPath = join(record.installPath, "extension.json");
+    if (!existsSync(manifestPath)) return record;
+    try {
+      const manifest = parseExtensionManifest(readFileSync(manifestPath, "utf8"));
+      const refreshed: LoadedExtension = {
+        ...record,
+        id: manifest.id,
+        manifest,
+      };
+      if (manifest.id !== record.id) this.loaded.delete(record.id);
+      this.loaded.set(manifest.id, refreshed);
+      return refreshed;
+    } catch (error) {
+      /*
+       * An invalid edit is surfaced on the existing record rather than hidden by
+       * serving the last valid manifest. Serving stale content makes an invalid
+       * extension look healthy, which is exactly what "no cache" is meant to
+       * prevent.
+       */
+      return { ...record, status: "failed", error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
-  /** List all loaded extensions. */
+  /** Get a LoadedExtension by id, with its manifest re-read from disk. */
+  get(id: string): LoadedExtension | null {
+    const record = this.loaded.get(id);
+    return record ? this.refreshRecord(record) : null;
+  }
+
+  /** List all extensions, refreshing every manifest first. */
   list(): LoadedExtension[] {
-    return [...this.loaded.values()];
+    return [...this.loaded.values()].map((record) => this.refreshRecord(record));
   }
 
   /**
@@ -215,9 +256,20 @@ export class ExtensionRegistry {
    * That rule is why the real bug was never here — it was `enable` enforcing a
    * gate this method could not satisfy. See `handleEnableExtension`.
    */
-  trust_(id: string, _note?: string): { ok: boolean; error?: string } {
+  trust_(id: string, note?: string): { ok: boolean; error?: string } {
     const r = this.loaded.get(id);
     if (!r) return { ok: false, error: `extension "${id}" not loaded` };
+    /*
+     * Persist the decision, not only the in-memory record.
+     *
+     * This bug was hidden while `get()` served the map forever: trust appeared
+     * to work for the rest of the process, even though no `trust.json` was
+     * written. Once manifests and trust are refreshed from disk on every read,
+     * the next `get()` correctly reverted to `project-untrusted`. A setting that
+     * disappears when it is read is not a setting, so promote through the
+     * resolver and let the file be the source of truth.
+     */
+    this.trust.promote(id, r.installPath, note);
     r.trust = "user-trusted";
     return { ok: true };
   }

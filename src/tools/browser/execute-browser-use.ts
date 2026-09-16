@@ -12,6 +12,9 @@
  * next without looking again.
  */
 
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+
 import type { Page } from "playwright";
 
 import type { ThreadBrowserRuntime } from "../../browser/thread-runtime.js";
@@ -55,6 +58,21 @@ export interface BrowserUseResult {
     viewport?: { width: number; height: number } | undefined;
     /** How much was on the page, so the pane can say it rather than guess. */
     stats?: { lines: number; chars: number; refs: number; interactive: number } | undefined;
+    /**
+     * A PNG for the pane to draw, relative to the thread's workspace root.
+     *
+     * Relative because that is what `/api/screenshot` resolves against: an
+     * absolute path is rejected as an escape. Absent when the capture failed,
+     * which costs the pane an image and nothing else.
+     */
+    screenshotPath?: string | undefined;
+    /**
+     * The elements a person could act on, with boxes in viewport pixels.
+     *
+     * Boxes rather than a list of refs, because the pane draws them over the
+     * screenshot and dividing by `viewport` is how it places them.
+     */
+    interactive: Array<{ ref: string; index: number; tag: string; text: string; x: number; y: number; width: number; height: number; role?: string | undefined; type?: string | undefined }>;
   } | undefined;
   /** Narrowed for presenters: the outcome alone is often all a UI needs. */
   outcome: StepReceipt["outcome"];
@@ -494,7 +512,7 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
    * (NO_CHANGE, a failure, a stale revision), the model is about to guess, and
    * that is precisely when the page is worth the tokens.
    */
-  const surface = await pageSurface(runtime);
+  const surface = await pageSurface(runtime, metadata.workspaceRoot);
   const observe = args.observe ?? "auto";
   const alreadyTold = receipt.outcome === "SUCCESS" && !receipt.wholesale;
   const shouldObserve = observe === "full" || observe === "changes" || (observe === "auto" && !alreadyTold);
@@ -613,16 +631,110 @@ function signatureOf(url: string | undefined, expectation: BrowserUseArgs["expec
  * receipt is real. The pane simply gets no update, which is better than the
  * step being reported as failed because a title could not be read.
  */
-async function pageSurface(runtime: ThreadBrowserRuntime): Promise<BrowserUseResult["surface"]> {
+async function pageSurface(runtime: ThreadBrowserRuntime, workspaceRoot: string | undefined): Promise<BrowserUseResult["surface"]> {
   try {
     const { page } = await runtime.ensureReady();
     const viewport = page.viewportSize();
+    /*
+     * The screenshot, written where the gateway can serve it.
+     *
+     * The UI's browser pane has always rendered `surface.screenshotPath` through
+     * `/api/screenshot`, and the field stopped being produced somewhere before
+     * this, so the pane could only ever say "No screenshot for the latest
+     * browser action" — a control that is built, wired and permanently empty.
+     * The route reads a `.png` relative to the thread's workspace root, so that
+     * is what this writes.
+     *
+     * Best-effort, like everything else here: a page that has closed, a viewport
+     * that is huge, or a workspace that is not writable costs the pane an image
+     * and must not fail the step whose receipt is already real.
+     */
+    const shot = await captureScreenshot(page, workspaceRoot).catch(() => undefined);
     return {
       url: page.url(),
       title: await page.title().catch(() => ""),
       ...(viewport ? { viewport } : {}),
+      ...(shot !== undefined ? { screenshotPath: shot.path } : {}),
+      /*
+       * The interactive elements, which the pane draws as boxes over the
+       * screenshot. Read from the live page rather than from a stored
+       * accessibility tree, because the tree this used to come from is gone and
+       * the page is right here.
+       */
+      interactive: await interactiveElements(page).catch(() => []),
     };
   } catch {
     return undefined;
   }
+}
+
+/** Where screenshots for a thread live, relative to its workspace root. */
+const SCREENSHOT_DIR = ".reaper/screenshots";
+
+/** How many interactive elements the pane is given, so an overlay stays legible. */
+const MAX_INTERACTIVE_BOXES = 200;
+
+/**
+ * Capture the page and return the path the gateway can serve it from.
+ *
+ * The path is relative to the workspace, because that is what `resolveInsideRoot`
+ * expects and an absolute one would be rejected as an escape rather than
+ * resolved.
+ */
+async function captureScreenshot(page: Pick<Page, "screenshot">, workspaceRoot: string | undefined): Promise<{ path: string } | undefined> {
+  if (workspaceRoot === undefined || workspaceRoot.length === 0) return undefined;
+  const name = `shot-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}.png`;
+  const relative = `${SCREENSHOT_DIR}/${name}`;
+  /*
+   * The directory is created before the write, and the first version of this
+   * did not do that: `writeFile` failed with `ENOENT` on a workspace that had
+   * never held a screenshot, the catch swallowed it, and the pane kept saying it
+   * had no screenshot while the capture itself worked perfectly. A best-effort
+   * path needs its own failure to be visible, or it hides a hard error behind a
+   * soft one.
+   */
+  await mkdir(path.join(workspaceRoot, SCREENSHOT_DIR), { recursive: true });
+  const buffer = await page.screenshot({ fullPage: false, type: "png" });
+  await writeFile(path.join(workspaceRoot, relative), buffer);
+  return { path: relative };
+}
+
+/**
+ * The elements a person could act on, with their boxes.
+ *
+ * Measured from the live DOM in one `evaluate`, because that is one round trip
+ * and the alternative is a call per element. Only what is on screen is reported:
+ * a box for an element scrolled out of view would be drawn somewhere it is not,
+ * which is worse than no box.
+ */
+async function interactiveElements(page: Page): Promise<NonNullable<BrowserUseResult["surface"]>["interactive"]> {
+  const found = await page.evaluate((limit: number) => {
+    const selector = 'a,button,input,select,textarea,[role="button"],[role="link"],[role="tab"],[contenteditable="true"]';
+    const out: Array<{ ref: string; index: number; tag: string; text: string; x: number; y: number; width: number; height: number; role?: string; type?: string }> = [];
+    let index = 0;
+    for (const element of Array.from(document.querySelectorAll(selector))) {
+      if (out.length >= limit) break;
+      const rect = element.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) continue;
+      if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+      if (rect.right < 0 || rect.left > window.innerWidth) continue;
+      index += 1;
+      const role = element.getAttribute("role");
+      const type = element.getAttribute("type");
+      out.push({
+        ref: `i${index}`,
+        index,
+        tag: element.tagName.toLowerCase(),
+        text: ((element as HTMLElement).innerText || element.getAttribute("aria-label") || element.getAttribute("placeholder") || "").trim().slice(0, 80),
+        x: Math.round(rect.x),
+        y: Math.round(rect.y),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+        ...(role !== null ? { role } : {}),
+        ...(type !== null ? { type } : {}),
+      });
+    }
+    return out;
+  }, MAX_INTERACTIVE_BOXES);
+  return found;
 }

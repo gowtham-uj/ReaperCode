@@ -118,24 +118,33 @@ export type ApproveHookArgs = z.infer<typeof ApproveHookArgsSchema>;
 export type UninstallHookArgs = z.infer<typeof UninstallHookArgsSchema>;
 
 /**
- * The consolidated manager. Flat `action` enum with the union of the per-action
- * fields, validated per action in the handler — the same shape `scratchpad` and
- * `job` use. `scope` is shared: `create` uses it as the install scope and
- * `list` uses it as a filter, and the two ranges agree on "project"/"user".
+ * The consolidated manager, as an action-discriminated union.
  *
- * The create fields are spread through `omit` + `partial()`: `scope` is
- * re-declared below with the wider range `list` needs, and the rest are
- * optional because only `create` sets them. Defaults are applied by the strict
- * re-parse inside `create`, not here.
+ * This used to be one object whose only required field was `action`; every
+ * create field was `.partial()` and the handler re-parsed it later. Runtime
+ * validation worked, but `tools.describe("hook_manager")` truthfully reported
+ * `required: ["action"]`, so a model had no machine-readable way to learn that
+ * create also requires `id`, `event`, `description` and `source`. Prose in the
+ * tool description was not enough: the schema is what code mode inspects.
+ *
+ * Each action now carries its own real schema. The runtime and the descriptor
+ * therefore agree by construction: a create call is incomplete before it ever
+ * reaches the handler, and describe exposes the conditional required fields in
+ * the generated union rather than pretending they are optional.
  */
-export const HookManagerArgsSchema = z
-  .object({
-    action: z
-      .enum(["create", "list", "update", "approve", "uninstall"])
-      .describe("author, inventory, re-register, or remove a hook"),
-    ...CreateHookArgsSchema.omit({ scope: true }).partial().shape,
-    scope: z.enum(["project", "user", "all"]).optional(),
-  })
-  .strict();
+export const HookManagerArgsSchema = z.discriminatedUnion("action", [
+  CreateHookArgsSchema.extend({ action: z.literal("create") }),
+  ListHooksArgsSchema.extend({ action: z.literal("list") }),
+  UpdateHookArgsSchema.extend({ action: z.literal("update") }),
+  ApproveHookArgsSchema.extend({ action: z.literal("approve") }),
+  UninstallHookArgsSchema.extend({ action: z.literal("uninstall") }),
+]);
 
-export type HookManagerArgs = z.infer<typeof HookManagerArgsSchema>;
+/*
+ * Input rather than output: callers constructing a list request may omit its
+ * defaulted scope, and Zod fills it during parse. The handler receives parsed
+ * output in production, but its public type is also used by focused unit tests
+ * and direct callers, and requiring a field whose schema gives it a default is
+ * a lie at those call sites.
+ */
+export type HookManagerArgs = z.input<typeof HookManagerArgsSchema>;

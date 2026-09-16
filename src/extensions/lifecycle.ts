@@ -18,8 +18,10 @@
  */
 
 import { spawnSync } from "node:child_process";
+import path from "node:path";
+
+import { buildSandboxedShellCommand } from "../policy/shell-sandbox.js";
 import { ExtensionRegistry } from "./registry.js";
-import type { ExtensionManifest } from "./types.js";
 
 export interface ValidateResult {
   ok: boolean;
@@ -48,21 +50,23 @@ export class ExtensionLifecycle {
    * Does NOT activate the extension. The extension stays dormant
    * until the model calls `enable_extension` + `trust_extension`.
    *
-   * Note: the current ExtensionManifest schema does not expose a
-   * `validation.commands` block (this is a forward-looking hook).
-   * When present on a custom manifest, the lifecycle honors it;
-   * otherwise this is a no-op that reports the extension's
-   * install-time error (if any).
+   * The manifest schema exposes `validation.commands`, and both extensions
+   * installed from disk and extensions created through `extension_manager`
+   * use it. This used to be a forward-looking hook with no authoring field, so
+   * validate was a guaranteed no-op and honestly reported that there was
+   * nothing to run. The action is real now.
+   *
+   * Commands run inside a bubblewrap sandbox rooted at the extension's own
+   * install directory. An extension can validate its own files and dependencies
+   * and cannot use validation as a shell escape into Reaper's checkout or a
+   * neighbouring thread's workspace.
    */
   validate(id: string): ValidateResult {
     const loaded = this.registry.get(id);
     if (!loaded) {
       return { ok: false, id, results: [], error: `extension "${id}" not found` };
     }
-    const extManifest = loaded.manifest as ExtensionManifest & {
-      validation?: { commands?: Array<{ id: string; command: string }> };
-    };
-    const cmds = extManifest.validation?.commands ?? [];
+    const cmds = loaded.manifest.validation?.commands ?? [];
     if (cmds.length === 0) {
       /*
        * Nothing to validate is not a failed validation.
@@ -96,7 +100,18 @@ export class ExtensionLifecycle {
      */
     const results: Array<{ id: string; exitCode: number; stdout: string; stderr: string }> = [];
     for (const c of cmds) {
-      const r = spawnSync(c.command, { shell: true, encoding: "utf8" });
+      const root = path.resolve(loaded.installPath);
+      const requested = c.cwd === undefined ? root : path.resolve(root, c.cwd);
+      const workingDirectory = requested === root || requested.startsWith(root + path.sep) ? requested : root;
+      const sandboxed = buildSandboxedShellCommand({
+        workspaceRoot: root,
+        workingDirectory,
+        shell: "/bin/sh",
+        shellArgs: ["-c", c.command],
+      });
+      const r = sandboxed
+        ? spawnSync(sandboxed.command, sandboxed.args, { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 })
+        : spawnSync("/bin/sh", ["-c", c.command], { cwd: workingDirectory, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
       results.push({
         id: c.id,
         exitCode: r.status ?? -1,
