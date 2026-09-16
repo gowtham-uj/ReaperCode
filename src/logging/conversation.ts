@@ -3,6 +3,8 @@ import path from "node:path";
 
 import { resolveLogRoot } from "./paths.js";
 import { redactSecrets } from "./redaction.js";
+
+import { summariseBrowserAction } from "./action-summary.js";
 import type { TrajectoryEntry } from "./schema.js";
 
 export class ConversationLog {
@@ -65,7 +67,17 @@ export function renderConversationSlice(entry: TrajectoryEntry): string | undefi
   if (entry.kind === "tool_call" && entry.status !== "started") {
     const err = entry.is_error || entry.status === "failed" ? " error" : "";
     const dur = typeof entry.duration_ms === "number" ? ` ${entry.duration_ms}ms` : "";
-    return String(redactSecrets(`## tool ${entry.tool_name}${turn}${err}${dur}\n\n`));
+    /*
+     * A sentence when the tool can give one.
+     *
+     * `## tool browser_use t3 1200ms` tells a reader nothing about the browsing
+     * it recorded. The line below is the outcome in words, so a session can be
+     * read back as a sequence of things that happened rather than as a list of
+     * tool names and timings.
+     */
+    const said = summariseBrowserAction(entry.tool_name, entry.output);
+    const body = said ? `${said}\n\n` : "";
+    return String(redactSecrets(`## tool ${entry.tool_name}${turn}${err}${dur}\n\n${body}`));
   }
   return undefined;
 }
