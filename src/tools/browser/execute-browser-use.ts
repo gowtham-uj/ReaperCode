@@ -249,8 +249,21 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
    */
   if (args.code === undefined || args.code.trim().length === 0) {
     const view = await runtime.view({ ...(args.selector !== undefined ? { selector: args.selector } : {}) });
+    /*
+     * What is known about this site, before the model writes anything.
+     *
+     * A flow is worth more than a description: an edge carries the program that
+     * worked last time, already verified, which is the difference between the
+     * model writing a step and the model reusing one. Offered rather than
+     * applied, because a learned program replayed without being read is how an
+     * agent clicks a button that moved.
+     */
+    const flows = await flowHint(runtime, view.url);
     return {
-      output: `${view.text}\n\n[${view.stats.lines} lines, ${view.stats.chars} chars, ${view.stats.refs} refs, ${view.stats.interactive} interactive]\n(REV ${runtime.observer.revision} - pass expected_revision with your next program)`,
+      output:
+        `${view.text}\n\n[${view.stats.lines} lines, ${view.stats.chars} chars, ${view.stats.refs} refs, ${view.stats.interactive} interactive]` +
+        `\n(REV ${runtime.observer.revision} - pass expected_revision with your next program)` +
+        (flows.length > 0 ? `\n\n${flows.join("\n")}` : ""),
       outcome: "SUCCESS",
       rev: runtime.observer.revision,
     };
@@ -274,6 +287,15 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
       rev: runtime.observer.revision,
     };
   }
+
+  /*
+   * The state this step starts from, captured before anything runs.
+   *
+   * Recorded now rather than read back afterwards, because by then the page has
+   * moved and the "from" state is gone.
+   */
+  const urlAtStart = (await runtime.ensureReady().catch(() => undefined))?.page.url();
+  const stateBefore = signatureOf(urlAtStart, args.expect);
 
   let outcome: StepReceipt["outcome"];
   let receipt: StepReceipt;
@@ -374,6 +396,32 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
     }
   }
 
+  /*
+   * Learn the edge, but only when it was confirmed.
+   *
+   * The transition database is a shared file, and the rule that keeps it useful
+   * is that an edge exists only where the checks passed. A graph built from what
+   * the model believed it did fills with transitions that never happened, and a
+   * model following those is worse off than one exploring.
+   *
+   * `verification.passed` is the whole gate. No verification ran (because there
+   * was nothing to check and no error appeared) counts as passed, since the
+   * alternative is a graph that never records anything on a site with no
+   * expectations stated.
+   */
+  if (stateBefore !== undefined && runtime.flows !== undefined) {
+    const stateAfter = signatureOf(surface?.url, args.expect);
+    await runtime.flows
+      .record({
+        host: hostOf(surface?.url),
+        from: stateBefore,
+        to: stateAfter,
+        program: args.code,
+        succeeded: verification?.passed ?? true,
+      })
+      .catch(() => undefined);
+  }
+
   return {
     output: lines.join("\n"),
     outcome,
@@ -381,6 +429,66 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
     rev: runtime.observer.revision,
     ...(surface ? { surface } : {}),
   };
+}
+
+/**
+ * What this site has taught us, as lines for the model.
+ *
+ * Rendered for reading, not for copying: the model is shown that a step is known
+ * and what it did, and writes its own program from the current page. Handing
+ * back a stored program to run unread is how an agent clicks a control that
+ * moved, so the program is shown as a hint and not as a payload.
+ */
+async function flowHint(runtime: ThreadBrowserRuntime, url: string): Promise<string[]> {
+  const flows = runtime.flows;
+  if (!flows) return [];
+  const host = hostOf(url);
+  const line = await flows.describe(host).catch(() => undefined);
+  if (line === undefined) return [];
+
+  const edges = await flows.edgesFrom(host, signatureOf(url, undefined)).catch(() => []);
+  if (edges.length === 0) return [line];
+
+  const known = edges.slice(0, 3).map((edge: { to: string; successes: number; program: string }) => `  ${edge.to} (worked ${edge.successes}x): ${edge.program.replace(/\s+/g, " ").slice(0, 120)}`);
+  return [line, "Known steps from here:", ...known];
+}
+
+/** The host a URL belongs to, for keying the learned graph. */
+function hostOf(url: string | undefined): string {
+  if (url === undefined) return "unknown";
+  try {
+    return new URL(url).host;
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
+ * A state identifier for the graph.
+ *
+ * The compiler's section signature is the right one and is not available here
+ * without a compile on every step. What is available is the page's own shape as
+ * the outline describes it, which is the same information one layer up: the url
+ * for what kind of page it is, without the query string that carries the tenant
+ * and the session.
+ */
+function signatureOf(url: string | undefined, expectation: BrowserUseArgs["expect"]): string {
+  const path = (() => {
+    if (url === undefined) return "unknown";
+    try {
+      return new URL(url).pathname;
+    } catch {
+      return url;
+    }
+  })();
+  /*
+   * The expectation is part of the signature when there is one, because two
+   * steps on the same path that expect different things are different
+   * transitions: "submit the form" and "check the form for errors" land on the
+   * same URL and are not the same edge.
+   */
+  const expect = expectation ? Object.keys(expectation).sort().join(",") : "";
+  return expect.length > 0 ? `${path}#${expect}` : path;
 }
 
 /**

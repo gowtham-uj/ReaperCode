@@ -19,6 +19,7 @@
  */
 
 import { ThreadBrowserRuntime } from "../browser/thread-runtime.js";
+import type { TransitionDb } from "../browser/transition-db.js";
 
 export interface ThreadBrowsersOptions {
   /** CDP endpoint of the browser to attach to. */
@@ -35,6 +36,15 @@ export interface ThreadBrowsersOptions {
    * Absent means in-memory only, which is what a test wants.
    */
   statePathFor?: ((threadId: string) => string) | undefined;
+  /**
+   * The learned site graph.
+   *
+   * One for the server, not one per thread: a site's shape is the same for
+   * everybody, and the value of the graph comes from accumulating across
+   * threads. What is per-thread stays per-thread, and that is the browser state
+   * (`statePathFor`) rather than the recipe.
+   */
+  flows?: TransitionDb | undefined;
 }
 
 const DEFAULT_IDLE_MS = 10 * 60_000;
@@ -65,6 +75,7 @@ export class ThreadBrowsers {
       threadId,
       cdpUrl: this.options.cdpUrl,
       ...(this.options.statePathFor ? { statePath: this.options.statePathFor(threadId) } : {}),
+      ...(this.options.flows ? { flows: this.options.flows } : {}),
     });
     this.runtimes.set(threadId, runtime);
     this.lastUsed.set(threadId, Date.now());

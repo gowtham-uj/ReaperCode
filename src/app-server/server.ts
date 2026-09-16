@@ -13,6 +13,7 @@ import { AppServerOutgoingRouter } from "./outgoing-router.js";
 import type { ManagedTurnRunner } from "./managed-turn-runner.js";
 import { ReaperThreadManager } from "./thread-manager.js";
 import { ThreadBrowsers } from "./thread-browsers.js";
+import { TransitionDb } from "../browser/transition-db.js";
 import { join } from "node:path";
 import { BrowserHub, VirtualAppServerConnection } from "./web/hub.js";
 import { startBrowserGateway, type RunningBrowserGateway } from "./web/gateway.js";
@@ -123,8 +124,18 @@ export function createAppServerCore(options: StartAppServerOptions): {
    * It attaches lazily, on the first `browser_use` of a thread, so a server that
    * never browses pays nothing for it.
    */
+  /*
+   * The learned site graph, shared across every thread.
+   *
+   * Under `.reaper` beside the rest, and shared because a site's shape is not
+   * per task: the second thread to visit a Greenhouse application should not
+   * rediscover it. What is typed never reaches it; see `generaliseProgram`.
+   */
+  const flows = new TransitionDb({ path: join(options.workspaceRoot, ".reaper", "browser", "flows.json") });
+
   const threadBrowsers = new ThreadBrowsers({
     cdpUrl: options.browserCdpUrl ?? "http://127.0.0.1:9222",
+    flows,
     ...(options.browserIdleCloseMs !== undefined ? { idleMs: options.browserIdleCloseMs } : {}),
     /*
      * One state file per thread, under the same `.reaper` root everything else

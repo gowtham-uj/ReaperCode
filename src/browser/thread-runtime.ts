@@ -34,6 +34,7 @@ import type { Browser, BrowserContext, Page } from "playwright";
 
 import { PageObserver, type PageContentMeta, type PageViewOptions, type SnapshotStats } from "./page-view.js";
 import { runStep, type SettleOptions, type StepReceipt } from "./transaction.js";
+import type { TransitionDb } from "./transition-db.js";
 
 export interface ThreadRuntimeOptions {
   /** The thread this browser belongs to, for naming and logging. */
@@ -51,6 +52,14 @@ export interface ThreadRuntimeOptions {
    * thread whose login has to survive a restart.
    */
   statePath?: string | undefined;
+  /**
+   * The learned site graph, when one is shared.
+   *
+   * Owned by the app-server rather than by a thread, because a site's shape is
+   * the same for everybody and the value of the graph comes from accumulating
+   * across threads.
+   */
+  flows?: TransitionDb | undefined;
 }
 
 /**
@@ -76,8 +85,17 @@ export class ThreadBrowserRuntime {
   /** The counter behind auto-generated page names. */
   private anonymousCount = 0;
   readonly observer = new PageObserver();
+  /**
+   * The learned site graph, when one is shared.
+   *
+   * Public and readonly: the tool reads it to learn an edge and to describe a
+   * site, and there is exactly one per app-server rather than one per thread.
+   */
+  readonly flows: TransitionDb | undefined;
 
-  constructor(private readonly options: ThreadRuntimeOptions) {}
+  constructor(private readonly options: ThreadRuntimeOptions) {
+    this.flows = options.flows;
+  }
 
   /**
    * Attach if not already attached, and return the live handles.
@@ -315,7 +333,14 @@ export class ThreadBrowserRuntime {
   }
 
   /** The whole page, as the model should read it. */
-  async view(options: PageViewOptions = {}): Promise<{ text: string; truncated: boolean; stats: SnapshotStats; contentMeta: PageContentMeta }> {
+  async view(options: PageViewOptions = {}): Promise<{
+    text: string;
+    truncated: boolean;
+    stats: SnapshotStats;
+    contentMeta: PageContentMeta;
+    /** The page that was read, so a caller does not need a second round trip. */
+    url: string;
+  }> {
     const active = await this.ensureReady();
     /*
      * What to read, in order of specificity: a locator the caller passed, then a
@@ -339,10 +364,10 @@ export class ThreadBrowserRuntime {
       // A scoped look replaces what the observer is holding, so a later diff is
       // against what the model actually saw rather than the whole page it did not.
       this.observer.capture({ url: page.url(), title: await page.title().catch(() => ""), snapshot });
-      return this.observer.view(`selector: ${options.selector}`);
+      return { ...this.observer.view(`selector: ${options.selector}`), url: page.url() };
     }
     this.observer.capture({ url: page.url(), title: await page.title().catch(() => ""), snapshot });
-    return this.observer.view();
+    return { ...this.observer.view(), url: page.url() };
   }
 
   /**
