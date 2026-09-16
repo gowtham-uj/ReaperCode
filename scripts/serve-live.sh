@@ -13,9 +13,18 @@
 # ports, confirm the ports are actually free, start both servers, and wait for
 # each to answer. It is idempotent, and it is safe to run when nothing is up.
 #
-#   ./scripts/serve-live.sh          stop, rebuild the UI, start both, verify
+#   ./scripts/serve-live.sh          stop, rebuild, start both, verify, publish
 #   ./scripts/serve-live.sh --no-build   skip the UI build (faster, uses dist as-is)
+#   ./scripts/serve-live.sh --no-publish leave the port mapping alone
 #   ./scripts/serve-live.sh --stop       stop only
+#
+# The publish step exists because both listeners bind loopback, so a redeploy
+# that only restarts them leaves the UI unreachable from outside. `reaper-port
+# publish` is what puts the UI on the network, and it is idempotent: publishing
+# a port that is already published re-asserts the same mapping rather than
+# stacking a second one. Deliberately never `--public`: the protected mapping is
+# the one that requires a session, which is the only reason this is safe to do
+# from a script at all.
 #
 set -euo pipefail
 
@@ -34,9 +43,11 @@ UI_LOG="$LOG_DIR/ui.log"
 
 BUILD=1
 STOP_ONLY=0
+PUBLISH=1
 for arg in "$@"; do
   case "$arg" in
     --no-build) BUILD=0 ;;
+    --no-publish) PUBLISH=0 ;;
     --stop) STOP_ONLY=1 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
@@ -135,7 +146,22 @@ if ! wait_for "http://127.0.0.1:$GATEWAY_PORT/healthz" "app-server gateway" 90; 
 fi
 
 say "starting the UI (log: $UI_LOG)"
-setsid nohup npx vite --config web/ui/vite.config.ts >"$UI_LOG" 2>&1 </dev/null &
+#
+# Bound to 0.0.0.0, not loopback, and that is required rather than optional.
+#
+# `reaper-port publish` forwards the public port to this container's network
+# interface, so a Vite bound to 127.0.0.1 is listening on an address the forward
+# never reaches: the mapping exists, the container looks healthy, and every
+# outside request times out. That is exactly how this was first deployed, and it
+# was indistinguishable from "the publish failed".
+#
+# The config documents this: loopback is its default, and REAPER_WEB_HOST opts
+# into the wider bind for `reaper-port publish`, where the published route
+# carries Reaper's own auth. So the wider bind is paired with that auth and is
+# not a widening on its own. Set here rather than in the config default, because
+# the default must stay loopback for anyone running Vite by hand.
+REAPER_WEB_HOST="${REAPER_WEB_HOST:-0.0.0.0}" \
+  setsid nohup npx vite --config web/ui/vite.config.ts >"$UI_LOG" 2>&1 </dev/null &
 sleep 1
 
 if ! wait_for "http://127.0.0.1:$UI_PORT/" "ui" 90; then
@@ -144,10 +170,52 @@ if ! wait_for "http://127.0.0.1:$UI_PORT/" "ui" 90; then
   exit 1
 fi
 
+# ---------------------------------------------------------------- publish
+#
+# The UI is bound to loopback, so restarting it is not enough to make it
+# reachable: the mapping has to exist too, and a fresh container may not have
+# one. `publish` is idempotent, so re-asserting it on every deploy is what keeps
+# the two in step rather than drifting apart silently.
+#
+# Only the UI. The gateway is the app-server's real API surface and Vite proxies
+# to it over loopback, so nothing outside needs to reach it directly, and
+# publishing it would widen the reachable surface for no benefit.
+if [ "$PUBLISH" = "1" ]; then
+  if command -v reaper-port >/dev/null 2>&1; then
+    say "publishing :$UI_PORT"
+    PUBLISH_OUT="$(reaper-port publish "$UI_PORT" 2>&1 || true)"
+    case "$PUBLISH_OUT" in
+      *"already published"*)
+        # Idempotence, which is the point of running this every deploy. The
+        # server rejects a second publish of the same port rather than
+        # re-asserting it, and the first version of this script read that as a
+        # failure and told the user the UI was unreachable when it was in fact
+        # already mapped. "Already done" is the success case here.
+        say "already published, nothing to do"
+        ;;
+      *"HTTP 400"*|*"error"*|*"Error"*)
+        fail "could not publish :$UI_PORT: ${PUBLISH_OUT}"
+        say "the UI is up on loopback but may not be reachable from outside"
+        ;;
+      *)
+        say "published :$UI_PORT"
+        ;;
+    esac
+  else
+    say "reaper-port is not on PATH; skipping the publish step"
+  fi
+fi
+
+# Report the mapping that is actually in place, whichever path was taken above.
+if [ "$PUBLISH" = "1" ] && command -v reaper-port >/dev/null 2>&1; then
+  URL="$(reaper-port list 2>/dev/null | grep -oE 'https://[^ ]*:'"$UI_PORT" | head -1 || true)"
+fi
+
 # ---------------------------------------------------------------- report
 echo
 say "live:"
 printf '  UI        http://127.0.0.1:%s/\n' "$UI_PORT"
+[ -n "${URL:-}" ] && printf '            %s   <- from outside\n' "$URL"
 printf '  gateway   http://127.0.0.1:%s/\n' "$GATEWAY_PORT"
 printf '  logs      %s\n' "$LOG_DIR"
 echo
