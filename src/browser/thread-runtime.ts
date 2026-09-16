@@ -35,8 +35,7 @@ import type { Browser, BrowserContext, Page } from "playwright";
 import { scopeBrowser, scopePage } from "./scoped-page.js";
 
 import { perceive, type PerceptionResult } from "./engine.js";
-import type { BrowserIR } from "./ir.js";
-import { PageObserver, type PageContentMeta, type PageViewOptions, type SnapshotStats } from "./page-view.js";
+import { countOutline, PageObserver, type PageContentMeta, type PageViewOptions, type SnapshotStats } from "./page-view.js";
 import { runStep, type SettleOptions, type StepReceipt } from "./transaction.js";
 import type { TransitionDb } from "./transition-db.js";
 
@@ -340,64 +339,46 @@ export class ThreadBrowserRuntime {
   }
 
   /**
-   * Read a page through the perception engine, holding the compile for the next
-   * revision.
+   * Read a page through the perception engine.
    *
-   * The `previous` compile is what keeps section ids and element ids stable
-   * across observations, which is the whole reason a model can hold "s1:r3" and
-   * come back to it. It is kept on the runtime rather than on the observer
-   * because the observer works on text and deliberately knows nothing about the
-   * compiler.
+   * A one-line pass-through while the engine is stubbed. It stays a method
+   * rather than a direct call because the compiled engine will need per-runtime
+   * state here (the previous compile, for stable section and element ids across
+   * revisions) and the call sites should not have to change when it lands.
    */
   private async perceive(target: Page): Promise<PerceptionResult> {
     const perceived = await perceive(target, {
-      ...(this.lastIr !== undefined ? { previous: this.lastIr } : {}),
       context: {
         ...(this.observer.step !== undefined ? { step: this.observer.step } : {}),
         ...(this.observer.goal !== undefined ? { goal: this.observer.goal } : {}),
       },
     });
-    /*
-     * Only a successful compile replaces the previous one. A fallback must not
-     * clear it, or the next revision after a transient failure would renumber
-     * every section and invalidate every id the model is holding.
-     */
-    if (perceived.ir !== undefined) this.lastIr = perceived.ir;
     this.lastWasFallback = perceived.usedFallback;
     return perceived;
   }
 
-  /** The last successful compile, for id stability across revisions. */
-  private lastIr: BrowserIR | undefined;
+  /** Whether the last read produced a fallback rather than a compiled view. */
+  private lastWasFallback = false;
 
   /**
-   * What the last read cost and contains, in the model's terms.
+   * What the last read cost and contains.
    *
-   * Answered from the compile rather than by counting the rendered text. The
-   * text is a view with sections and rows, and counting `[ref=` in it would
-   * report zero on any page the compiler read, which reads to a model as "this
-   * page is empty". A fallback reports its own line count and no element count,
-   * because it has no elements in the compiled sense.
+   * Counted from the text, because that is all there is while the engine is
+   * stubbed: there is no compiled element list to ask. A caller that logs a step
+   * reads this to see how large an observation was, and a caller that sees
+   * `fallback: true` on every read knows the compiler is not running, which is
+   * the signal that would otherwise be invisible.
    */
   lastStats(): { lines: number; chars: number; elements: number; sections: number; fallback: boolean } {
     const text = this.observer.currentOutline();
     return {
       lines: text.split("\n").filter((line) => line.trim().length > 0).length,
       chars: text.length,
-      elements: this.lastIr?.elements.size ?? 0,
-      sections: this.lastIr?.sections.length ?? 0,
-      /*
-       * Whether the model is reading a fallback, reported rather than inferred.
-       * A caller that logs a step needs to know the read came from the snapshot
-       * path, because that is the signal that the compiler has a page it cannot
-       * handle and someone should look at why.
-       */
+      elements: 0,
+      sections: 0,
       fallback: this.lastWasFallback,
     };
   }
-
-  /** Whether the last read fell back to Playwright's own snapshot. */
-  private lastWasFallback = false;
 
   /** The whole page, as the model should read it. */
   async view(options: PageViewOptions = {}): Promise<{
@@ -771,12 +752,24 @@ export class ThreadBrowserRuntime {
  * one the model can act on, which is what the field means.
  */
 function statsOf(perceived: PerceptionResult): SnapshotStats {
+  /*
+   * Counted from the text, because that is what the stub produces and the text
+   * is Playwright's own snapshot: it marks every addressable element with
+   * `[ref=...]`, so the counts are real, and `countOutline` finds them the same
+   * way it always did.
+   *
+   * This was reading `perceived.ir.elements.size` while the compiler existed,
+   * because a compiled view has no ref markers to count. When the compiler
+   * returns it will need the branch back; until then the text is the only source
+   * and it is an accurate one.
+   */
   const text = perceived.text;
+  const counted = countOutline(text, false);
   return {
     lines: text.split("\n").filter((line) => line.trim().length > 0).length,
     chars: text.length,
-    refs: perceived.ir?.elements.size ?? 0,
-    interactive: perceived.ir?.elements.size ?? 0,
+    refs: counted.refs,
+    interactive: counted.interactive,
   };
 }
 

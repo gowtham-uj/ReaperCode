@@ -25,7 +25,6 @@
 
 import type { Page } from "playwright";
 
-import type { BrowserIR } from "./ir.js";
 import type { PageObserver } from "./page-view.js";
 
 /**
@@ -175,7 +174,6 @@ export async function runStep(
   options: {
     expectedRevision?: number | undefined;
     settle?: SettleOptions | undefined;
-    before?: BrowserIR | undefined;
     /**
      * How the page is captured into the observer.
      *
