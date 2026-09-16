@@ -4,6 +4,33 @@
 open and already on the right page. You are not starting a browser, and you are
 not calling a wrapper that hides Playwright — you write the Playwright.
 
+Your program runs in the same sandbox `eval` uses, so it can read the workspace
+and npm packages but not the filesystem outside it. It has no browser connection
+of its own: `page` is a proxy that forwards each Playwright call to the real
+page. Two differences follow, and they are worth knowing before you write:
+
+**Await every call, including ones that look synchronous.**
+
+```js
+const url = await tabs.url();        // not tabs.url()
+const count = await page.locator("a").count();
+```
+
+**A chain you have not awaited is a pending call, not a value.**
+
+```js
+const others = await page.context().browser().contexts().flatMap(c => c.pages());
+if (others.length === 0) { /* this works, the chain was awaited */ }
+
+const pending = page.context().browser().contexts().flatMap(c => c.pages());
+if (pending.length === 0) { /* never true: pending.length is not a number */ }
+```
+
+Everything else is ordinary Playwright. `getByRole`, `locator`, `click`, `fill`,
+`selectOption`, `inputValue`, `.catch()`, `.nth()`, arrays from `.all()` — all of
+it behaves as it does outside, because the host is running the same library you
+are writing against.
+
 ## The loop
 
 Browsing is a loop of *look, act, look*. Getting the second look cheap is the
@@ -149,17 +176,22 @@ A tab is a real Playwright page. It stays open between calls, so open one and
 come back to it later:
 
 ```js
-const cart = await browser.newPage({ name: "cart" });
+const cart = await browser.newPage("cart");      // the name is an argument
 await cart.goto("https://shop.example.com/cart");
 
-pages();                       // every open page
-await browser.page("cart");    // the named one
-await browser.setActive("cart");
-await page.url();              // now the bare `page` is the cart
+await browser.pages();                           // every open page, named
+await browser.setActive("cart");                 // or: browser.page("cart")
+await page.url();                                // the bare `page` is the cart now
+
+await browser.closePage(cart);                   // and this one closes only it
 ```
 
-`page` is always the active page. Prefer naming them: `browser.page(1)` by index
-breaks the moment a page closes.
+`page` is always the active page, and each thread's pages are its own: another
+agent's tabs are not reachable from here.
+
+Prefer names to indices. `browser.setActive(1)` breaks the moment a page closes,
+which is the reason pages are named at all: a model that opens a tab, works
+elsewhere and comes back has no way to say which one it meant by position.
 
 ## What persists
 

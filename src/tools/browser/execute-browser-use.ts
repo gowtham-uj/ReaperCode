@@ -20,12 +20,22 @@ import { serializeBrowserResult } from "../../browser/serialize.js";
 import type { BrowserUseArgs } from "./browser-use.js";
 import { verifyStep } from "../../browser/verify.js";
 import { scopePage } from "../../browser/scoped-page.js";
+import { BrowserProgramHost } from "../../browser/browser-program.js";
+import { runProgram } from "../../browser/run-program.js";
 import { liftTrailingDeclaration, splitTrailingExpression, wrapWithTail, wrapWithoutTail } from "../code/transform.js";
 
 export interface BrowserUseMetadata {
   runId: string;
   artifactDir: string;
   toolCallId: string;
+  /**
+   * The thread's workspace, which the sandbox confines a program to.
+   *
+   * Optional in the type only because tests build metadata by hand. In
+   * production it is always set, and the runner falls back to the process's own
+   * directory when it is not, which is wrong for a server and right for a test.
+   */
+  workspaceRoot?: string | undefined;
 }
 
 export interface BrowserUseResult {
@@ -149,7 +159,19 @@ export interface ProgramContext {
 /** The parameter names a program can use. Kept in one place so they cannot drift. */
 const PROGRAM_PARAMS = ["page", "browser", "view", "viewChanges", "screenshot", "pages"] as const;
 
-export function compileBrowserProgram(code: string): ProgramContext {
+/**
+ * The program body as source, ready for whichever runtime will run it.
+ *
+ * Split out from `compileBrowserProgram` because there are now two runtimes: the
+ * sandboxed worker, which takes source, and the in-process compiler, which takes
+ * source and a parameter list. Both need the same analysis, and the analysis is
+ * the part that is easy to get subtly wrong, so it happens once here and the two
+ * callers only differ in how they execute the result.
+ *
+ * Throws on a genuine syntax error, which is the model's own and is reported as
+ * such by the caller.
+ */
+export function compileBrowserSource(code: string): string {
   const verify = (source: string): boolean => {
     try {
       new Function(...PROGRAM_PARAMS, `return ${source};`);
@@ -166,8 +188,8 @@ export function compileBrowserProgram(code: string): ProgramContext {
    */
   const split = splitTrailingExpression(code, verify);
   if (split) {
-    const wrapped = wrapWithTail(split.prefix, split.tail);
-    if (verify(wrapped)) return new Function(...PROGRAM_PARAMS, `return ${wrapped};`) as ProgramContext;
+    const wrapped = wrapWithTail(split.prefix, split.tail, { awaitTail: true });
+    if (verify(wrapped)) return wrapped;
   }
 
   /*
@@ -176,17 +198,34 @@ export function compileBrowserProgram(code: string): ProgramContext {
    * to name it. Lifting it is what turns a silent `undefined` into the value.
    */
   const lifted = liftTrailingDeclaration(code, verify);
-  if (lifted !== undefined && verify(lifted)) {
-    return new Function(...PROGRAM_PARAMS, `return ${lifted};`) as ProgramContext;
-  }
+  if (lifted !== undefined && verify(lifted)) return lifted;
 
   /*
    * No tail at all: the program acts and returns nothing, which is the normal
    * shape of a click or a fill. Compiling it plainly is correct rather than a
-   * fallback, and a genuine syntax error surfaces from here as itself.
+   * fallback.
+   *
+   * Verified like every other candidate, and the check is not a formality. This
+   * is where a genuine syntax error lands, and without the check the source is
+   * shipped to the worker, fails inside `vm.compileFunction`, and comes back as
+   * a *runtime* failure after the transaction has already captured the page. The
+   * model is then told the step failed against a page it never touched, when the
+   * truth is that nothing ran. Throwing here keeps the two apart:
+   * `compileBrowserSource` throws for "your program is not JavaScript" and the
+   * caller answers SYNTAX_ERROR with the page explicitly unchanged.
    */
   const plain = wrapWithoutTail(code);
-  return new Function(...PROGRAM_PARAMS, `return ${plain};`) as ProgramContext;
+  if (!verify(plain)) {
+    // Compile it once more outside `verify` so the syntax error escapes with
+    // its own message, rather than being replaced by this throw.
+    new Function(...PROGRAM_PARAMS, `return ${plain};`);
+    throw new Error("the program could not be compiled");
+  }
+  return plain;
+}
+
+export function compileBrowserProgram(code: string): ProgramContext {
+  return new Function(...PROGRAM_PARAMS, `return ${compileBrowserSource(code)};`) as ProgramContext;
 }
 
 /**
@@ -249,7 +288,7 @@ function observeSurface(runtime: ThreadBrowserRuntime): ObserveSurface {
  * because a dialog is covering the button has told the model something real, and
  * a stack trace would throw that away.
  */
-export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: BrowserUseArgs, _metadata: BrowserUseMetadata): Promise<BrowserUseResult> {
+export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: BrowserUseArgs, metadata: BrowserUseMetadata): Promise<BrowserUseResult> {
   /*
    * A look with no program: the model's first call on a page, and the one it
    * makes again whenever the receipt tells it something changed that it does not
@@ -289,9 +328,14 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
     };
   }
 
-  let program: ProgramContext;
+  let programSource: string;
   try {
-    program = compileBrowserProgram(args.code);
+    /*
+     * Compiled here, run in the sandbox. The analysis is shared with the old
+     * in-process path so the two cannot disagree about what a program means;
+     * only the execution differs.
+     */
+    programSource = compileBrowserSource(args.code);
   } catch (error) {
     /*
      * A syntax error is the model's own, and it must be told plainly: the
@@ -322,22 +366,64 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
   let result: unknown;
   try {
     const observe = observeSurface(runtime);
-    const surface = browserSurface(runtime);
+    const active = await runtime.ensureReady();
     /*
-     * The program gets the SCOPED page, not the raw one.
+     * The program drives the SCOPED page, and it drives it from inside the
+     * sandbox.
      *
-     * A raw Playwright page's context chain reaches every other thread's
-     * contexts, so `page.context().browser().contexts()` is a working route from
-     * one agent into another's tabs. Handing out the scoped page is what closes
-     * it; the runtime keeps the real handles.
+     * The scoping is what stops one agent reaching another's tabs, and it now
+     * travels with the object rather than with the process: the sandboxed
+     * program holds proxies, the host replays every call against this page, and
+     * `page.context().browser().contexts()` still dead-ends at this thread's
+     * context. A program with its own CDP connection would have none of that,
+     * which is why it does not get one.
      */
-    const scoped = runtime.scopedHandles();
+    /*
+     * Rooted at the SCOPED page, not the raw one, and this is the line the
+     * isolation tests exist for.
+     *
+     * The proxy replays every call against the object a handle roots at, so
+     * rooting at the raw page means the program's `page.context().browser()
+     * .contexts()` reaches the real connection and comes back with every
+     * thread's contexts. It did: the test that counts them got 2 where it must
+     * get 1. `scopePage` is what dead-ends that chain, and it has to be applied
+     * here rather than somewhere downstream, because every call the program
+     * makes starts from this object.
+     */
+    const programHost = new BrowserProgramHost(runtime, scopePage(active.page), observe);
     const stepped = await runtime.step(
-      (page) => program(scoped.page ?? page, surface, observe.view, observe.viewChanges, observe.screenshot, surface.pages),
+      async () => {
+        const ran = await runProgram({
+          compiled: programSource,
+          host: programHost,
+          workspace: metadata.workspaceRoot ?? process.cwd(),
+          ...(args.timeout_ms !== undefined ? { timeoutMs: args.timeout_ms } : {}),
+        });
+        /*
+         * The runner reports rather than throws, and the transaction reads a
+         * throw as the failure signal. So the two are translated here, and both
+         * halves are load-bearing.
+         *
+         * Returning the outcome object instead of the value was the first
+         * version and it broke the tool's most important answer: `producedValue`
+         * is `result !== undefined`, an object is never undefined, so every step
+         * reported SUCCESS. A click that landed on nothing and a program that
+         * threw both came back as success with the error sitting inside the
+         * value where nothing looked for it. The model would have read "ok" for
+         * a step that did nothing and for one that failed.
+         */
+        if (ran.error !== undefined) {
+          const failure = new Error(ran.error.message);
+          failure.name = ran.error.name;
+          throw failure;
+        }
+        return ran.value;
+      },
       {
-      ...(args.expected_revision !== undefined ? { expectedRevision: args.expected_revision } : {}),
-      ...(args.timeout_ms !== undefined ? { timeoutMs: args.timeout_ms } : {}),
-    });
+        ...(args.expected_revision !== undefined ? { expectedRevision: args.expected_revision } : {}),
+        ...(args.timeout_ms !== undefined ? { timeoutMs: args.timeout_ms } : {}),
+      },
+    );
     receipt = stepped.receipt;
     result = stepped.result;
     outcome = receipt.outcome;

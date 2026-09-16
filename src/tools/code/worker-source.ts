@@ -690,8 +690,15 @@ async function main() {
      * object where a string was expected, so slicing the view failed with a
      * message about the method rather than about the wrapping.
      */
+    /*
+     * The arguments arrive already encoded by callHelper inside the injected
+     * source, so they are spread rather than nested. Wrapping them as a single
+     * element was the bug that made view(locator) read the whole page: the host
+     * saw one argument that was an array of one, resolved nothing, and rendered
+     * the page.
+     */
     const view = async (name, args) => {
-      const reply = await callPage(-1, [[name, args]]);
+      const reply = await callPage(-1, [[name, ...(Array.isArray(args) ? args : [args])]]);
       if (reply && reply.kind === 'error') {
         const error = new Error(reply.message || 'the page call failed');
         if (reply.name) error.name = reply.name;
@@ -755,7 +762,18 @@ parentPort.on('message', (message) => {
   }
 });
 
-main().then(
+/*
+ * Await the script's value before reporting it.
+ *
+ * The compiler already emits an awaited tail for a browser program, so this is
+ * normally a no-op. It matters for the case that is not: a value still holding
+ * an unresolved node, which a program reaches by awaiting a chain whose last
+ * step the host answered with a handle. Promise.resolve unwraps a thenable, and
+ * that is exactly what turns such a node into the value the program asked for.
+ */
+Promise.resolve()
+  .then(() => main())
+  .then(
   (value) => { parentPort.postMessage({ type: 'done', value: safeValue(value) }); },
   (error) => {
     parentPort.postMessage({
@@ -785,6 +803,17 @@ function safeValue(value) {
   function walk(node, depth) {
     if (node === null || node === undefined) return node;
     const type = typeof node;
+    /*
+     * A browser node that reached the result unresolved.
+     *
+     * The proxy's steps are callables, so a chain a program forgot to await
+     * arrives here as a function. Reporting it as "[Function]" is what the
+     * isolation test saw: a program asked for contexts().length and was handed
+     * a description of the thing instead of the number. The marker is read first
+     * so the real value can be named, which turns a silent wrong answer into one
+     * the model can act on.
+     */
+    if (type === 'function' && node.__reaperNode) return '[unawaited page value: await it]';
     if (type === 'string' || type === 'number' || type === 'boolean') return node;
     // The "n" suffix is kept: a bare 10 for a bigint is indistinguishable
     // from the number 10 in the result, and telling them apart is exactly

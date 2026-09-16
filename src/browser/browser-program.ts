@@ -74,7 +74,27 @@ export class BrowserFacade {
     return this.runtime.pagesForDisplay();
   }
 
-  /** Make a page the one a bare `page` means. By name or by index. */
+  /**
+   * Make a page the one a bare `page` means. By name or by index.
+   *
+   * Three names for one call, deliberately, and the reason is that a model
+   * writes what it has been taught. `setActive` is the documented surface a
+   * program in the field already uses; `page(name)` is the spelling the browser
+   * skill shows in its examples and the one Playwright's own vocabulary
+   * suggests; `usePage` reads correctly in a program. All three go to the same
+   * runtime call, so there is one behaviour and three doors to it, and a model
+   * that reaches for any of them is right rather than nearly right.
+   */
+  async setActive(selector: string | number): Promise<Page> {
+    return await this.runtime.setActive(selector);
+  }
+
+  /** The same call, spelled the way the skill's examples show it. */
+  async page(selector: string | number): Promise<Page> {
+    return await this.runtime.setActive(selector);
+  }
+
+  /** The same call under the name that reads best in a program. */
   async usePage(selector: string | number): Promise<Page> {
     return await this.runtime.setActive(selector);
   }
@@ -129,9 +149,19 @@ export class BrowserProgramHost {
      * `newPage` outright, which is the guard working exactly as designed and
      * exactly the wrong thing to root a program at.
      */
+    const facade = new BrowserFacade(runtime);
     this.inner = new RemotePageHost(page, {
-      browser: new BrowserFacade(runtime),
-      pages: new BrowserFacade(runtime),
+      browser: facade,
+      /*
+       * `pages` roots at the *method*, not at the facade.
+       *
+       * A root is what the program calls: `pages()` invokes the root directly,
+       * with no step before it. Rooting at the facade would mean calling the
+       * facade object itself, which is not a function, and the program got
+       * "this object is not callable" for a call that is documented to work.
+       * Bound so it keeps its `this` after crossing the wire.
+       */
+      pages: () => facade.pages(),
     });
   }
 
@@ -154,11 +184,24 @@ export class BrowserProgramHost {
     return await this.inner.call(handle, path);
   }
 
+  /**
+   * Turn the handle markers in an observation call's arguments into real objects.
+   *
+   * The observation helpers do not go through `RemotePageHost.call`, so they do
+   * not get its argument revival, and `view(locator)` arrived holding
+   * `{ __reaperNode: 7 }` where a Locator was meant. The helper then read the
+   * whole page instead of the region, which is the exact failure this scoping
+   * exists to prevent and is silent: the call succeeds and returns too much.
+   */
+  private resolveArgs(args: unknown[]): unknown[] {
+    return args.map((arg) => this.inner.resolve(arg));
+  }
+
   /** One `view`, `viewChanges` or `screenshot` call from inside the sandbox. */
   private async observeCall(path: Array<{ method: string; args: unknown[] }>): Promise<CallResult> {
     const step = path[0];
     if (!step) return { kind: "error", name: "BadCall", message: "the observation call had no method" };
-    const target = step.args[0] as Page | undefined;
+    const target = this.resolveArgs(step.args)[0] as Page | undefined;
     try {
       switch (step.method) {
         case "view":

@@ -404,8 +404,17 @@ test("a program cannot drive another thread's page", { skip }, async () => {
     const attack = await executeBrowserUse(
       mine,
       {
+        /*
+         * Awaited, because a browser program runs against a proxy: a chain that
+         * has not been awaited is a pending path rather than a value, so
+         * `others.length` on an unawaited chain is a node and never `0`. That is
+         * a real difference from writing Playwright in-process, it is documented
+         * in the tool description, and it does not weaken the assertion: the
+         * point is that the other thread's page cannot be found or driven, and
+         * the awaited form is the strongest way to look for it.
+         */
         code: `
-          const others = page.context().browser().contexts().flatMap(c => c.pages()).filter(p => p.url().includes("/hidden"));
+          const others = await page.context().browser().contexts().flatMap(c => c.pages()).filter(p => p.url().includes("/hidden"));
           if (others.length === 0) return "blocked";
           await others[0].goto("${site!.origin}/canvas");
           return "drove it";
@@ -440,7 +449,7 @@ test("scoping does not break ordinary browsing", { skip }, async () => {
         const tabs = await browser.newPage("extra");
         await tabs.goto("${site!.origin}/canvas");
         const active = await browser.setActive("extra");
-        ({ filled: await page.locator("#first").inputValue().catch(() => "gone"), newTabUrl: tabs.url(), activeUrl: active.url() })
+        ({ filled: await page.locator("#first").inputValue().catch(() => "gone"), newTabUrl: await tabs.url(), activeUrl: await active.url() })
       `,
       observe: "none",
     } as never,

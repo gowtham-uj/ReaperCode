@@ -460,8 +460,21 @@ export function liftTrailingBlocks(source: string, verify: (candidate: string) =
  * The tail is inserted as-is, so a tail that starts after a blank line stays
  * after that blank line.
  */
-export function wrapWithTail(prefix: string, tail: string): string {
-  return `${WRAP_OPEN}${prefix}; return (${tail}\n); })()`;
+export function wrapWithTail(prefix: string, tail: string, options: { awaitTail?: boolean } = {}): string {
+  /*
+   * `awaitTail` is off by default and on for browser programs, which is not a
+   * cosmetic difference.
+   *
+   * A plain eval tail is already a resolved value, so `return (x)` and
+   * `return await (x)` agree, and the unawaited form is left alone because it
+   * is what every existing caller was written and tested against. A browser
+   * tail is often a *proxy node*: `page.context().browser().contexts().length`
+   * is a chain the sandbox has not run yet, and returning it unawaited hands
+   * back the node itself instead of the number. Awaiting is what runs the chain,
+   * and it resolves the property read at the end of it too, because the host
+   * replays the whole path including the final step.
+   */
+  return `${WRAP_OPEN}${prefix}; return ${options.awaitTail === true ? "await " : ""}(${tail}\n); })()`;
 }
 
 /**

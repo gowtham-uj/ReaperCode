@@ -2178,6 +2178,13 @@ export class ToolExecutor {
       runId: this.options.runId,
       artifactDir: this.options.artifactsDir ?? path.join(getReaperScratchpadPaths(this.options.workspaceRoot).logs, this.options.runId, "artifacts"),
       toolCallId,
+      /*
+       * The thread's workspace, so a browser program runs confined to it like
+       * every other sandboxed script. Carried on the metadata because the
+       * browser runtime does not know about workspaces: it owns a connection,
+       * and the workspace belongs to the thread.
+       */
+      workspaceRoot: this.options.workspaceRoot,
     };
   }
 

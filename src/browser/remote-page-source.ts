@@ -47,27 +47,34 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
   const promise = Promise.resolve();
 
   /* Arguments that cannot be cloned are sent as source, and rebuilt by the host. */
-  function encodeArgument(value, depth) {
-    if (typeof value === 'function') return { __reaperFn: value.toString() };
-    if (value === null || typeof value !== 'object') return value;
+  async function encodeArgument(value, depth) {
+    if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return value;
     /*
-     * A handle node travelled as an argument is sent as its handle.
-     *
-     * Without this it would be sent as a plain object, and because a node's
-     * target is empty, \`Object.keys\` on it gives nothing: the host would
-     * receive \`{}\` where a page was meant and every call taking a page —
-     * \`browser.closePage(tab)\` is the one that found it — would fail with a
-     * message about the method rather than about the argument.
-     *
-     * The marker is read off the node itself, so it works for a handle the
-     * program has been carrying for a while as well as one it just got.
+     * The node check comes FIRST, before the function check, and the ordering is
+     * load-bearing. A node is a Proxy over a function, so typeof is 'function'
+     * for it, and testing for a function first would serialize every one as
+     * source text: view(page.locator("form")) would send a function's toString
+     * instead of the region, which is the silent-scoping bug returning through a
+     * different door.
      */
     const marker = value.__reaperNode;
-    if (marker && typeof marker.handle === 'number') return { __reaperNode: marker.handle };
+    if (marker && typeof marker.handle === 'number') {
+      if (marker.path && marker.path.length > 0) {
+        const resolved = await run(marker.handle, marker.path);
+        const resolvedMarker = resolved && resolved.__reaperNode;
+        return { __reaperNode: resolvedMarker ? resolvedMarker.handle : marker.handle };
+      }
+      return { __reaperNode: marker.handle };
+    }
+    if (typeof value === 'function') return { __reaperFn: value.toString() };
     if (depth > 8) return value;
-    if (Array.isArray(value)) return value.map((item) => encodeArgument(item, depth + 1));
+    if (Array.isArray(value)) {
+      const out = [];
+      for (const item of value) out.push(await encodeArgument(item, depth + 1));
+      return out;
+    }
     const out = {};
-    for (const key of Object.keys(value)) out[key] = encodeArgument(value[key], depth + 1);
+    for (const key of Object.keys(value)) out[key] = await encodeArgument(value[key], depth + 1);
     return out;
   }
 
@@ -84,33 +91,40 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
     return out;
   }
 
-  /* The path a node carries, replayed from its handle. A step is [method, ...args]. */
+  /*
+   * A node: callable, awaitable, and chainable, all at once.
+   *
+   * The proxy targets a *function* rather than a plain object, which is what
+   * lets one expression serve both a call and a read. Playwright needs both:
+   * page.locator("a").count() calls, contexts()[0] indexes, and a bare chain
+   * awaited for its value is a read. An object target cannot be called, and a
+   * plain function target shadows the proxy with its own length and name, so
+   * neither alone works.
+   *
+   * Everything stays lazy: a node accumulates a path and the host runs the whole
+   * path when the program awaits it. Indexing and property reads are steps like
+   * any other, so contexts().filter(f)[0].goto(url) is one round trip, not four.
+   */
   function makeNode(handle, path) {
-    const node = {};
-    const proxy = new Proxy(node, {
+    const handler = {
       get(_target, property) {
         if (typeof property === 'symbol') return undefined;
         /*
          * The marker that lets this node travel as an argument. Read by
-         * \`encodeArgument\` above; not part of the Playwright surface, and named
+         * encodeArgument above; not part of the Playwright surface, and named
          * with a prefix a page cannot collide with.
          */
         if (property === '__reaperNode') return { handle: handle, path: path };
         if (property === 'then') {
           /*
-           * Awaiting a *pending chain* runs it. That is what makes
-           * \`await page.click()\` work.
+           * Awaiting runs the chain, which is what makes await page.click()
+           * work.
            *
-           * A node with an empty path is a value that has already been
-           * resolved, and it must NOT be thenable. This is the difference
-           * between working and an infinite loop, and it took a heap exhaustion
-           * to find: resolving a promise with a thenable makes JavaScript
-           * unwrap it by calling \`then\`, which for a resolved node ran the
-           * empty path again, which resolved to another thenable, forever.
-           *
-           * So a resolved node awaits to itself, which is what a caller wants:
-           * \`const tab = await browser.newPage("x")\` gives the locator-like node
-           * to keep calling, not another round trip.
+           * A node with an empty path is already resolved and must NOT be
+           * thenable: resolving a promise with a thenable makes JavaScript
+           * unwrap it by calling then, so a resolved node would run the empty
+           * path, resolve to another thenable, and loop forever. That cost a
+           * heap exhaustion to find, and it is why this branch exists.
            */
           if (path.length === 0) return undefined;
           return (onFulfilled, onRejected) =>
@@ -119,25 +133,85 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
               onRejected,
             );
         }
-        if (property === 'catch' || property === 'finally') return undefined;
-        if (property === 'constructor') return undefined;
         /*
-         * Every other property is a method that extends the path. Returning a new
-         * node rather than calling immediately is what makes a held \`locator\`
-         * reusable and a chain one round trip.
+         * catch and finally work, because a real Playwright call has them and a
+         * model writes them.
+         *
+         * They were undefined in the first version and that is the kind of
+         * difference that misleads rather than fails: Playwright's own API
+         * returns promises, so .catch(() => fallback) is an idiom a model
+         * reaches for without thinking, and getting "catch is not a function"
+         * teaches it that the page is broken rather than that the bridge is
+         * narrow. Both resolve the chain and delegate, so the semantics match
+         * what the model already knows.
          */
-        return (...args) => makeNode(handle, path.concat([[property, args]]));
+        if (property === 'catch' || property === 'finally') {
+          const run1 = (onFulfilled, onRejected) =>
+            run(handle, path).then(
+              (value) => (onFulfilled ? onFulfilled(value) : value),
+              onRejected,
+            );
+          if (path.length === 0) {
+            // An already-resolved node: nothing to catch, and finally still
+            // has to run the callback the model passed.
+            return property === 'catch'
+              ? (onRejected) => run1(undefined, onRejected)
+              : (onFinally) => { const r = run1(undefined, undefined); if (onFinally) onFinally(); return r; };
+          }
+          return property === 'catch'
+            ? (onRejected) => run1(undefined, onRejected)
+            : (onFinally) => run1(undefined, undefined).then((v) => { if (onFinally) onFinally(); return v; });
+        }
+        if (property === 'constructor') return undefined;
+        if (property === 'apply' || property === 'call' || property === 'bind') return undefined;
+        /*
+         * Everything else extends the path. Whether the program meant a call or
+         * a read is decided by the host when it runs the step: a method is
+         * invoked, a property is read, and an index into an array takes the
+         * element.
+         */
+        return makeNode(handle, path.concat([[property, []]]));
+      },
+      apply(_target, _thisArg, args) {
+        /*
+         * A call replaces the last step's arguments. The last step is the method
+         * name, so page.locator("a").count() becomes locator(a) then count(),
+         * and the arguments land on the step they belong to rather than being
+         * appended after it.
+         *
+         * Calling a *root* is the case that made this branch exist. pages() is a
+         * root the host owns, so the call is an invoke on handle 2 with no step
+         * before it, and returning the node unchanged meant the call never
+         * reached the host: pages() came back as an unawaited value. A marker
+         * step is what carries the arguments, and the host reads it as "call
+         * this object itself".
+         */
+        if (path.length === 0) return makeNode(handle, [['__reaperInvoke', args]]);
+        const last = path[path.length - 1];
+        const head = path.slice(0, -1);
+        return makeNode(handle, head.concat([[last[0], args]]));
       },
       has() {
         return true;
       },
-    });
-    return proxy;
+    };
+    return new Proxy(function () {}, handler);
   }
 
   /* One round trip. The path is encoded so functions survive, values decoded so handles come back live. */
   async function run(handle, path) {
-    const encoded = path.map((step) => [step[0], ...step[1].map((arg) => encodeArgument(arg, 0))]);
+    /*
+     * Sequentially, not with Promise.all. Encoding an argument may itself be a
+     * round trip (a pending chain passed as an argument), and those have to
+     * reach the host in the order the program wrote them: the host resolves them
+     * against a handle table that has to still hold what the earlier ones named.
+     */
+    const encoded = [];
+    for (const step of path) {
+      const args = [];
+      for (const arg of step[1]) args.push(await encodeArgument(arg, 0));
+      encoded.push([step[0], ...args]);
+    }
     const reply = await __pageCall(handle, encoded);
     if (!reply || typeof reply !== 'object') {
       throw new Error('the browser bridge returned nothing for ' + path.map((s) => s[0]).join('.'));
@@ -156,13 +230,30 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
    * so a program cannot reach from one to another except by a call the host
    * replays and accepts.
    */
+  /*
+   * The helpers encode their arguments the same way a method call does.
+   *
+   * They have to, and skipping it was a bug with a silent failure. A helper
+   * receives its arguments as raw JavaScript, so \`view(page.locator("form"))\`
+   * handed the transport a live proxy node. A node is a Proxy over an empty
+   * object, so it crosses the boundary as nothing, the host received no target,
+   * and the helper read the whole page: the scoping a program asked for was
+   * silently ignored and it paid for the page anyway. Encoding resolves a
+   * pending chain to the handle the host should actually look at.
+   */
+  async function callHelper(name, args) {
+    const encoded = [];
+    for (const arg of args) encoded.push(await encodeArgument(arg, 0));
+    return __pageView(name, encoded);
+  }
+
   return {
     page: makeNode(__pageRoot.page, []),
     browser: makeNode(__pageRoot.browser, []),
     pages: makeNode(__pageRoot.pages, []),
-    view: (...args) => __pageView('view', args),
-    viewChanges: () => __pageView('viewChanges', []),
-    screenshot: (...args) => __pageView('screenshot', args),
+    view: (...args) => callHelper('view', args),
+    viewChanges: () => callHelper('viewChanges', []),
+    screenshot: (...args) => callHelper('screenshot', args),
   };
 }
 

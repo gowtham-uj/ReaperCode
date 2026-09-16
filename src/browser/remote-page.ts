@@ -160,10 +160,53 @@ export class RemotePageHost {
       throw new Error(`${step.method}() was called with ${step.args.length} arguments, which is more than the ${MAX_ARGS} this bridge accepts`);
     }
 
+    /*
+     * An index into an array, which is a step like any other.
+     *
+     * `contexts()[0]` and `(await pages)[0]` both arrive here, because the
+     * sandbox cannot know whether a chain is an array until the host runs it.
+     * Refusing it was what made `others[0].goto(...)` fail with a message about
+     * the method when the chain simply had not been resolved.
+     */
+    if (Array.isArray(current) && /^\d+$/.test(step.method) && step.args.length === 0) {
+      return (current as unknown[])[Number(step.method)];
+    }
+
+    /*
+     * The object itself is being called, which happens only for a root.
+     *
+     * `pages()` is the case: the worker's root is the host's own function, and
+     * there is no property to look up because the call is the whole operation.
+     * The marker name is prefixed the same way the node marker is, so no
+     * Playwright member can collide with it and a program cannot produce it by
+     * naming a real method.
+     */
+    if (step.method === "__reaperInvoke") {
+      if (typeof current !== "function") {
+        throw new Error("this object is not callable");
+      }
+      return await (current as (...given: unknown[]) => unknown).apply(undefined, step.args.map((arg) => this.resolve(reviveArgument(arg))));
+    }
+
     const target = current as Record<string, unknown>;
     const member = target[step.method];
+    /*
+     * A property read, not a call. `page.context().browser().contexts().length`
+     * is the shape that found this: the sandbox cannot tell a property from a
+     * method, so `.length` arrives as a step with no arguments, and refusing it
+     * made every program that reads a length or an attribute fail with a message
+     * about a method that does not exist.
+     *
+     * Reading it is safe because the host resolved `current` itself: this
+     * returns a property of an object the program legitimately holds, and the
+     * program still cannot name a property it did not reach through a chain of
+     * calls it was allowed to make.
+     */
     if (typeof member !== "function") {
-      throw new Error(`${step.method} is not a method on this object`);
+      if (step.args.length > 0) {
+        throw new Error(`${step.method} is not a method on this object`);
+      }
+      return member;
     }
 
     /*
@@ -172,7 +215,7 @@ export class RemotePageHost {
      * them, and Playwright itself sends a function to the browser as source, so
      * rebuilding it here is the same mechanism rather than a new one.
      */
-    const args = step.args.map((arg) => this.revive(reviveArgument(arg)));
+    const args = step.args.map((arg) => this.resolve(reviveArgument(arg)));
     return await (member as (...given: unknown[]) => unknown).apply(current, args);
   }
 
@@ -214,14 +257,14 @@ export class RemotePageHost {
   /**
    * Replace a handle marker with the live object it names.
    *
-   * Done here rather than in `reviveArgument` because the table is the host's,
-   * and a free function has no business reaching into it. An unknown handle is
-   * an error rather than `undefined`: passing `undefined` to Playwright would
-   * fail with a message about the argument's type, which is the wrong fact.
+   * Public because the observation helpers need it and do not go through
+   * `call`. An unknown handle is an error rather than `undefined`: passing
+   * `undefined` to Playwright would fail with a message about the argument's
+   * type, which is the wrong fact.
    */
-  private revive(value: unknown): unknown {
+  resolve(value: unknown): unknown {
     if (!value || typeof value !== "object") return value;
-    if (Array.isArray(value)) return value.map((item) => this.revive(item));
+    if (Array.isArray(value)) return value.map((item) => this.resolve(item));
     const candidate = value as { __reaperNode?: unknown };
     if (typeof candidate.__reaperNode !== "number") return value;
     const held = this.handles.get(candidate.__reaperNode);

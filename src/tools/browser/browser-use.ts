@@ -142,12 +142,18 @@ export type BrowserUseArgs = z.infer<typeof BrowserUseArgsSchema>;
  * installs its own browser or launches one instead of using the page it was
  * given.
  *
- * Kept short on purpose. The eval description is at its character cap and this
- * one rides in the same context budget, so every sentence here costs a sentence
- * somewhere else. The detail lives in the browser skill.
+ * Kept short on purpose, though not because anything enforces it: there is no
+ * character cap on a tool description anywhere in this codebase, and an earlier
+ * version of this comment claimed the eval description was at one. That was
+ * wrong, and worth recording so nobody budgets against a limit that does not
+ * exist. Every tool description is sent on every turn, so the real constraint is
+ * the turn's context rather than a validator, and the detail belongs in the
+ * browser skill where it is loaded only when the model is actually browsing.
  */
 export const BROWSER_USE_DESCRIPTION =
-  "Drive the browser with Playwright code. The page is already open, already logged in, and already connected: `page` is bound, so write the actions directly and never launch or connect to a browser. " +
+  "Drive the browser with Playwright code, which runs in the same sandbox `eval` uses. The page is already open, already logged in, and already connected: `page` is bound, so write Playwright directly and never launch or connect to a browser. " +
+  "In scope: `page` (the thread's own page), `browser` (open, switch and close pages: `browser.newPage(name)`, `browser.pages()`, `browser.setActive(name)`, `browser.closePage(p)`), `view()`, `viewChanges()`, `screenshot()`, and `pages()`. " +
+  "Two things differ from Playwright in your own process, and both matter. **Await every call**, including ones you expect to be synchronous: `await tabs.url()`, not `tabs.url()`. And a `.` chain that has not been awaited is a pending call rather than a value, so `if (others.length === 0)` on an unawaited chain is never true. " +
   "Write one program per step, not one action per call: six fills and a click in a single script is one decision. " +
   "The result is a receipt with an OUTCOME (SUCCESS, NO_CHANGE, STALE_REVISION, and so on), the URL transition, and the lines that changed, so a click that did nothing is visible as NO_CHANGE rather than reported as success. " +
   "Before acting, look at the page with the browser view; after acting, read the receipt rather than guessing what happened.";
