@@ -345,6 +345,17 @@ export class ThreadBrowserRuntime {
     return this.observer.view();
   }
 
+  /**
+   * The outline the observer is holding, without acknowledging it.
+   *
+   * Reading the page for a verifier must not count as the model having seen it,
+   * or the next `viewChanges` would report nothing and the model would miss the
+   * change that just happened.
+   */
+  async currentOutline(): Promise<string> {
+    return this.observer.currentOutline();
+  }
+
   /** Only what differs from the last thing the model was told. */
   viewChanges(): { text: string; full: boolean } {
     return this.observer.viewChanges();

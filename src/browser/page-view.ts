@@ -393,6 +393,18 @@ export class PageObserver {
    * is not a page with nothing on it, and rendering it as an empty section is
    * exactly the silent-coverage failure this layer exists to prevent.
    */
+  /**
+   * The outline as it stands, for a checker that needs to look at it.
+   *
+   * Distinct from `view()`, which acknowledges what the model has now seen and
+   * advances the delta baseline. A verifier reading the page must not change what
+   * the model is told on its next look, or the verification would silently
+   * consume the change it was checking for.
+   */
+  currentOutline(): string {
+    return this.current ?? "";
+  }
+
   isPageGone(): boolean {
     const current = this.current;
     return current === undefined || current.trim().length === 0;

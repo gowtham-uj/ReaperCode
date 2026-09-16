@@ -85,6 +85,30 @@ export const BrowserUseArgsSchema = z
       .optional()
       .describe("One short sentence: what this step is for. Recorded in the session journal."),
     /**
+     * What this step is supposed to achieve, so Reaper can check it.
+     *
+     * The free checks already catch a step that did nothing. This catches the
+     * step that did *something else*: the page changed, but not to the page the
+     * model intended, which is a failure no structural check can see.
+     *
+     * Stating it is optional and cheap, and it is the difference between the
+     * model being told SUCCESS and being told SUCCESS-but-not-what-you-expected.
+     */
+    expect: z
+      .object({
+        urlIncludes: z.string().optional(),
+        urlChanged: z.boolean().optional(),
+        textPresent: z.string().optional(),
+        textAbsent: z.string().optional(),
+        pageChanged: z.boolean().optional(),
+        expectFailure: z.boolean().optional(),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "What this step should achieve, e.g. {urlIncludes: '/dashboard'} after signing in, or {textPresent: 'Application submitted'} after submitting. Checked against the page and reported, so a step that changed the page in the wrong way is visible rather than reported as success.",
+      ),
+    /**
      * The revision the program was written against.
      *
      * Supplying it turns "the page moved and I clicked anyway" into a refusal.

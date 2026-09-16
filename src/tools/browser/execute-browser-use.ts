@@ -18,6 +18,7 @@ import type { ThreadBrowserRuntime } from "../../browser/thread-runtime.js";
 import { renderReceipt, type StepReceipt } from "../../browser/transaction.js";
 import { serializeBrowserResult } from "../../browser/serialize.js";
 import type { BrowserUseArgs } from "./browser-use.js";
+import { verifyStep } from "../../browser/verify.js";
 import { liftTrailingDeclaration, splitTrailingExpression, wrapWithTail, wrapWithoutTail } from "../code/transform.js";
 
 export interface BrowserUseMetadata {
@@ -319,6 +320,21 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
   }
 
   const lines = [renderReceipt(receipt)];
+
+  /*
+   * The checks, when there is something to check against or something to report.
+   *
+   * Level 0 runs whether or not an expectation was given, because a page that
+   * shows an error after a successful click is a rejection the model would
+   * otherwise walk past. Level 1 only runs when the model said what it expected,
+   * which is why stating it is worth the tokens.
+   */
+  let verification: ReturnType<typeof verifyStep> | undefined;
+  if (args.expect !== undefined || receipt.outcome === "SUCCESS") {
+    const outline = await runtime.currentOutline().catch(() => "");
+    verification = verifyStep(receipt, args.expect, outline);
+    if (!verification.passed) lines.push("", `VERIFICATION: ${verification.summary}`);
+  }
 
   /*
    * The program's own value, when it produced one.
