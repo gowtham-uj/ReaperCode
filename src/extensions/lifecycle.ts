@@ -22,6 +22,7 @@ import path from "node:path";
 
 import { buildSandboxedShellCommand } from "../policy/shell-sandbox.js";
 import { ExtensionRegistry } from "./registry.js";
+import { buildChildEnv } from "../tools/child-env.js";
 
 export interface ValidateResult {
   ok: boolean;
@@ -109,9 +110,24 @@ export class ExtensionLifecycle {
         shell: "/bin/sh",
         shellArgs: ["-c", c.command],
       });
+      /*
+       * A scrubbed environment, not the app-server's own.
+       *
+       * `spawnSync` with no `env` inherits `process.env` wholesale, so a
+       * validation command ran with `ANTHROPIC_AUTH_TOKEN` in scope and with no
+       * sandbox to climb: bubblewrap does not clear the environment, and
+       * `--unshare-net` does not either. The audit printed the running server's
+       * own token from inside a validation command and found it in the
+       * trajectory afterwards, because the redactor's pattern did not match the
+       * variable's name.
+       *
+       * `buildChildEnv` is what every other child of this process already gets,
+       * which is what makes this the same boundary rather than a second one.
+       */
+      const env = buildChildEnv({ workspaceRoot: root }).env;
       const r = sandboxed
-        ? spawnSync(sandboxed.command, sandboxed.args, { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 })
-        : spawnSync("/bin/sh", ["-c", c.command], { cwd: workingDirectory, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
+        ? spawnSync(sandboxed.command, sandboxed.args, { encoding: "utf8", maxBuffer: 4 * 1024 * 1024, env })
+        : spawnSync("/bin/sh", ["-c", c.command], { cwd: workingDirectory, encoding: "utf8", maxBuffer: 4 * 1024 * 1024, env });
       results.push({
         id: c.id,
         exitCode: r.status ?? -1,

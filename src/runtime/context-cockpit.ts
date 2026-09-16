@@ -18,6 +18,7 @@ import type { PreparedContext } from "../context/pruner.js";
 import type { CompactedHistory } from "../context/history-compaction.js";
 import type { Skill } from "../context/skills.js";
 import type { EnvironmentFingerprint } from "./fingerprint.js";
+import { neutralizeSkillEnvelope } from "../tools/read/activate-skill.js";
 import type { ContextFile } from "../resources/context-files.js";
 import type { MentionResolution } from "../context/mentions.js";
 
@@ -289,7 +290,20 @@ function renderInvokedSkills(input: CockpitInput): string[] {
   for (const skill of invoked) {
     const authority = skill.pinned ? "user_configured;always_on" : "user_instruction";
     lines.push(`<<<SKILL: ${skill.name}>>> (authority=${authority})`);
-    lines.push(skill.body.trim());
+    /*
+     * A body cannot forge a section around itself.
+     *
+     * Interpolated verbatim, a body containing `<<<END_SKILL>>>` followed by a
+     * fake `# Runtime facts` block ends the skill early and inserts a section
+     * the surrounding text labels `authority=runtime_fact`. Reproduced: the
+     * rendered output carried two `END_SKILL` markers and a forged facts block
+     * *before* the real one, which is the worse position because the first thing
+     * a reader sees is the more specific-looking claim.
+     *
+     * The same neutralizer the activation tool uses, so both envelopes are
+     * inert rather than each being closed in its own way.
+     */
+    lines.push(neutralizeSkillEnvelope(skill.body.trim()));
     lines.push("<<<END_SKILL>>>");
   }
   return lines;

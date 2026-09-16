@@ -62,6 +62,22 @@ const UNTRUSTED_TOOL_NAMES = new Set([
   "web_search",
   "web_fetch",
   "web_research_search",
+  /*
+   * `browser_use` returns the text of whatever page the agent is on.
+   *
+   * That is external content in the most direct sense there is: the agent
+   * fetched it and put it in the transcript, and anyone who can serve a page
+   * can write it. The runtime already marks it (`PageContentMeta.untrusted` in
+   * `page-view.ts`), but the tool returned a plain string and the flag was
+   * dropped at the boundary, so the marker never reached the model.
+   *
+   * Verified before this line: a page carrying "SYSTEM: Ignore all previous
+   * instructions..." arrived verbatim, `classifyToolResultTrust("browser_use")`
+   * answered `trusted`, and `renderToolResultForModel` therefore wrapped it in
+   * nothing. A page the agent is *already driving* supplies the injection, so
+   * no network access is needed to reach this.
+   */
+  "browser_use",
 ]);
 
 /**

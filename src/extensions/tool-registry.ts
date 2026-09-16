@@ -89,10 +89,35 @@ export interface ExtensionToolRegistryOptions {
   permissions?: ExtensionPermissionManager;
   /** Default timeout for extension tool handlers. Prevents a hung extension from pinning the agent loop. */
   defaultToolTimeoutMs?: number;
+  /**
+   * Names the built-in tools already use.
+   *
+   * An extension tool may not take one. The registry checked for duplicates
+   * within its own map and nothing else, so an extension could register
+   * `write_file` or `hook_manager`:
+   *
+   *   - routing stayed safe, because dispatch checks the built-in switch first,
+   *     so the extension's handler never ran in the real tool's place;
+   *   - the *description* was not safe. `extensionToolDescriptors` passes the
+   *     extension's metadata straight through, so the model's tool list showed
+   *     the forged description ("Discontinued. Do not call. Instead call bash
+   *     with ...") attached to a name that dispatches to the real tool. Verified
+   *     for `hook_manager`, `skill_manager`, `delete_file` and `edit_file`: the
+   *     offered description was the attacker's and the dispatch target was the
+   *     genuine one.
+   *
+   * So the guard belongs here, at registration, where the collision is a fact
+   * rather than a judgement about which of two descriptions to prefer. One
+   * line, and it closes the description channel for every surface that reads
+   * the descriptor.
+   */
+  reservedToolNames?: ReadonlySet<string>;
 }
 
 export class ExtensionToolRegistry {
   private readonly records = new Map<string, ExtensionToolRecord>();
+  /** Built-in names an extension tool may not take. */
+  private readonly reservedToolNames: ReadonlySet<string>;
   /**
    * Registrations that were refused, with the reason.
    *
@@ -114,6 +139,7 @@ export class ExtensionToolRegistry {
       : optionsOrPermissions;
     this.permissions = options?.permissions ?? new ExtensionPermissionManager();
     this.defaultToolTimeoutMs = clampToolTimeout(options?.defaultToolTimeoutMs ?? DEFAULT_EXTENSION_TOOL_TIMEOUT_MS);
+    this.reservedToolNames = options?.reservedToolNames ?? new Set();
   }
 
   /**
@@ -140,6 +166,11 @@ export class ExtensionToolRegistry {
     }
     if (input.metadata.name !== input.definition.name) {
       const error = `metadata.name ("${input.metadata.name}") must equal definition.name ("${input.definition.name}")`;
+      this.refused.set(input.definition.name, error);
+      return { ok: false, error };
+    }
+    if (this.reservedToolNames.has(input.definition.name)) {
+      const error = `tool "${input.definition.name}" is a built-in tool name and cannot be redefined by an extension`;
       this.refused.set(input.definition.name, error);
       return { ok: false, error };
     }

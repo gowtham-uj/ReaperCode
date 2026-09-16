@@ -37,6 +37,8 @@ import ts from "typescript";
 import { z } from "zod";
 
 import { normalizeWorkspacePath } from "../policy/paths.js";
+import { buildSandboxedShellCommand } from "../policy/shell-sandbox.js";
+import { buildChildEnv } from "./child-env.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -344,11 +346,42 @@ async function runEslint(filePath: string, workspaceRoot: string): Promise<Diagn
   }
 
   try {
-    const { stdout, stderr } = await execFileAsync(
-      process.execPath,
-      [eslint, "--format", "json", filePath],
-      { timeout: 30_000, cwd: workspaceRoot, maxBuffer: 4 * 1024 * 1024 },
-    );
+    /*
+     * The linter is workspace-supplied code, so it runs confined and with a
+     * scrubbed environment.
+     *
+     * `<workspace>/node_modules/.bin/eslint` is a file the agent can write, and
+     * this ran it as a plain child of the app-server: as root, with
+     * `ANTHROPIC_AUTH_TOKEN` in `process.env`, with the whole host filesystem
+     * reachable and the CDP port open. Two `write_file` calls were enough to
+     * turn "check this file" into arbitrary code execution as the host, with no
+     * approval, and the marker the probe wrote recorded exactly that.
+     *
+     * So it goes through the same sandbox `bash` uses, and gets the same
+     * stripped environment every other child gets. `buildSandboxedShellCommand`
+     * is the shared definition, which is what keeps this from drifting away
+     * from bash's confinement the way the eval sandbox once did.
+     *
+     * Unconfined is the fallback only when bubblewrap is unavailable, which is
+     * the same trade the shell tools make and for the same reason: a host
+     * without user namespaces still needs a working linter, and refusing every
+     * check there would not be safer in any way the user could use.
+     */
+    const sandboxed = buildSandboxedShellCommand({
+      workspaceRoot,
+      workingDirectory: workspaceRoot,
+      shell: "/bin/sh",
+      shellArgs: ["-c", "exec \"$0\" \"$@\"", process.execPath, eslint, "--format", "json", filePath],
+    });
+    const options = {
+      timeout: 30_000,
+      cwd: workspaceRoot,
+      maxBuffer: 4 * 1024 * 1024,
+      env: buildChildEnv({ workspaceRoot }).env,
+    };
+    const { stdout, stderr } = sandboxed
+      ? await execFileAsync(sandboxed.command, sandboxed.args, options)
+      : await execFileAsync(process.execPath, [eslint, "--format", "json", filePath], options);
     return { file: filePath, kind: "eslint", diagnostics: parseEslintJson(stdout), ok: true };
   } catch (error: any) {
     // eslint exits 1 when it finds problems, which is not a failure to run.

@@ -22,11 +22,36 @@ import test from "node:test";
 
 import { LinterRegistry } from "../../../src/tools/viewer/linter-registry.js";
 
-async function withWorkspace<T>(fn: (workspaceRoot: string) => Promise<T>): Promise<T> {
+/**
+ * A workspace the linter registry will honour a manifest in.
+ *
+ * A `.reaper/linters/manifest.json` names a package that `file_edit` `require`s
+ * into the app-server process, so it is only read in a trusted workspace: that
+ * directory is on the trust-requiring list now, and an untrusted workspace falls
+ * back to the built-in manifest. These tests are about dispatch, so they
+ * establish trust the way a real user does, rather than being rewritten around a
+ * rule they are not testing. `host-rce-paths.test.ts` covers the rule.
+ */
+async function withWorkspace<T>(fn: (workspaceRoot: string) => Promise<T>, options: { trusted?: boolean } = { trusted: true }): Promise<T> {
   const root = await mkdtemp(path.join(tmpdir(), "reaper-linter-"));
+  const home = path.join(root, "home");
+  if (options.trusted) {
+    const { mkdirSync, realpathSync, writeFileSync } = await import("node:fs");
+    mkdirSync(path.join(home, ".reaper"), { recursive: true });
+    writeFileSync(
+      path.join(home, ".reaper", "project-trust.json"),
+      JSON.stringify({ entries: [{ workspaceRoot: realpathSync(root), trusted: true, updatedAt: Date.now() }] }),
+    );
+  }
+  const previousHome = process.env.HOME;
+  // The registry reads trust from the process home when given no store, so the
+  // fixture points HOME at its own directory for the duration.
+  process.env.HOME = home;
   try {
     return await fn(root);
   } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
     await rm(root, { recursive: true, force: true });
   }
 }

@@ -155,10 +155,10 @@ function extensionsDoctor(registry: ExtensionRegistry, rest: string[], ctx: { co
   return any ? err("one or more extensions failed doctor", "see above") : ok("all extensions healthy", reports);
 }
 
-function extensionsRemove(registry: ExtensionRegistry, rest: string[], ctx: { commandName: string; host: { print(msg: string): void; printError(msg: string): void } }): SlashCommandResult {
+async function extensionsRemove(registry: ExtensionRegistry, rest: string[], ctx: { commandName: string; host: { print(msg: string): void; printError(msg: string): void } }): Promise<SlashCommandResult> {
   const id = rest[0];
   if (!id) return err("missing extension id", "usage: /extensions remove <id>");
-  const result = registry.uninstall(id);
+  const result = await registry.uninstall(id);
   if (!result.ok) return err(result.error ?? "uninstall failed", result.error ?? "");
   ctx.host.print(`removed "${id}"`);
   return ok(id);

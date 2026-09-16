@@ -38,6 +38,14 @@ const TRUST_REQUIRING_PROJECT_PATHS = [
   [".reaper", "settings.json"],
   [".reaper", "extensions"],
   [".reaper", "hooks"],
+  /*
+   * `linters` belongs here for the same reason as `extensions` and `hooks`: a
+   * manifest in this directory names a package, and `file_edit` `require`s that
+   * package into the app-server process. Its absence from this list is what made
+   * the manifest trust gate above inert, because a workspace whose only
+   * trust-requiring resource was a linter manifest read as having none.
+   */
+  [".reaper", "linters"],
   [".reaper", "packages"],
   [".reaper", "prompts"],
   [".reaper", "skills"],
@@ -96,9 +104,21 @@ export class ProjectTrustStore {
   }
 
   async get(workspaceRoot: string): Promise<boolean | null> {
+    return this.getSync(workspaceRoot);
+  }
+
+  /**
+   * The same lookup, synchronously.
+   *
+   * The async form existed only so the interface could grow an async backend
+   * later; the implementation has always read one JSON file with a synchronous
+   * reader. Hooks need the answer inside a synchronous discovery walk, and
+   * pretending the read is async would force that walk to change shape for no
+   * benefit.
+   */
+  getSync(workspaceRoot: string): boolean | null {
     const key = canonicalizeWorkspaceRoot(workspaceRoot);
-    const entries = this.readEntries();
-    const entry = entries.find((candidate) => canonicalizeWorkspaceRoot(candidate.workspaceRoot) === key);
+    const entry = this.readEntries().find((candidate) => canonicalizeWorkspaceRoot(candidate.workspaceRoot) === key);
     return entry ? entry.trusted : null;
   }
 
@@ -245,6 +265,46 @@ export async function resolveProjectTrusted(options: ResolveProjectTrustedOption
     return { trusted: true, source: "ask-session", requiresTrust: true };
   }
   return { trusted: false, source: "ask-denied", requiresTrust: true };
+}
+
+/**
+ * The same decision as `resolveProjectTrusted`, without the async parts.
+ *
+ * Exists because `HookLifecycle.discover()` is synchronous: it walks two
+ * directories, parses JSON and compiles each hook's source with `new Function`,
+ * all in one pass, and the trust decision has to be made before any of that
+ * compilation happens. Making discovery async to borrow the resolver would mean
+ * changing every caller of a method that five other paths already call
+ * synchronously, for a read that is a small JSON file and a `realpath`.
+ *
+ * The rules are the same and deliberately duplicated in shape rather than in
+ * effect: requires-trust is decided by the same path list, remembered decisions
+ * by the same store, and the default is the same "never". What is lost is the
+ * ancestry walk and the interactive ask, which a synchronous call cannot do.
+ * Neither matters here, because a hook discovered from disk was not put there
+ * interactively in this process: it is a file that was already present, and the
+ * question is only whether this workspace has been trusted.
+ */
+export function isProjectTrustedSync(workspaceRoot: string, userHome?: string): boolean {
+  for (const parts of TRUST_REQUIRING_PROJECT_PATHS) {
+    const candidate = path.join(workspaceRoot, ...parts);
+    if (!existsSync(candidate)) continue;
+    try {
+      if (statSync(candidate).size === 0) continue;
+    } catch {
+      continue;
+    }
+    /*
+     * A trust-requiring resource exists, so the workspace has to have been
+     * trusted for it. Read the store's own file directly: `ProjectTrustStore`
+     * keeps entries in one JSON document and its reader is already synchronous.
+     */
+    const store = ProjectTrustStore.create(userHome ?? homedir());
+    const key = canonicalizeWorkspaceRoot(workspaceRoot);
+    return store.getSync(key) ?? false;
+  }
+  // Nothing in this workspace requires trust, so there is nothing to refuse.
+  return true;
 }
 
 export function canonicalizeWorkspaceRoot(workspaceRoot: string): string {

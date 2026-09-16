@@ -6,7 +6,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync,  mkdirSync,  rmSync,  existsSync,  readFileSync } from "node:fs";
+import { mkdtempSync,  mkdirSync,  rmSync,  existsSync,  readFileSync,  realpathSync,  writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -29,6 +29,19 @@ function setup(): { tmp: string; userHome: string; workspaceRoot: string; deps: 
   const workspaceRoot = join(tmp, "ws");
   mkdirSync(userHome, { recursive: true });
   mkdirSync(workspaceRoot, { recursive: true });
+  /*
+   * The workspace is trusted, which is the state a real user reaches by
+   * approving an extension. A project-scope extension in an untrusted workspace
+   * is refused at activation, which is the control that keeps a cloned repo from
+   * running code in Reaper's process the moment it is opened. These tests are
+   * about the authoring tools, and `extension-approval.test.ts` covers the trust
+   * rule directly.
+   */
+  mkdirSync(join(userHome, ".reaper"), { recursive: true });
+  writeFileSync(
+    join(userHome, ".reaper", "project-trust.json"),
+    JSON.stringify({ entries: [{ workspaceRoot: realpathSync(workspaceRoot), trusted: true, updatedAt: Date.now() }] }),
+  );
   const registry = new ExtensionRegistry({
     workspaceRoot,
     userHome,

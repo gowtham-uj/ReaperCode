@@ -11,6 +11,7 @@ import { dirname } from "node:path";
 import { z } from "zod";
 
 import { normalizeWorkspacePath, PathPolicyError } from "../policy/paths.js";
+import { assertNotCodeLoadingPath } from "../policy/code-loading-paths.js";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -241,6 +242,13 @@ async function applyFilePatch(
   dryRun: boolean,
 ): Promise<{ path: string; action: "created" | "modified" | "unchanged"; additions: number; removals: number; newContent: string }> {
   const fullPath = resolvePath(filePatch.newPath, workspaceRoot);
+  /*
+   * A patch can create a file, so it can create a hook. Same rule as
+   * `write_file` and `edit_file`, and checked here rather than at the call site
+   * because a patch names its own targets: the dispatcher sees one blob, not the
+   * paths inside it.
+   */
+  assertNotCodeLoadingPath(workspaceRoot, fullPath);
 
   // Read existing content (or empty if new file)
   let oldContent = "";
@@ -411,7 +419,18 @@ export async function executeApplyPatch(
     files: fileResults,
     totalAdditions,
     totalRemovals,
-    applied: allApplied && !dryRun,
+    /*
+     * `applied` means "a file was written", not "no file failed".
+     *
+     * It was `allApplied && !dryRun`, and `allApplied` stays true for a patch
+     * whose every file took the `unchanged` branch, so a patch that changed
+     * nothing reported `applied: true`. The per-file `action` was always right;
+     * the aggregate is what callers read, and "wrote nothing" and "wrote the
+     * file" were the same answer.
+     *
+     * A `created` or `modified` action is a write; `unchanged` is not.
+     */
+    applied: !dryRun && fileResults.some((file) => file.action === "created" || file.action === "modified"),
     dry_run: dryRun,
   };
 }

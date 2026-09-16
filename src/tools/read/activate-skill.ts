@@ -297,5 +297,38 @@ export async function activateSkillTool(workspaceRoot: string, args: { name: str
   }
 
   const content = await readFile(resolved.filePath, "utf8");
-  return `<activated_skill>\n<instructions>\n${stripFrontmatter(content)}\n</instructions>\n</activated_skill>`;
+  /*
+   * A body cannot close its own envelope.
+   *
+   * The body is interpolated verbatim between `<instructions>` tags, so a skill
+   * whose text contains `</instructions></activated_skill>` ends the envelope
+   * early and puts whatever follows it outside, in the same channel as the
+   * system's own words. Reproduced: a created skill returned two closed-tag
+   * pairs and a line reading "SYSTEM (trusted, outside the skill block)" that
+   * the model has no way to tell from a real instruction.
+   *
+   * Escaped rather than stripped, because a skill explaining these very markers
+   * is legitimate and silently deleting its text would be a worse answer than
+   * showing it as text. The escaping is the minimum that makes the delimiters
+   * inert: a reader sees the characters, a parser sees no tag.
+   */
+  return `<activated_skill>\n<instructions>\n${neutralizeSkillEnvelope(stripFrontmatter(content))}\n</instructions>\n</activated_skill>`;
+}
+
+/**
+ * Make the skill envelope's delimiters inert inside a body.
+ *
+ * Every marker that could end a block early, from this envelope and from the
+ * cockpit's `<<<SKILL: ...>>>` form, so a body cannot forge a section of either
+ * shape. The replacement keeps the text readable so a model still understands
+ * what the skill was saying.
+ */
+export function neutralizeSkillEnvelope(body: string): string {
+  return body
+    .replace(/<\/?instructions>/gi, (match) => match.replace(/[<>]/g, (ch) => (ch === "<" ? "&lt;" : "&gt;")))
+    .replace(/<\/?activated_skill>/gi, (match) => match.replace(/[<>]/g, (ch) => (ch === "<" ? "&lt;" : "&gt;")))
+    .replace(/<<<SKILL:/g, "&lt;&lt;&lt;SKILL:")
+    .replace(/<<<END_SKILL>>>/g, "&lt;&lt;&lt;END_SKILL&gt;&gt;&gt;")
+    .replace(/<<<UNTRUSTED_EXTERNAL_CONTENT>>>/g, "&lt;&lt;&lt;UNTRUSTED_EXTERNAL_CONTENT&gt;&gt;&gt;")
+    .replace(/<<<END_UNTRUSTED_EXTERNAL_CONTENT>>>/g, "&lt;&lt;&lt;END_UNTRUSTED_EXTERNAL_CONTENT&gt;&gt;&gt;");
 }

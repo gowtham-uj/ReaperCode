@@ -263,22 +263,64 @@ export class AuthoringRuntime {
    * Returns undefined when the run has no approval surface, so a test or a
    * direct caller is not blocked by a gate it cannot satisfy.
    */
-  private approvalGate(): ((input: { kind: string; id: string; description: string; trust: string }) => Promise<boolean>) | undefined {
+  private approvalGate():
+    | ((input: { kind: string; id: string; description: string; trust: string }) => Promise<boolean>)
+    | undefined {
     const requester = this.input.approvalRequester;
     if (!requester) return undefined;
     return async (input) => {
+      /*
+       * One adapter for both authoring kinds, because they are the same
+       * question asked about two artefacts.
+       *
+       * The sentence has to differ, though. "An extension is about to be written
+       * and run in Reaper's process with Reaper's privileges" is the fact that
+       * makes the decision, and it is not true of a hook in the same way: a hook
+       * is not a module with a lifecycle, it is a snippet compiled and run on
+       * every matching tool call. A user told the extension sentence about a
+       * hook would be approving something other than what happens.
+       */
+      const isHook = input.kind === "create_hook" || input.kind === "update_hook";
+      const reason = isHook
+        ? `A hook is about to run inside Reaper's own process with Reaper's privileges (${input.id}: ${input.description}). ` +
+          `Hook code is compiled and executed on every matching tool call and is not sandboxed.`
+        : `An extension is about to ${input.kind === "create_extension" ? "be written" : "run"} in Reaper's own process ` +
+          `with Reaper's privileges (${input.id}: ${input.description}). Extensions are not sandboxed.`;
+      /*
+       * The tool call is built per branch rather than with a ternary on `name`,
+       * because the argument shape is a discriminated union: a `hook_manager`
+       * call requires `event` and a `extension_manager` call does not, so a
+       * widened literal is not assignable to either member.
+       */
+      /*
+       * The approval surface shows the tool call it is about, so the gate
+       * carries the call's real arguments rather than a synthesized minimum.
+       *
+       * A `hook_manager create` requires `event`, `description`, `source`,
+       * `enforce` and `scope` together, so a call built from an id alone is not
+       * a call at all: the approval would be showing the user a request that
+       * could not have been made. The handler has the real arguments in hand and
+       * passes them, which is why this reads them off the input rather than
+       * assembling them.
+       */
+      const asRecord = input as unknown as Record<string, unknown>;
+      const toolCall = isHook
+        ? { id: `hook-${input.id}`, name: "hook_manager" as const, args: asRecord["rawArgs"] as never }
+        : {
+            id: `extension-${input.id}`,
+            name: "extension_manager" as const,
+            args: { action: input.kind === "create_extension" ? ("create" as const) : ("enable" as const), id: input.id },
+          };
       const decision = await requester.requestApproval(
         {
-          approvalId: `extension-${input.kind}-${input.id}`,
+          approvalId: `${isHook ? "hook" : "extension"}-${input.kind}-${input.id}`,
           runId: this.input.runId ?? "unknown",
           sessionId: this.input.sessionId ?? "unknown",
-          toolCall: { id: `extension-${input.id}`, name: "extension_manager", args: { action: "enable", id: input.id } },
+          toolCall,
           workspaceRoot: this.input.workspaceRoot,
           workingDirectory: this.input.workspaceRoot,
           permissionMode: this.input.permissionMode ?? "strict",
-          reason:
-            `An extension is about to ${input.kind === "create_extension" ? "be written" : "run"} in Reaper's own process ` +
-            `with Reaper's privileges (${input.id}: ${input.description}). Extensions are not sandboxed.`,
+          reason,
         },
         this.input.abortSignal,
       );
@@ -294,6 +336,17 @@ export class AuthoringRuntime {
         workspaceRoot: this.input.workspaceRoot,
         userHome: this.input.userHome,
       }),
+      /*
+       * The approval gate, which the hook deps did not have.
+       *
+       * Extensions were given one and hooks were not, so the cheaper path from
+       * a turn to code running as the host was the one with no question
+       * attached: a hook's source is compiled with `new Function` and run in
+       * this process, where the provider token is in scope. The gate has to be
+       * supplied here rather than checked inside the lifecycle, because this is
+       * the only place that knows how to ask.
+       */
+      ...(this.approvalGate() ? { approvalRequester: this.approvalGate() } : {}),
     }));
     return this.hookDeps;
   }

@@ -335,7 +335,7 @@ export async function handleUninstallExtension(
     });
     if (!allowed) return { ok: false, id: args.id, error: "denied by approval gate" };
   }
-  const u = deps.registry.uninstall(args.id);
+  const u = await deps.registry.uninstall(args.id);
   if (!u.ok) return { ok: false, id: args.id, ...(u.error ? { error: u.error } : {}) };
   if (deps.refreshExtensionTools) {
     await deps.refreshExtensionTools();

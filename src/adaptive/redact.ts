@@ -34,7 +34,30 @@ const PATTERNS: { name: string; re: RegExp; replacement: string | ((...args: str
   { name: "bearer",         re: /\bBearer\s+[A-Za-z0-9._-]{16,}/g, replacement: "Bearer [REDACTED:bearer]" },
   { name: "basic-auth",     re: /\bBasic\s+[A-Za-z0-9+/=]{8,}/g,    replacement: "Basic [REDACTED:basic-auth]" },
   { name: "conn-string",    re: /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp):\/\/[^\s:@/]+:([^@\s/]+)@[^\s/]+/g, replacement: (m: string) => m.replace(/:[^@\s/]+@/, ":[REDACTED:password]@") },
-  { name: "env-secret",     re: /\b(?:TOKEN|PASSWORD|SECRET|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|AUTH[_-]?KEY|SESSION[_-]?KEY)(\s*[:=]\s*)["']?([^\s"',;]{6,})["']?/gi, replacement: (m: string, _sep: string, val: string) => m.replace(val, "[REDACTED]") },
+  /*
+   * Environment assignments whose *name* says it holds a credential.
+   *
+   * The first version anchored the alternatives with `\b`, which is wrong for
+   * the commonest form of all: `_` is a word character, so there is no boundary
+   * between `ANTHROPIC_AUTH_` and `TOKEN`, and every prefixed name slipped
+   * through. Measured on this box: `ANTHROPIC_AUTH_TOKEN=cpa_...`,
+   * `DEEPSEEK_API_KEY=sk-...` and `NURALWATT_API_KEY=...` all survived
+   * redaction verbatim and were written to the trajectory, while a bare
+   * `TOKEN=...` was caught.
+   *
+   * The fix is to allow the name to be *anything* ending in one of these
+   * suffixes, so the vendor prefix is irrelevant. `\w*` before the suffix
+   * covers `ANTHROPIC_`, `MY_APP_CLIENT_` and everything else, and a leading
+   * `(?:^|[^\w])` is what keeps the match from starting mid-word: without it,
+   * `SOMETOKEN=` would match from `TOKEN=`. No `\b` at the end, because `=`
+   * and `:` follow a name and neither is a word character.
+   *
+   * The suffix list has to include the `AUTH_TOKEN` and `ACCESS_TOKEN` shapes,
+   * because a name ending in `_AUTH_TOKEN` is a credential whatever precedes
+   * it. The value must still be at least six characters, so a sentence that
+   * ends in a word like "secret" is not redacted.
+   */
+  { name: "env-secret",     re: /(?:^|[^\w])\w*(?:TOKEN|PASSWORD|PASSWD|SECRET|APIKEY|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH_KEY|SESSION_KEY|CREDENTIAL)\w*(\s*[:=]\s*)["']?([^\s"',;]{6,})["']?/gi, replacement: (m: string, _sep: string, val: string) => m.replace(val, "[REDACTED]") },
   { name: "cookie",         re: /\b(?:session|sid|auth|token|access_token|id_token)\s*=\s*([A-Za-z0-9._-]{16,})/g, replacement: (m: string) => m.replace(/([A-Za-z0-9._-]{16,})/, "[REDACTED]") },
 ];
 

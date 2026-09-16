@@ -139,7 +139,8 @@ export type EvalArgs = z.infer<typeof EvalArgsSchema>;
  * exists and one that gets used.
  */
 export const EVAL_TOOL_DESCRIPTION =
-  "Execute JavaScript in a real Node.js runtime: the full language and the full platform, including npm packages, node:* builtins, network access, child processes, and parallel execution.\n" +
+  "Execute JavaScript in a real Node.js runtime: the full language, npm packages, node:* builtins, child processes and parallel execution.\n" +
+  "It runs confined to this thread's workspace in a mount namespace: the filesystem outside the workspace is not mounted and **there is no network access**, so `fetch` to any host fails. Read and write inside the workspace, and use `bash` or a tool for anything that needs the network.\n" +
   /*
    * The "not for this" list goes first, and it is doing more work than any other
    * sentence here.

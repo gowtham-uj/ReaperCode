@@ -9,9 +9,26 @@
  *   uninstall_hook   → lifecycle.uninstall (remove from disk and runner)
  *   reload_hooks     → lifecycle.reload (re-walk the disk)
  *
- * No approval gate. Hooks have no trust tiers: a hook is live the
- * moment it is written, and `approve_hook` is kept only so a caller
- * written against the old workflow still gets a success answer.
+ * `create_hook` asks before it writes, and that header used to say the
+ * opposite: "No approval gate. Hooks have no trust tiers: a hook is live the
+ * moment it is written." That was true and it was the largest hole in the
+ * codebase, one layer below the sandbox.
+ *
+ * A hook's source is compiled with `new Function` and run in the app-server
+ * process, as root, with `ANTHROPIC_AUTH_TOKEN` in scope. Measured: `uid=0`,
+ * `child_process` available, the token readable from `process.env`, and the
+ * handler's return value lands in the transcript so the model reads it back.
+ * Exfiltration needs no network because the model is the channel. It also
+ * persists: a hook authored in one session is loaded from disk and fires in the
+ * next.
+ *
+ * Extensions were given an approval gate on create and enable for exactly this
+ * reason. Hooks had nothing, which left the cheaper path open: `create_hook`
+ * with a source that runs on the next tool call, unattended.
+ *
+ * `approve_hook` is still a no-op and still reports success. It was never the
+ * gate, and a caller written against it keeps working; the gate is here, at the
+ * write, which is the only point where asking changes anything.
  *
  * Enforce flag: `enforce: false` (default) makes the hook
  * observation-only — `allow: false` is ignored at dispatch time
@@ -38,8 +55,44 @@ import type {
   HookManagerArgs,
 } from "../types/hook-tools.schema.js";
 
+/**
+ * How a hook write asks the user first.
+ *
+ * Shaped like the extension requester rather than sharing its type, because the
+ * two answer different questions: an extension's gate is about code that is
+ * loaded as a module with its own lifecycle, and a hook's is about a snippet
+ * that runs on every matching tool call. Sharing one type would mean one
+ * description for both, and the sentence a user reads is the whole control.
+ */
+export type HookApprovalRequester = (input: {
+  kind: "create_hook" | "update_hook";
+  id: string;
+  description: string;
+  /** Whether the hook can block tool calls, which is worth saying separately. */
+  enforce: boolean;
+  scope: string;
+  /**
+   * The tool arguments this approval is about, verbatim.
+   *
+   * The approval surface renders the call, and a `create` is only a call with
+   * all of `event`, `description`, `source`, `enforce` and `scope` present, so
+   * a summary assembled by the gate would not be the request being approved.
+   * The handler has the real arguments, so it passes them through unchanged.
+   */
+  rawArgs?: unknown;
+}) => Promise<boolean>;
+
 export interface HookToolDeps {
   lifecycle: HookLifecycle;
+  /**
+   * How the run asks the user to approve a hook.
+   *
+   * Optional because tests and direct callers legitimately build these handlers
+   * without an approval surface; when it is absent the gate is skipped rather
+   * than every call failing. The app-server supplies one, which is what makes
+   * the gate real in the path a model actually takes.
+   */
+  approvalRequester?: HookApprovalRequester | undefined;
 }
 
 export interface CreateHookResult {
@@ -53,6 +106,23 @@ export async function handleCreateHook(
   args: CreateHookArgs,
   deps: HookToolDeps,
 ): Promise<CreateHookResult> {
+  /*
+   * Before the write, not after: a denied create must leave nothing on disk and
+   * nothing registered. `lifecycle.create` both persists and registers on the
+   * live runner, so asking afterwards would mean the code was already live when
+   * the question was asked.
+   */
+  if (deps.approvalRequester) {
+    const allowed = await deps.approvalRequester({
+      kind: "create_hook",
+      id: args.id,
+      description: args.description,
+      enforce: args.enforce,
+      scope: args.scope,
+      rawArgs: args,
+    });
+    if (!allowed) return { ok: false, id: args.id, error: "denied by approval gate" };
+  }
   const out = deps.lifecycle.create({
     id: args.id,
     event: args.event as HookEventName,
@@ -103,6 +173,26 @@ export async function handleUpdateHook(
   args: UpdateHookArgs,
   deps: HookToolDeps,
 ): Promise<{ ok: boolean; record?: HookRecord; error?: string }> {
+  /*
+   * A new source is the same power as a create, so it asks the same question.
+   *
+   * Gating create alone left the obvious way around it: create a hook whose
+   * source does nothing, then update it to one that does. The description, the
+   * matcher and the timeout are metadata and go through ungated, because asking
+   * about a sentence change trains the user to click through the prompt that
+   * matters.
+   */
+  if (deps.approvalRequester && args.source !== undefined) {
+    const allowed = await deps.approvalRequester({
+      kind: "update_hook",
+      id: args.id,
+      description: args.description ?? `rewrite the source of hook "${args.id}"`,
+      enforce: args.enforce ?? true,
+      scope: "existing",
+      rawArgs: args,
+    });
+    if (!allowed) return { ok: false, error: "denied by approval gate" };
+  }
   const input: UpdateHookInput = { id: args.id };
   if (args.description !== undefined) input.description = args.description;
   if (args.event !== undefined) input.event = args.event;

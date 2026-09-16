@@ -130,7 +130,7 @@ export const toolRegistry = {
       "Use `run_in_background: true` only for a tracked process that must outlive the call, then stop it when finished. " +
       "Do not use bash for file reads, listings, searches, or edits when file_view, list_directory, grep_search, file_edit, or write_file can do the work. " +
       "Large output returns a bounded preview and persisted output path; inspect that path with file_view instead of rerunning. " +
-      "Commands run from the workspace root and cannot leave it: a `cd` outside the workspace is refused with path_escape. " +
+      "Commands run confined to this thread's workspace: `cd` works, but the filesystem outside the workspace is not mounted, so a path out there does not resolve and there is no network access. " +
       "A command whose output is identical to an earlier one in the same turn may come back as `[same as earlier]`; if you need to confirm a state change, make the command produce distinguishing output (a timestamp, a count, a fresh `ls`) rather than repeating it verbatim. " +
       "After a failed broad build or test, inspect the focused failure before repeating the command.",
     argsSchema: BashArgsSchema,
@@ -207,7 +207,7 @@ export const toolRegistry = {
   },
   hook_manager: {
     description:
-      "Author and manage event hooks. A hook is a `(event, matcher, JS handler)` triple that runs on a lifecycle event. Actions: create (writes `.reaper/hooks/<id>.json`, compiles the handler, and attaches it to the live runner in one call; requires `id` (kebab-case), `event`, `description`, and `source` — omitting any is rejected, and `matcher`, `enforce`, `scope` and `timeout_ms` are optional), list (read-only inventory: id, event, matcher, enforce, registered flag), update (re-compile and re-register; accepts the same fields as create, all optional), approve (a no-op kept for compatibility — creation already registers it), uninstall (removes it from disk and the live runner). The handler body is compiled with `new Function` and its result decides the outcome; `enforce: false` (the default) means the hook can only advise, and `enforce: true` lets it block the tool call. A handler returns `{ allow: boolean, reason?, message? }`, and a bare `false` blocks.",
+      "Author and manage event hooks. A hook is a `(event, matcher, JS handler)` triple that runs on a lifecycle event. Creating or rewriting one requires user approval, because the handler runs in Reaper's own process. Actions: create (writes `.reaper/hooks/<id>.json`, compiles the handler, and attaches it to the live runner in one call; requires `id` (kebab-case), `event`, `description`, and `source` — omitting any is rejected, and `matcher`, `enforce`, `scope` and `timeout_ms` are optional), list (read-only inventory: id, event, matcher, enforce, registered flag), update (re-compile and re-register; accepts `description`, `event`, `source`, `matcher`, `enforce` and `timeout_ms`, all optional; the scope is not a field because it is where the file already lives), approve (a no-op kept for compatibility — creation already registers it), uninstall (removes it from disk and the live runner). The handler body is compiled with `new Function` and its result decides the outcome; `enforce: false` (the default) means the hook can only advise, and `enforce: true` lets it block the tool call. A handler returns `{ allow: boolean, reason?, message? }`, and a bare `false` blocks.",
     argsSchema: HookManagerArgsSchema,
   },
   apply_patch_edit: {

@@ -27,6 +27,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 import type { HookEventName } from "../extensions/types.js";
+import { isProjectTrustedSync } from "../resources/project-trust.js";
 import { HookRunner, type HookRunnerHandler } from "../extensions/hook-runner.js";
 import { compileHookSource, type CompiledHookHandler, type CompileResult } from "./sandbox.js";
 
@@ -119,6 +120,27 @@ export class HookLifecycle {
   discover(): HookRecord[] {
     const found: HookRecord[] = [];
     /*
+     * Whether project-scope hooks may run, asked once per walk.
+     *
+     * Extensions got this gate and hooks did not, which left the asymmetry the
+     * right way round for an attacker: a project extension in
+     * `<workspace>/.reaper/extensions/` is refused as untrusted, while a hook in
+     * the sibling `<workspace>/.reaper/hooks/` was discovered, compiled and
+     * enforcing. Both directories are on `TRUST_REQUIRING_PROJECT_PATHS`, and
+     * both run code in this process, so they must answer to the same rule.
+     *
+     * Synchronous because `discover()` is: the store reads a small JSON file and
+     * the decision is needed before any source is compiled. A cached read per
+     * walk, not per hook, so a directory of hooks does not read the file N times.
+     */
+    let projectTrusted = true;
+    try {
+      projectTrusted = isProjectTrustedSync(this.opts.workspaceRoot, this.opts.userHome);
+    } catch {
+      // A trust store that cannot be read is not a reason to run the code.
+      projectTrusted = false;
+    }
+    /*
      * Ids still present on disk after this walk.
      *
      * A record whose file is gone is dropped, together with its runner
@@ -135,6 +157,19 @@ export class HookLifecycle {
     const seen = new Set<string>();
     for (const dir of [this.hooksDir("user"), this.hooksDir("project")]) {
       if (!existsSync(dir)) continue;
+      /*
+       * A project-scope hook is refused unless the workspace is trusted, while
+       * a user-scope one needs no check: `~/.reaper/hooks` is writable only by
+       * the user, so a file there carries its own consent. The same rule and the
+       * same reasoning as the extension registry's `activateOne`.
+       *
+       * Refused before compilation, so an untrusted hook's source never reaches
+       * `new Function`. It stays on disk and stays listed, which is the honest
+       * report: the file is there, and the reason it is not running is the
+       * workspace's trust state rather than anything wrong with the hook.
+       */
+      const isProjectDir = dir === this.hooksDir("project");
+      if (isProjectDir && !projectTrusted) continue;
       let names: string[];
       try {
         names = readdirSync(dir).filter((n) => n.endsWith(".json"));

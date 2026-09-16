@@ -31,6 +31,7 @@ import type { ThreadBrowserRuntime } from "../browser/thread-runtime.js";
 import { executeBrowserUse } from "./browser/execute-browser-use.js";
 import { CORE_TOOL_NAMES, toolRegistry } from "./registry.js";
 import { assertDeletablePath, assertDeletableTarget, deleteFileTool } from "./write/delete-file.js";
+import { assertNotCodeLoadingPath } from "../policy/code-loading-paths.js";
 import { applyEditFileContent, editFileTool } from "./write/edit-file.js";
 import { writeFileTool } from "./write/write-file.js";
 import { executeSearchTools } from "./write/search-tools.js";
@@ -1591,6 +1592,19 @@ export class ToolExecutor {
         {
           const args = toolRegistry.write_file.argsSchema.parse(call.args);
           const targetPath = await this.resolveExistingPathCase(args.path);
+          /*
+           * `write_file` was the unfenced side door to code execution.
+           *
+           * The approval gates on `extension_manager create` and `hook_manager
+           * create` are the front door, and a file write reaches the same
+           * loaders: a hook JSON in `.reaper/hooks/` is compiled and registered
+           * by the next `discover()`, and an extension module in
+           * `.reaper/extensions/` is imported into this process. Checked here,
+           * at the one place every write passes through, rather than in each
+           * tool, because the set of write tools is exactly the set that would
+           * need to remember.
+           */
+          assertNotCodeLoadingPath(this.options.workspaceRoot, targetPath);
           await this.snapshotBeforeMutation(targetPath, "write_file");
           this.fileWriteCounts.set(targetPath, (this.fileWriteCounts.get(targetPath) ?? 0) + 1);
           // V1: route through the WAL so `hasPendingWrites()` reflects the
@@ -1621,6 +1635,9 @@ export class ToolExecutor {
         {
           const parsedArgs = toolRegistry.edit_file.argsSchema.parse(call.args);
           const args = { ...parsedArgs, path: await this.resolveExistingPathCase(parsedArgs.path) };
+          // Same rule as `write_file`: editing a hook into existence is the same
+          // act as writing one, and the loader cannot tell the difference.
+          assertNotCodeLoadingPath(this.options.workspaceRoot, args.path);
           await this.snapshotBeforeMutation(args.path, "edit_file");
           this.fileWriteCounts.set(args.path, (this.fileWriteCounts.get(args.path) ?? 0) + 1);
           if (this.recoverySession) {

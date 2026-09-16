@@ -82,6 +82,25 @@ export function parsePreviewPath(rawUrl: string): PreviewTarget | undefined {
   if (!/^\d{2,5}$/.test(portText) || !Number.isInteger(port) || port < 1024 || port > 65_535) {
     return undefined;
   }
+  /*
+   * Two ports are refused outright, and they are the two that matter.
+   *
+   * The port range check above bounds *how many* ports this reaches and not
+   * which, and the interesting services all sit above 1024. Measured before
+   * this: `/preview/9222/json/version` returned the shared Chrome's CDP
+   * descriptor, and `/preview/4180/healthz` returned the gateway's own health,
+   * so the proxy reached both the browser every thread shares and the server
+   * serving the page. Anything that can fetch from this gateway can reach those
+   * two, which is why naming them is worth more than narrowing the range.
+   *
+   * A denylist rather than an allowlist of "ports the agent started", because
+   * the honest set of dev-server ports is not knowable here: a project picks
+   * its own, and refusing a legitimate one would break the pane this proxy
+   * exists for. The two below are the ones with no legitimate preview use.
+   */
+  const CDP_PORT = 9222;
+  const gatewayPort = Number(process.env["REAPER_BFF_PORT"] ?? 4180);
+  if (port === CDP_PORT || port === gatewayPort) return undefined;
 
   const rest = slash === -1 ? "/" : remainder.slice(slash);
   return { port, path: `${rest || "/"}${url.search}` };

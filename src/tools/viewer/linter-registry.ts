@@ -34,6 +34,7 @@ import {
 } from "./types.js";
 
 import { buildChildEnv } from "../child-env.js";
+import { isProjectTrustedSync } from "../../resources/project-trust.js";
 import { bundledLinterManifest } from "../../util/bundled-assets.js";
 
 const CACHE_ROOT = ".reaper";
@@ -101,8 +102,26 @@ export class LinterRegistry {
        LINTERS_DIR,
        "manifest.json",
      );
+     /*
+      * A workspace manifest is only honoured in a trusted workspace.
+      *
+      * The manifest names a package, and that package is `require`d into the
+      * app-server process, so writing a manifest is saying "load this code
+      * here". The audit reproduced the whole path with two `write_file` calls:
+      * one for `.reaper/linters/manifest.json`, one for the package it named,
+      * after which `file_edit` reported the edit as clean while the package's
+      * `index.js` ran as the host with the provider token in scope.
+      *
+      * Untrusted means the *built-in* manifest is used instead of a refusal.
+      * That is the correct reading rather than a compromise: the user has not
+      * agreed to this workspace loading code, so the code it would load is
+      * simply not consulted, and lint still works with the linters that shipped.
+      */
+     const mayUseWorkspaceManifest = isProjectTrustedSync(workspaceRoot) || !existsSync(manifestPath);
+
      let raw: string | undefined;
      try {
+       if (!mayUseWorkspaceManifest) throw new Error("untrusted workspace manifest");
        raw = await readFile(manifestPath, "utf8");
      } catch {
        // 2) Fall back to the bundled default manifest shipped with this

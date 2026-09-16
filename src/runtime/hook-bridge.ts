@@ -160,10 +160,24 @@ export function runnerAsHooks(runner: HookRunner | undefined): Hooks | undefined
     emit: async (event: HookEvent): Promise<HookResult> => {
       const outcome = await runner.dispatch(event.name, event.payload ?? {});
       if (outcome.allow) {
-        return {
-          allow: true,
-          ...(outcome.firstDenyReason ? { message: outcome.firstDenyReason } : {}),
-        };
+        /*
+         * An observe-only hook's advice is carried through on the allow path.
+         *
+         * `firstDenyReason` is set only when a handler denies or times out, so
+         * the message of an `enforce: false` hook never reached this point and
+         * was dropped. The executor reads `preHookResult.message` and attaches
+         * it as the tool result's `hint`, so every advice-only hook a model
+         * authored was inert: it ran, returned its sentence, and nothing
+         * surfaced it. Verified end to end through a real `ToolExecutor`: the
+         * dispatch carried `outcome: "message"` with the text, and the tool
+         * result had no `hint` field at all.
+         *
+         * Advising is the only thing a non-enforcing hook can do, so dropping
+         * the message made the feature a no-op rather than a quiet one.
+         */
+        const advice = outcome.results.find((result) => result.outcome === "message" && result.message)?.message;
+        const message = advice ?? outcome.firstDenyReason;
+        return { allow: true, ...(message !== undefined ? { message } : {}) };
       }
       const reason = outcome.firstDenyReason ?? "blocked by hook";
       return { allow: false, message: reason, reason };

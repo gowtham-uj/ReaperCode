@@ -93,6 +93,78 @@ const ALLOWED_METHODS = new Set([
   "policy/rules/write",
 ]);
 
+/**
+ * Methods that act on a thread the caller must already be attached to.
+ *
+ * The gateway registered interest in any thread a tab named, which is right for
+ * reading and *wrong* for changing one. Verified: a tab that had never created
+ * thread X sent one `thread/workspace/set` and X's `cwd` became `/root`, after
+ * which the root itself served that directory to every tab. Re-pointing a
+ * thread's workspace is the strongest example, but the same hole let any page
+ * rename another conversation, change its model, start a turn on it, or close
+ * it.
+ *
+ * `thread/start` and `thread/resume` are deliberately absent: they are how a
+ * tab *becomes* attached, and requiring prior attachment would make them
+ * impossible to call. Everything else here assumes the thread exists, so the
+ * caller has to have reached it first.
+ *
+ * "Attached" means the tab resumed, started, or read the thread before this
+ * call. The UI does that when a conversation is opened, so a legitimate client
+ * passes without changing anything about how it works.
+ */
+const OWNERSHIP_REQUIRED_METHODS = new Set([
+  "thread/workspace/set",
+  "thread/name/set",
+  "thread/model/set",
+  "thread/effort/set",
+  "thread/config/set",
+  "thread/close",
+  "turn/start",
+  "turn/interrupt",
+  "turn/steer",
+]);
+
+/**
+ * Whether a request's Origin may use this surface.
+ *
+ * One rule, used by both listeners. The WebSocket had it and the REST surface
+ * did not, which made the guard look complete while `/api/*` stayed open to any
+ * page: verified by POSTing to `/api/upload` from `Origin: http://evil.example.com`
+ * and watching the bytes land on disk. A write from a page the server did not
+ * serve is the case worth refusing, and refusing it on one socket while
+ * accepting it on the other is not a boundary.
+ *
+ * The rule is same-origin against the request's own Host, which is what a
+ * browser guarantees for a page this server actually served:
+ *
+ *   - no Origin at all is a non-browser client, already inside the loopback
+ *     boundary this surface trusts;
+ *   - a loopback origin is allowed, because the dev setup proxies from Vite on
+ *     one loopback port to the gateway on another and those do not share a Host;
+ *   - an Origin whose host matches the Host the request arrived on is the UI
+ *     talking to itself, whatever hostname that is, loopback or public;
+ *   - `REAPER_ALLOWED_ORIGINS` covers a deployment behind a proxy that rewrites
+ *     Host;
+ *   - anything else is a page this server did not serve.
+ */
+export function originAllowed(origin: string | undefined, requestHost: string | undefined): boolean {
+  if (origin === undefined || origin === "") return true;
+  try {
+    const parsed = new URL(origin);
+    if (isLoopbackHost(parsed.hostname)) return true;
+    if (typeof requestHost === "string" && requestHost.length > 0 && parsed.host === requestHost) return true;
+    const allowed = (process.env["REAPER_ALLOWED_ORIGINS"] ?? "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+    return allowed.includes(origin);
+  } catch {
+    // A malformed Origin is not one of ours.
+    return false;
+  }
+}
+
 export interface BrowserGatewayOptions {
   host: string;
   port: number;
@@ -153,6 +225,24 @@ export async function startBrowserGateway(options: BrowserGatewayOptions): Promi
   };
 
   const http = createServer((request, response) => {
+    /*
+     * The Origin check comes first, before any route is considered.
+     *
+     * The WebSocket had this and the REST surface did not, so a page on a
+     * foreign origin could not open the socket and *could* POST to
+     * `/api/upload`: verified, from `Origin: http://evil.example.com`, and the
+     * bytes landed on disk. Same rule, checked once, before anything reads a
+     * path or a body.
+     *
+     * A refused request gets no CORS headers, so a browser blocks the response
+     * and a script cannot read it. The write is refused as well, which is the
+     * part that matters: the body is never parsed and the file is never opened.
+     */
+    if (!originAllowed(request.headers.origin, request.headers.host)) {
+      response.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" });
+      response.end(JSON.stringify({ error: "origin_not_allowed" }));
+      return;
+    }
     // The streaming routes first: they are not JSON, they stream a body, and
     // they must pass through arbitrary methods. Routing them through
     // `handleRest` would mean its GET-only guard rejected a preview form
@@ -255,29 +345,8 @@ export async function startBrowserGateway(options: BrowserGatewayOptions): Promi
      * A request with no Origin at all is a non-browser client, already inside the
      * loopback boundary this surface trusts.
      */
-    verifyClient: (info: { origin?: string; req: IncomingMessage }) => {
-      const origin = info.origin ?? info.req.headers.origin;
-      if (origin === undefined || origin === "") return true;
-      try {
-        const originHost = new URL(origin).host;
-        if (isLoopbackHost(new URL(origin).hostname)) return true;
-        // The Host header the client sent, which for the browser is the origin
-        // it is on. Comparing to it is what makes this work for any deployment
-        // hostname without configuring one.
-        const requestHost = info.req.headers.host;
-        if (typeof requestHost === "string" && requestHost.length > 0 && originHost === requestHost) return true;
-        // An explicitly configured public origin, for a deployment behind a
-        // proxy that rewrites Host.
-        const allowed = (process.env["REAPER_ALLOWED_ORIGINS"] ?? "")
-          .split(",")
-          .map((entry) => entry.trim())
-          .filter((entry) => entry.length > 0);
-        if (allowed.includes(origin)) return true;
-      } catch {
-        // A malformed Origin is not one of ours.
-      }
-      return false;
-    },
+    verifyClient: (info: { origin?: string; req: IncomingMessage }) =>
+      originAllowed(info.origin ?? info.req.headers.origin, info.req.headers.host),
   });
   wss.on("connection", (socket: WebSocket) => {
     const tabId = hub.addTab({
@@ -576,6 +645,23 @@ async function handleTabMessage(
   // post-hoc registration below is sufficient for it.
   const earlyThreadId = typeof params.threadId === "string" ? params.threadId : undefined;
   const wasWatching = earlyThreadId ? hub.isWatching(tabId, earlyThreadId) : false;
+  /*
+   * A mutating call has to come from a tab that was already attached.
+   *
+   * Checked before `watchThread` below, because that call is what would
+   * otherwise turn "this tab named your thread" into permission to change it.
+   * The two orders are the whole difference between a boundary and a formality.
+   */
+  if (
+    OWNERSHIP_REQUIRED_METHODS.has(message.method)
+    && earlyThreadId !== undefined
+    && !wasWatching
+  ) {
+    if (message.id !== undefined) {
+      replyError(socket, message.id, -32600, "Not attached to this thread");
+    }
+    return;
+  }
   if (earlyThreadId) hub.watchThread(tabId, earlyThreadId);
 
   try {

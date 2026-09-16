@@ -12,6 +12,7 @@
  */
 
 import { execFile } from "node:child_process";
+import { lstatSync, realpathSync } from "node:fs";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -32,14 +33,74 @@ export class PathEscapeError extends Error {
   }
 }
 
-/** Resolve a client-supplied path inside `root`, or throw. */
+/**
+ * Resolve a client-supplied path inside `root`, or throw.
+ *
+ * The lexical check below is not enough on its own, and believing it was is what
+ * this function got wrong. `path.resolve` never touches the filesystem, so the
+ * containment it proves is about a *string*; the kernel then resolves every
+ * symlink in that string when the caller opens it. A sandboxed process could
+ * create a link inside its own workspace and the host gateway would follow it
+ * out: verified with `ln -sfn /etc/passwd <workspace>/link`, after which
+ * `/api/file?path=link` returned the password file, and with `/work/node_modules`
+ * and a nested `mkdir` through a link that landed outside the root on disk.
+ *
+ * So the check is done twice, and the second one is the real one:
+ *
+ *   1. Lexically, which catches `..` before any filesystem call and gives a
+ *      clear error for the common case.
+ *   2. Against `realpath`, which resolves every link and proves the *actual*
+ *      target is inside the root. `realpath` on the root as well, so a root
+ *      that is itself reached through a link compares correctly.
+ *
+ * The realpath check is skipped when the path does not exist yet, because a
+ * caller legitimately resolves a path it is about to create (`/api/upload`
+ * resolves a target before writing it). A non-existent path has nothing to
+ * follow, and the caller that creates it re-checks with `realpathSync` on the
+ * parent, which is where a link would be.
+ */
 export function resolveInsideRoot(root: string, requested: string): string {
   const absoluteRoot = path.resolve(root);
   const candidate = path.resolve(absoluteRoot, requested);
   if (candidate !== absoluteRoot && !candidate.startsWith(absoluteRoot + path.sep)) {
     throw new PathEscapeError(requested);
   }
+  /*
+   * A NUL byte is neither a traversal nor a valid path, and letting it through
+   * made `stat` throw `ERR_INVALID_ARG_VALUE`, which is not an `ENOENT` and not
+   * a `PathEscapeError`, so the route reported `internal_error` for a
+   * client-supplied string. The upload path already rejected NUL; the read
+   * routes did not.
+   */
+  if (candidate.includes("\0")) throw new PathEscapeError(requested);
+
+  const real = realpathSyncOrUndefined(candidate);
+  if (real !== undefined && !isInside(absoluteRoot, real)) throw new PathEscapeError(requested);
   return candidate;
+}
+
+/** `lstatSync` when the path exists, undefined when it does not. */
+function lstatSyncOrUndefined(target: string): ReturnType<typeof lstatSync> | undefined {
+  try {
+    return lstatSync(target);
+  } catch {
+    return undefined;
+  }
+}
+
+/** `realpathSync` when the path exists, undefined when it does not. */
+function realpathSyncOrUndefined(target: string): string | undefined {
+  try {
+    return realpathSync(target);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Whether `target` is the root or inside it, after both are resolved. */
+function isInside(root: string, target: string): boolean {
+  const realRoot = realpathSyncOrUndefined(root) ?? path.resolve(root);
+  return target === realRoot || target.startsWith(realRoot + path.sep);
 }
 
 export interface TreeEntry {
@@ -155,7 +216,59 @@ export async function writeWorkspaceUpload(
 ): Promise<{ path: string; bytes: number }> {
   if (input.bytes.byteLength > MAX_UPLOAD_BYTES) throw new UploadTooLargeError(input.bytes.byteLength);
   const target = resolveUploadTarget(root, input.path);
-  await mkdir(path.dirname(target), { recursive: true });
+  /*
+   * Refuse to write through a link, in either position.
+   *
+   * `resolveInsideRoot` now resolves the path, but that is not enough for a
+   * *write*, because a write creates something that did not exist. Two cases,
+   * both reproduced against the live server:
+   *
+   *   - the target itself is a link: `writeFile` follows it and the bytes land
+   *     wherever it points, outside the root, while the response reports a path
+   *     that reads as though it were inside.
+   *   - a parent directory is a link: `mkdir(dirname, { recursive: true })`
+   *     creates directories through it, outside the root.
+   *
+   * So the parent is resolved and checked, and the final segment is refused
+   * outright when it is a symlink. Refused rather than replaced, because
+   * silently unlinking a file the user may have created is a destructive act
+   * this route has no business taking.
+   */
+  const parent = path.dirname(target);
+  /*
+   * The deepest *existing* ancestor is checked before anything is created.
+   *
+   * `mkdir(parent, { recursive: true })` through a symlinked directory creates
+   * the directories outside the root and only then does the check that would
+   * refuse them fail, so a refused upload still left empty directories on the
+   * host: verified, `deep/` appeared in `/tmp/symlink-outside` after a request
+   * the route answered with 403. Refusing after the side effect is not refusing.
+   *
+   * So the walk goes upward from the target to the nearest ancestor that exists,
+   * resolves *that*, and proves it is inside the root. Everything below it does
+   * not exist yet, so there is nothing there to follow, and creating it cannot
+   * escape a directory already known to be inside.
+   */
+  let ancestor = parent;
+  while (realpathSyncOrUndefined(ancestor) === undefined && ancestor !== path.dirname(ancestor)) {
+    ancestor = path.dirname(ancestor);
+  }
+  const realAncestor = realpathSyncOrUndefined(ancestor);
+  if (realAncestor === undefined || !isInside(path.resolve(root), realAncestor)) {
+    throw new PathEscapeError(input.path);
+  }
+  const existing = lstatSyncOrUndefined(target);
+  if (existing?.isSymbolicLink()) throw new PathEscapeError(input.path);
+  await mkdir(parent, { recursive: true });
+  /*
+   * Re-checked after the create, because the create is what could have followed
+   * a link. Cheap, and it is the difference between proving the leaf is inside
+   * and assuming it.
+   */
+  const realParent = realpathSyncOrUndefined(parent);
+  if (realParent === undefined || !isInside(path.resolve(root), realParent)) {
+    throw new PathEscapeError(input.path);
+  }
   await writeFile(target, input.bytes);
   return {
     path: path.relative(path.resolve(root), target).split(path.sep).join("/"),

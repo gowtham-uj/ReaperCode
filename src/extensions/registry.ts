@@ -25,12 +25,14 @@ import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statS
 import { isAbsolute, join, resolve, sep } from "node:path";
 
 import { assertActivated, loadExtensionMain, type ActivatedModule } from "./loader.js";
-import { ProjectTrustStore, resolveProjectTrusted } from "../resources/project-trust.js";
+import { isProjectTrustedSync, ProjectTrustStore, resolveProjectTrusted } from "../resources/project-trust.js";
 import { ExtensionTrustResolver } from "./trust.js";
 import { ExtensionToolRegistry } from "./tool-registry.js";
 import { ExtensionPermissionManager } from "./permission-manager.js";
 import { HookRunner } from "./hook-runner.js";
 import { parseExtensionManifest } from "./manifest.js";
+import { TOOL_METADATA } from "../governance/tool-metadata.js";
+import { toolRegistry } from "../tools/registry.js";
 import { createExtensionContext, type ExtensionLoggerSink } from "./host.js";
 import type {
   ExtensionDoctorReport,
@@ -91,14 +93,44 @@ export class ExtensionRegistry {
       userHomeExtensionsDir: join(opts.userHome, ".reaper", "extensions"),
       projectExtensionsDir: join(opts.workspaceRoot, ".reaper", "extensions"),
     });
-    this.toolRegistry = opts.toolRegistry ?? new ExtensionToolRegistry();
+    /*
+     * The built-in names, so an extension cannot claim one.
+     *
+     * Two sources, unioned, because neither alone is the whole set. `toolRegistry`
+     * is what the executor dispatches on and `TOOL_METADATA` is what the policy
+     * layer knows about; `hook_manager`, `extension_manager` and `skill_manager`
+     * are in the first and not the second, and an extension claiming
+     * `hook_manager` was accepted while `write_file` was refused. Their
+     * descriptions are what reaches the model, so the gap mattered.
+     */
+    const builtinToolNames = new Set([
+      ...Object.keys(toolRegistry),
+      ...Object.keys(TOOL_METADATA),
+    ]);
+    this.toolRegistry = opts.toolRegistry ?? new ExtensionToolRegistry({
+      reservedToolNames: builtinToolNames,
+    });
     this.permissions = opts.permissionManager ?? this.toolRegistry.getPermissions();
     this.hookRunner = opts.hookRunner ?? null;
   }
 
-  /** Walk the 3 install locations and parse manifests. */
+  /**
+   * Walk the 3 install locations and parse manifests.
+   *
+   * Runtime state survives the walk. `status` and `error` are facts about this
+   * *process* — whether an extension has been activated, and whether activation
+   * threw — and the disk knows nothing about them. Rebuilding every record from
+   * disk dropped both, so `enable` reported `activated: true`, the tool
+   * registered, and the next `list` (which the manager calls before every
+   * action) said `installed` as though nothing had happened. An inventory the
+   * model reads to check its own work has to agree with the work.
+   *
+   * Trust is taken from `loadManifestFromDir`, which computes it fresh, so a
+   * trust decision still comes from disk where it belongs.
+   */
   discover(_input?: DiscoverInput): LoadedExtension[] {
     this.loadErrors.length = 0;
+    const previous = new Map(this.loaded);
     const out: LoadedExtension[] = [];
     for (const folder of [this.opts.builtinRoot, join(this.opts.userHome, ".reaper", "extensions"), join(this.opts.workspaceRoot, ".reaper", "extensions")]) {
       for (const ent of enumerateFolders(folder)) {
@@ -110,8 +142,25 @@ export class ExtensionRegistry {
     const dedup = new Map<string, LoadedExtension>();
     for (const l of out) dedup.set(l.id, l);
     this.loaded.clear();
-    for (const l of dedup.values()) this.loaded.set(l.id, l);
-    return [...dedup.values()];
+    for (const [id, record] of dedup) {
+      const before = previous.get(id);
+      if (before === undefined) {
+        this.loaded.set(id, record);
+        continue;
+      }
+      /*
+       * Only the runtime fields are carried over, and only when the manifest did
+       * not fail to parse. A record that failed on this walk is a real failure
+       * and must not inherit a healthy status from before.
+       */
+      const failedNow = record.status === "failed";
+      this.loaded.set(id, failedNow ? record : {
+        ...record,
+        ...(before.status === "enabled" || before.status === "disabled" ? { status: before.status } : {}),
+        ...(before.error !== undefined ? { error: before.error } : {}),
+      });
+    }
+    return [...this.loaded.values()];
   }
 
   /**
@@ -205,9 +254,65 @@ export class ExtensionRegistry {
     return { ok: true, id: manifest.id };
   }
 
-  uninstall(id: string): { ok: boolean; error?: string; partial?: boolean } {
+  /**
+   * Remove an extension, and stop everything it started.
+   *
+   * The first version deleted the folder and cleared the tool registry, and
+   * both of those are only half of what an extension is. An extension also
+   * registers hook handlers on the shared runner, holds permissions granted
+   * from its manifest, and may have started a timer in `activate()`. None of
+   * those were touched, so an uninstalled extension kept observing every tool
+   * call and kept running its interval, with its directory gone and its name
+   * absent from `list()`:
+   *
+   *   - runner handlers after uninstall: still `["evil"]`, and the hook still
+   *     fired on the next `PreToolUse`, whose payload includes tool arguments;
+   *   - the extension's `setInterval` kept ticking;
+   *   - `deactivate` was never called, and `deactivateAll` re-imports from
+   *     `installPath`, which is deleted by then, so it could never be reached.
+   *
+   * `async` because `deactivate` is, and calling it is the only way an
+   * extension gets to clean up what it started.
+   */
+  async uninstall(id: string): Promise<{ ok: boolean; error?: string; partial?: boolean }> {
     const r = this.loaded.get(id);
     if (!r) return { ok: false, error: `extension "${id}" not loaded` };
+    /*
+     * Deactivate first, while the folder still exists: `deactivate` may want to
+     * write a log or flush state into its own install path, and it cannot do
+     * that after the rm below.
+     */
+    let deactivateError: string | undefined;
+    if (r.status === "enabled") {
+      try {
+        const loadResult = await loadExtensionMain(r.installPath, r.manifest);
+        const activated = loadResult.ok ? loadResult.module?.default : undefined;
+        if (activated && typeof activated.deactivate === "function") {
+          await activated.deactivate(createExtensionContext({
+            extensionId: r.id,
+            trust: r.trust,
+            workspaceRoot: this.opts.workspaceRoot,
+            scratchpadPath: join(this.opts.workspaceRoot, ".reaper", "scratch"),
+            extensionInstallPath: r.installPath,
+            ...(this.opts.logSink ? { logSink: this.opts.logSink } : {}),
+          }));
+        }
+      } catch (error) {
+        // Reported, not fatal: the extension is being removed either way, and
+        // refusing to remove it because its cleanup threw would leave it
+        // installed and still running.
+        deactivateError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    /*
+     * Then the subscriptions, which is what actually stops it.
+     *
+     * `unregisterAll` returns the count so the result can say how much was
+     * detached; a handler that survives its extension is the failure this whole
+     * method exists to prevent.
+     */
+    const hooksRemoved = this.hookRunner?.unregisterAll(id) ?? 0;
+    this.permissions.revokeAll(id);
     this.loaded.delete(id);
     this.toolRegistry.unregisterAllForExtension(id);
     if (existsSync(r.installPath)) {
@@ -226,7 +331,14 @@ export class ExtensionRegistry {
         };
       }
     }
-    return { ok: true };
+    return {
+      ok: true,
+      ...(deactivateError !== undefined
+        ? { partial: true, error: `removed, but deactivate threw: ${deactivateError}` }
+        : {}),
+      // Reported so a caller can see the teardown happened rather than assume it.
+      ...(hooksRemoved > 0 ? { hooksRemoved } : {}),
+    } as { ok: boolean; error?: string; partial?: boolean };
   }
 
   enable(id: string): { ok: boolean; error?: string } {
@@ -270,9 +382,37 @@ export class ExtensionRegistry {
      * disappears when it is read is not a setting, so promote through the
      * resolver and let the file be the source of truth.
      */
-    this.trust.promote(id, r.installPath, note);
+    /*
+     * A project extension is trusted by trusting the *workspace*.
+     *
+     * Writing `trust.json` beside a project extension cannot work, and the
+     * resolver is right to refuse it: that file sits inside a directory anything
+     * with workspace write access can edit, so honouring it would let a workspace
+     * grant itself trust. Only a record under the user's own home counts.
+     *
+     * The extension's own `installPath` is under the workspace, so
+     * `promote` wrote a file the next read discarded, and the tool reported
+     * `trust: "user-trusted"` while `list` in a fresh process said
+     * `project-untrusted`. The decision that *can* stick for a project extension
+     * is the workspace's, which lives in the user's home and is the same record
+     * the activation gate consults.
+     */
+    const projectScoped = this.isProjectScoped(r.installPath);
+    if (projectScoped) {
+      ProjectTrustStore.create(this.opts.userHome).set(this.opts.workspaceRoot, true);
+    } else {
+      this.trust.promote(id, r.installPath, note);
+    }
     r.trust = "user-trusted";
     return { ok: true };
+  }
+
+  /** Whether an install path lives under this workspace's `.reaper/extensions`. */
+  private isProjectScoped(installPath: string): boolean {
+    const projectRoot = join(this.opts.workspaceRoot, ".reaper", "extensions");
+    const a = installPath.endsWith(sep) ? installPath : installPath + sep;
+    const b = projectRoot.endsWith(sep) ? projectRoot : projectRoot + sep;
+    return a.startsWith(b);
   }
 
   untrust(id: string, note?: string): { ok: boolean; error?: string } {
@@ -571,6 +711,27 @@ export class ExtensionRegistry {
     }
     const decision = this.trust.resolve({ extensionId: manifest.id, installPath: dir });
     /*
+     * The label is the *effective* trust, not the per-extension record.
+     *
+     * For a project-scope extension the resolver can only ever answer
+     * `project-untrusted`, because the file it would need sits inside a
+     * directory the workspace can write and honouring it would let a workspace
+     * grant itself trust. That answer is correct about the file and wrong about
+     * the outcome: the gate that decides whether a project extension runs is the
+     * *workspace's* trust, so after `extensions trust` the extension activates
+     * while the label still read `project-untrusted`.
+     *
+     * A label that disagrees with the gate is worse than no label, because it is
+     * the thing an author reads to find out why their extension is not loading.
+     * So a project-scope extension reports `user-trusted` when its workspace is
+     * trusted, which is exactly the condition `activateOne` checks.
+     */
+    const projectScoped = this.isProjectScoped(dir);
+    const effectiveTrust: ExtensionTrust = projectScoped && decision.trust === "project-untrusted"
+      && isProjectTrustedSync(this.opts.workspaceRoot, this.opts.userHome)
+      ? "user-trusted"
+      : decision.trust;
+    /*
      * Installed, not disabled. An extension the user just installed is one they
      * intend to use; parking it as `disabled` until a separate trust step was
      * the other half of why enable appeared to work and did nothing.
@@ -579,7 +740,7 @@ export class ExtensionRegistry {
     return {
       id: manifest.id,
       manifest,
-      trust: decision.trust,
+      trust: effectiveTrust,
       status,
       installPath: dir,
       loadedAt: Date.now(),

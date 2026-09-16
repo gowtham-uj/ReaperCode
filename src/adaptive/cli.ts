@@ -1201,7 +1201,7 @@ export class ReaperCLI {
     const [id] = args;
     if (!id) return { exitCode: 2, stdout: "", stderr: "extension id required" };
     const r = this.ensureExtensionRegistry();
-    const out = r.uninstall(id);
+    const out = await r.uninstall(id);
     return out.ok ? { exitCode: 0, stdout: `removed ${id}\n`, stderr: "" } : { exitCode: 1, stdout: "", stderr: out.error ?? "remove failed" };
   }
 

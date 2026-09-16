@@ -21,6 +21,22 @@ export default defineConfig({
     // carries Reaper auth — that auth is then what replaces loopback.
     host: process.env.REAPER_WEB_HOST ?? "127.0.0.1",
     port: 5273,
+    /*
+     * No CORS, on any route.
+     *
+     * Vite's dev server reflects the request's Origin back as
+     * `Access-Control-Allow-Origin` by default, and it does that for the dev
+     * server's own routes as well as for the proxied ones. `foo.localhost`
+     * counts as loopback, so a page served from any `*.localhost` origin could
+     * read `/api/file?path=.env` through this port and get the provider keys
+     * verbatim. Verified.
+     *
+     * The UI is same-origin with this server, so it needs no header, and a
+     * foreign page that gets none is blocked by the browser. Setting it here
+     * rather than per-proxy-rule because the reflection happened on the routes
+     * that are *not* proxied too.
+     */
+    cors: false,
     // The BFF is proxied rather than exposed. One published origin, and the
     // BFF itself never has to leave loopback.
     proxy: {

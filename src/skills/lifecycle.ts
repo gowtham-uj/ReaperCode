@@ -39,6 +39,7 @@ import { parseSkillManifest, sha256OfManifest, writeSkillManifest } from "./mani
 import { SkillRegistry } from "./registry.js";
 import { TrustResolver } from "./trust.js";
 import { buildSandboxedShellCommand } from "../policy/shell-sandbox.js";
+import { buildChildEnv } from "../tools/child-env.js";
 import {
   type InstalledSkillRecord,
   type SkillManifest,
@@ -115,9 +116,15 @@ function defaultRunCommand(workspaceRoot: string): RunCommandFn {
     });
 
     try {
+      /*
+       * A scrubbed environment, for the same reason as the extension path: an
+       * inherited `process.env` put the provider token inside a command that
+       * only had to print it.
+       */
+      const env = buildChildEnv({ workspaceRoot: root }).env;
       const r = sandboxed
-        ? spawnSync(sandboxed.command, sandboxed.args, { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 })
-        : spawnSync("/bin/sh", ["-c", cmd], { cwd: workingDirectory, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
+        ? spawnSync(sandboxed.command, sandboxed.args, { encoding: "utf8", maxBuffer: 4 * 1024 * 1024, env })
+        : spawnSync("/bin/sh", ["-c", cmd], { cwd: workingDirectory, encoding: "utf8", maxBuffer: 4 * 1024 * 1024, env });
       return { exitCode: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
     } catch (e) {
       return { exitCode: 127, stdout: "", stderr: (e as Error).message };
@@ -306,18 +313,57 @@ export class SkillLifecycle {
     if (!r) return { ok: false, error: `skill "${name}" not found` };
     this.opts.registry.unregister(name);
     this.opts.memory.forget(name);
-    const baseDir = scope === "user"
-      ? join(this.opts.userHome, ".reaper", "skills")
-      : scope === "builtin"
-        ? this.opts.builtinRoot
-        : join(this.opts.workspaceRoot, ".reaper", "skills");
-    const target = join(baseDir, name);
-    if (existsSync(target)) {
+    /*
+     * The folder is found, not computed from the caller's scope.
+     *
+     * `createDraft` writes every skill to the user root regardless of the
+     * manifest's own `scope`, and this used the *caller's* scope to build the
+     * path. So creating with `scope: "project"` and uninstalling with
+     * `scope: "project"` looked in the project directory, found nothing, and
+     * returned `ok: true` while the skill sat in the user directory: still on
+     * disk, dropped from the in-memory registry, and therefore invisible to
+     * `skill_manager list` while `activate_skill` went on serving it. Removal
+     * that reports success and does not remove is worse than a refusal, because
+     * the model has no signal to retry.
+     *
+     * The registry record knows where the skill actually is, so that is what is
+     * used. The caller's scope is a hint about intent, not a fact about the
+     * filesystem, and the two disagreeing is exactly the bug.
+     */
+    const candidates = [
+      // Where the record says it lives, when it says.
+      ...(r.sourcePath ? [r.sourcePath] : []),
+      join(this.opts.userHome, ".reaper", "skills", name),
+      join(this.opts.workspaceRoot, ".reaper", "skills", name),
+      join(this.opts.builtinRoot, name),
+    ];
+    /*
+     * Every candidate is removed rather than the first that exists, because a
+     * skill can legitimately be in more than one place: a user copy shadowing a
+     * project one is the same name in two roots, and leaving the shadow behind
+     * means the next session re-discovers it.
+     */
+    let removeError: string | undefined;
+    let removedAny = false;
+    for (const target of candidates) {
+      if (!existsSync(target)) continue;
       try {
         rmSync(target, { recursive: true, force: true });
+        removedAny = true;
       } catch (e) {
-        return { ok: true, error: `removed from registry but not from disk: ${(e as Error).message}` };
+        removeError = (e as Error).message;
       }
+    }
+    /*
+     * `ok: false` when nothing was removed and the message says so, rather than
+     * the old silent success. `scope` is still reported so a caller can tell a
+     * genuine "already gone" from a path that was never right.
+     */
+    if (!removedAny) {
+      return { ok: false, error: `skill "${name}" was removed from the registry but not found on disk under any known root (${scope})` };
+    }
+    if (removeError !== undefined) {
+      return { ok: true, error: `removed from registry but not entirely from disk: ${removeError}` };
     }
     // Also clean up draft
     const draft = join(this.opts.userHome, ".reaper", "skills", "drafts", name);

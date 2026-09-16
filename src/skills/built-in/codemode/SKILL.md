@@ -30,10 +30,12 @@ loop, a filter, a fan-out, a chain. Do not reach for it to wrap one call.
 3. **Each eval starts fresh.** A `const` you declared in the previous call is
    not here. Keep a pipeline inside one script, or persist with
    `tools.write_file`.
-4. **The whole language is available.** `require`, `import`, npm packages,
-   `node:*` builtins, `fetch`, and `child_process` all work. You are not
-   limited, so use the right tool for the job rather than the closest available
-   one.
+4. **The whole language is available, and the network is not.** `require`,
+   `import`, npm packages, `node:*` builtins and `child_process` all work. The
+   script runs confined to this thread's workspace, so the filesystem outside it
+   is not mounted and **`fetch` fails for every host**. Use `bash` or a tool for
+   anything that needs the network; a script that reaches for `fetch` will throw
+   rather than return.
 5. **Prefer `tools.*` when both would work.** A raw `fs.readFile` skips the
    workspace check, the permission check, and the audit log; `tools.read` goes
    through all three, so the transcript shows what you did and why. Reach for
@@ -128,10 +130,14 @@ retry of the same script.
 
 ## What you can reach
 
-`fs`, `child_process`, `fetch`, and npm packages are all real, and a write from
-a script is a write. The script runs inside the workspace, and the workspace is
-where a relative path lands: `fs.readFileSync("src/app.ts")` reads this thread's
-own tree, not Reaper's checkout, which is the mistake worth knowing about.
+`fs`, `child_process` and npm packages are all real, and a write from a script
+is a write. The script runs inside the workspace, and the workspace is where a
+relative path lands: `fs.readFileSync("src/app.ts")` reads this thread's own
+tree, not Reaper's checkout, which is the mistake worth knowing about.
+
+`fetch` is the exception: the sandbox has no network namespace, so every request
+fails. That is deliberate rather than a ceiling to work around, so use `bash` or
+a tool when something needs the network.
 
 What the sandbox does *not* do is hide the rest of the machine, and an earlier
 version of this file claimed it did. Two things are true and the distinction

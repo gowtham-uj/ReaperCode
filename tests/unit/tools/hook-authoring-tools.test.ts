@@ -6,7 +6,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -28,6 +28,19 @@ function setup(): { tmp: string; userHome: string; workspaceRoot: string; runner
   const workspaceRoot = join(tmp, "ws");
   mkdirSync(userHome, { recursive: true });
   mkdirSync(workspaceRoot, { recursive: true });
+  /*
+   * The workspace is trusted, which is the state a real user reaches by
+   * approving a hook. These tests are about the authoring tools rather than
+   * about trust, and a project-scope hook in an untrusted workspace is refused
+   * at discovery now: an untrusted project's hook must not run unattended,
+   * which is the same rule the extension registry already applied to the
+   * sibling directory. `hook-approval.test.ts` covers that rule directly.
+   */
+  mkdirSync(join(userHome, ".reaper"), { recursive: true });
+  writeFileSync(
+    join(userHome, ".reaper", "project-trust.json"),
+    JSON.stringify({ entries: [{ workspaceRoot: realpathSync(workspaceRoot), trusted: true, updatedAt: Date.now() }] }),
+  );
   const runner = new HookRunner();
   const lifecycle = new HookLifecycle({
     runner,
