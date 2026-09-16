@@ -24,6 +24,7 @@ import { stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 
+import { isLoopbackHost } from "../auth.js";
 import type { BrowserHub } from "./hub.js";
 import { parsePreviewPath, proxyPreview } from "./preview.js";
 import {
@@ -169,7 +170,43 @@ export async function startBrowserGateway(options: BrowserGatewayOptions): Promi
         : handleRest(request, response, root));
   });
 
-  const wss = new WebSocketServer({ server: http, path: "/ws", perMessageDeflate: false });
+  const wss = new WebSocketServer({
+    server: http,
+    path: "/ws",
+    perMessageDeflate: false,
+    /*
+     * Only a loopback page may hold this socket open.
+     *
+     * This listener accepts browser origins on purpose, because it *is* the
+     * browser surface, and the raw protocol's blanket refusal would break the
+     * UI. But "accepts browser origins" was implemented as "accepts any origin",
+     * and WebSockets are not subject to CORS: the browser sends the handshake
+     * regardless and only the server can refuse it. So any page a user visited
+     * could open `ws://127.0.0.1:4180/ws` and speak the full RPC protocol.
+     *
+     * Verified end to end before this guard: from a socket with
+     * `Origin: http://evil.example.com`, `thread/start` accepted
+     * `cwd: ~/.reaper`, and a follow-up `GET /api/file?path=settings.json` read
+     * that file from the attacker-chosen root. The same request against a
+     * `providers.json` would have returned the provider keys.
+     *
+     * A loopback origin is what the UI itself is, in dev (the Vite server on
+     * 127.0.0.1) and in any deployment that serves the built UI from this
+     * listener. A request with no Origin at all is a non-browser client, which
+     * is already inside the loopback boundary this whole surface trusts.
+     */
+    verifyClient: (info: { origin?: string; req: IncomingMessage }) => {
+      const origin = info.origin ?? info.req.headers.origin;
+      if (origin === undefined || origin === "") return true;
+      try {
+        const host = new URL(origin).hostname;
+        if (isLoopbackHost(host)) return true;
+      } catch {
+        // A malformed Origin is not a loopback one.
+      }
+      return false;
+    },
+  });
   wss.on("connection", (socket: WebSocket) => {
     const tabId = hub.addTab({
       send: (payload) => socket.send(payload),
