@@ -45,6 +45,7 @@
  * written to make the runtime replaceable; this is it being replaced.
  */
 
+import type { RemotePageHost } from "../../browser/remote-page.js";
 import { buildChildEnv } from "../child-env.js";
 
 import { aliasesForTool } from "../normalize.js";
@@ -73,6 +74,23 @@ export interface NodeRuntimeRunOptions {
   onToolCall?: ((record: CodeToolCallRecord) => void) | undefined;
   /** Directory the script's `require` and relative paths resolve against. */
   workspace?: string | undefined;
+  /**
+   * The browser this run's program may drive, for the browser profile.
+   *
+   * Present only when the caller wants `page` bound in the script's scope. The
+   * host owns the real page and replays every call against it, which is what
+   * lets the program run inside the sandbox with no browser connection of its
+   * own: a connection would see every thread's pages, which was measured rather
+   * than assumed.
+   */
+  pageHost?: RemotePageHost | undefined;
+  /**
+   * Handles the program's browser surface roots at, sent to the worker.
+   *
+   * The page, and the scoped browser and page list. Kept as handles rather than
+   * objects because the worker cannot hold an object the host owns.
+   */
+  browserRoots?: { page: number; browser: number; pages: number } | undefined;
 }
 
 export class ReaperNodeRuntime {
@@ -445,6 +463,49 @@ export class ReaperNodeRuntime {
                 void worker.terminate();
               },
             });
+            return;
+          }
+
+          case "page": {
+            /*
+             * A Playwright call from inside the sandbox, replayed against the
+             * thread's own scoped page.
+             *
+             * This is the only route a browser program has to the browser, and
+             * it is deliberately narrow: the frame names a method and its
+             * arguments, never a property, so the host only ever invokes things
+             * it resolved itself. A program cannot reach Playwright's internals
+             * or another thread's pages because it never holds anything but a
+             * handle into this table.
+             *
+             * Errors are answered rather than thrown out of the handler: the
+             * program's `await` has to settle either way, and a rejected
+             * Playwright call is information about the page, not a failure of
+             * the bridge. Only a missing host is a real fault, and that cannot
+             * happen because the profile is only enabled with one.
+             */
+            const host = options.pageHost;
+            if (!host) {
+              worker.postMessage({
+                type: "pageResult",
+                id: message.id,
+                reply: { kind: "error", name: "NoBrowser", message: "this run has no browser attached" },
+              });
+              return;
+            }
+            void host
+              .call(
+                message.handle,
+                message.path.map(([method, ...args]) => ({ method, args })),
+              )
+              .then((reply) => worker.postMessage({ type: "pageResult", id: message.id, reply }))
+              .catch((error: unknown) =>
+                worker.postMessage({
+                  type: "pageResult",
+                  id: message.id,
+                  reply: { kind: "error", name: "BridgeError", message: error instanceof Error ? error.message : String(error) },
+                }),
+              );
             return;
           }
 

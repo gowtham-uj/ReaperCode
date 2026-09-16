@@ -55,7 +55,33 @@ export interface SerializeResult {
  */
 export function playwrightName(value: unknown): string | undefined {
   if (!value || typeof value !== "object") return undefined;
-  const candidate = value as { _channel?: unknown; _connection?: unknown; _initializer?: { type?: unknown } };
+  const candidate = value as {
+    _channel?: unknown;
+    _connection?: unknown;
+    _initializer?: { type?: unknown };
+    _apiName?: unknown;
+    _frame?: unknown;
+    _selector?: unknown;
+  };
+
+  /*
+   * A Locator is the second shape, and missing it was a real bug.
+   *
+   * Locators have no `_channel`. They carry a frame and a selector and resolve
+   * through the frame's channel when they are used, so the `_channel` test below
+   * is false for every one of them. `locator.all()` returns an array of them,
+   * and without this the caller treated each as a plain object, walked its
+   * internals, and handed the model a dump of Playwright's private fields where
+   * it should have got locators it could keep calling.
+   *
+   * `_apiName` is the field that names them, and it is the same field
+   * Playwright uses for its own error messages, so it is stable across the
+   * versions that matter.
+   */
+  if (typeof candidate._apiName === "string" && candidate._frame !== undefined) {
+    return candidate._apiName;
+  }
+
   if (!candidate._channel || !candidate._connection) return undefined;
   const protocolType = candidate._initializer?.type;
   if (typeof protocolType === "string" && protocolType.length > 0) {

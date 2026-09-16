@@ -35,6 +35,7 @@
  */
 
 import { GUARD_SOURCE } from "./guard.js";
+import { REMOTE_PAGE_SOURCE } from "../../browser/remote-page-source.js";
 
 /**
  * Build the worker program.
@@ -43,7 +44,7 @@ import { GUARD_SOURCE } from "./guard.js";
  * seam is visible: everything the worker knows arrives as text, because a
  * worker started from a string has no lexical scope shared with this file.
  */
-function buildWorkerSource(guard: string): string {
+function buildWorkerSource(guard: string, remotePage: string): string {
   return `
 'use strict';
 const { parentPort, workerData } = require('node:worker_threads');
@@ -117,6 +118,32 @@ for (const level of ['log', 'info', 'warn', 'error', 'debug', 'trace', 'dir']) {
  * ------------------------------------------------------------------ */
 const pending = new Map();
 let nextCallId = 0;
+
+/* ------------------------------------------------------------------ *
+ * The browser bridge, for the browser profile only.
+ *
+ * A program in this profile gets \`page\`, \`browser\` and the rest as proxies
+ * with no browser connection behind them. Every Playwright call becomes a
+ * frame to the host, which replays it against the thread's own scoped page and
+ * answers. The script therefore cannot reach a browser the way a connection
+ * would let it: there is no connection here to reach with.
+ *
+ * This exists because the obvious alternative is worse. A worker with its own
+ * CDP connection sees *every* thread's pages — measured, not assumed: a fresh
+ * connection to Steel returned 17 pages belonging to three different threads,
+ * and a page-level endpoint could still enumerate all 21 targets. So a
+ * connection here would trade a filesystem hole for a cross-agent one.
+ * ------------------------------------------------------------------ */
+const pendingPageCalls = new Map();
+let nextPageCallId = 0;
+
+function callPage(handle, path) {
+  return new Promise((resolve, reject) => {
+    const id = ++nextPageCallId;
+    pendingPageCalls.set(id, { resolve, reject });
+    parentPort.postMessage({ type: 'page', id, handle, path });
+  });
+}
 
 function callTool(name, args) {
   return new Promise((resolve, reject) => {
@@ -581,7 +608,7 @@ function isPromise(value) {
  * The wrapper costs one line of offset in stack traces, which \`lineFromStack\`
  * on the host side already accounts for.
  */
-function compile(body) {
+function compile(body, extraNames = []) {
   /*
    * \`body\` is already a complete async IIFE expression — transform.ts emits
    * \`(async () => { … })()\` — so this only has to return it. Wrapping it in
@@ -597,8 +624,13 @@ function compile(body) {
      * a plain JavaScript error naming the thing that is missing — rather than
      * a \`ReferenceError\` that reads as a typo in the script. When the host does
      * offer it, the same name is bound to the real surface.
+     *
+     * The extra names after these are the browser profile's, and the list is
+     * empty for an ordinary eval. They are appended rather than declared
+     * unconditionally so a plain script cannot reach \`page\` and find a proxy
+     * it has no business holding.
      */
-    ['tools', 'models', 'require', '__dirname', '__filename'],
+    ['tools', 'models', 'require', '__dirname', '__filename', ...extraNames],
     {
       filename: 'codemode.js',
       /*
@@ -642,13 +674,44 @@ async function main() {
    * second implementation here would be a worse copy of it that drifts, so the
    * worker receives the finished source and only runs it.
    */
-  let value = compile(workerData.compiled).call(
+  /*
+   * The browser profile's surface, built here rather than shipped in
+   * \`workerData\`: it is a program, and a program in workerData would have to
+   * be stringified anyway. The handles it roots at come from the host, which is
+   * the only side that has the real page.
+   */
+  const extraNames = [];
+  const extraValues = [];
+  if (workerData.browser && workerData.browser.enabled === true) {
+    /*
+     * The observation helpers travel on the same channel as a Playwright call
+     * and come back in the same envelope, so they are unwrapped the same way.
+     * Returning the envelope itself was the first version, and the model got an
+     * object where a string was expected, so slicing the view failed with a
+     * message about the method rather than about the wrapping.
+     */
+    const view = async (name, args) => {
+      const reply = await callPage(-1, [[name, args]]);
+      if (reply && reply.kind === 'error') {
+        const error = new Error(reply.message || 'the page call failed');
+        if (reply.name) error.name = reply.name;
+        throw error;
+      }
+      return reply && reply.kind === 'value' ? reply.value : undefined;
+    };
+    const surface = buildRemoteBrowser(callPage, workerData.browser.roots, view);
+    extraNames.push('page', 'browser', 'view', 'viewChanges', 'screenshot', 'pages');
+    extraValues.push(surface.page, surface.browser, surface.view, surface.viewChanges, surface.screenshot, surface.pages);
+  }
+
+  let value = compile(workerData.compiled, extraNames).call(
     undefined,
     tools,
     models,
     workspaceRequire,
     workerData.workspace,
     workerData.workspace + '/codemode.js',
+    ...extraValues,
   );
   if (isPromise(value)) value = await value;
   return value;
@@ -658,6 +721,13 @@ async function main() {
  * Messages from the parent: tool results, and nothing else.
  * ------------------------------------------------------------------ */
 parentPort.on('message', (message) => {
+  if (message.type === 'pageResult') {
+    const entry = pendingPageCalls.get(message.id);
+    if (!entry) return;
+    pendingPageCalls.delete(message.id);
+    entry.resolve(message.reply);
+    return;
+  }
   if (message.type !== 'toolResult' && message.type !== 'modelResult') return;
   const entry = pending.get(message.id);
   if (!entry) return;
@@ -743,7 +813,16 @@ function safeValue(value) {
     return String(value);
   }
 }
+
+/* ------------------------------------------------------------------ *
+ * The browser profile's page proxy, injected as source.
+ *
+ * A worker started from a string has no lexical scope shared with the host, so
+ * everything it knows arrives as text. This is the builder that turns a call
+ * path into a frame and a frame back into a chainable node.
+ * ------------------------------------------------------------------ */
+${remotePage}
 `;
 }
 
-export const CODE_MODE_WORKER_SOURCE = buildWorkerSource(GUARD_SOURCE);
+export const CODE_MODE_WORKER_SOURCE = buildWorkerSource(GUARD_SOURCE, REMOTE_PAGE_SOURCE);

@@ -46,6 +46,13 @@ export type WorkerMessage =
   | { type: "consoleTruncated" }
   | { type: "tool"; id: number; name: string; args: unknown }
   | { type: "model"; id: number; args: unknown }
+  /*
+   * One Playwright call from a browser-profile program, to be replayed against
+   * the thread's own page. `path` is a list of `[method, ...args]` steps, never
+   * a property name, so the host only invokes methods on objects it resolved
+   * itself. See `browser/remote-page.ts`.
+   */
+  | { type: "page"; id: number; handle: number; path: Array<[string, ...unknown[]]> }
   | { type: "child"; pid: number }
   | { type: "done"; value: unknown }
   | { type: "failed"; error: { name: string; message: string; stack?: string; code?: string; tool?: string } };

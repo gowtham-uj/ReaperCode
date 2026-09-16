@@ -132,3 +132,4 @@ tool-discovery-trace.json
 # without carrying the whole tree in this repository's history.
 vendor/
 .scratch/
+.scratch/
