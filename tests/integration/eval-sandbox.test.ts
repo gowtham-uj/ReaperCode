@@ -254,3 +254,41 @@ test("the dependency bind is read-only", { skip: !sandboxAvailable }, async () =
   assert.equal(value?.wrote, undefined, "a script must not be able to write into the dependency tree");
   assert.ok(value?.blocked, "the write should fail with a filesystem error");
 });
+
+/**
+ * The network boundary, which did not exist until it was probed.
+ *
+ * Every other case in this file tests the filesystem, and the filesystem
+ * boundary held. The network one did not: the sandbox tail had
+ * `--unshare-pid`, `--unshare-ipc` and `--unshare-uts` and no `--unshare-net`,
+ * so a script shared the host's network namespace and loopback was fully
+ * reachable. Measured from inside a script before the flag was added: it
+ * fetched `127.0.0.1:9222/json/version`, listed every thread's page targets,
+ * opened a raw CDP WebSocket to another thread's page and navigated it from
+ * example.com to example.org.
+ *
+ * That is the whole point of `scoped-page.ts` defeated from one `fetch`.
+ * Scoping closes the widening chain for a program that holds a `page`; a raw
+ * socket to the CDP port never asks for one.
+ *
+ * The trade is that a sandboxed command now has no network at all, including no
+ * DNS. That is what the sandbox is for, and it is what `bash` promises: a
+ * command reaches its workspace and nothing else.
+ */
+test("a script cannot reach the network, including the browser's own CDP port", { skip: !sandboxAvailable }, async () => {
+  const { workspace } = await fixture();
+  const output = await evalScript(
+    workspace,
+    `const probe = async (url) => { try { await fetch(url); return 'reachable' } catch { return 'blocked' } };
+     ({
+       cdp: await probe('http://127.0.0.1:9222/json/version'),
+       gateway: await probe('http://127.0.0.1:4180/healthz'),
+       dns: await probe('http://example.com/'),
+     })`,
+  );
+  const value = output?.value as { cdp?: string; gateway?: string; dns?: string } | undefined;
+
+  assert.equal(value?.cdp, "blocked", "the CDP port is reachable from every thread's sandbox without --unshare-net");
+  assert.equal(value?.gateway, "blocked", "the app-server gateway is on loopback and must not be reachable from a script");
+  assert.equal(value?.dns, "blocked", "a sandboxed script has no network at all, not even outbound");
+});

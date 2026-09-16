@@ -254,6 +254,27 @@ export function nodePathForBinds(extraBinds: readonly SandboxBind[]): string[] {
  * something unrelated. Read-only turns that into `Read-only file system` at the
  * point of the write, which is a result the model can act on. The writable
  * places are the ones mounted before this: the workspace, /tmp, /var/tmp, $HOME.
+ *
+ * ## `--unshare-net`, which was missing and mattered
+ *
+ * Without it the sandbox shares the host's network namespace, so loopback is
+ * reachable and a sandboxed script can talk to every service the host runs.
+ * Measured from inside an `eval` script before this flag was added: it fetched
+ * `127.0.0.1:9222/json/version`, enumerated every thread's page targets, opened
+ * a raw CDP WebSocket to another thread's page, and navigated it from
+ * example.com to example.org. `scoped-page.ts` closes the widening chain for a
+ * program holding a `page`; a raw socket bypasses it entirely, and `bash`,
+ * `browser_use` and skill validation had the same reach because they share this
+ * tail.
+ *
+ * The unix-socket IPC that `eval` uses is unaffected: it is a filesystem object
+ * bound in by `--bind`, not a TCP port, and a network namespace does not touch
+ * it. Verified both ways with the flag on — the unix socket answers, and
+ * `curl 127.0.0.1:9222` returns nothing.
+ *
+ * This does mean a sandboxed command has no network at all, including no DNS.
+ * That is the intended trade and it is what `bash`'s own description promises:
+ * a sandboxed process reaches its workspace and nothing else.
  */
 function sandboxNamespaceTail(root: string, workingDirectory: string): string[] {
   return [
@@ -264,6 +285,7 @@ function sandboxNamespaceTail(root: string, workingDirectory: string): string[] 
     "--unshare-pid",
     "--unshare-ipc",
     "--unshare-uts",
+    "--unshare-net",
     "--die-with-parent",
     "--new-session",
     "--chdir", insideWorkspace(root, workingDirectory) ? path.resolve(workingDirectory) : root,
