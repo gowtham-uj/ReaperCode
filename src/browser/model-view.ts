@@ -51,6 +51,16 @@ export const MODEL_VIEW_MAX_CHARS = 3_000;
 /** How many rows of a list to print before summarising the rest. */
 export const MAX_ROWS_SHOWN = 12;
 
+/**
+ * How many cut sections to name by id before counting the rest.
+ *
+ * Naming them is what makes the trim notice actionable rather than a dead end, so
+ * this is generous. The bound exists because a pathological page can have
+ * hundreds of sections and the notice is still one line inside a budget that was
+ * already spent.
+ */
+export const MAX_NAMED_WHEN_TRIMMED = 12;
+
 export interface ModelViewOptions {
   /** What the model is doing, for relevance ordering. */
   context?: { step?: string | undefined; goal?: string | undefined; blockers?: string[] | undefined } | undefined;
@@ -87,9 +97,22 @@ export function renderModelView(ir: BrowserIR, options: ModelViewOptions = {}): 
 
   /*
    * Sections in the order the model should consider them: what it is doing
-   * first, then what a page is usually for, then everything else by size.
+   * first, then what a page is usually for, and ties broken by document order.
+   *
+   * The tiebreak is document order rather than the id string, and the difference
+   * is not cosmetic. `s10` sorts before `s2` lexicographically, so comparing ids
+   * printed a twelve-region page as s1, s10, s11, s12, s2, s3 and so on: the
+   * model read the page in an order the page does not have, and one that
+   * disagrees with `ir.order` and with the document order the compiler computed.
+   * Section ids are assigned in document order precisely so they can be compared
+   * that way, so the position in `order` is the right key.
    */
-  const ranked = [...ir.sections].sort((a, b) => priorityOf(b, scores) - priorityOf(a, scores) || a.id.localeCompare(b.id));
+  const documentOrder = new Map(ir.order.map((id, index) => [id, index]));
+  const ranked = [...ir.sections].sort(
+    (a, b) =>
+      priorityOf(b, scores) - priorityOf(a, scores) ||
+      (documentOrder.get(a.id) ?? 0) - (documentOrder.get(b.id) ?? 0),
+  );
 
   /*
    * Which sections to open, decided against the budget rather than by picking
@@ -171,7 +194,34 @@ export function renderModelView(ir: BrowserIR, options: ModelViewOptions = {}): 
   }
 
   const trimmed = trimToBudget(lines, maxChars);
-  return { text: trimmed.text, truncated: trimmed.truncated, expanded: [...expanded] };
+
+  /*
+   * A section the trim cut is still named, which is the last place the
+   * "never hide existence" rule can be broken and the easiest to miss.
+   *
+   * `trimToBudget` cuts the tail on a line boundary, and on a page with more
+   * sections than the budget can hold, the tail IS sections. Counting them
+   * ("6 more lines") is not enough: the model cannot ask about a region it has
+   * no id for, so a count is a dead end where a name is an invitation. This is
+   * not a hypothetical shape; forty collapsed sections at 30 characters each
+   * exceed a 400-character view, which is what the test that found this builds.
+   *
+   * Naming them is cheap, one line however many were cut, so the budget still
+   * holds. Only sections whose one-line form did not survive are listed, and
+   * only reachable ones: a section that opened is present by definition.
+   */
+  let text = trimmed.text;
+  if (trimmed.truncated) {
+    const missing = ranked.filter((section) => !text.includes(collapsedLines.get(section.id) ?? " "));
+    if (missing.length > 0) {
+      const named = missing.slice(0, MAX_NAMED_WHEN_TRIMMED);
+      const names = named.map((section) => `${section.id} "${truncate(section.label, 24)}"`).join(", ");
+      const rest = missing.length - named.length;
+      text += `\n[not shown above: ${names}${rest > 0 ? `, and ${rest} more section${rest === 1 ? "" : "s"}` : ""}. Ask for one by id.]`;
+    }
+  }
+
+  return { text, truncated: trimmed.truncated, expanded: [...expanded] };
 }
 
 /**

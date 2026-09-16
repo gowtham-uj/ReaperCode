@@ -294,8 +294,32 @@ export class PageObserver {
      * passes them and the line-based count stays for the snapshot path.
      */
     stats?: SnapshotStats | undefined;
+    /**
+     * Send the snapshot whole, with no budget applied.
+     *
+     * Set by the fallback and by nothing else. The budget exists because the
+     * compiled view is a summary that a model may need to ask more of, and
+     * trimming it is safe: every section is still named and can be opened by id.
+     * A fallback is not a summary. It is Playwright's own accessibility tree,
+     * unsummarised, and cutting it at 3,000 characters does not withhold detail
+     * the model can ask for later, it removes whole regions with no id, no
+     * count, and no way to reach them. The model would be reading a partial tree
+     * believing it was the page.
+     *
+     * So the fallback is delivered as it comes, however large. It is expensive
+     * by design and it should be rare; when it fires, the model needs the page
+     * more than it needs the budget.
+     */
+    untrimmed?: boolean | undefined;
   }): void {
-    this.current = trimOutline(input.snapshot, input.maxChars ?? VIEW_MAX_CHARS).outline;
+    if (input.untrimmed === true) {
+      this.current = input.snapshot;
+      this.wasTrimmed = false;
+    } else {
+      const trimmed = trimOutline(input.snapshot, input.maxChars ?? VIEW_MAX_CHARS);
+      this.current = trimmed.outline;
+      this.wasTrimmed = trimmed.truncated;
+    }
     this.lastUrl = input.url;
     this.lastTitle = input.title;
     this.note = input.note;
@@ -304,6 +328,17 @@ export class PageObserver {
 
   /** The stats the last capture supplied, when it supplied them. */
   private stats: SnapshotStats | undefined;
+
+  /**
+   * Whether the budget cut the last capture.
+   *
+   * Recorded at capture time rather than re-derived from the text by looking for
+   * the trim notice. The string match worked and was the wrong shape: page text
+   * is attacker-controlled, so a page containing the words "more line" would
+   * have reported itself as truncated, and the flag is what a caller uses to
+   * decide whether to go and look at the region that was cut.
+   */
+  private wasTrimmed = false;
 
   /**
    * A line the next header carries, when the view is not the ordinary one.
@@ -341,7 +376,7 @@ export class PageObserver {
     const outline = this.current ?? "(nothing captured yet)";
     this.previous = outline;
     this.rev += 1;
-    const truncated = outline.includes("more line");
+    const truncated = this.wasTrimmed;
     return {
       text: `${this.header(selectorNote)}\n\n${outline}`,
       truncated,

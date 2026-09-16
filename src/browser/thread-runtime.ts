@@ -329,6 +329,13 @@ export class ThreadBrowserRuntime {
       snapshot: perceived.text,
       ...(perceived.note !== undefined ? { note: perceived.note } : {}),
       stats: statsOf(perceived),
+      /*
+       * A fallback is delivered whole. It is not a summary of the page, it is
+       * the page as Playwright describes it, and trimming it removes regions
+       * with no id and no way to reach them. The budget applies to the compiled
+       * view, where every section is named and can be opened by id.
+       */
+      untrimmed: perceived.usedFallback,
     });
   }
 
@@ -449,6 +456,13 @@ export class ThreadBrowserRuntime {
       snapshot: perceived.text,
       ...(perceived.note !== undefined ? { note: perceived.note } : {}),
       stats: statsOf(perceived),
+      /*
+       * A fallback is delivered whole. It is not a summary of the page, it is
+       * the page as Playwright describes it, and trimming it removes regions
+       * with no id and no way to reach them. The budget applies to the compiled
+       * view, where every section is named and can be opened by id.
+       */
+      untrimmed: perceived.usedFallback,
     });
     return { ...this.observer.view(), url: page.url() };
   }
