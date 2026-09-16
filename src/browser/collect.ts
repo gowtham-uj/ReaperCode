@@ -193,6 +193,18 @@ export interface StructuralNode {
   depth: number;
   /** The backend id of its parent, or undefined for a document root. */
   parentBackendNodeId?: number | undefined;
+  /**
+   * Every ancestor's backend id, nearest first, exactly as an element carries.
+   *
+   * Without this a container whose direct parent was filtered out attaches to
+   * the document root, and the containment the section rules depend on is lost.
+   * Hacker News is the page that proved it: its table structure
+   * (`table > tbody > tr > td`) came back with every row hanging off the root,
+   * so thirty rows compiled as thirty sections instead of one list. Elements
+   * already carried a chain; the structural nodes did not, and the asymmetry was
+   * the bug.
+   */
+  ancestorBackendNodeIds: number[];
   /** True for `html`, `body` and the document root, which are never sections. */
   isRoot: boolean;
 }
@@ -878,6 +890,7 @@ function buildFrame(document_: SnapshotDocument, prefix: string, strings: string
             name: ancestorName,
             depth: parentDepth(cursor, nodes),
             parentBackendNodeId: parentBackendOf(cursor, nodes),
+            ancestorBackendNodeIds: ancestorChainOf(cursor, nodes),
             isRoot: ancestorTag === "html" || ancestorTag === "body",
           });
         }

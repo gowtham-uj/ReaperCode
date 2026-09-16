@@ -414,7 +414,25 @@ export function opensSection(node: IrNode, nodes: IrNode[]): SectionKind | undef
      * pattern every component library emits.
      */
     if (node.role === "list" && !node.name) return undefined;
-    if (node.role === "table" && !node.name && !hasHeadingChild(node, nodes)) return undefined;
+    /*
+     * A table is a section when it reads like a list, not when it has a name.
+     *
+     * The guard here was "unnamed and no heading, so it is a layout table",
+     * written to stop a page-shell `<table>` becoming a section. Hacker News
+     * then exposed it: its page shell is a three-cell layout table, and its
+     * entire story list is *also* an unnamed table with no heading. The guard
+     * rejected both, so ninety-two rows of one list were cut one at a time and
+     * the page compiled to sixty-two sections.
+     *
+     * Name and heading are the wrong questions for a table. The right one is
+     * whether its rows are the same kind of thing repeated, which is the same
+     * test every other container gets. A layout table has three cells that look
+     * nothing alike; a list table has thirty rows that do.
+     */
+    if (node.role === "table" && !node.name && !hasHeadingChild(node, nodes)) {
+      const rows = node.children.map((index) => nodes[index]).filter((child): child is IrNode => child !== undefined);
+      if (repeatedChildShape(rows, nodes) < 3) return undefined;
+    }
     return landmark;
   }
   // A named region or complementary is a landmark the page declared; unnamed it
@@ -481,7 +499,7 @@ function inferredSectionKind(node: IrNode, nodes: IrNode[]): SectionKind | undef
    * something actionable. This is the rule that catches a job board, a search
    * page and a feed, which share this shape and nothing else.
    */
-  const repeated = repeatedChildShape(kids);
+  const repeated = repeatedChildShape(kids, nodes);
   if (repeated >= 3 && links.length >= 2) return "results";
   if (repeated >= 3) return "list";
 
@@ -505,10 +523,34 @@ function inferredSectionKind(node: IrNode, nodes: IrNode[]): SectionKind | undef
  * inner text differs are still three of the same thing, and comparing text
  * would make every item unique and the rule never fire.
  */
-function repeatedChildShape(children: IrNode[]): number {
+function repeatedChildShape(children: IrNode[], nodes: IrNode[]): number {
   const shapes = new Map<string, number>();
   for (const child of children) {
-    const key = child.role === "listitem" ? "listitem" : `${child.role}:${child.children.length}`;
+    /*
+     * Role, and whether the row holds anything to act on.
+     *
+     * The child *count* was part of this key and that is why Hacker News
+     * compiled to thirty sections. Its table alternates between a title row
+     * with three cells and a score row with two, so the rows grouped as
+     * `row:3` and `row:2` and neither reached the count the rule needs. The
+     * page is one list of thirty stories and the rule could not see it.
+     *
+     * Counting cells is the wrong question. A row of story titles and a row of
+     * story scores are the same kind of thing: both are `row`s. What
+     * distinguishes a list from a header is the role and whether the rows are
+     * actionable, not how many cells each happens to have.
+     */
+    /*
+     * Resolved against the page's node list, not against the sibling array.
+     *
+     * `descendants(child, children)` was the first version and it is a
+     * type-shaped lie: `children` is a list of rows, and `descendants` indexes
+     * into whatever it is handed, so it walked a different subtree for every row
+     * and reported actionability that had nothing to do with the row it was
+     * asked about. On the Hacker News shape that made the score row look
+     * actionable, which is exactly the half the row-pairing rule reads.
+     */
+    const key = `${child.role}:${isInteractive(child) || descendants(child, nodes).some((n) => isInteractive(n)) ? "actionable" : "text"}`;
     shapes.set(key, (shapes.get(key) ?? 0) + 1);
   }
   let best = 0;
@@ -841,7 +883,25 @@ export function compileIr(input: CompileInput, options: CompileOptions = {}): Br
      */
     const enclosingIsEmpty =
       enclosingCut !== undefined && (ownElements.get(cuts[enclosingCut]!.roots[0]!.index) ?? 0) === 0;
-    const opensHere = found !== undefined && (!insideSection || isLandmark || enclosingIsEmpty);
+
+    /*
+     * An inferred shape does not cut inside an inferred shape.
+     *
+     * This is the rule Hacker News needed, and it cost thirty sections to find.
+     * Its markup is one large table, so a `td` holding four links infers as
+     * `results` on its own. The enclosing `tr` had inferred the same, and the
+     * enclosing container held nothing of its own, so `enclosingIsEmpty` was
+     * true all the way down and every cell cut. The page compiled to thirty
+     * identically-shaped sections instead of one list of thirty rows.
+     *
+     * A *landmark* cutting inside another section is right: a `form` inside a
+     * `main` is its own thing, because the page declared it. An inferred shape
+     * doing so is not, because nothing was declared; two guesses about the same
+     * region should not both become sections. The outer guess wins, and the
+     * inner ones become the rows of its list.
+     */
+    const enclosingIsInferred = enclosingCut !== undefined && LANDMARK_KINDS[cuts[enclosingCut]!.roots[0]!.role] === undefined;
+    const opensHere = found !== undefined && (!insideSection || isLandmark || (enclosingIsEmpty && !enclosingIsInferred));
 
     if (opensHere) {
       const previousCut = enclosingCut;
@@ -904,6 +964,7 @@ export function compileIr(input: CompileInput, options: CompileOptions = {}): Br
   }
 
   groupRepeatedCuts(cuts, nodes);
+  splitRepeatedRows(cuts, nodes);
 
   /* ---- sections get ids, reusing the previous revision's where they match ---- */
   const previousSections = new Map<string, string>();
@@ -1271,6 +1332,158 @@ export function compileIr(input: CompileInput, options: CompileOptions = {}): Br
   };
 }
 
+/**
+ * Split one section's repeated children into rows.
+ *
+ * The sibling fix to `groupRepeatedCuts`, and the other half of the same
+ * problem. Grouping merges *separate cuts* that are rows of one list; this
+ * handles a single section that swallowed the whole list, which is what Hacker
+ * News became once its table stopped being rejected: 62 sections collapsed to 4,
+ * and one of them held 360 elements and described none of them.
+ *
+ * Both are needed because the section rule can fail in either direction. When it
+ * cuts too eagerly, grouping repairs it; when it cuts too little, this does. The
+ * shape it looks for is the same one `opensSection` uses to recognise a list in
+ * the first place, so a container cannot be a list for one purpose and not the
+ * other.
+ *
+ * Rows become addressable as `s1:r3`, which is what lets a model say "the fourth
+ * story" and get one, rather than scrolling a section of three hundred elements
+ * looking for it.
+ */
+function splitRepeatedRows(
+  cuts: Array<{ roots: IrNode[]; kind: SectionKind; label: string; heading?: string | undefined; itemRoots?: IrNode[][] | undefined }>,
+  nodes: IrNode[],
+): void {
+  for (const cut of cuts) {
+    // A cut that already has rows was merged by grouping; leave it alone.
+    if (cut.itemRoots !== undefined) continue;
+    const root = cut.roots.length === 1 ? cut.roots[0] : undefined;
+    if (!root) continue;
+
+    const children = root.children.map((index) => nodes[index]).filter((child): child is IrNode => child !== undefined);
+    /*
+     * Three at least, which is the same floor the section rules use. Two
+     * repeated children are two elements, not a list, and turning them into rows
+     * costs the model a level of indirection to save one line.
+     */
+    if (children.length < GROUP_MIN_RUN) continue;
+    if (repeatedChildShape(children, nodes) < GROUP_MIN_RUN) continue;
+
+    /*
+     * A form is never a list of rows.
+     *
+     * The first version of this split a form into one row per field, which is
+     * the exact shape the section rules were written to prevent: "a form is one
+     * section rather than one per field" is the oldest test in the file. A form's
+     * children look repetitive because a form *is* repetitive; a label, a
+     * control, a label, a control. Repetition is not the same as a list, and the
+     * declared landmarks are where the difference shows: a page says "this is a
+     * form" and it never says "this is a row".
+     */
+    if (cut.kind === "form" || cut.kind === "search" || cut.kind === "dialog") continue;
+
+    /*
+     * And the children have to be alike, which is a stronger test than the
+     * shape count alone.
+     *
+     * A nav holding eight identical links passes the count and is not a list:
+     * rows of a list are containers that each hold *several* things, where a
+     * strip of links is a run of leaves. Requiring a majority of the children to
+     * be containers is what separates "eight links" from "thirty stories".
+     */
+    const containers = children.filter((child) => child.children.length > 0).length;
+    if (containers < children.length * 0.6) continue;
+
+    /*
+     * Every child becomes a row, including the ones that do not match the
+     * majority shape. A list where the title row and the score row alternate is
+     * one list; taking only the majority would drop half the content, and
+     * dropping content is the failure this whole layer exists to avoid.
+     */
+    cut.itemRoots = pairContinuationRows(children, nodes);
+
+    /*
+     * The label says how many rows, for the same reason the merged one does.
+     *
+     * "Results" reads as though the page has a list; "Results (61)" tells the
+     * model the list is long enough to need a row reference, which is the fact
+     * it would otherwise have to infer by counting. The count is only added when
+     * there is not one already, so a label that came from a merge is not counted
+     * twice.
+     */
+    if (!/\(\d+\)$/.test(cut.label)) cut.label = `${cut.label} (${children.length})`;
+  }
+}
+
+/**
+ * Merge a row that continues the one above it.
+ *
+ * Hacker News again, and the last of its three shapes. A story there is *two*
+ * adjacent table rows: the title, and the score line underneath. Both are
+ * children of the same table, so the first version made them two items, and the
+ * model read a list whose rows alternated between headlines and point counts.
+ * Neither half is a story on its own.
+ *
+ * The rule that fixes it is general rather than site-specific. A row holding
+ * nothing interactive, immediately after a row that does, is that row's
+ * continuation: the metadata line under an item, the address under a name, the
+ * tag list under an entry. That pattern is everywhere in tables and lists, and
+ * it is the same shape in all of them.
+ *
+ * Guarded so it cannot chain: a continuation only merges upward into a row that
+ * was not itself a continuation. Three text rows in a row are still three rows,
+ * because there is nothing for the second and third to attach to.
+ */
+function pairContinuationRows(children: IrNode[], nodes: IrNode[]): IrNode[][] {
+  const rows: IrNode[][] = [];
+  for (const child of children) {
+    const actionable = subtreeIsActionable(child, nodes);
+    const previous = rows[rows.length - 1];
+    if (!actionable && previous !== undefined && previous.length === 1) {
+      const above = previous[0]!;
+      if (subtreeIsActionable(above, nodes)) {
+        previous.push(child);
+        continue;
+      }
+    }
+    rows.push([child]);
+  }
+  return rows;
+}
+
+/**
+ * True when a row, or anything inside it, is something a person can act on.
+ *
+ * The first version of the check above was
+ * `child.children.some((index) => isInteractive({ ...child, index }))`, which
+ * looks like it tests the children and does not: it spread the *parent* and
+ * replaced its `index`, so the object handed to `isInteractive` was the row
+ * itself wearing a different number. Every row of a generic list therefore read
+ * as non-actionable, every row merged into the one above it, and a thirty-row
+ * list compiled to fifteen items holding two rows each. The test that caught it
+ * is the one asserting every row is addressable, and the reason it is worth
+ * stating here is that the bug was invisible in the output: the model would have
+ * read a list of fifteen stories where the page had thirty.
+ *
+ * Children are indexes into the node list, so resolving them needs the list,
+ * which is why this takes `nodes` rather than reaching through the row. The walk
+ * is iterative because a page can nest arbitrarily deep and a recursive walk over
+ * hostile markup is a stack overflow rather than a wrong answer.
+ */
+function subtreeIsActionable(row: IrNode, nodes: IrNode[]): boolean {
+  const stack: IrNode[] = [row];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (isInteractive(node)) return true;
+    for (const index of node.children) {
+      const child = nodes[index];
+      if (child !== undefined) stack.push(child);
+    }
+  }
+  return false;
+}
+
 /** How many cuts of the same kind and label it takes before they are one list. */
 export const GROUP_MIN_RUN = 3;
 
@@ -1306,8 +1519,31 @@ function groupRepeatedCuts(
   const grouped: typeof cuts = [];
   let run: typeof cuts = [];
 
-  /** The key a run shares. Kind plus label, because that is what the model sees. */
-  const keyOf = (cut: (typeof cuts)[number]): string => `${cut.kind}|${normaliseName(cut.label)}`;
+  /**
+   * The key a run shares: the kind, and the *shape* of the rows.
+   *
+   * Not the label, and the first version keyed on the label, which is why
+   * Hacker News compiled to thirty sections rather than one list. Every row
+   * there is a `results` cut, but each one's label is its own content -- "921
+   * points by albelfio" against "25 points by bananaboy" -- so no two rows
+   * agreed and nothing ever grouped.
+   *
+   * The label is content and content differs between rows of the same list by
+   * definition. The shape is what they share: the same roles, in the same
+   * order, at the same depth. Two job rows and two story rows both look like
+   * rows, and a heading followed by a paragraph looks like neither.
+   */
+  const shapeOf = (cut: (typeof cuts)[number]): string => {
+    const root = cut.roots[0];
+    if (!root) return "";
+    /*
+     * Depth-two roles, which is enough to tell a row from a header without
+     * being so specific that a row with one extra tag stops matching.
+     */
+    const roles = [root.role, ...root.children.map((child) => nodes[child]?.role ?? "?")];
+    return roles.join(",");
+  };
+  const keyOf = (cut: (typeof cuts)[number]): string => `${cut.kind}|${shapeOf(cut)}`;
   const siblingOf = (a: (typeof cuts)[number], b: (typeof cuts)[number]): boolean => {
     const first = a.roots[0];
     const second = b.roots[0];
@@ -1408,7 +1644,18 @@ function disambiguateLabels(sections: IrSection[], elements: Map<string, IrEleme
      * number is last, because "Section 2" is only marginally better than
      * "Section" and should not win over a real name.
      */
-    const first = section.elements.map((id) => elements.get(id)).find((element) => element?.name);
+    /*
+     * The borrowed name has to be a name.
+     *
+     * This reached for the first element's name without checking its length, so
+     * on a table-based page it appended the row's entire concatenated text and
+     * produced labels *longer* than the ones the length rule had just rejected.
+     * A short name that distinguishes two sections is worth borrowing; a
+     * paragraph of row text is not a label at all.
+     */
+    const first = section.elements
+      .map((id) => elements.get(id))
+      .find((element) => element?.name !== undefined && element.name.length > 0 && element.name.length <= MAX_LABEL_CHARS);
     const borrowed = section.heading ?? first?.name;
     let candidate = borrowed ? `${section.label}: ${borrowed}` : section.label;
     if (used.has(candidate)) {
@@ -1457,8 +1704,28 @@ export function isInteractive(node: IrNode): boolean {
 }
 
 /** What a person would call this section. */
+/**
+ * Longest a section label can be before it stops being a label.
+ *
+ * Hacker News is why this exists. Its markup is tables, and the accessible name
+ * of a table cell is the concatenated text of everything inside it, so 31 of its
+ * 32 sections were labelled:
+ *
+ *     "Hacker Newsnew | past | comments | ask | show | jobs | submit"
+ *     "911 points by albelfio 8 hours ago | hide | 290 comments"
+ *
+ * That is the section's *content*, not its name, and it is worse than no label:
+ * a model reading it cannot tell two sections apart, and it costs 60 characters
+ * on every observation to say nothing. lobste.rs, which uses lists rather than
+ * tables, had none of these.
+ *
+ * So a name is only used as a label when it reads like one. Past that, the
+ * heading is the better answer, and past that the kind's default name.
+ */
+const MAX_LABEL_CHARS = 60;
+
 function labelFor(node: IrNode, kind: SectionKind): string {
-  if (node.name) return node.name;
+  if (node.name && node.name.length <= MAX_LABEL_CHARS) return node.name;
   const defaults: Record<SectionKind, string> = {
     navigation: "Navigation",
     search: "Search",

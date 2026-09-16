@@ -133,7 +133,7 @@ test("landmarks become sections, and a form is one section rather than one per f
     const section = ir.sections.find((candidate) => candidate.id === id)!;
     return `${section.kind}:${section.label}`;
   });
-  assert.deepEqual(inDocumentOrder, ["navigation:Main", "form:Application", "list:Results", "footer:Footer"]);
+  assert.deepEqual(inDocumentOrder, ["navigation:Main", "form:Application", "list:Results (3)", "footer:Footer"]);
 
   /*
    * `main` wrapped the form and the list and held nothing of its own, so it is a
@@ -426,7 +426,7 @@ test("a blocker's section outranks everything", () => {
     { url: "https://x", title: "t", ...jobsPage() },
     { context: { step: "application form", blockers: ["CAPTCHA on Results"] } },
   );
-  assert.equal(ir.sections[0]!.label, "Results", "the section holding the blocker is the one to look at");
+  assert.match(ir.sections[0]!.label, /^Results/, "the section holding the blocker is the one to look at");
 });
 
 test("the compile is deterministic, so a diff between revisions is meaningful", () => {
@@ -651,6 +651,68 @@ test("a grouped section keeps its id across a re-render", () => {
   const regrouped = second.sections.find((section) => section.items !== undefined)!;
 
   assert.equal(regrouped.id, grouped.id, "the grouped section must keep its id");
+});
+
+test("a row is tested for actionability by what it contains, not by itself", () => {
+  /*
+   * The bug this pins was invisible in the output and changed the count.
+   *
+   * `pairContinuationRows` decides whether a row continues the one above it by
+   * asking whether the row above is actionable. Its first version asked
+   * `child.children.some((index) => isInteractive({ ...child, index }))`, which
+   * spreads the row and swaps its index, so the object it tested was the row
+   * itself and never one of its children. Every generic row read as
+   * non-actionable, every row merged upward, and a thirty-row list came back as
+   * fifteen rows of two. The model would have read half a list and had no way to
+   * tell, because nothing in the render says a row holds two table rows.
+   *
+   * So the assertion is the count, and it is asserted at a size where a pairing
+   * bug cannot hide behind the grouping floor.
+   */
+  for (const rows of [4, 7, 30]) {
+    const ir = compileIr({ url: "https://news.example", title: "Feed", ...build(feed(rows)) });
+    const section = ir.sections.find((candidate) => candidate.items !== undefined)!;
+    assert.equal(section.items?.length, rows, `${rows} stories must be ${rows} rows, not ${section.items?.length}`);
+  }
+});
+
+test("a row that genuinely continues the one above it is still merged", () => {
+  /*
+   * The shape pairing exists for: a story and the score line underneath it are
+   * two table rows and one story. Both are children of the same table, so
+   * without this the model reads a list whose rows alternate between headlines
+   * and point counts, and neither half is a story on its own.
+   */
+  const page = build([
+    {
+      role: "generic",
+      name: "",
+      children: Array.from({ length: 6 }, (_, index) => [
+        {
+          role: "generic",
+          name: "",
+          children: [
+            { role: "link", name: `Story number ${index + 1}`, href: `/item?id=${index + 1}` },
+            { role: "link", name: "comments", href: `/comments?id=${index + 1}` },
+          ],
+        },
+        /*
+         * The score line. A container with a text cell, because that is what it
+         * is on the real page: a `<tr>` holding `<td>`s. Written as a bare leaf
+         * first and that was wrong, because a list whose children alternate
+         * between containers and leaves fails the "children have to be alike"
+         * guard and never reaches the pairing rule this test is about.
+         */
+        { role: "generic", name: "", children: [{ role: "generic", name: `${900 + index} points by someone` }] },
+      ]).flat(),
+    },
+  ]);
+  const ir = compileIr({ url: "https://news.example", title: "Feed", ...page });
+  const section = ir.sections.find((candidate) => candidate.items !== undefined)!;
+
+  assert.equal(section.items?.length, 6, "each story and its score line are one row");
+  // And the merged row holds the elements of both halves, so nothing is lost.
+  assert.ok(section.items![0]!.elements.length >= 2, "the merged row carries the story's own elements");
 });
 
 /* ------------------------------------------------------------------ *

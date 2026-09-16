@@ -77,6 +77,13 @@ export function buildIrTree(collected: CollectedPage): { nodes: IrNode[]; root: 
     entries.push({
       backendNodeId: node.backendNodeId,
       parentBackendNodeId: node.parentBackendNodeId,
+      /*
+       * The chain, so a container whose direct parent was filtered attaches to
+       * its nearest kept ancestor rather than to the document root. Without it
+       * Hacker News's table hierarchy was lost and thirty rows compiled as
+       * thirty sections instead of one list.
+       */
+      ancestors: node.ancestorBackendNodeIds,
       order: order++,
       structural: true,
       node: {
