@@ -1,0 +1,37 @@
+{
+  "name": "browser",
+  "version": "1.0.0",
+  "description": "Drive a real browser by writing Playwright: read the page as a small accessibility outline, act with real Playwright calls, and see only what changed.",
+  "category": "prompt-enhancement",
+  "whenToUse": "Before any browser_use call, and whenever you need to look at a page. Load this to get the observation loop, the view()/viewChanges() primitives, and the locator idioms right so a browsing task does not burn context re-reading the same page.",
+  "triggers": [
+    "browser",
+    "browser_use",
+    "playwright",
+    "page",
+    "navigate",
+    "website",
+    "click",
+    "form",
+    "login",
+    "scrape",
+    "screenshot"
+  ],
+  "allowedTools": [
+    "browser_use",
+    "eval",
+    "file_view",
+    "write_file",
+    "grep_search",
+    "list_directory"
+  ],
+  "trust": "builtin",
+  "author": "Reaper",
+  "license": "MIT",
+  "memoryPolicy": {
+    "mayReadProjectMemory": false,
+    "mayWriteProjectMemory": false,
+    "mayReadUserMemory": false,
+    "mayWriteUserMemory": false
+  }
+}
