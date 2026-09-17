@@ -132,6 +132,67 @@ That applies to everything a person does with a mouse or a keyboard:
 condition, and the rare site where nothing else works. What it is not for is
 *acting*, because that is the case where the untrusted marker costs you the task.
 
+### A function or a string, as you prefer
+
+`evaluate` and `waitForFunction` take either. Write whichever reads better:
+
+```js
+await page.evaluate(() => document.title);      // a function
+await page.evaluate("document.title");          // a string
+await page.waitForFunction(() => window.ready); // both work
+```
+
+## What you get back, and what you do not
+
+A program that returns a value does **not** also get the page dumped after it.
+If your program ends with
+
+```js
+return { registered: true, url: page.url() };
+```
+
+then that object is the whole answer, and the tool does not spend your context on
+an accessibility tree you did not ask for. The page is sent when it is worth it:
+after a failure, after a step that changed nothing, or when you ask for it.
+
+So when you want to *see* the result of an action, ask in the program itself:
+
+```js
+await page.getByRole("button", { name: "Register" }).click();
+return { url: page.url(), welcome: await page.getByText("Welcome").isVisible() };
+```
+
+That costs a few dozen tokens instead of thousands, and it is the same
+information. Reach for `observe: "full"` only when you genuinely need the tree,
+and `view({ selector })` when you need one region of it.
+
+## When an action does nothing
+
+A click that succeeds but dispatches no event, and a click that missed its
+target, look identical from a receipt: `NO_CHANGE`, no error. There are two
+causes and they need opposite responses.
+
+1. **The locator was wrong.** Read the element back once and check it is the one
+   you meant.
+2. **The page stopped accepting input.** A renderer can reach a state where it
+   renders, answers reads and navigates, but silently drops every trusted event:
+   clicks do nothing, typing into a focused field does nothing, Tab never moves
+   focus. It is per page, not per browser, and nothing on the page shows it.
+
+For the second, call `recover()`:
+
+```js
+await recover();  // replaces the page's renderer, then puts it back on the same URL
+```
+
+Logged-in state survives, because cookies live in the browser context rather than
+in the renderer that was replaced. It takes a few seconds.
+
+Give it two attempts. If a page still will not take input after that, it is not
+going to, and the right move is to finish the task another way rather than to keep
+testing the same click. Spending twenty steps proving a page is broken is twenty
+steps not spent on the job.
+
 ## Write locators against the name, not the ref
 
 The `[ref=eN]` handles are for *reading* the page. For acting, use a role and an
@@ -251,6 +312,40 @@ Each thread's pages are its own: another agent's tabs are not reachable from her
 Prefer names to indices. `browser.setActive(1)` breaks the moment a page closes,
 which is the reason pages are named at all: a model that opens a tab, works
 elsewhere and comes back has no way to say which one it meant by position.
+
+## Downloads and uploads
+
+A download is handled for you. You do not need `waitForEvent("download")`,
+`saveAs`, a path, or any filesystem code: when you click a link that downloads a
+file, the tool catches it and saves it into this thread's own folder.
+
+Use `downloadAfter` when you want the file in the same step:
+
+```js
+// Click the thing AND get the file back, in one call.
+const invoice = await downloadAfter(page.getByRole("link", { name: "Download Invoice" }));
+// { name: "invoice.txt", path: "/…/downloads/invoice.txt", bytes: 66 }
+```
+
+Or check for it later with `downloads()` and `download(name)`:
+
+```js
+const files = await downloads();          // [{ name, bytes, url }]
+const file = await download("invoice.txt"); // { name, path, bytes } or undefined
+```
+
+To upload, give `setInputFiles` the path from either call. The path is a real
+absolute path in this thread's workspace, so it works directly:
+
+```js
+const file = await download("invoice.txt");
+await page.locator("#uploadPicture").setInputFiles(file.path);
+```
+
+Files persist in the thread's workspace, so a file downloaded one step can be
+uploaded on another site a hundred steps later. Do not build your own download
+handling with `fetch` and `writeFile`: the vault is the supported path, and it is
+what makes the cross-site transfer work after a restart.
 
 ## Changing how the browser presents itself
 

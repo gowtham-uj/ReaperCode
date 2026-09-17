@@ -406,6 +406,17 @@ export class PageObserver {
    * because the model has now seen the full picture and no longer needs a
    * description of how it got here.
    */
+  /**
+   * Whether the budget cut the last capture.
+   *
+   * Exposed because a caller deciding whether to ask for a region needs to know
+   * there is something more to ask for, and reading it off the text would mean
+   * matching the cut notice's wording, which page content can imitate.
+   */
+  wasTruncated(): boolean {
+    return this.wasTrimmed;
+  }
+
   view(selectorNote?: string): { text: string; truncated: boolean; stats: SnapshotStats; contentMeta: PageContentMeta } {
     const outline = this.current ?? "(nothing captured yet)";
     this.previous = outline;
