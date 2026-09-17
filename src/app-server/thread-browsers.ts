@@ -22,6 +22,7 @@ import { readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import { BrowserControlRegistry } from "../browser/control-lease.js";
+import { resetUnresponsiveTargets } from "../browser/cdp-health.js";
 import { forgetPage } from "../browser/page-ownership.js";
 import { readOwnedTargetIds, sweepOrphanPages, type OrphanSweepResult } from "../browser/orphan-reaper.js";
 import { ThreadBrowserRuntime } from "../browser/thread-runtime.js";
@@ -222,13 +223,19 @@ export class ThreadBrowsers {
    * is called directly after a thread is deleted so the common case is immediate
    * rather than eventually.
    *
-   * It attaches to the browser to do this, which is the one cost worth naming: a
-   * browser that is already too clogged to attach to cannot be swept, so the
-   * first cleanup after a bad run needs a restart. Every run after that is kept
-   * clear by this pass, which is the property that matters going forward.
+   * It attaches to the browser to do this, so it clears wedged pages first. That
+   * ordering is the fix for a failure worth naming: `connectOverCDP` waits on
+   * every target, so a page whose renderer stopped answering made the attach
+   * hang until it timed out, which meant this pass could never run on the one
+   * browser that needed it, and a browser in that state stayed unattachable
+   * until it was restarted by hand. Sweeping health before attaching removes
+   * that deadlock: the sweep talks raw CDP, so it works exactly when the
+   * Playwright attach does not.
    */
   async sweepOrphans(): Promise<OrphanSweepResult | undefined> {
     if (this.closed) return undefined;
+    // Before anything attaches: a wedged page would hang the attach below.
+    await resetUnresponsiveTargets(this.options.cdpUrl).catch(() => undefined);
     const owned = await readOwnedTargetIds(this.workspaceRoot).catch(() => undefined);
     if (owned === undefined) return undefined;
     /*

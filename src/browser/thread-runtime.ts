@@ -43,6 +43,7 @@ import {
 
 import { perceive, type PerceptionResult } from "./engine.js";
 import { assertNotRawChrome, assertSteelManagedEndpoint } from "./steel-endpoint.js";
+import { resetUnresponsiveTargets } from "./cdp-health.js";
 import { applySettingsToPage, type BrowserSettings, type PageControls } from "./session-controls.js";
 import { captureIndexedDb, restoreIndexedDb, type StorageCapture } from "./storage-state.js";
 import { DownloadVault, watchDownloads, type VaultFile } from "./downloads.js";
@@ -196,6 +197,16 @@ export class ThreadBrowserRuntime {
   private closed = false;
 
   /**
+   * The last thing the health sweep did, if it closed a wedged page.
+   *
+   * Surfaced on the next tool result rather than logged and forgotten. A page
+   * disappearing from under a thread is otherwise unexplainable from the agent's
+   * side, and "a tab vanished and nobody said why" is exactly the kind of thing
+   * that sends a model hunting for a cause that is not there.
+   */
+  private lastHealthNote: string | undefined;
+
+  /**
    * Attach if needed, without resolving or changing the active page.
    *
    * The list calls need the context and nothing else, and going through
@@ -289,9 +300,36 @@ export class ThreadBrowserRuntime {
      */
     assertSteelManagedEndpoint(this.options.cdpUrl);
     await assertNotRawChrome(this.options.cdpUrl);
+    /*
+     * Clear any page whose renderer has stopped answering, before the handshake.
+     *
+     * `connectOverCDP` attaches to every target and waits for each one, so one
+     * wedged renderer makes the connect hang until it times out, permanently and
+     * for every caller. Measured: three consecutive 120s timeouts against a
+     * browser whose twelve other pages answered in under 150ms, and a connect
+     * that took 11s the moment the one wedged page was closed. The sweep talks
+     * raw CDP precisely because it has to run when Playwright cannot connect.
+     *
+     * Best effort: if the sweep itself cannot run (Steel down, socket refused)
+     * it returns and the connect below reports the real problem.
+     */
+    const health = await resetUnresponsiveTargets(this.options.cdpUrl).catch(() => undefined);
+    if (health !== undefined && health.closed.length > 0) {
+      this.lastHealthNote =
+        `Closed ${health.closed.length} page(s) whose renderer had stopped answering, ` +
+        `which would otherwise have made this browser impossible to attach to: ` +
+        `${health.closed.map((page) => page.url || page.targetId).join(", ")}.`;
+    }
     const { chromium } = await import("playwright");
     const browser = await chromium.connectOverCDP(this.options.cdpUrl, {
-      timeout: this.options.cdpTimeoutMs ?? 30_000,
+      /*
+       * 45s rather than 30s. A healthy attach is not instant: measured at 11s for
+       * a session with eleven pages, because the handshake is per target. With
+       * the sweep above removing the one case that hangs rather than merely
+       * slows, the remaining cost is real work, and 30s left too little room for
+       * a session in the twenties.
+       */
+      timeout: this.options.cdpTimeoutMs ?? 45_000,
     });
     /*
      * The runtime was closed while this connect was in flight.
@@ -1359,6 +1397,20 @@ export class ThreadBrowserRuntime {
       sections: 0,
       fallback: this.lastWasFallback,
     };
+  }
+
+  /**
+   * Take the health note, if the last attach produced one.
+   *
+   * Read once and cleared, so the next tool result carries it and the one after
+   * that does not: a notice that repeats on every step becomes noise the model
+   * learns to skip, and this is worth reading exactly once, on the step where a
+   * tab it was using has just disappeared.
+   */
+  takeHealthNote(): string | undefined {
+    const note = this.lastHealthNote;
+    this.lastHealthNote = undefined;
+    return note;
   }
 
   /** The whole page, as the model should read it. */

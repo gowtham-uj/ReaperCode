@@ -489,11 +489,19 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
      * "this page has nothing on it".
      */
     const stats = runtime.lastStats();
+    /*
+     * The health note is drained here as well as on the code path, because a
+     * look is the first call a model makes after a reconnect, and it is exactly
+     * when a closed tab needs explaining. Drained rather than read: leaving it
+     * set would repeat it on every later step until something else tripped it.
+     */
+    const health = runtime.takeHealthNote();
     return {
       output:
         `${view.text}\n\n[${stats.lines} lines, ${stats.chars} chars, ${stats.elements} elements]` +
         `\n(REV ${runtime.observer.revision} - pass expected_revision with your next program)` +
-        (flows.length > 0 ? `\n\n${flows.join("\n")}` : ""),
+        (flows.length > 0 ? `\n\n${flows.join("\n")}` : "") +
+        (health !== undefined ? `\n\nBROWSER: ${health}` : ""),
       outcome: "SUCCESS",
       rev: runtime.observer.revision,
     };
@@ -777,6 +785,18 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
       })
       .catch(() => undefined);
   }
+
+  /*
+   * A page the runtime had to close to keep the browser attachable.
+   *
+   * This is the one thing about a step that the model cannot discover for
+   * itself: a tab it was using is gone, and nothing else in the receipt
+   * explains why. Reporting it once, with the URL, turns "my tab disappeared"
+   * into "the page wedged and was closed, reopen it" instead of a hunt for a
+   * cause that is not on the page.
+   */
+  const health = runtime.takeHealthNote();
+  if (health !== undefined) lines.push("", `BROWSER: ${health}`);
 
   return {
     output: lines.join("\n"),
