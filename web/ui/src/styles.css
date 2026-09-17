@@ -123,6 +123,41 @@ code, pre, [data-diff], [data-read], [data-terminal] { font-family: var(--ds-fon
 .thread-delete:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 1px; }
 .thread-delete:disabled { opacity: .4; cursor: default; }
 
+/*
+ * The delete confirmation.
+ *
+ * Fixed to the viewport rather than the sidebar, because the row it is about can
+ * be scrolled out from under it and a dialog anchored to the list would leave the
+ * question somewhere the user cannot see. The backdrop closes on click, the panel
+ * does not, and Escape closes as well, which is what makes it dismissible without
+ * a pointer.
+ *
+ * It is an alertdialog: deleting a thread cannot be undone, so assistive
+ * technology should announce it as a decision rather than as a passing notice.
+ */
+.thread-confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgb(0 0 0 / 45%);
+}
+.thread-confirm {
+  width: min(440px, 100%);
+  padding: 18px 18px 14px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-base);
+  box-shadow: 0 16px 48px rgb(0 0 0 / 28%);
+}
+.thread-confirm h2 { margin: 0 0 8px; font-size: 15px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.thread-confirm p { margin: 0 0 16px; font-size: 13px; line-height: 1.55; color: var(--dsw-alias-label-secondary); }
+.thread-confirm p strong { color: var(--dsw-alias-label-primary); font-weight: 600; }
+.thread-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
 .sidebar-empty { padding: 12px; color: var(--dsw-alias-label-caption); font-size: 12px; text-align: center; }
 .new-thread-button { order: -1; display: flex; flex: none; align-items: center; justify-content: center; gap: 6px; height: 38px; margin: 0 2px 8px; padding: 8px 16px; overflow: hidden; border: .5px solid var(--dsw-alias-border-l3); border-radius: 12px; background: var(--dsw-alias-button-elevated-fill); color: var(--dsw-alias-label-primary); font-size: 14px; font-weight: 500; line-height: 22px; cursor: pointer; }
 .new-thread-button:hover { background: var(--dsw-alias-button-floating-hover); }

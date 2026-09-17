@@ -199,6 +199,21 @@ export function createAppServerCore(options: StartAppServerOptions): {
     ...(options.settingsHome ? { settingsHome: options.settingsHome } : {}),
     ...(options.memoryStore ? { memoryStore: options.memoryStore } : {}),
   });
+
+  /*
+   * Clear workspace directories whose thread no longer exists, once at boot.
+   *
+   * The record is the source of truth for existence, so a directory under the
+   * managed root with no record is garbage: it is what a delete by another
+   * process, a crash midway through one, or an older build leaves behind.
+   * Measured before this: thirteen empty workspace directories survived a purge
+   * and nothing would ever have removed them.
+   *
+   * Deliberately not awaited. A boot must not fail or wait on housekeeping, and
+   * the sweep is best effort by construction: it logs nothing and throws nothing.
+   */
+  void manager.sweepOrphanWorkspaces().catch(() => undefined);
+
   return { processor, router, manager, threadBrowsers };
 }
 

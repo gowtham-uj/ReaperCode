@@ -83,6 +83,38 @@ export function ThreadList({ client, activeThreadId, threads, loading, onRefresh
   const [failure, setFailure] = useState<string>();
   const [now, setNow] = useState(() => Date.now());
   const titleRef = useRef<HTMLInputElement>(null);
+  /**
+   * The thread awaiting delete confirmation, or undefined.
+   *
+   * Deleting is irreversible and takes the thread's workspace, its files, its
+   * browser tabs and its whole transcript with it, so it asks first. The button
+   * used to delete immediately on one click, which on a list of similar titles
+   * is one misplaced click away from losing a conversation that cannot be
+   * recovered.
+   */
+  const [confirming, setConfirming] = useState<ThreadSummary | undefined>(undefined);
+  const [deleting, setDeleting] = useState(false);
+  const confirmRef = useRef<HTMLButtonElement>(null);
+
+  // Focus the confirm button when the dialog opens, so Enter confirms and Escape
+  // cancels without the pointer, and the dialog can be dismissed by keyboard.
+  useEffect(() => {
+    if (confirming) queueMicrotask(() => confirmRef.current?.focus());
+  }, [confirming]);
+
+  const doDelete = async (): Promise<void> => {
+    if (!confirming) return;
+    setDeleting(true);
+    setFailure(undefined);
+    try {
+      await onDelete?.(confirming.id);
+      setConfirming(undefined);
+    } catch (cause) {
+      setFailure(cause instanceof Error ? cause.message : "Could not delete the thread");
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   // "3m ago" that never becomes "4m ago" is worse than no timestamp; tick once
   // a minute, which is the finest granularity the labels actually render.
@@ -234,7 +266,7 @@ export function ThreadList({ client, activeThreadId, threads, loading, onRefresh
                   title="Delete this thread"
                   onClick={(event) => {
                     event.stopPropagation();
-                    void onDelete?.(entry.id);
+                    setConfirming(entry);
                   }}
                 >
                   <TrashIcon />
@@ -255,6 +287,53 @@ export function ThreadList({ client, activeThreadId, threads, loading, onRefresh
         <button className="new-thread-button" type="button" disabled={!client || busy} onClick={() => setCreating(true)}>
           <PlusIcon /><span>New thread</span>
         </button>
+      )}
+      {confirming && (
+        /*
+         * A modal, not a second click on the row.
+         *
+         * Deleting takes the conversation, its workspace, the files the agent
+         * wrote, its download vault and its open browser tabs. None of that comes
+         * back, and the list is full of rows that look alike, so the decision is
+         * separated from the button that starts it. The confirmation names what
+         * goes, because "are you sure" alone does not tell a user what they are
+         * about to lose.
+         */
+        <div className="thread-confirm-backdrop" role="presentation" onClick={() => { if (!deleting) setConfirming(undefined); }}>
+          <div
+            className="thread-confirm"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="thread-confirm-title"
+            aria-describedby="thread-confirm-body"
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => { if (event.key === "Escape" && !deleting) setConfirming(undefined); }}
+          >
+            <h2 id="thread-confirm-title">Delete this thread?</h2>
+            <p id="thread-confirm-body">
+              <strong>{threadLabel(confirming, confirming.id)}</strong> and everything it owns will be
+              removed: the conversation, its workspace and files, its downloads, and its open browser tabs.
+              This cannot be undone.
+            </p>
+            <div className="thread-confirm-actions">
+              <button
+                className="button"
+                data-variant="ghost"
+                type="button"
+                disabled={deleting}
+                onClick={() => setConfirming(undefined)}
+              >Cancel</button>
+              <button
+                ref={confirmRef}
+                className="button"
+                data-variant="danger"
+                type="button"
+                disabled={deleting}
+                onClick={() => void doDelete()}
+              >{deleting ? "Deleting…" : "Delete thread"}</button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

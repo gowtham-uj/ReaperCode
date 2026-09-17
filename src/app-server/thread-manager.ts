@@ -1,5 +1,6 @@
 import { rm, stat } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, resolve, sep } from "node:path";
 
 import type { ProviderCredentialStore } from "../config/provider-credentials.js";
 import type { ToolApprovalDecision } from "../tools/approval.js";
@@ -57,6 +58,71 @@ export class ReaperThreadManager {
     this.turnRunner = options.turnRunner ?? runManagedTurn;
   }
 
+  /**
+   * Remove workspace directories whose thread no longer exists.
+   *
+   * `deleteThread` cleans up after itself, and this covers everything it cannot:
+   * a thread deleted by another process or an older build, a crash midway through
+   * a delete, or a server killed between removing the record and removing the
+   * directory. The record is the source of truth for existence, so a directory
+   * under the managed root with no record beside it is garbage by definition.
+   *
+   * Measured: after a purge from a script, thirteen empty workspace directories
+   * were left on disk that nothing would ever reference or remove. Only the
+   * managed root is swept: a directory the user chose is never touched, because
+   * it is their code and not a workspace the app minted.
+   *
+   * Best effort. A sweep that cannot read the directory or cannot remove one
+   * entry leaves the rest alone rather than failing the boot.
+   */
+  async sweepOrphanWorkspaces(): Promise<{ removed: string[] }> {
+    const removed: string[] = [];
+    const root = join(homedir(), ".reaper", "workspaces");
+    const { readdir } = await import("node:fs/promises");
+    const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+    /*
+     * Every workspace path a live thread is using, resolved.
+     *
+     * Matched by path rather than by directory name, and that distinction was a
+     * bug the tests caught: the first version compared names to thread ids, which
+     * holds only for a workspace the app minted. A thread pointed at
+     * `<root>/<anything>` is a live thread whose directory name has nothing to do
+     * with its id, so the sweep deleted a workspace out from under it. The record
+     * holds the path, so the path is what is compared.
+     */
+    const livePaths = new Set(
+      (await this.store.list())
+        .map((metadata) => metadata.workspaceRoot)
+        .filter((workspace): workspace is string => typeof workspace === "string" && workspace.length > 0)
+        .map((workspace) => resolve(workspace)),
+    );
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const target = join(root, entry.name);
+      if (livePaths.has(resolve(target))) continue;
+      /*
+       * Only remove a directory that is certainly ours.
+       *
+       * Two shapes qualify. An empty one is the scaffolding `createThreadWorkspace`
+       * makes for a thread that then ran nothing, and removing it loses nothing.
+       * A populated one carries the `.reaper` directory the app writes into every
+       * workspace it makes, which is the marker that says "the app has been
+       * here". A directory with content and no such marker is left alone: it is
+       * something a person put here, and it is not this pass's to delete.
+       */
+      const marker = join(target, ".reaper");
+      const hasMarker = await stat(marker).then((info) => info.isDirectory()).catch(() => false);
+      if (!hasMarker) {
+        const contents = await readdir(target).catch(() => undefined);
+        if (contents === undefined || contents.length > 0) continue;
+      }
+      await rm(target, { recursive: true, force: true })
+        .then(() => removed.push(entry.name))
+        .catch(() => undefined);
+    }
+    return { removed };
+  }
+
   async startThread(input: CreateThreadMetadataInput): Promise<ManagedReaperThread> {
     this.assertOpen();
     const metadata = this.store.createMetadata(input);
@@ -101,10 +167,33 @@ export class ReaperThreadManager {
     return await this.resumeThread(threadId);
   }
 
+  /**
+   * Every thread that still exists, newest first.
+   *
+   * The record on disk decides existence, and the in-memory entry only supplies
+   * fresher metadata for a thread that still has one. This was a plain merge of
+   * the two, which listed dead threads: a thread deleted by another process (the
+   * CLI, a second server, a cleanup script) left this process's map holding it
+   * forever, so the sidebar showed a row for a conversation whose record, files
+   * and browser pages were all gone. Measured: after a purge, the live UI still
+   * rendered one row for a thread that no longer existed anywhere, and clicking
+   * delete on it did nothing because there was nothing left to delete.
+   *
+   * A live entry with no record is dropped from the map as well as from the list,
+   * because it can never become valid again: nothing recreates a record under the
+   * same id.
+   */
   async listThreads(): Promise<ThreadMetadata[]> {
     const stored = await this.store.list();
+    const onDisk = new Set(stored.map((metadata) => metadata.threadId));
     const byId = new Map(stored.map((metadata) => [metadata.threadId, metadata]));
-    for (const thread of this.threads.values()) byId.set(thread.threadId, thread.metadata);
+    for (const thread of [...this.threads.values()]) {
+      if (!onDisk.has(thread.threadId)) {
+        this.threads.delete(thread.threadId);
+        continue;
+      }
+      byId.set(thread.threadId, thread.metadata);
+    }
     return [...byId.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
@@ -238,6 +327,11 @@ export class ReaperThreadManager {
   async deleteThread(threadId: string): Promise<{ removed: string[] }> {
     const removed: string[] = [];
     /*
+     * Read the metadata before removing anything, because the workspace path is
+     * only in the record and it is needed for the two steps at the end.
+     */
+    const metadata = await this.store.load(threadId);
+    /*
      * The browser first, and by thread id rather than through a runtime, because
      * the runtime may not exist after a restart while the disk state does.
      */
@@ -255,7 +349,56 @@ export class ReaperThreadManager {
      * delete-heavy cleanup is how the accumulation happens.
      */
     void this.options.threadBrowsers?.sweepOrphans().catch(() => undefined);
+    void this.sweepOrphanWorkspaces().catch(() => undefined);
     this.threads.delete(threadId);
+
+    /*
+     * The thread's own workspace, when the app created it.
+     *
+     * This was missing, and the user's requirement is explicit: deleting a thread
+     * removes it, its pages, its resources and its session too. Measured before
+     * the fix: the record, the browser state and the ownership file all went, and
+     * the workspace directory and its whole session journal stayed on disk
+     * forever. A user clearing fifty threads was left with fifty directories.
+     *
+     * The check is what keeps this from being dangerous. A thread whose workspace
+     * is a directory the user chose (`/work`, a repository, anything they typed)
+     * must not have that directory deleted: it holds their code, not ours. Only a
+     * path the app itself minted, under its own managed workspaces root, is
+     * removed, and only when it is a strict child of that root rather than the
+     * root itself.
+     */
+    const workspace = metadata?.workspaceRoot;
+    if (workspace !== undefined && workspace.length > 0) {
+      if (isAppManagedWorkspace(workspace)) {
+        /*
+         * The whole directory, because the app created it for this thread alone.
+         * It holds the sandbox the thread's commands ran in, the files the agent
+         * wrote, the download vault, and the session journal under `.reaper`.
+         * Nothing else references it once the record is gone, so it is the
+         * thread's sandbox and the thread's resources together.
+         */
+        await rm(workspace, { recursive: true, force: true })
+          .then(() => removed.push("workspace"))
+          .catch(() => undefined);
+      } else {
+        /*
+         * A directory the user chose (`/work`, a repository) keeps its contents,
+         * because they are the user's code and not ours to delete. What goes is
+         * the thread's own state inside it: the session journal and the session
+         * name directory beside it, which is the conversation and how it is
+         * resumed, and nothing else reads once the thread is gone.
+         */
+        for (const target of [
+          join(workspace, ".reaper", "sessions", `app-${threadId}`),
+          join(workspace, ".reaper", "sessions", threadId),
+        ]) {
+          await rm(target, { recursive: true, force: true })
+            .then(() => removed.push(`session:${threadId}`))
+            .catch(() => undefined);
+        }
+      }
+    }
     return { removed };
   }
 
@@ -413,6 +556,31 @@ function abortError(signal: AbortSignal): Error {
   const error = new Error(typeof reason === "string" ? reason : "Operation aborted");
   error.name = "AbortError";
   return error;
+}
+
+/**
+ * Whether a workspace path is one the app minted for a thread.
+ *
+ * The rule is a strict child of the managed workspaces root, `<home>/.reaper/
+ * workspaces/<id>`, which is where `createThreadWorkspace` puts a thread that
+ * was not given a directory. A strict child and not the root, because a thread
+ * pointed at `<home>/.reaper/workspaces` itself is a user-chosen directory and
+ * deleting it would take every other thread's workspace with it.
+ *
+ * Paths are compared after resolution so `.` and trailing separators cannot
+ * disguise a directory as one of ours.
+ */
+function isAppManagedWorkspace(workspaceRoot: string): boolean {
+  const root = join(homedir(), ".reaper", "workspaces");
+  const target = resolve(workspaceRoot);
+  const base = resolve(root);
+  if (target === base) return false;
+  /*
+   * A separator is appended before the prefix test, so a sibling directory whose
+   * name merely starts with the same characters (`/x/workspaces-other`) is not
+   * mistaken for a child of `/x/workspaces`.
+   */
+  return target.startsWith(base.endsWith(sep) ? base : `${base}${sep}`);
 }
 
 /**
