@@ -109,6 +109,15 @@ export interface ControlSurface {
    * a broken page, and there is nothing on the page to point at the browser.
    */
   recover: () => Promise<ControlReport>;
+  /**
+   * What this browser can do, so the model asks rather than experiments.
+   *
+   * The mission spent thirteen calls establishing whether downloads were possible
+   * and several more probing whether trusted input worked. Both are facts the
+   * runtime already holds, and a fact the model cannot query is a fact it will
+   * try to discover by acting, which is the expensive way.
+   */
+  capabilities: () => Promise<Record<string, unknown>>;
 }
 
 /**

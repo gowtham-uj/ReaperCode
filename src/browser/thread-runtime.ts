@@ -243,6 +243,17 @@ export class ThreadBrowserRuntime {
   }
 
   /**
+   * Whether the connection to the browser is currently live.
+   *
+   * Answered from the handles rather than by trying to attach: a capability
+   * query must not have the side effect of connecting, or asking what the
+   * browser can do would be a thing that changes what it is doing.
+   */
+  isAttached(): boolean {
+    return this.browser !== undefined && this.browser.isConnected() && this.context !== undefined;
+  }
+
+  /**
    * Attach if not already attached, and return the live handles.
    *
    * Concurrency-safe by construction: `connecting` holds the in-flight promise

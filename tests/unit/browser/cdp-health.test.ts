@@ -280,3 +280,22 @@ test("a retry that is not helped by the sweep still throws", async () => {
     await steel.stop();
   }
 });
+
+test("the runtime reports its capabilities without connecting", async () => {
+  /*
+   * A capability query must not be a thing that changes what the browser is
+   * doing, so `isAttached()` answers from the handles rather than by attaching.
+   * The mission spent thirteen calls working out whether downloads were possible
+   * because there was no way to ask; this is the way to ask.
+   */
+  const { ThreadBrowserRuntime } = await import("../../../src/browser/thread-runtime.js");
+  const runtime = new ThreadBrowserRuntime({
+    threadId: "00000000-0000-0000-0000-000000000001",
+    cdpUrl: "ws://127.0.0.1:1",
+    // A short timeout so a test that accidentally connects fails fast.
+    cdpTimeoutMs: 300,
+  });
+
+  assert.equal(runtime.isAttached(), false, "a runtime that has never attached reports not attached");
+  assert.equal(runtime.downloadsAreEnabled, false, "and downloads are off until the command is accepted");
+});

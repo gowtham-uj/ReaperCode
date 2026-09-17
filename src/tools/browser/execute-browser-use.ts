@@ -453,6 +453,31 @@ function controlSurface(runtime: ThreadBrowserRuntime): ControlSurface {
     blockAds: async (enabled) => await runtime.setSettings({ blockAds: enabled }),
     bandwidth: async (options) => await runtime.setSettings({ bandwidth: options as BandwidthSettings }),
     settings: async () => runtime.currentSettings(),
+    /*
+     * What this browser can actually do right now.
+     *
+     * The mission showed why this matters: the model spent thirteen calls working
+     * out whether downloads were possible, and it had no way to ask. That is not
+     * a reasoning problem, it is a missing fact, and a fact the runtime already
+     * holds. So it is one call rather than an experiment.
+     *
+     * Reported from live state rather than as a static list, because the answer
+     * genuinely changes: downloads depend on whether the command was accepted on
+     * this connection, and `attached` depends on the connection being up.
+     */
+    capabilities: async () => ({
+      attached: runtime.isAttached(),
+      downloads: runtime.downloadsAreEnabled,
+      /** Trusted input is available; `recover()` is the fix when a page ignores it. */
+      trustedInput: true,
+      /** Settings that take effect on the live page. */
+      liveSettings: ["userAgent", "timezone", "viewport", "fullscreen", "mobile", "blockAds", "bandwidth"],
+      /** Settings that apply only when the browser next starts. */
+      nextLaunchSettings: ["proxy", "userPreferences"],
+      /** Files persist in this thread's workspace and can be uploaded later. */
+      downloadVault: runtime.downloadsAreEnabled,
+      recoverable: true,
+    }),
     rotateUserAgent: async () => await runtime.rotateUserAgent(),
     recover: async () => await runtime.recover(),
     downloads: async () =>
