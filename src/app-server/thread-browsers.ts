@@ -337,8 +337,18 @@ export class ThreadBrowsers {
     }
     if (targetIds.length === 0) return;
 
+    /*
+     * Clear wedged pages before attaching, for the same reason the sweep before
+     * the orphan pass does: this is a delete, and a delete that hangs because
+     * some page stopped answering is a thread the user cannot remove. The sweep
+     * closes any wedged page and not only this thread's, which is correct rather
+     * than overreaching: a page whose renderer is gone cannot be used by any
+     * thread, and leaving it would block every delete and every attach from here
+     * on.
+     */
+    await resetUnresponsiveTargets(this.options.cdpUrl).catch(() => undefined);
     const { chromium } = await import("playwright");
-    const browser = await chromium.connectOverCDP(this.options.cdpUrl, { timeout: 30_000 });
+    const browser = await chromium.connectOverCDP(this.options.cdpUrl, { timeout: 45_000 });
     try {
       const context = browser.contexts()[0];
       if (context === undefined) return;
