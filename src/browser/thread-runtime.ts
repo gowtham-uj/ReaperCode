@@ -446,6 +446,7 @@ export class ThreadBrowserRuntime {
     await this.decoratePages(context.pages().filter((page) => !page.isClosed())).catch(() => undefined);
 
     await this.restorePages(context).catch(() => undefined);
+    await this.restoreNames(context).catch(() => undefined);
 
     /*
      * IndexedDB, restored after the pages are open.
@@ -984,6 +985,35 @@ export class ThreadBrowserRuntime {
    * The record is a list of target ids under the thread's own state path, so two
    * threads cannot claim the same tab: whichever file names the id owns it.
    */
+  /**
+   * Put the names back on the pages a restart recovered.
+   *
+   * Ownership is keyed by target id and survives a crash, but the name map is
+   * keyed by the `Page` object, which does not: after a restart every recovered
+   * page came back `undefined`-named, measured, so `browser.setActive("npm")`
+   * failed on a tab that was plainly open and the pane listed tabs with no
+   * labels. The saved page list pairs a name with a URL, so matching on URL is
+   * enough to restore it without a second identity scheme.
+   */
+  private async restoreNames(context: BrowserContext): Promise<void> {
+    const path = this.options.statePath;
+    if (!path) return;
+    let saved: { pages?: Array<{ url?: string; name?: string }> } | undefined;
+    try {
+      saved = JSON.parse(await readFile(ThreadBrowserRuntime.pagesPath(path), "utf8"));
+    } catch {
+      return;
+    }
+    for (const entry of saved?.pages ?? []) {
+      if (typeof entry.url !== "string" || typeof entry.name !== "string") continue;
+      if (entry.name.length === 0 || this.named.has(entry.name)) continue;
+      const match = context.pages().find((page) => !page.isClosed() && page.url() === entry.url);
+      if (match && ![...this.named.values()].some((existing) => existing.page === match)) {
+        this.named.set(entry.name, { name: entry.name, page: match, openedAt: Date.now() });
+      }
+    }
+  }
+
   private async claimOwnPages(context: BrowserContext): Promise<void> {
     const path = this.options.statePath;
     /*

@@ -90,6 +90,36 @@ export function LiveBrowser({ baseUrl, threadId, surface }: {
     return () => { cancelled = true; };
   }, [root, threadId]);
 
+  /*
+   * Bring the stream back when the server it was talking to comes back.
+   *
+   * The viewer is an iframe holding a socket to this gateway. When the gateway
+   * restarts, that socket dies and nothing re-establishes it: the iframe keeps
+   * its dead connection and the pane sits on "Session connecting" forever, even
+   * though the browser it is meant to show was never touched. Measured during
+   * the ten-site mission, where a deliberate restart left the pane showing zero
+   * tabs while the agent's pages were all still open.
+   *
+   * So health is watched, and a recovery bumps the nonce, which is the mechanism
+   * this component already has for giving the viewer a fresh source. Only the
+   * transition from unhealthy to healthy remounts: polling alone would reload
+   * the stream every few seconds and flicker.
+   */
+  useEffect(() => {
+    let wasDown = false;
+    let cancelled = false;
+    const timer = setInterval(() => {
+      void fetch(`${root}/healthz`, { cache: "no-store" })
+        .then((response) => {
+          if (cancelled) return;
+          if (!response.ok) { wasDown = true; return; }
+          if (wasDown) { wasDown = false; setNonce((n) => n + 1); }
+        })
+        .catch(() => { wasDown = true; });
+    }, 3000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [root]);
+
   const changeControl = useCallback(async (action: "take" | "return") => {
     if (!threadId) return;
     /*
