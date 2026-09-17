@@ -20,11 +20,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { startTortureSite, type RunningTortureSite } from "../fixtures/torture-site.js";
-import { probeBrowser, skipUnless } from "../fixtures/browser-availability.js";
+import { DEFAULT_CDP_URL, probeBrowser, skipUnless } from "../fixtures/browser-availability.js";
 import { ThreadBrowserRuntime } from "../../src/browser/thread-runtime.js";
 import { executeBrowserUse } from "../../src/tools/browser/execute-browser-use.js";
 
-const CDP_URL = process.env["REAPER_CDP_URL"] ?? "http://127.0.0.1:9222";
+const CDP_URL = process.env["REAPER_CDP_URL"] ?? DEFAULT_CDP_URL;
 const availability = await probeBrowser(CDP_URL);
 const skip = skipUnless(availability);
 const site: RunningTortureSite | undefined = availability.available ? await startTortureSite() : undefined;

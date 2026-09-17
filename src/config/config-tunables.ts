@@ -145,13 +145,13 @@ interface TunablesCache {
     executablePath: string;
     headless: boolean;
     /**
-     * The CDP endpoint of the browser Reaper attaches to.
+     * Steel's managed CDP endpoint, which is the only thing Reaper attaches to.
      *
-     * Configuration rather than a constant because it is the one thing that
-     * changes if the arrangement does: `:9222` is Chrome's own remote-debugging
-     * port, `:9223` is Steel's nginx forwarding to the same Chrome, and if Steel
-     * ever became launcher-only this would point straight at Chrome. All three
-     * are the same browser from Playwright's side.
+     * Steel runs Chrome as its child and proxies CDP on its own API port; that
+     * port is this URL, so it is a Steel endpoint by definition. Configuration
+     * rather than a constant only because Steel can be configured on another
+     * host or port. Chrome's own debugging port is not a valid value here and
+     * is refused: see `browser/steel-endpoint.ts`.
      */
     cdpUrl: string;
     /**
@@ -251,7 +251,20 @@ const DEFAULTS: TunablesCache = {
     maxOutputLines: 5_000,
     termGraceMs: 5_000,
   },
-  browser: { executablePath: "", headless: true, cdpUrl: "http://127.0.0.1:9222", idleCloseMs: 600_000 },
+  /*
+   * Steel's managed endpoint, not Chrome's own debugging port.
+   *
+   * Steel runs Chrome as its child and proxies CDP on its own port, and that is
+   * the endpoint its session object advertises as `websocketUrl`. Connecting
+   * straight to 9222 reaches the same browser while bypassing Steel: it skips
+   * whatever Steel does to the connection and it breaks the moment Steel is
+   * configured on different ports or moved to another host, because 9222 is
+   * Chrome's number rather than Steel's.
+   *
+   * The `browser` block takes these from the runtime tunables, so a deployment
+   * that moves Steel changes `REAPER_BROWSER_CDP_URL` rather than editing this.
+   */
+  browser: { executablePath: "", headless: true, cdpUrl: "ws://127.0.0.1:3000", idleCloseMs: 600_000 },
   concurrency: { queueMaxConcurrency: 4, tuiNoQueue: false },
   engine: {
     liveModelTimeoutMs: 60_000,

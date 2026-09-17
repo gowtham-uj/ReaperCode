@@ -27,8 +27,14 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { isLoopbackHost } from "../auth.js";
 import type { ThreadBrowsers } from "../thread-browsers.js";
 import type { BrowserHub } from "./hub.js";
-import { attachLiveView, handleBrowserControl, serveLiveViewPage } from "./live-view.js";
+import {
+  attachLiveView,
+  DEFAULT_STEEL_API_URL,
+  handleBrowserControl,
+  serveLiveViewPage,
+} from "./live-view.js";
 import { parsePreviewPath, proxyPreview } from "./preview.js";
+import { reservedLoopbackPorts } from "./reserved-ports.js";
 import {
   gitDiff,
   gitStatus,
@@ -199,6 +205,15 @@ export interface BrowserGatewayOptions {
   threadBrowsers: ThreadBrowsers;
   /** Base URL of the Steel API that serves the cast socket. Loopback by default. */
   steelApiUrl?: string | undefined;
+  /**
+   * The CDP endpoint the browser attaches to, for the preview proxy's denylist.
+   *
+   * Named here so the ports that must not be proxied follow the configuration
+   * rather than a constant. The browser endpoint moved once already, and a
+   * denylist that had hardcoded the old port would have quietly started
+   * forwarding to the new one.
+   */
+  cdpUrl?: string | undefined;
 }
 
 export interface RunningBrowserGateway {
@@ -209,6 +224,18 @@ export interface RunningBrowserGateway {
 
 export async function startBrowserGateway(options: BrowserGatewayOptions): Promise<RunningBrowserGateway> {
   const { hub, workspaceRoot, resolveThreadRoot } = options;
+
+  /*
+   * The port this gateway serves on, for the preview proxy's denylist.
+   *
+   * Read after `listen` rather than from `options.port`, because the port is
+   * commonly 0: the real one is assigned by the OS and only the listen
+   * callback knows it. A mutable binding rather than a captured value for the
+   * same reason — the request handler reads it long after it is set, and
+   * reading `options.port` would refuse port 0 and forward to whatever
+   * happened to be bound.
+   */
+  let actualGatewayPort = options.port;
 
   /**
    * The sandbox root for one REST request.
@@ -248,7 +275,16 @@ export async function startBrowserGateway(options: BrowserGatewayOptions): Promi
     // `handleRest` would mean its GET-only guard rejected a preview form
     // submission.
     const url = request.url ?? "/";
-    const preview = parsePreviewPath(url);
+    /*
+     * The ports this proxy must never forward to, computed once per request
+     * from the configured endpoints rather than read from a constant. See
+     * `reserved-ports.ts` for why each one is on the list.
+     */
+    const preview = parsePreviewPath(url, reservedLoopbackPorts({
+      cdpUrl: options.cdpUrl,
+      steelApiUrl: options.steelApiUrl ?? DEFAULT_STEEL_API_URL,
+      gatewayPort: actualGatewayPort,
+    }));
     if (preview) return proxyPreview(preview, request, response);
     // A browser screenshot is binary; the JSON `handleRest` cannot serve it.
     // It is routed before the JSON surface and must be a GET like the rest.
@@ -426,10 +462,21 @@ export async function startBrowserGateway(options: BrowserGatewayOptions): Promi
   });
 
   const actualPort = (http.address() as { port: number }).port;
+  actualGatewayPort = actualPort;
   return {
     url: `http://${options.host}:${actualPort}`,
     port: actualPort,
     async close(): Promise<void> {
+      /*
+       * The live bridges first, and by force.
+       *
+       * Each holds an upstream socket to Steel, and `closeServer` below only
+       * terminates the *client* websockets. Their `close` handlers would then
+       * ask Steel to close and wait for an answer Steel does not always send, so
+       * a bridge could keep the process alive after every test passed. Ending
+       * them here makes shutdown independent of the peer.
+       */
+      liveView.close();
       await closeServer(wss, liveWss, http);
     },
   };

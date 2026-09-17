@@ -566,6 +566,79 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
     return __pageView(name, encoded);
   }
 
+  /*
+   * The control surface: the browser settings a program can change while it
+   * works.
+   *
+   * Ride the same helper channel as view/viewChanges/screenshot, because they
+   * are the same kind of thing (a named call the host answers, not a Playwright
+   * method path) and because the channel already handles argument encoding and
+   * error unwrapping. Each returns what the host says actually changed, so a
+   * program that sets a setting it cannot have is told rather than reassured.
+   *
+   * \`browser.set(...)\` takes one object and is the shape most programs want;
+   * the individual setters exist because a model that thinks in terms of "change
+   * the user agent" should not have to build an object to say so.
+   */
+  async function set(settings) {
+    return callHelper('set', [settings]);
+  }
+  async function setUserAgent(userAgent) {
+    return callHelper('setUserAgent', [userAgent]);
+  }
+  async function setTimezone(timezone) {
+    return callHelper('setTimezone', [timezone]);
+  }
+  async function setViewport(width, height) {
+    return callHelper('setViewport', [width, height]);
+  }
+  async function setFullscreen(enabled) {
+    return callHelper('setFullscreen', [enabled]);
+  }
+  async function setMobile(enabled) {
+    return callHelper('setMobile', [enabled]);
+  }
+  async function blockAds(enabled) {
+    return callHelper('blockAds', [enabled]);
+  }
+  async function bandwidth(options) {
+    return callHelper('bandwidth', [options]);
+  }
+  async function settings() {
+    return callHelper('settings', []);
+  }
+  async function rotateUserAgent() {
+    return callHelper('rotateUserAgent', []);
+  }
+  /*
+   * The download vault: files this thread saved, and their paths on disk.
+   *
+   * This is what makes a cross-site file transfer possible. A program downloads
+   * an invoice on one site, and later, on another site, calls
+   * \`setInputFiles(await download("invoice.pdf"))\`. Without it the file would
+   * live in a context-scoped temporary directory and be gone by then.
+   */
+  async function downloads() {
+    return callHelper('downloads', []);
+  }
+  async function download(name) {
+    return callHelper('download', [name]);
+  }
+  /*
+   * Trigger a download and get the file, in one call.
+   *
+   * The action is a source string, not a function, because the bridge refuses
+   * functions and because it has to run on the host: a wait for the download
+   * event cannot be awaited on this side, since the event is produced by the
+   * action that has not run yet. See the note in the host's dispatch.
+   *
+   *   const file = await downloadAfter('page.click("#invoice")');
+   *   await other.setInputFiles("#file", file.path);
+   */
+  async function downloadAfter(target) {
+    return callHelper('downloadAfter', [target]);
+  }
+
   return {
     page: makeNode(__pageRoot.page, []),
     browser: makeNode(__pageRoot.browser, []),
@@ -573,6 +646,19 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
     view: (...args) => callHelper('view', args),
     viewChanges: () => callHelper('viewChanges', []),
     screenshot: (...args) => callHelper('screenshot', args),
+    set,
+    setUserAgent,
+    setTimezone,
+    setViewport,
+    setFullscreen,
+    setMobile,
+    blockAds,
+    bandwidth,
+    settings,
+    rotateUserAgent,
+    downloads,
+    download,
+    downloadAfter,
   };
 }
 
@@ -587,4 +673,8 @@ buildRemoteBrowser
  * documentation cannot drift: this list is what a program may use, and it is
  * exactly what `buildRemoteBrowser` returns.
  */
-export const BROWSER_PROGRAM_PARAMS = ["page", "browser", "view", "viewChanges", "screenshot", "pages"] as const;
+export const BROWSER_PROGRAM_PARAMS = [
+  "page", "browser", "view", "viewChanges", "screenshot", "pages",
+  "set", "setUserAgent", "setTimezone", "setViewport", "setFullscreen", "setMobile",
+  "blockAds", "bandwidth", "settings", "rotateUserAgent", "downloads", "download", "downloadAfter",
+] as const;

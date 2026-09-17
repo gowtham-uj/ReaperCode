@@ -144,7 +144,7 @@ export function buildStarterConfig(input: { defaultModel?: string; defaultProvid
       // Browser
       browserExecutablePath: "",
       browserHeadless: true,
-      browserCdpUrl: "http://127.0.0.1:9222",
+      browserCdpUrl: "ws://127.0.0.1:3000",
       browserIdleCloseMs: 600_000,
       // Computer use
       // Concurrency

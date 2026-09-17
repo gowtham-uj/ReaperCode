@@ -51,14 +51,13 @@ export default defineConfig({
        * directly: `ws://127.0.0.1:4180/api/live/<thread>?tabInfo=true` returns a
        * tab list, and the same URL through the Vite port fails the handshake.
        *
-       * `cors: false` as well, because the dev server's default is to reflect
-       * any Origin back as `Access-Control-Allow-Origin`. That made a page on
-       * any loopback origin able to read `/api/*` through this port, including
-       * provider keys from `.env`. The UI is same-origin with its own dev
-       * server, so it needs no ACAO; a foreign page now gets none and the
-       * browser blocks the read.
+       * The CORS reflection is turned off by `server.cors` above, which covers
+       * this route and every other. It used to be repeated here as `cors:
+       * false`, which is not a proxy option: `http-proxy` ignored it and tsc
+       * rejected it, so the header this was meant to suppress was suppressed
+       * only by the top-level setting the whole time.
        */
-      "/api": { target: BFF_TARGET, ws: true, cors: false },
+      "/api": { target: BFF_TARGET, ws: true },
       "/healthz": { target: BFF_TARGET },
     },
   },

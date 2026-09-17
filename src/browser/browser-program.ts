@@ -51,6 +51,64 @@ export interface ObserveSurface {
   view: (target?: Page) => Promise<string>;
   viewChanges: () => string;
   screenshot: (target?: Page) => Promise<string>;
+  /**
+   * The browser settings a program can change, and the calls that do it.
+   *
+   * Part of the same surface because they are the same kind of thing to a
+   * program: a named call the host answers. They live here rather than in
+   * `ThreadBrowserRuntime`'s public API only because they were added later, and
+   * putting them on the observe surface keeps the worker's parameter list and
+   * the tool's documentation in one place.
+   */
+  control: ControlSurface;
+}
+
+/**
+ * The settings calls a program can make.
+ *
+ * Every one returns a report rather than void, because the honest answer is
+ * sometimes "that will apply at the next launch" and a program that is told
+ * nothing would believe a setting took effect when it did not.
+ */
+export interface ControlSurface {
+  set: (settings: Record<string, unknown>) => Promise<ControlReport>;
+  setUserAgent: (userAgent: string) => Promise<ControlReport>;
+  setTimezone: (timezone: string) => Promise<ControlReport>;
+  setViewport: (width: number, height: number) => Promise<ControlReport>;
+  setFullscreen: (enabled: boolean) => Promise<ControlReport>;
+  /** Present as a phone: user agent, mobile viewport and touch, together. */
+  setMobile: (enabled: boolean) => Promise<ControlReport>;
+  blockAds: (enabled: boolean) => Promise<ControlReport>;
+  bandwidth: (options: Record<string, unknown>) => Promise<ControlReport>;
+  settings: () => Promise<Record<string, unknown>>;
+  rotateUserAgent: () => Promise<ControlReport>;
+  /** Files this thread has downloaded, with the names and sizes. */
+  downloads: () => Promise<Array<{ name: string; bytes: number; url?: string }>>;
+  /** Resolve one downloaded file to an absolute path, for an upload input. */
+  download: (name: string) => Promise<{ name: string; path: string; bytes: number } | undefined>;
+  /**
+   * Run a snippet that triggers a download, and answer with the file it produced.
+   *
+   * The pair in one call, because waiting for the event across the bridge
+   * deadlocks: see the note in `observeCall`.
+   */
+  downloadAfter: (target: unknown) => Promise<{ name: string; path: string; bytes: number }>;
+}
+
+/**
+ * What a settings call actually did.
+ *
+ * `applied` and `nextLaunch` are separate on purpose: a setting that only takes
+ * effect when Steel next starts Chrome is not a failure, but reporting it as
+ * applied would be a lie the model then builds on.
+ */
+export interface ControlReport {
+  applied: string[];
+  nextLaunch: string[];
+  /** The settings in force after the call. */
+  current: Record<string, unknown>;
+  /** Present when a rotation happened, naming why. */
+  note?: string;
 }
 
 /**
@@ -86,7 +144,7 @@ export class BrowserFacade {
    * bug, and there is exactly one door.
    */
   private scoped(page: Page): Page {
-    return scopePage(page);
+    return scopePage(page, this.runtime.threadId);
   }
 
   /** Open a page in this thread's own context, optionally naming it. */
@@ -173,6 +231,11 @@ export class BrowserFacade {
   async save(): Promise<void> {
     await this.runtime.save();
   }
+}
+
+/** A settings argument, coerced from whatever crossed the boundary. */
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
 
 /**
@@ -273,6 +336,7 @@ export class BrowserProgramHost {
     const step = path[0];
     if (!step) return { kind: "error", name: "BadCall", message: "the observation call had no method" };
     const target = this.resolveArgs(step.args)[0] as Page | undefined;
+    const args = this.resolveArgs(step.args);
     try {
       switch (step.method) {
         case "view":
@@ -281,6 +345,55 @@ export class BrowserProgramHost {
           return { kind: "value", value: this.observe.viewChanges() };
         case "screenshot":
           return { kind: "value", value: await this.observe.screenshot(target) };
+        /*
+         * `downloadAfter`, which exists because the obvious spelling deadlocks.
+         *
+         * `page.waitForEvent("download")` goes through the same bridge as every
+         * other call, and that bridge awaits the promise before returning. A
+         * download event only fires when something *else* runs, and through the
+         * bridge that something else is the next step of the same program, which
+         * cannot start until the first one returns. So the wait held the only
+         * thread that could have produced the event, and the program timed out
+         * with no error: measured, 30s and then `OUTCOME: TIMEOUT` for both
+         * `Promise.all([wait, click])` and the sequential wait-then-click form.
+         *
+         * The host can interleave them because it holds the real page, so the
+         * pair is one helper here: the action is a source string the host
+         * evaluates, and it waits for the download while that runs.
+         */
+        case "downloadAfter":
+          return { kind: "value", value: await this.observe.control.downloadAfter(args[0]) };
+        /*
+         * The control calls. Each returns a plain object, which crosses the
+         * boundary as data, so a program can read what changed.
+         */
+        case "set":
+          return { kind: "value", value: await this.observe.control.set(asRecord(args[0])) };
+        case "setUserAgent":
+          return { kind: "value", value: await this.observe.control.setUserAgent(String(args[0] ?? "")) };
+        case "setTimezone":
+          return { kind: "value", value: await this.observe.control.setTimezone(String(args[0] ?? "")) };
+        case "setViewport":
+          return {
+            kind: "value",
+            value: await this.observe.control.setViewport(Number(args[0]), Number(args[1])),
+          };
+        case "setFullscreen":
+          return { kind: "value", value: await this.observe.control.setFullscreen(args[0] === true) };
+        case "setMobile":
+          return { kind: "value", value: await this.observe.control.setMobile(args[0] === true) };
+        case "blockAds":
+          return { kind: "value", value: await this.observe.control.blockAds(args[0] === true) };
+        case "bandwidth":
+          return { kind: "value", value: await this.observe.control.bandwidth(asRecord(args[0])) };
+        case "settings":
+          return { kind: "value", value: await this.observe.control.settings() };
+        case "rotateUserAgent":
+          return { kind: "value", value: await this.observe.control.rotateUserAgent() };
+        case "downloads":
+          return { kind: "value", value: await this.observe.control.downloads() };
+        case "download":
+          return { kind: "value", value: await this.observe.control.download(String(args[0] ?? "")) };
         default:
           /*
            * A screenshot is the only helper that returns an image, and an

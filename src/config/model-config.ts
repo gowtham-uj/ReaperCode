@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { isRawChromeEndpoint } from "../browser/steel-endpoint.js";
 import { ConnectionPoliciesSchema } from "../connection/policies.js";
 import {
   REAPER_CONTEXT_HARD_CAP_TOKENS,
@@ -347,14 +348,33 @@ export const RuntimeTunablesConfigSchema = z
     browserExecutablePath: z.string().default(""),
     browserHeadless: z.boolean().default(true),
     /*
-     * Where the browser Reaper attaches to is listening.
+     * Steel's managed endpoint, which is where the browser is reached from.
      *
-     * `:9222` is Chrome's own remote-debugging port and `:9223` is Steel's nginx
-     * forwarding to the same Chrome; either works, which is why it is a setting
-     * rather than a constant. Playwright attaches to whatever is here, and Steel
-     * owns the process.
+     * Steel runs Chrome as its child and proxies CDP on its own port; its
+     * session object advertises that URL as `websocketUrl`, and the docs are
+     * explicit that clients connect to it rather than to Chrome. `:9222` is
+     * Chrome's own remote-debugging port, reachable on this host only because
+     * Steel runs locally, and connecting there bypasses Steel: it skips the
+     * layer that owns the browser and it breaks as soon as Steel is configured
+     * on different ports or moved elsewhere, because 9222 is Chrome's number
+     * and not Steel's.
+     *
+     * Still a setting rather than a constant, because Steel Cloud and a
+     * remote self-host both name a different host.
      */
-    browserCdpUrl: z.string().default("http://127.0.0.1:9222"),
+    /*
+     * Refused at parse time so a config that names raw Chrome fails to load
+     * with a message naming the field, rather than loading and failing later
+     * when a thread first browses. The runtime re-checks before it connects,
+     * because a test or embedder can build a runtime without this schema.
+     */
+    browserCdpUrl: z
+      .string()
+      .default("ws://127.0.0.1:3000")
+      .refine((value) => !isRawChromeEndpoint(value), {
+        message:
+          "browserCdpUrl must be Steel's managed endpoint, not raw Chrome's debugging port (9222/9223).",
+      }),
     /** Close a thread's browser after this long unused, in milliseconds. */
     browserIdleCloseMs: z.number().int().positive().default(600_000),
     /**

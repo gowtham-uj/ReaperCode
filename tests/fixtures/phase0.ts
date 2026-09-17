@@ -1,4 +1,5 @@
 import type { ReaperConfig } from "../../src/config/model-config.js";
+import { DEFAULT_CDP_URL } from "./browser-availability.js";
 import type { AgentRequestEnvelope } from "../../src/connection/schemas.js";
 
 export function createValidConfig(): ReaperConfig {
@@ -128,7 +129,7 @@ export function createValidConfig(): ReaperConfig {
       bgTermGraceMs: 5_000,
       browserExecutablePath: "",
       browserHeadless: true,
-      browserCdpUrl: "http://127.0.0.1:9222",
+      browserCdpUrl: DEFAULT_CDP_URL,
       browserIdleCloseMs: 600_000,
       promptSpillChars: 20_000,
       queueMaxConcurrency: 4,

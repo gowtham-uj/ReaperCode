@@ -75,11 +75,21 @@ async function portOpen(cdpUrl: string): Promise<boolean> {
  * purpose, so getting it wrong in the direction of a false positive is the worst
  * way for it to fail.
  *
- * Three attempts of ten seconds. A Steel that is up answers the first one; one
- * under load answers a later one; one that is genuinely crashed never answers,
- * which is the case the message is for.
+ * Ten seconds replaced it and was still too short, which produced the opposite
+ * failure: every browser test skipped. Measured here, `connectOverCDP` against a
+ * Chrome that has been up a while takes 12 to 17 seconds, because the handshake
+ * enumerates every target in the browser and a long-lived Chrome accumulates
+ * them (22 targets and 15 renderer processes when this was measured, most of
+ * them leftover pages). Both endpoints took the same time, so it is the browser
+ * and the machine, not Steel's proxy.
+ *
+ * Thirty seconds, matching the product's own `cdpTimeoutMs` default. That is the
+ * relationship that matters: an attach the product would still be waiting on
+ * must not be diagnosed as a dead browser by the probe that says whether the
+ * browser is alive. Three attempts, so a genuinely crashed Steel still fails
+ * rather than hanging.
  */
-const CDP_CONNECT_TIMEOUT_MS = 10_000;
+const CDP_CONNECT_TIMEOUT_MS = 30_000;
 const CDP_CONNECT_ATTEMPTS = 3;
 
 export async function probeBrowser(cdpUrl: string): Promise<BrowserAvailability> {
@@ -132,3 +142,17 @@ export function skipUnless(availability: BrowserAvailability): false | string {
   }
   return availability.reason ?? "the browser is unavailable";
 }
+
+/**
+ * Where the browser is reached from, in every test that needs one.
+ *
+ * Steel's managed endpoint, not Chrome's own debugging port. Steel runs Chrome
+ * as its child and proxies CDP on its own port, and that is the URL its session
+ * object advertises as `websocketUrl`; connecting straight to 9222 reaches the
+ * same browser while bypassing the layer that owns it. The tests exercise the
+ * path the product takes, so they connect the way the product does.
+ *
+ * Overridable for a remote self-host or Steel Cloud, which name a different
+ * host.
+ */
+export const DEFAULT_CDP_URL = process.env["REAPER_CDP_URL"] ?? "ws://127.0.0.1:3000";

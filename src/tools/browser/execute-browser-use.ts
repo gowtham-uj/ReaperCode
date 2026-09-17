@@ -23,8 +23,14 @@ import { renderReceipt, type StepReceipt } from "../../browser/transaction.js";
 import { serializeBrowserResult } from "../../browser/serialize.js";
 import type { BrowserUseArgs } from "./browser-use.js";
 import { verifyStep } from "../../browser/verify.js";
+import { looksBlocked } from "../../browser/user-agents.js";
 import { scopePage } from "../../browser/scoped-page.js";
-import { BrowserProgramHost } from "../../browser/browser-program.js";
+import {
+  BrowserProgramHost,
+  type ControlSurface,
+  type ObserveSurface,
+} from "../../browser/browser-program.js";
+import type { BandwidthSettings, BrowserSettings } from "../../browser/session-controls.js";
 import { runProgram } from "../../browser/run-program.js";
 import { liftTrailingDeclaration, splitTrailingExpression, wrapWithTail, wrapWithoutTail } from "../code/transform.js";
 
@@ -163,14 +169,15 @@ export interface BrowserSurface {
  * program that closes a page and then asks what is on it should get an answer
  * rather than an error about the thing it just did deliberately.
  */
-export interface ObserveSurface {
-  /** The whole page, pruned to a token budget. */
-  view(target?: Page): Promise<string>;
-  /** Only what changed since the model last looked. */
-  viewChanges(): string;
-  /** The page as an image, for canvas and sites built from divs. */
-  screenshot(target?: Page): Promise<string>;
-}
+/*
+ * `ObserveSurface` is imported from `browser-program.ts` rather than declared
+ * here.
+ *
+ * It was declared in both places, and adding the control calls to one of them
+ * made them disagree: the host required a `control` member the tool's copy did
+ * not have, so the tool's object was rejected where it was consumed. One
+ * declaration is the fix; a second copy would drift the same way again.
+ */
 
 /**
  * Everything a program has in scope.
@@ -184,8 +191,19 @@ export interface ProgramContext {
   (page: Page, browser: BrowserSurface, view: ObserveSurface["view"], viewChanges: ObserveSurface["viewChanges"], screenshot: ObserveSurface["screenshot"], pages: () => ReturnType<BrowserSurface["pages"]>): Promise<unknown>;
 }
 
-/** The parameter names a program can use. Kept in one place so they cannot drift. */
-const PROGRAM_PARAMS = ["page", "browser", "view", "viewChanges", "screenshot", "pages"] as const;
+/**
+ * The parameter names a program can use. Kept in one place so they cannot drift.
+ *
+ * Must stay in step with the names `worker-source.ts` pushes and with
+ * `BROWSER_PROGRAM_PARAMS`. A name documented but missing here is
+ * "pages is not defined" at runtime, which reads to a model as its own mistake,
+ * and that is exactly the drift this list exists to prevent.
+ */
+const PROGRAM_PARAMS = [
+  "page", "browser", "view", "viewChanges", "screenshot", "pages",
+  "set", "setUserAgent", "setTimezone", "setViewport", "setFullscreen", "setMobile",
+  "blockAds", "bandwidth", "settings", "rotateUserAgent", "downloads", "download", "downloadAfter",
+] as const;
 
 /**
  * The program body as source, ready for whichever runtime will run it.
@@ -274,7 +292,7 @@ function browserSurface(runtime: ThreadBrowserRuntime): BrowserSurface {
      * .browser().contexts()`. The scoping has to cover every page a program can
      * hold, not just the first one.
      */
-    newPage: async (name?: string) => scopePage(await runtime.newPage(name)),
+    newPage: async (name?: string) => scopePage(await runtime.newPage(name), runtime.threadId),
     pages: () => runtime.describePages(),
     page: async (selector?: string | number) => (selector === undefined ? (await runtime.ensureReady()).page : runtime.setActive(selector)),
     setActive: (selector: string | number) => runtime.setActive(selector),
@@ -304,6 +322,131 @@ function observeSurface(runtime: ThreadBrowserRuntime): ObserveSurface {
        * and lands in the receipt, which is where an image is useful.
        */
       return `data:image/png;base64,${buffer.toString("base64")}`;
+    },
+    control: controlSurface(runtime),
+  };
+}
+
+/**
+ * The settings a program can change, wired to the runtime.
+ *
+ * Each call goes through `setSettings`, so the live-vs-next-launch distinction
+ * and the "apply to every open page" step happen in one place and every spelling
+ * of a setting gets the same answer. Parsing is deliberately forgiving about the
+ * shape and strict about the value: a viewport of `"wide"` is refused rather
+ * than silently coerced to `NaN`, because a program that asked for something
+ * impossible should hear about it.
+ */
+function controlSurface(runtime: ThreadBrowserRuntime): ControlSurface {
+  const requireString = (value: string, name: string): string => {
+    if (typeof value !== "string" || value.trim().length === 0) {
+      throw new Error(`${name} must be a non-empty string`);
+    }
+    return value.trim();
+  };
+  const requireSize = (value: number, name: string): number => {
+    if (!Number.isFinite(value) || value < 1) {
+      throw new Error(`${name} must be a positive number, got ${String(value)}`);
+    }
+    return Math.round(value);
+  };
+
+  return {
+    set: async (settings) => {
+      const patch: BrowserSettings = {};
+      if (settings["userAgent"] !== undefined) patch.userAgent = requireString(String(settings["userAgent"]), "userAgent");
+      if (settings["timezone"] !== undefined) patch.timezone = requireString(String(settings["timezone"]), "timezone");
+      if (settings["blockAds"] !== undefined) patch.blockAds = settings["blockAds"] === true;
+      if (settings["fullscreen"] !== undefined) patch.fullscreen = settings["fullscreen"] === true;
+      if (settings["mobile"] !== undefined) patch.mobile = settings["mobile"] === true;
+      if (settings["proxy"] !== undefined && typeof settings["proxy"] === "object" && settings["proxy"] !== null) {
+        const proxy = settings["proxy"] as Record<string, unknown>;
+        patch.proxy = {
+          server: requireString(String(proxy["server"] ?? ""), "proxy.server"),
+          ...(typeof proxy["username"] === "string" ? { username: proxy["username"] } : {}),
+          ...(typeof proxy["password"] === "string" ? { password: proxy["password"] } : {}),
+        };
+      }
+      const width = settings["width"];
+      const height = settings["height"];
+      if (width !== undefined || height !== undefined) {
+        patch.viewport = {
+          width: requireSize(Number(width), "width"),
+          height: requireSize(Number(height), "height"),
+        };
+      }
+      if (settings["bandwidth"] !== undefined && typeof settings["bandwidth"] === "object") {
+        patch.bandwidth = settings["bandwidth"] as BandwidthSettings;
+      }
+      if (settings["userPreferences"] !== undefined && typeof settings["userPreferences"] === "object") {
+        patch.userPreferences = settings["userPreferences"] as Record<string, unknown>;
+      }
+      return await runtime.setSettings(patch);
+    },
+    setUserAgent: async (userAgent) => await runtime.setSettings({ userAgent: requireString(userAgent, "userAgent") }),
+    setTimezone: async (timezone) => await runtime.setSettings({ timezone: requireString(timezone, "timezone") }),
+    setViewport: async (width, height) =>
+      await runtime.setSettings({ viewport: { width: requireSize(width, "width"), height: requireSize(height, "height") } }),
+    setFullscreen: async (enabled) => await runtime.setSettings({ fullscreen: enabled }),
+    setMobile: async (enabled) => await runtime.setSettings({ mobile: enabled }),
+    blockAds: async (enabled) => await runtime.setSettings({ blockAds: enabled }),
+    bandwidth: async (options) => await runtime.setSettings({ bandwidth: options as BandwidthSettings }),
+    settings: async () => runtime.currentSettings(),
+    rotateUserAgent: async () => await runtime.rotateUserAgent(),
+    downloads: async () =>
+      runtime.downloadedFiles.map((file) => ({ name: file.name, bytes: file.bytes, ...(file.url ? { url: file.url } : {}) })),
+    download: async (name) => {
+      /*
+       * Resolved against the files actually on the vault, never against a path a
+       * program supplied. A bare name is the whole input, so a program cannot
+       * ask for a path outside this thread's downloads even by accident.
+       */
+      const wanted = name.trim();
+      const match = runtime.downloadedFiles.find((file) => file.name === wanted)
+        ?? (await runtime.vaultFiles()).find((file) => file.name === wanted);
+      return match === undefined ? undefined : { name: match.name, path: match.path, bytes: match.bytes };
+    },
+    downloadAfter: async (target) => {
+      /*
+       * Arm the listener, click the thing, and hand back the file.
+       *
+       * The pair is one host call because it cannot be two. Through the bridge a
+       * `waitForEvent` is a call that does not return until the event fires, and
+       * the event can only fire once the *next* call of the same program runs,
+       * which cannot start until this one returns. Measured: both
+       * `Promise.all([waitForEvent, click])` and the sequential wait-then-click
+       * form timed out at 30s with no error.
+       *
+       * The argument is the element to click, resolved from the program's own
+       * locator, so the call reads as `downloadAfter(page.getByText("Invoice"))`
+       * and no selector has to be re-derived on this side.
+       */
+      const page = (await runtime.ensureReady()).page;
+      const before = runtime.downloadedFiles.length;
+      const download = page.waitForEvent("download", { timeout: 30_000 });
+      const clickable = target as unknown as { click?: () => Promise<void> };
+      if (typeof clickable?.click !== "function") {
+        throw new Error("downloadAfter takes the element that starts the download, for example page.getByRole(\"link\", { name: \"Invoice\" })");
+      }
+      await clickable.click().catch(() => undefined);
+      /*
+       * The event is awaited, and so is the copy into the vault, which happens
+       * asynchronously in the download handler. Waiting for the file to appear
+       * rather than for the event alone is what stops a caller from being handed
+       * a name for a file that is still being written.
+       */
+      await download.catch(() => undefined);
+      for (let i = 0; i < 60 && runtime.downloadedFiles.length === before; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      const file = runtime.downloadedFiles[runtime.downloadedFiles.length - 1];
+      if (file === undefined) {
+        throw new Error(
+          "no download started. The click landed but the page produced no file: check that it hit a real download control, " +
+          "and that the page does not want a dialog answered first.",
+        );
+      }
+      return { name: file.name, path: file.path, bytes: file.bytes };
     },
   };
 }
@@ -418,7 +561,7 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
      * here rather than somewhere downstream, because every call the program
      * makes starts from this object.
      */
-    const programHost = new BrowserProgramHost(runtime, scopePage(active.page), observe);
+    const programHost = new BrowserProgramHost(runtime, scopePage(active.page, runtime.threadId), observe);
     const stepped = await runtime.step(
       async () => {
         const ran = await runProgram({
@@ -552,6 +695,60 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
        * step. Saying so beats an empty section that reads as an empty page.
        */
       lines.push("", "PAGE: could not be read (the page may have closed or navigated)");
+    }
+  }
+
+  /*
+   * A page that refused us is named, and the user agent is rotated.
+   *
+   * This is the "rotate when one is blocked" behaviour, and the retry is left to
+   * the model on purpose. Reloading automatically would hide the block from the
+   * model that has to reason about it, and a site that blocks usually wants a
+   * different approach rather than the same request again. So the block is
+   * reported, the user agent changes so the next attempt looks different, and
+   * the model is told what to do about it.
+   *
+   * Checked after the program rather than inside `view()`, because a block is a
+   * property of the step and not of the reading: rotating on every look at a
+   * block page would change the user agent several times for one page.
+   */
+  /*
+   * A program that acted through page JavaScript instead of the input API.
+   *
+   * The events it dispatched are untrusted, and a site that checks
+   * `event.isTrusted` will ignore them: the click lands, nothing happens, and
+   * the receipt says the step succeeded. That is the worst shape a failure can
+   * take, so it is named here rather than left for the model to discover when a
+   * form mysteriously does not submit.
+   *
+   * Detected from the program's own source, which is the only place the
+   * difference is visible: by the time the page is read, both paths look the
+   * same. `isTrusted` cannot be faked, so the answer is to rewrite the program,
+   * and the message says exactly which call to change.
+   */
+  const syntheticAction = /\.\s*(click|submit)\s*\(/.test(args.code ?? "") && /evaluate/.test(args.code ?? "");
+  if (syntheticAction) {
+    lines.push(
+      "",
+      "NOTE: this program acted through `evaluate`, so the events it dispatched are untrusted (`isTrusted: false`).",
+      "Pages that check for that ignore them, and the step can look successful while nothing happened.",
+      "Use the real input API next time: `locator.click()`, `locator.fill()`, `locator.press()` and `locator.check()` are trusted because Chrome generates the events itself.",
+    );
+  }
+
+  if (outcome === "SUCCESS" && surface !== undefined) {
+    const blocked = looksBlocked({ title: surface.title, url: surface.url });
+    if (blocked.blocked) {
+      const rotation = await runtime.rotateUserAgent(blocked.reason).catch(() => undefined);
+      lines.push(
+        "",
+        `BLOCKED: ${blocked.reason}.`,
+        `This is a refusal rather than a page, so reading it further will not help.`,
+        rotation === undefined
+          ? `Rotate the user agent with rotateUserAgent() and try a different route.`
+          : `${rotation.note ?? ""} The user agent is now ${String(rotation.current["userAgent"] ?? "")}. ` +
+            `Reload to retry, or navigate somewhere else if this site is determined to refuse.`,
+      );
     }
   }
 

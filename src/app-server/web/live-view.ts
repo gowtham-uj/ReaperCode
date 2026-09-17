@@ -40,13 +40,13 @@ import { renderHandoffEvent } from "../../browser/control-lease.js";
 import type { ThreadBrowsers } from "../thread-browsers.js";
 
 /**
- * Where Steel's cast endpoint lives, derived from the CDP URL.
+ * Where Steel's cast endpoint lives.
  *
- * The CDP URL points at the browser's debugging port (`:9222`); the REST API
- * that serves the cast socket is the Steel server itself, on `:3000` by
- * default. Steel's own session object reports `websocketUrl`, and this mirrors
- * that rather than re-deriving it, because a deployment that moves Steel to a
- * different host would otherwise silently point the pane at nothing.
+ * It is the same host and port the browser attaches to: Steel's session object
+ * builds `websocketUrl` from its own API host and port, and the REST route that
+ * serves the cast socket is on that port. So the configured CDP endpoint names
+ * Steel, and this is a scheme swap from that one URL rather than a second
+ * setting to keep in agreement.
  */
 export interface LiveViewOptions {
   threadBrowsers: ThreadBrowsers;
@@ -87,7 +87,15 @@ export type LiveViewFailure = "no-browser" | "no-page" | "upstream-unreachable" 
  */
 export type ResolvedPage = { targetId: string } | { failure: LiveViewFailure; detail: string };
 
-const DEFAULT_STEEL_API_URL = "http://127.0.0.1:3000";
+/**
+ * Where Steel's API listens when nothing overrides it.
+ *
+ * Exported because the preview proxy's denylist has to refuse the same port,
+ * and two modules each holding their own copy of this number is exactly how
+ * the two would drift: one moves, the other keeps refusing the old port and
+ * starts forwarding to the new one.
+ */
+export const DEFAULT_STEEL_API_URL = "http://127.0.0.1:3000";
 const DEFAULT_CONNECT_TIMEOUT_MS = 5_000;
 
 /**
@@ -326,8 +334,26 @@ export async function serveLiveViewPage(
     "#content .canvas-container.active{display:block!important}",
     /* The canvas itself, fitted to the width and free to be as tall as it needs. */
     "#content .canvas{position:relative!important;left:auto!important;transform:none!important;display:block!important;width:100%!important;height:auto!important;max-width:none!important;max-height:none!important;object-fit:contain!important}",
-    /* A dark gutter, so a page shorter than the pane does not end in white. */
-    "#content{background:#171717!important}",
+    /*
+     * The page surface fills the pane's height, even when the page is shorter.
+     *
+     * Fitting the canvas to the width is right (it avoids cropping a wide page)
+     * but it leaves the page only as tall as its own aspect ratio allows: a
+     * 1280x900 stream in a 520-wide pane is about 365px tall, so a taller pane
+     * showed a band of empty background under the page. That band is what made
+     * the pane look half-drawn rather than like a browser.
+     *
+     * A real browser window does not do that: the page's background extends to
+     * the bottom of the viewport whatever the content's height. So the container
+     * is given at least the pane's full height and the page's own background
+     * colour, which is what makes a short page read as a browser filling the
+     * pane instead of as a cropped strip with a gutter under it. `min-height`
+     * rather than `height`, so a page taller than the pane still grows and
+     * scrolls rather than being squeezed back into the viewport.
+     */
+    "#content{min-height:100%!important}",
+    "html,body{height:100%!important}",
+    "#content .canvas-container{min-height:100%!important;background:#fff!important}",
     "</style>",
   ].join("");
 
@@ -460,9 +486,30 @@ export async function handleBrowserControl(
 export function attachLiveView(
   wss: WebSocketServer,
   options: LiveViewOptions,
-): { handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): boolean } {
+): {
+  handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): boolean;
+  /** Close every live bridge, terminating upstream sockets rather than asking. */
+  close(): void;
+} {
   const steelApiUrl = options.steelApiUrl ?? process.env["REAPER_STEEL_API_URL"] ?? DEFAULT_STEEL_API_URL;
   const connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+
+  /*
+   * Every upstream socket this handler has opened and not yet seen close.
+   *
+   * Tracked so the server can end them on shutdown. A `close()` on a ws client
+   * starts a closing handshake and waits for the peer to answer; Steel's cast
+   * socket does not always answer, so the socket sat in CLOSING and kept the
+   * process alive. That is invisible in production, where the process runs
+   * until it is told to stop, and it is not invisible in a test: the suite
+   * passed every assertion and then hung forever with no failing test to look
+   * at, which is the same shape as a leak this file's sibling already fixed.
+   *
+   * `terminate()` is the right call here rather than a graceful close: the
+   * viewer is gone, the frames have nowhere to go, and there is no protocol
+   * state to preserve on a socket we are abandoning.
+   */
+  const upstreams = new Set<WebSocket>();
 
   return {
     handleUpgrade(request, socket, head) {
@@ -501,6 +548,7 @@ export function attachLiveView(
       });
       return true;
     },
+    close,
   };
 
   /** Send a typed refusal and close, rather than a bare close code. */
@@ -526,10 +574,40 @@ export function attachLiveView(
    * showing tabs that are gone.
    */
   async function serveTabList(client: WebSocket, threadId: string): Promise<void> {
-    const runtime = options.threadBrowsers.forThread(threadId);
     const send = async (): Promise<void> => {
       if (client.readyState !== WebSocket.OPEN) return;
-      const pages = await runtime.pageTargets().catch(() => []);
+      /*
+       * The runtime is fetched per poll, not once per connection.
+       *
+       * Two reasons, and both are the same bug. A thread with a pane open is a
+       * thread in use, and `forThread` is what records that; fetching once meant
+       * the idle reaper could close a browser out from under a viewer that was
+       * still watching, and the next poll would then re-attach it, resurrecting
+       * the browser the reaper had just reclaimed. Fetching per poll keeps the
+       * thread marked in use for as long as the pane is open, which is the
+       * truth, and means a reaped runtime is replaced deliberately rather than
+       * by accident.
+       */
+      const runtime = options.threadBrowsers.forThread(threadId);
+      let pages: Awaited<ReturnType<typeof runtime.pageTargets>>;
+      try {
+        pages = await runtime.pageTargets();
+      } catch (error) {
+        /*
+         * A failure is reported as a failure, not as an empty list.
+         *
+         * `.catch(() => [])` here meant a thread whose browser had gone sent an
+         * empty `tabList`, so the viewer drew no tabs and the pane looked like a
+         * thread with nothing open. The two states need different answers: one is
+         * normal, the other is a browser that has to be reopened.
+         */
+        client.send(JSON.stringify({
+          type: "error",
+          reason: "no-browser",
+          detail: `this thread's browser could not be read: ${(error as Error).message}`,
+        }));
+        return;
+      }
       client.send(JSON.stringify({
         type: "tabList",
         tabs: pages.map((entry) => ({
@@ -551,19 +629,49 @@ export function attachLiveView(
      * closes tabs) and which one is active (the agent switches pages). The list
      * carries both, `firstTabId` being the active page, and the viewer's own
      * `handleTabList` only promotes a tab when nothing is active. So the active
-     * page is also sent as its own message, which the small script injected
-     * into the viewer reads to follow the agent.
+     * page is also sent as its own message, in the type the viewer's handler
+     * already switches on.
      *
      * Not a per-event push: the runtime has no change feed for "the active page
      * moved", and a two-second poll is cheaper than adding one, while being
      * well under the time it takes a person to notice the strip is a beat
      * behind.
      */
+    /*
+     * Pushed as soon as the runtime says the pages changed.
+     *
+     * The poll alone made the strip lag the agent by up to its interval, which
+     * showed up as a step that opened a tab reporting one tab: the agent had
+     * finished before the next tick. The runtime announces it now, so the common
+     * case is immediate, and the poll below stays for changes nothing announces
+     * (a page the site closed by itself, a target that went away).
+     *
+     * Debounced with a short timer rather than sent per event, because opening a
+     * tab is several changes in a row (page created, named, activated, id
+     * recorded) and a viewer that re-rendered on each would flicker.
+     */
+    let pushTimer: NodeJS.Timeout | undefined;
+    const unsubscribe = options.threadBrowsers.forThread(threadId).onPagesChanged(() => {
+      if (pushTimer) return;
+      pushTimer = setTimeout(() => {
+        pushTimer = undefined;
+        if (client.readyState === WebSocket.OPEN) void send();
+      }, 120);
+      pushTimer.unref?.();
+    });
+
     const timer = setInterval(() => {
       void send().then(async () => {
         if (client.readyState !== WebSocket.OPEN) return;
-        const pages = await runtime.pageTargets().catch(() => []);
-        const active = pages.find((entry) => entry.active);
+        let pages: Awaited<ReturnType<ReturnType<ThreadBrowsers["forThread"]>["pageTargets"]>>;
+        try {
+          pages = await options.threadBrowsers.forThread(threadId).pageTargets();
+        } catch {
+          // The tab list above has already reported the failure; this frame
+          // simply does not go out, rather than blanking what is on screen.
+          return;
+        }
+        const active = pages.find((entry: { active: boolean }) => entry.active);
         /*
          * `activeTabChange`, which is the type the viewer already handles.
          *
@@ -579,8 +687,13 @@ export function attachLiveView(
       });
     }, 2_000);
     timer.unref?.();
-    client.on("close", () => clearInterval(timer));
-    client.on("error", () => clearInterval(timer));
+    const stop = (): void => {
+      clearInterval(timer);
+      if (pushTimer) clearTimeout(pushTimer);
+      unsubscribe();
+    };
+    client.on("close", stop);
+    client.on("error", stop);
   }
 
   /**
@@ -618,19 +731,40 @@ export function attachLiveView(
       refuse(client, "upstream-unreachable", `the browser stream is not reachable: ${(error as Error).message}`);
       return;
     }
+    upstreams.add(upstream);
+    upstream.on("close", () => upstreams.delete(upstream));
 
     /*
      * A byte pump in both directions, and the teardown is symmetric so neither
      * side is left holding a socket the other has given up on. Closing only one
      * way leaks the other: the viewer socket stays open after Steel has gone,
      * or Steel keeps screencasting to a browser nobody is watching.
+     *
+     * The client side is closed gracefully, because it is a real websocket in a
+     * real browser and a clean close lets it report why. The upstream is
+     * terminated after a short grace period instead of only asked to close, for
+     * the reason `upstreams` exists: Steel does not always answer the closing
+     * handshake, and a socket left in CLOSING holds the process open.
      */
+    let upstreamClosed = false;
     const closeBoth = (code: number, reason: string): void => {
       if (client.readyState === WebSocket.OPEN || client.readyState === WebSocket.CONNECTING) {
         client.close(code, reason);
       }
+      if (upstreamClosed) return;
+      upstreamClosed = true;
       if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) {
         upstream.close(code, reason);
+        /*
+         * Unref'd so a socket mid-handshake cannot hold the process open, and
+         * terminated shortly after so the fd is released either way. Five
+         * hundred milliseconds is long enough for a responsive peer to finish
+         * the handshake cleanly and short enough not to delay a shutdown.
+         */
+        const timer = setTimeout(() => {
+          if (upstream.readyState !== WebSocket.CLOSED) upstream.terminate();
+        }, 500);
+        timer.unref?.();
       }
     };
 
@@ -655,5 +789,21 @@ export function attachLiveView(
     client.on("close", () => closeBoth(1000, "viewer closed"));
     upstream.on("error", () => closeBoth(1011, "upstream error"));
     client.on("error", () => closeBoth(1011, "viewer error"));
+  }
+
+  /*
+   * End every upstream socket by force.
+   *
+   * Called by the gateway as it shuts down. `wss.close()` terminates client
+   * sockets, which fires their `close` handlers and would normally drain the
+   * upstreams too, but that path is asynchronous and depends on Steel answering.
+   * A shutdown that waits on a peer is not a shutdown, so this ends what is left
+   * directly and returns nothing to await.
+   */
+  function close(): void {
+    for (const socket of upstreams) {
+      socket.terminate();
+    }
+    upstreams.clear();
   }
 }

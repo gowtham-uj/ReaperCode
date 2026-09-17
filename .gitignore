@@ -133,3 +133,6 @@ tool-discovery-trace.json
 vendor/
 .scratch/
 .scratch/
+
+# Local agent tooling state, not project code.
+.claude/

@@ -1117,17 +1117,59 @@ body[data-ds-reaper-theme] { --syntax-keyword: #dc82bb; }
 .browser-note { margin: 0; color: var(--dsw-alias-label-tertiary); font-size: 12px; }
 .browser-note[data-tone="warn"] { color: var(--dsw-alias-state-warning-primary, var(--dsw-alias-label-secondary)); }
 /*
- * The stage holds the frame and the input blocker, and does not scroll.
+ * The stage: the pane's full remaining height, and it scrolls vertically.
  *
- * Steel's viewer draws the browser's own chrome and sizes its canvas to the
- * stream, so the scrollbar belongs to the page inside the frame, not to the
- * frame itself. A scrolling stage would put two scrollbars on one screen and
- * make the address bar scroll out of view.
+ * Two changes from the previous shape, both from using the pane rather than
+ * reasoning about it:
+ *
+ * **It is tall.** `flex: 1` in a column whose parent is `height: 100%` gives the
+ * stage everything the bar and the notes do not take, and `min-height: 0` is
+ * what lets it actually shrink to that instead of growing to its content. The
+ * pane is meant to be the browser, so it gets the room.
+ *
+ * **It scrolls.** The stage used to be `overflow: hidden` on the theory that the
+ * page inside the frame owns the only scrollbar worth having. That is true for a
+ * page that is the same shape as the frame. It is false for the common case
+ * here: the streamed browser has its own aspect ratio, and when the pane is
+ * shorter or narrower than that, the content is *cropped* rather than reachable
+ * with `hidden`. Scrolling makes it reachable, and the viewer's own chrome
+ * scrolls with it, which is what a browser window does when it is smaller than
+ * what it is showing.
  */
-/* Squared off, because with the body's padding gone a rounded border would leave
-   four slivers of background showing through at the pane's own corners. */
-.browser-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; border-top: .5px solid var(--dsw-alias-border-l3); background: #171717; }
-.browser-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+.browser-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: auto;
+  overscroll-behavior: contain;
+  border-top: .5px solid var(--dsw-alias-border-l3);
+  background: #171717;
+}
+
+/*
+ * The frame fits the pane horizontally and keeps a real height.
+ *
+ * `inset: 0` with `position: absolute` made the frame exactly the stage's box,
+ * so the streamed page was letterboxed into whatever shape the pane happened to
+ * be and the parts outside it were cut off. The wrapper below is what changes
+ * that: it is at least as tall as the stage and as wide as the stage, so the
+ * frame fills the width and grows downward rather than being clipped.
+ */
+.browser-fit {
+  position: relative;
+  min-width: 100%;
+  min-height: 100%;
+  width: 100%;
+  height: 100%;
+}
+.browser-frame {
+  display: block;
+  width: 100%;
+  min-height: 100%;
+  height: 100%;
+  border: 0;
+}
 /*
  * The input blocker, present whenever the human does not own the browser.
  *
@@ -2065,8 +2107,34 @@ body[data-ds-reaper-theme] { --syntax-keyword: #dc82bb; }
   backdrop-filter: blur(2px);
 }
 
-/* header / toolbar / scrolling list / footer */
-.skills-panel { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto; max-height: inherit; }
+/*
+ * header / toolbar / scrolling list / footer, as a flex column rather than a
+ * positional grid.
+ *
+ * It was `grid-template-rows: auto auto auto minmax(0,1fr) auto`, which is
+ * correct only when every child is present. Two of them are conditional — the
+ * status line and the read-error line — so in the common case of no status the
+ * body shifted up into an `auto` row, the footer took the `1fr`, and the body
+ * grew to its content instead of scrolling. The dialog clips its overflow, so
+ * the list past the fold was unreachable: the panel simply did not scroll.
+ *
+ * A flex column has no positions to get wrong: the body is the only child that
+ * grows, and `min-height: 0` is what lets it shrink below its content so the
+ * scrollbar appears. The fixed bands say `flex: none` so they never take a
+ * share of the height.
+ */
+.skills-panel {
+  display: flex;
+  flex-direction: column;
+  max-height: inherit;
+  min-height: 0;
+}
+
+.skills-header,
+.skills-toolbar,
+.skills-status,
+.skills-footer,
+.skills-dialog .field-error { flex: none; }
 
 .skills-header {
   display: flex;
@@ -2102,9 +2170,13 @@ body[data-ds-reaper-theme] { --syntax-keyword: #dc82bb; }
 .skills-dialog .field-error { margin: 0 18px 10px; }
 
 .skills-body {
+  flex: 1 1 auto;
+  min-height: 0;
   padding: 0 18px;
   border-top: .5px solid var(--dsw-alias-border-l3);
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .skills-list { margin: 0; padding: 0; list-style: none; }

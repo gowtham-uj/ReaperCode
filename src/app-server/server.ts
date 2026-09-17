@@ -144,7 +144,7 @@ export function createAppServerCore(options: StartAppServerOptions): {
   const flows = new TransitionDb({ path: join(options.workspaceRoot, ".reaper", "browser", "flows.json") });
 
   const threadBrowsers = new ThreadBrowsers({
-    cdpUrl: options.browserCdpUrl ?? "http://127.0.0.1:9222",
+    cdpUrl: options.browserCdpUrl ?? "ws://127.0.0.1:3000",
     flows,
     ...(options.browserIdleCloseMs !== undefined ? { idleMs: options.browserIdleCloseMs } : {}),
     /*
@@ -306,13 +306,15 @@ export async function startAppServer(options: StartAppServerOptions): Promise<Ru
       hub,
       threadBrowsers,
       /*
-       * Where Steel's cast socket lives. Derived from the CDP URL so a
-       * deployment that moves Steel to another host keeps the live pane
-       * working: the browser port is 9222 and the API port is 3000 on the same
-       * host, which is the layout every Steel install uses.
+       * Where Steel's cast socket lives, and the endpoint the browser attaches
+       * to. Both are passed so the preview proxy can refuse to forward to
+       * either: they are Reaper's own services, not dev servers, and reaching
+       * them through a preview would hand out control the scoping exists to
+       * keep in. See `web/reserved-ports.ts`.
        */
-      ...(steelApiUrlFor(options.browserCdpUrl) !== undefined
-        ? { steelApiUrl: steelApiUrlFor(options.browserCdpUrl)! }
+      cdpUrl: threadBrowsers.cdpUrl,
+      ...(steelApiUrlFor(threadBrowsers.cdpUrl) !== undefined
+        ? { steelApiUrl: steelApiUrlFor(threadBrowsers.cdpUrl)! }
         : {}),
       // A thread's own workspace root, read from its persisted metadata. This
       // is what scopes the files/diff panes to the conversation rather than to
@@ -362,30 +364,26 @@ export async function startAppServer(options: StartAppServerOptions): Promise<Ru
 }
 
 /**
- * Steel's REST/cast base URL, from the browser's CDP URL.
+ * Steel's REST/cast base URL, from the browser's CDP endpoint.
  *
- * Steel runs two listeners on one host: the Chrome debugging port the agent
- * connects to over CDP, and the Steel API that serves the session REST routes
- * and the cast socket. The live-view pane needs the second, and the configured
- * value names the first, so the port is swapped rather than configured twice:
- * two settings that must agree is one setting too many, and a mismatch would
- * show up only as a pane that never connects.
+ * The endpoint the agent connects to *is* the Steel API: `websocketUrl` is
+ * built from the same host and port that serve the REST routes, and the CDP
+ * proxy is the upgrade fallthrough on that port (see
+ * `vendor/steel-browser/api/src/plugins/browser-socket/browser-socket.ts`). So
+ * this is a scheme swap, not a port swap. It used to map `:9222` to `:3000`,
+ * which was correct only while the browser attached to raw Chrome; once the
+ * endpoint became Steel's, that mapping looked for a port that never appears
+ * and silently returned undefined, leaving the pane on a constant.
  *
- * Returns undefined for a URL that cannot be parsed or is not loopback-ish, so
- * a caller falls back to the default rather than being handed a bad host.
+ * Returns undefined only for a URL that cannot be parsed, so a caller falls
+ * back to the default rather than being handed a bad host.
  */
 function steelApiUrlFor(cdpUrl: string | undefined): string | undefined {
   if (cdpUrl === undefined || cdpUrl.length === 0) return undefined;
   try {
     const parsed = new URL(cdpUrl);
-    const port = parsed.port === "" ? undefined : Number(parsed.port);
-    /*
-     * Only the known Steel pairing is rewritten. A CDP URL on any other port is
-     * a browser Reaper did not start, and guessing an API port for it would
-     * point the pane at an unrelated service.
-     */
-    if (port !== 9222) return undefined;
-    return `${parsed.protocol === "https:" ? "https" : "http"}://${parsed.hostname}:3000`;
+    const scheme = parsed.protocol === "https:" || parsed.protocol === "wss:" ? "https" : "http";
+    return `${scheme}://${parsed.host}`;
   } catch {
     return undefined;
   }

@@ -28,27 +28,28 @@ import { ThreadBrowsers } from "../../src/app-server/thread-browsers.js";
 import { BrowserControlRegistry } from "../../src/browser/control-lease.js";
 import { resolveThreadPageTarget } from "../../src/app-server/web/live-view.js";
 import { createTempWorkspace } from "../fixtures/workspace.js";
+import { DEFAULT_CDP_URL, probeBrowser, skipUnless } from "../fixtures/browser-availability.js";
 
-const CDP_URL = process.env["REAPER_CDP_URL"] ?? "http://127.0.0.1:9222";
+const CDP_URL = process.env["REAPER_CDP_URL"] ?? DEFAULT_CDP_URL;
 
-/**
- * Skip when there is no browser to stream.
+/*
+ * Skip when there is no browser to stream, using the same probe every other
+ * browser suite uses.
  *
- * The pane is a browser feature; a host with no CDP endpoint cannot run these,
- * and failing there would report "the live view is broken" for a machine that
- * simply has no browser.
+ * This had its own check: it fetched `/json/version` from the endpoint and read
+ * `response.ok`. That worked while the endpoint was raw Chrome, which serves
+ * that path. It broke twice over when the endpoint became Steel's: `CDP_URL` is
+ * a `ws://` URL, which `fetch` cannot open at all, and Steel returns 404 for
+ * `/json/version` even over HTTP because only Chrome serves the devtools
+ * descriptor. So the check was false on a perfectly healthy browser and every
+ * test in this file skipped, which reads as "nothing to see" rather than "the
+ * probe is wrong".
+ *
+ * The shared probe connects the way the product does and tells absent from
+ * broken, so there is no reason for a second one here.
  */
-async function browserAvailable(): Promise<boolean> {
-  try {
-    const response = await fetch(`${CDP_URL}/json/version`, { signal: AbortSignal.timeout(3_000) });
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-
-const available = await browserAvailable();
-const skip = available ? false : "no Chrome on the CDP endpoint";
+const availability = await probeBrowser(CDP_URL);
+const skip = skipUnless(availability);
 
 async function makeBrowsers(): Promise<{ browsers: ThreadBrowsers; cleanup(): Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), "live-view-"));
@@ -96,13 +97,28 @@ test("a thread's page target is resolved from the thread, not from a request", {
     assert.match(resolved.targetId, /^[A-F0-9]{8,}$/i, "the id must look like a CDP target id");
 
     /*
-     * A thread with no browser is refused rather than answered with somebody
-     * else's page. This is the branch that would silently widen if the
-     * resolver ever fell back to the session's first tab.
+     * A thread whose pane is opened before it has browsed gets its OWN page,
+     * and specifically not another thread's.
+     *
+     * The resolver used to refuse here with `no-browser`, and this test asserted
+     * that. It was changed on purpose: a thread's browser is its own context, and
+     * the page the agent will act on exists as a blank tab the moment the context
+     * does, so refusing meant the pane sat empty through the part of a task where
+     * the user most wants to watch, then appeared suddenly. The resolver attaches
+     * on demand now (see its doc comment).
+     *
+     * The guarantee that matters is unchanged and is what this asserts: the page
+     * belongs to *this* thread. It must be a different target from another
+     * thread's, and a different context, so the fallback-to-the-session's-first-
+     * tab widening this test exists to catch is still caught.
      */
-    const missing = await resolveThreadPageTarget(browsers, "never-opened");
-    assert.ok("failure" in missing, "a thread with no browser must not resolve to a page");
-    assert.equal(missing.failure, "no-browser");
+    const own = await resolveThreadPageTarget(browsers, "never-opened");
+    assert.ok("targetId" in own, `an unopened thread should get its own page, got ${JSON.stringify(own)}`);
+    assert.notEqual(
+      own.targetId,
+      resolved.targetId,
+      "a second thread must never be answered with the first thread's page",
+    );
   } finally {
     await cleanup();
   }

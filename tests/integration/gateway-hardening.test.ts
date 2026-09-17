@@ -138,14 +138,25 @@ test("a symlink out of the root is not followed, and a write through one creates
  * `/preview/9222/json/version` returned the shared Chrome's CDP descriptor and
  * `/preview/4180/healthz` returned the gateway's own, so anything able to fetch
  * from this server could also drive the browser every thread shares.
+ *
+ * The reserved set follows the configuration now, so the numbers here changed
+ * once already: the browser attaches to Steel's port (3000), which is what
+ * serves the unscoped cast socket, and that is a reserved port rather than a
+ * dev server. The gateway's own port is supplied by the caller, because only
+ * it knows what it bound when it asked for port 0.
  */
-test("the preview proxy refuses the browser's CDP port and the gateway's own", () => {
-  assert.equal(parsePreviewPath("/preview/9222/json/version"), undefined, "CDP must not be reachable");
-  assert.equal(parsePreviewPath("/preview/4180/healthz"), undefined, "nor the gateway itself");
+test("the preview proxy refuses the browser's and the gateway's own ports", () => {
+  assert.equal(parsePreviewPath("/preview/9222/json/version"), undefined, "raw Chrome must not be reachable");
+  assert.equal(parsePreviewPath("/preview/3000/v1/sessions/cast"), undefined, "nor Steel's cast socket");
+  assert.equal(
+    parsePreviewPath("/preview/4180/healthz", new Set([9222, 9223, 3000, 4180])),
+    undefined,
+    "nor the gateway itself",
+  );
   // Below 1024 is a system service, which was already refused.
   assert.equal(parsePreviewPath("/preview/80/"), undefined);
   // A dev server the agent started is what this exists for.
-  assert.deepEqual(parsePreviewPath("/preview/3000/app?x=1"), { port: 3000, path: "/app?x=1" });
+  assert.deepEqual(parsePreviewPath("/preview/5173/app?x=1"), { port: 5173, path: "/app?x=1" });
 });
 
 /*

@@ -282,13 +282,22 @@ test("a script cannot reach the network, including the browser's own CDP port", 
     `const probe = async (url) => { try { await fetch(url); return 'reachable' } catch { return 'blocked' } };
      ({
        cdp: await probe('http://127.0.0.1:9222/json/version'),
+       steel: await probe('http://127.0.0.1:3000/v1/health'),
        gateway: await probe('http://127.0.0.1:4180/healthz'),
        dns: await probe('http://example.com/'),
      })`,
   );
-  const value = output?.value as { cdp?: string; gateway?: string; dns?: string } | undefined;
+  const value = output?.value as { cdp?: string; steel?: string; gateway?: string; dns?: string } | undefined;
 
-  assert.equal(value?.cdp, "blocked", "the CDP port is reachable from every thread's sandbox without --unshare-net");
+  assert.equal(value?.cdp, "blocked", "raw Chrome's CDP port must not be reachable from a script");
+  /*
+   * Steel's port as well as Chrome's, because that is where the browser tool's
+   * own endpoint lives now. Reaching it from a script would be the same bypass
+   * through a different door: Steel's cast socket and session routes are
+   * unscoped, so a sandboxed program that could open them would see every
+   * thread's pages without ever asking for a `page`.
+   */
+  assert.equal(value?.steel, "blocked", "Steel's API port must not be reachable from a script");
   assert.equal(value?.gateway, "blocked", "the app-server gateway is on loopback and must not be reachable from a script");
   assert.equal(value?.dns, "blocked", "a sandboxed script has no network at all, not even outbound");
 });

@@ -98,6 +98,40 @@ Removed:
   - textbox "Search jobs"
 ```
 
+## Act with Playwright's own input, not with page JavaScript
+
+This is the difference between an action a site accepts and one it blocks.
+
+```js
+// Trusted: Chrome generates the event because Playwright drives it through CDP.
+await page.getByRole("button", { name: "Apply" }).click();
+await page.getByLabel("Email").fill(email);
+await page.locator("#search").press("Enter");
+
+// NOT trusted: the page's own JavaScript dispatches it, and Chrome marks it.
+await page.evaluate("document.querySelector('#apply').click()");
+await page.evaluate("form.submit()");
+```
+
+Sites increasingly check `event.isTrusted`, and a synthetic event fails that
+check. It cannot be faked: `isTrusted` is set by the browser and is read-only, so
+an event dispatched from `evaluate` is always untrusted no matter how it is
+wrapped. The fix is to use the real input API, which is trusted by construction.
+
+That applies to everything a person does with a mouse or a keyboard:
+
+| do this | not this |
+|---|---|
+| `locator.click()` | `evaluate("el.click()")` |
+| `locator.fill(text)` | `evaluate("el.value = text")` |
+| `locator.press("Enter")` | `evaluate("form.submit()")` |
+| `locator.check()` | `evaluate("el.checked = true")` |
+| `locator.selectOption(v)` | setting `.selectedIndex` |
+
+`evaluate` still has its place: reading values, scrolling, waiting for a
+condition, and the rare site where nothing else works. What it is not for is
+*acting*, because that is the case where the untrusted marker costs you the task.
+
 ## Write locators against the name, not the ref
 
 The `[ref=eN]` handles are for *reading* the page. For acting, use a role and an
@@ -218,10 +252,66 @@ Prefer names to indices. `browser.setActive(1)` breaks the moment a page closes,
 which is the reason pages are named at all: a model that opens a tab, works
 elsewhere and comes back has no way to say which one it meant by position.
 
+## Changing how the browser presents itself
+
+You can change the browser's own settings, and you should when a site treats you
+badly. These are ordinary calls in scope, beside `view` and `browser`:
+
+```js
+await setUserAgent("Mozilla/5.0 ...");   // present as a different browser
+await setTimezone("America/New_York");
+await setViewport(1440, 900);
+await setFullscreen(true);
+await blockAds(true);                    // skip ad and tracker requests
+await bandwidth({ blockImages: true });  // much smaller pages, much faster
+const now = await settings();            // what is in force right now
+```
+
+They apply to the pages this thread already has open and to any page it opens
+later, without restarting the browser, so you can change one mid-task when a site
+starts behaving differently. `set({...})` takes several at once:
+
+```js
+await set({ userAgent: "...", timezone: "Europe/London", blockImages: true });
+```
+
+**Turn on image blocking when you are reading rather than looking.** A page with
+its images, media and ads blocked loads several times faster and produces a much
+smaller outline, and `view()` does not show images anyway. Reach for
+`screenshot()` when you actually need to see the page.
+
+**When a site blocks you.** A page that refuses you is reported as a `BLOCKED:`
+line naming the reason, and the user agent is rotated automatically so the next
+attempt looks different. You do not have to detect this yourself:
+
+```js
+return await view();   // says BLOCKED: the page reports unusual traffic
+// then either try again, or change approach:
+await setUserAgent("Mozilla/5.0 ...");
+await page.reload();
+```
+
+Rotating the user agent is worth one retry, not five. If a site keeps refusing,
+say so rather than burning the task on it.
+
+**Two settings wait for the next launch.** `set({ userPreferences: {...} })` and
+`persist` are Chrome profile settings with no per-page equivalent, so the call
+tells you they apply when the browser next starts rather than pretending they
+took effect now. Check the return: `applied` are live, `nextLaunch` are not.
+
 ## What persists
 
-- **Cookies and logins persist** across calls in this thread. Sign in once.
-- **Open pages persist** while the browser stays up.
+- **The live page is the real state.** Between calls in this thread it is the
+  same Chromium, so the DOM as JavaScript has modified it, form values you
+  typed, and the current URL are all still there. That is more than any
+  saved-state file can hold, so prefer staying on a page over re-navigating to
+  it.
+- **Cookies, localStorage and IndexedDB persist** across calls and across a
+  restart. Sign in once.
+- **Open pages persist** while the browser stays up, and their URLs are restored
+  after a restart.
+- **Scroll position does not survive a restart.** Reopening a restored tab
+  starts at the top, so scroll again if the position matters.
 - **A killed script persists nothing.** For a long script that just logged in,
   `await browser.save()` writes the state immediately.
 
@@ -235,6 +325,19 @@ code:
 - Reading `chromium.executablePath()`.
 - Installing a browser (`playwright install`, or a package manager fetching
   Chromium).
+- `chromium.connectOverCDP(...)` against anything but the browser you already
+  have. Reaper drives Chrome through Steel, which owns the browser process and
+  the connection; connecting to Chrome directly skips that layer and gets a
+  browser that is not the one the live pane is showing. There is no endpoint
+  worth reaching this way, so it is refused rather than merely discouraged.
+- `browser.close()` and `context.close()`. The browser outlives every call this
+  thread makes: its pages, cookies, logins and live DOM all live in it, and
+  nothing can bring them back once it is gone. Reaper owns that lifetime.
+
+**Closing a tab is yours to do.** `await page.close()` and
+`await browser.closePage(p)` work, and `await browser.newPage(name)` opens one.
+The distinction is page versus browser, and it matters: end a tab when you are
+done with it, but do not end the browser.
 
 Use the browser you have. If it is not reachable, the error names the cause and
 what to do — retrying with a launch call will not help.

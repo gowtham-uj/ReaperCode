@@ -27,12 +27,13 @@
  * is listening.
  */
 
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 
 import type { Browser, BrowserContext, Page } from "playwright";
 
 import { scopeBrowser, scopePage } from "./scoped-page.js";
+import { isPageOwnedBy, setPageOwner } from "./page-ownership.js";
 import {
   BrowserControlPausedError,
   BrowserControlRegistry,
@@ -41,6 +42,12 @@ import {
 } from "./control-lease.js";
 
 import { perceive, type PerceptionResult } from "./engine.js";
+import { assertNotRawChrome, assertSteelManagedEndpoint } from "./steel-endpoint.js";
+import { applySettingsToPage, type BrowserSettings, type PageControls } from "./session-controls.js";
+import { captureIndexedDb, restoreIndexedDb, type StorageCapture } from "./storage-state.js";
+import { DownloadVault, watchDownloads, type VaultFile } from "./downloads.js";
+import { defaultUserAgent, nextUserAgent } from "./user-agents.js";
+import type { ControlReport } from "./browser-program.js";
 import { countOutline, PageObserver, type PageContentMeta, type PageViewOptions, type SnapshotStats } from "./page-view.js";
 import { runStep, type SettleOptions, type StepReceipt } from "./transaction.js";
 import type { TransitionDb } from "./transition-db.js";
@@ -102,6 +109,22 @@ export class ThreadBrowserRuntime {
   private readonly named = new Map<string, NamedPage>();
   /** The counter behind auto-generated page names. */
   private anonymousCount = 0;
+
+  /**
+   * A page name that no other thread in the shared context is using.
+   *
+   * The counter is per-runtime, and the context is now shared, so two threads
+   * both generated `page-1`: measured, a thread's page list showed `page-1` for
+   * its own first tab and another `page-1` for a different thread's. The thread
+   * id is part of the name because that is the thing that is unique per
+   * workspace, and a name has to mean one page for `setActive` to be usable at
+   * all.
+   */
+  private anonymousName(): string {
+    this.anonymousCount += 1;
+    const prefix = this.options.threadId.replace(/[^a-zA-Z0-9_-]/g, "").slice(-6) || "t";
+    return `page-${prefix}-${this.anonymousCount}`;
+  }
   readonly observer = new PageObserver();
   /**
    * The learned site graph, when one is shared.
@@ -123,6 +146,22 @@ export class ThreadBrowserRuntime {
   constructor(private readonly options: ThreadRuntimeOptions) {
     this.flows = options.flows;
     this.control = options.control;
+    /*
+     * The vault is per thread, inside the workspace it belongs to.
+     *
+     * A download is the agent's own artifact: it fetched a file and will upload
+     * it somewhere, possibly much later. So it goes in the thread's own
+     * directory, under the workspace root the agent can already read and write,
+     * rather than in a temporary directory that dies with the context or in a
+     * shared folder two threads would collide in.
+     *
+     * The path is derived from the state file, which the app-server already
+     * places per thread under the workspace, so this follows whatever layout the
+     * caller chose rather than inventing a second one.
+     */
+    this.downloads = options.statePath
+      ? new DownloadVault(join(dirname(options.statePath), basename(options.statePath, ".json"), "downloads"))
+      : undefined;
   }
 
   /** This runtime's thread id, for lease lookups. */
@@ -139,6 +178,82 @@ export class ThreadBrowserRuntime {
    * can reach and that never closes.
    */
   private connecting: Promise<void> | undefined;
+
+  /**
+   * Set by `close()`, so an attach that lands afterwards is not leaked.
+   *
+   * Attaching is asynchronous and nothing awaits it: the live pane resolves a
+   * thread, which starts a connection, and the caller may stop the server before
+   * that connection completes. `close()` iterates the runtimes it knows about,
+   * and one whose attach has not finished has no browser to close yet, so the
+   * connection would land *after* shutdown and stay open. Measured: the test
+   * process exited with two sockets to Steel still ESTABLISHED, so the suite
+   * passed and then hung forever.
+   *
+   * Checked in `attach()` after the connect resolves, where the connection is
+   * the only thing that can still be undone.
+   */
+  private closed = false;
+
+  /**
+   * Attach if needed, without resolving or changing the active page.
+   *
+   * The list calls need the context and nothing else, and going through
+   * `ensureReady` would make a *read* do two things a read should not: pay a CDP
+   * round trip to re-pin the active page, and possibly *change* which page is
+   * active when the pin has gone stale. A model asking what tabs exist should
+   * get an answer, not a state transition.
+   */
+  async ensureAttached(): Promise<{ browser: Browser; context: BrowserContext }> {
+    if (this.browser && this.context && !this.browser.isConnected()) this.resetHandles();
+    if (!this.browser || !this.context) {
+      if (!this.connecting) this.connecting = this.attach().finally(() => { this.connecting = undefined; });
+      await this.connecting;
+    }
+    const browser = this.browser;
+    const context = this.context;
+    if (!browser || !context) throw new Error("the browser could not be attached");
+    /*
+     * A context with no pages gets one, and that belongs here rather than in the
+     * reader that happens to notice.
+     *
+     * `browser.newContext()` creates a context with no page in it, and the page
+     * was only made when something asked for the *active* page. So a thread whose
+     * pane was opened before its first `browser_use` call had a browser, a
+     * context, and nothing to show: `pageTargets()` returned `[]`, the pane sent
+     * no tab list at all, and the viewer sat on "Session connecting" with no
+     * error, because an empty list and a broken connection look the same from
+     * there. Reproduced against a live thread.
+     *
+     * Creating it here means every reader agrees: a thread that is attached has
+     * a page, which is the invariant the rest of this class already assumes
+     * (`scopedHandles` throws without one, `setActive` has nothing to select).
+     * The page is blank, which is the honest state of a thread that has not
+     * browsed yet, and it is the page its first `browser_use` call will drive.
+     */
+    if (context.pages().filter((page) => !page.isClosed()).length === 0) {
+      const page = await context.newPage();
+      await this.claimOwn(page);
+      /*
+       * Settings applied to the page that was just made.
+       *
+       * This is the page a thread actually drives, and it is created *after*
+       * `attach()` has run its own application pass, so without this line the
+       * one page that matters is the one page that never gets configured: the
+       * default user agent was measured not to reach it, and the page reported
+       * whatever Steel launched Chrome with.
+       */
+      await this.applyControls(page);
+      if (this.active === undefined || this.active.isClosed()) {
+        this.active = page;
+        this.activeTargetId = await targetIdOf(page).catch(() => undefined);
+        recordTargetId(page, this.activeTargetId);
+        const name = this.anonymousName();
+        this.named.set(name, { name, page, openedAt: Date.now() });
+      }
+    }
+    return { browser, context };
+  }
 
   async ensureReady(): Promise<{ browser: Browser; context: BrowserContext; page: Page }> {
     if (this.browser && this.context && !this.browser.isConnected()) {
@@ -158,40 +273,152 @@ export class ThreadBrowserRuntime {
   }
 
   private async attach(): Promise<void> {
+    /*
+     * Refused here as well as at config load, and that is not redundant.
+     *
+     * The runtime is constructed directly in tests and by embedders, so a
+     * caller can hand it an endpoint without going through the config schema.
+     * This is the last point before the socket opens, which is the only place
+     * a guarantee about what we connect to can actually be kept.
+     *
+     * The synchronous check rejects Chrome's known ports; the probe rejects
+     * Chrome on any other port by its devtools descriptor. Together they make
+     * Steel the only thing this can attach to, which is the point: a raw
+     * connection to Chrome would work and would bypass the layer that owns the
+     * browser, so it has to be impossible rather than discouraged.
+     */
+    assertSteelManagedEndpoint(this.options.cdpUrl);
+    await assertNotRawChrome(this.options.cdpUrl);
     const { chromium } = await import("playwright");
     const browser = await chromium.connectOverCDP(this.options.cdpUrl, {
       timeout: this.options.cdpTimeoutMs ?? 30_000,
     });
     /*
-     * A new context per thread, always — never `browser.contexts()[0]`.
+     * The runtime was closed while this connect was in flight.
      *
-     * The default context belongs to whoever got there first, and Steel reuses
-     * one Chrome across sessions, so attaching to it shares a cookie jar with
-     * every other thread. Verified as a real leak rather than inferred: a cookie
-     * written in one context was readable from another when both used the
-     * default.
+     * Closing the connection here rather than storing it is the whole point:
+     * `close()` has already run and returned, so nothing else will ever visit
+     * this runtime again, and an unclosed connection would outlive the server
+     * that asked for it. Returning without setting the handles leaves the
+     * runtime in the same closed state it was in.
      */
+    if (this.closed) {
+      await browser.close().catch(() => undefined);
+      return;
+    }
+
     /*
-     * The thread's saved cookies are seeded into the new context, so a restart
-     * does not cost every login. A missing file returns undefined and the context
-     * starts clean, which is the same thing that happened before persistence
-     * existed.
+     * Steel's default context, NOT one we create, and this was measured.
+     *
+     * A context made with `browser.newContext()` over CDP belongs to the
+     * connection that made it. When that client goes away, the context and every
+     * page in it are destroyed: measured, a page holding typed input and a
+     * JavaScript-set property came back as `0 pages` after a reconnect, while the
+     * default context came back with all three of its pages and every value
+     * intact.
+     *
+     * That is the whole difference between a browser that survives a client blip
+     * and one that does not, and it is what "a persistent browser workspace"
+     * means in practice: the pages live in the browser, not in our connection to
+     * it. It also matches how Steel is designed, since its default context is the
+     * one its own session and viewer talk about.
+     *
+     * The cost is real and was a deliberate reversal: contexts were per-thread so
+     * that two threads could not read each other's cookies, and the default
+     * context is shared. Steel Local is a single session (`session.service.ts`
+     * holds one `activeSession`), so a deployment with several browser threads
+     * was already sharing one Chrome; what changes is that the sharing is now
+     * explicit rather than defeated by a reconnect. Ownership is enforced at the
+     * page level instead, which is where it matters for a thread's own work: see
+     * `ownedPages`.
+     */
+    const context = browser.contexts()[0] ?? (await browser.newContext({
+      viewport: this.options.viewport ?? DEFAULT_VIEWPORT,
+    }));
+    if (this.options.viewport !== undefined) {
+      // Applied per page rather than to the context, which is shared.
+      void this.options.viewport;
+    }
+    /*
+     * The thread's saved cookies are seeded into the context, so a restart does
+     * not cost every login. A missing file is skipped and the context keeps
+     * whatever it already had, which after a reconnect is the live jar.
      */
     const state = await this.loadState();
-    const context = await browser.newContext({
-      viewport: this.options.viewport ?? DEFAULT_VIEWPORT,
-      ...(state ? { storageState: state } : {}),
-      // Steel's Chrome carries its own user agent; leaving this unset keeps it
-      // consistent with what the browser reports elsewhere.
-    });
+    if (state) {
+      await context.addCookies(state.cookies ?? []).catch(() => undefined);
+    }
+    /*
+     * Checked again after the context is built, because `loadState` and
+     * `newContext` both await and `close()` can land in between.
+     */
+    if (this.closed) {
+      await context.close().catch(() => undefined);
+      await browser.close().catch(() => undefined);
+      return;
+    }
     this.browser = browser;
     this.context = context;
     context.on("close", () => {
-      // A script can reach `context.close()` through the sandbox. Nulling the
-      // handles here is what stops the next eval finding a dead context and
-      // failing every call on it.
+      /*
+       * A script can reach `context.close()` through the sandbox, though the
+       * scoped surface refuses it. Nulling the handles here is what stops the
+       * next eval finding a dead context and failing every call on it.
+       */
       this.resetHandles();
     });
+    /*
+     * The site opening or closing a page itself.
+     *
+     * `window.open`, a target=_blank link and a script calling `close()` are the
+     * changes nothing in this runtime performs, so nothing calls
+     * `notifyPagesChanged` for them. Without these listeners the pane would show
+     * a stale strip until the falling-back poll caught up, which is the exact lag
+     * the push exists to remove.
+     */
+    context.on("page", (page) => {
+      /*
+       * Only a page this thread's own page opened.
+       *
+       * The listener fires for every page created in the context, and the
+       * context is shared, so claiming unconditionally handed this thread a tab
+       * another thread had just opened: measured, `a owns b's page` was true.
+       *
+       * The opener is the precise signal. `window.open` and a `target=_blank`
+       * link record the page that opened them, and Playwright exposes it, so the
+       * question "did this thread cause this tab" has an answer that does not
+       * depend on timing or on which listener ran first.
+       */
+      void (async () => {
+        const opener = await page.opener().catch(() => null);
+        /*
+         * `await`, and the missing await was a real bug: `owns` returns a
+         * Promise, a Promise is always truthy, so this claimed every page in the
+         * context regardless of its opener. The isolation tests still passed,
+         * because `owns` had already recorded the right owner and the claim was
+         * idempotent, which is exactly how a latent bug survives its own tests.
+         */
+        if (opener !== null && await this.owns(opener)) await this.claimOwn(page).catch(() => undefined);
+        page.once("close", () => this.notifyPagesChanged());
+        this.notifyPagesChanged();
+      })();
+    });
+
+    /*
+     * Downloads are watched on every page this thread has or makes.
+     *
+     * A download with nobody listening is discarded by Playwright, and the file
+     * lives in a context-scoped temporary directory that is deleted when the
+     * context closes. Both of those are silent losses, and the case they break is
+     * the one this tool exists for: download an invoice here, upload it there,
+     * possibly days later.
+     */
+    if (this.downloads) {
+      for (const page of context.pages()) {
+        if (!page.isClosed()) this.watchDownload(page);
+      }
+      context.on("page", (page) => this.watchDownload(page));
+    }
 
     /*
      * The pages this thread had open, put back.
@@ -201,7 +428,51 @@ export class ThreadBrowserRuntime {
      * navigated. A failure here never fails the attach: a thread that cannot
      * rebuild one of its tabs still needs a browser.
      */
+    /*
+     * Ownership is claimed before anything else looks at the page list.
+     *
+     * The shared default context holds every thread's tabs, so the runtime has to
+     * know which ones are its own before `pageEntries` filters anything. This
+     * runs first, and the window in which an unclaimed page may be adopted closes
+     * as soon as it returns.
+     */
+    await this.claimOwnPages(context).catch(() => undefined);
+    /*
+     * Every page this thread owns gets its target id stamped on it, so the
+     * scoping filter can answer synchronously. This is what makes
+     * `scopeContext.pages()` able to exclude another thread's tabs without a CDP
+     * round trip per page.
+     */
+    await this.decoratePages(context.pages().filter((page) => !page.isClosed())).catch(() => undefined);
+
     await this.restorePages(context).catch(() => undefined);
+
+    /*
+     * IndexedDB, restored after the pages are open.
+     *
+     * Order matters and this is the only correct one: IndexedDB is origin-scoped
+     * and can only be written from a document on that origin, so the pages have
+     * to exist and be navigated before their databases can be put back. Running
+     * this before `restorePages` would find no page on any origin and skip
+     * everything.
+     */
+    const storedIndexedDb = await this.loadIndexedDb();
+    if (storedIndexedDb !== undefined) {
+      this.indexedDbRestoreNotes = await restoreIndexedDb(context, storedIndexedDb).catch(() => []);
+    }
+
+    /*
+     * The default settings, applied once the context exists.
+     *
+     * This is what makes the stealth user agent the default rather than
+     * something a program has to ask for. Without it the page reports whatever
+     * user agent Steel launched Chrome with, which was measured to be a string
+     * from a previous session's config rather than the one this thread chose.
+     * Every page is visited, because the context may have restored tabs.
+     */
+    for (const page of context.pages()) {
+      if (!page.isClosed()) await this.applyControls(page);
+    }
   }
 
   private resetHandles(): void {
@@ -239,8 +510,33 @@ export class ThreadBrowserRuntime {
         return this.active;
       }
     }
-    const pages = context.pages().filter((p) => !p.isClosed());
-    const page = pages[0] ?? (await context.newPage());
+    /*
+     * Only this thread's own pages are candidates, and a page is created when
+     * there are none.
+     *
+     * This picked `context.pages()[0]` from a context that is now the shared
+     * default one, so a thread with no pages of its own adopted the first tab in
+     * the browser, which belonged to whoever opened it. Verified: a fresh thread
+     * resolved to a page left over from an earlier run, and would have driven it.
+     *
+     * The page it makes itself is claimed immediately, so the ownership it needs
+     * exists before anything can look at it.
+     */
+    const mine: Page[] = [];
+    for (const candidate of context.pages()) {
+      if (candidate.isClosed()) continue;
+      if (await this.owns(candidate)) mine.push(candidate);
+    }
+    const page = mine[0] ?? (await context.newPage());
+    if (mine.length === 0) await this.claimOwn(page);
+    /*
+     * Settings applied to whichever page this resolves to.
+     *
+     * This is the choke point for the page a thread actually drives: a page
+     * created here, or one adopted from this thread's own restored record, is the
+     * one every program uses, and nothing else configures it.
+     */
+    if (!page.isClosed()) await this.applyControls(page);
     this.active = page;
     /*
      * The first page is named like any other, and that is not cosmetic.
@@ -257,7 +553,7 @@ export class ThreadBrowserRuntime {
      * both get the same treatment.
      */
     if (![...this.named.values()].some((entry) => entry.page === page)) {
-      const name = `page-${++this.anonymousCount}`;
+      const name = this.anonymousName();
       this.named.set(name, { name, page, openedAt: Date.now() });
     }
     try {
@@ -328,7 +624,8 @@ export class ThreadBrowserRuntime {
   async newPage(name?: string): Promise<Page> {
     const { context } = await this.ensureReady();
     const page = await context.newPage();
-    const resolvedName = name ?? `page-${++this.anonymousCount}`;
+    await this.claimOwn(page);
+    const resolvedName = name ?? this.anonymousName();
     this.named.set(resolvedName, { name: resolvedName, page, openedAt: Date.now() });
     this.active = page;
     /*
@@ -338,7 +635,42 @@ export class ThreadBrowserRuntime {
      */
     this.activeTargetId = await targetIdOf(page).catch(() => undefined);
     recordTargetId(page, this.activeTargetId);
+    this.notifyPagesChanged();
     return page;
+  }
+
+  /**
+   * A subscription for "this thread's pages changed".
+   *
+   * The live pane needs to know when a tab is opened, closed or activated, and
+   * it was discovering it with a two-second poll. That poll is why the tab strip
+   * visibly lagged the agent: a program that opened a tab and finished in under
+   * two seconds had its tab appear only after the fact, and a step that checked
+   * the strip in between saw the old list. A push removes the delay without
+   * removing the poll, which stays as a safety net for changes nothing announces
+   * (a page the site closed by itself, a target that went away).
+   *
+   * Deliberately tiny: a set of callbacks, invoked synchronously and never
+   * awaited, because the caller is a websocket handler that must not be able to
+   * block the browser by being slow. A throwing listener is dropped rather than
+   * propagated, since a broken viewer must not break the agent's step.
+   */
+  onPagesChanged(listener: () => void): () => void {
+    this.pageListeners.add(listener);
+    return () => this.pageListeners.delete(listener);
+  }
+
+  private readonly pageListeners = new Set<() => void>();
+
+  /** Tell every listener the page set or the active page changed. */
+  notifyPagesChanged(): void {
+    for (const listener of this.pageListeners) {
+      try {
+        listener();
+      } catch {
+        /* A listener that throws is a broken viewer, not a broken browser. */
+      }
+    }
   }
 
   /**
@@ -350,15 +682,6 @@ export class ThreadBrowserRuntime {
    * for all of them — which is how a two-page session came back as
    * `['cart', 'cart']`.
    */
-  pagesForDisplay(): Array<{ name: string | undefined; url: string; active: boolean; index: number }> {
-    return this.pageEntries().map((entry) => ({
-      name: entry.name,
-      url: entry.page.url(),
-      active: entry.active,
-      index: entry.index,
-    }));
-  }
-
   /**
    * The thread's pages as scoped Playwright pages, each carrying its metadata.
    *
@@ -379,9 +702,28 @@ export class ThreadBrowserRuntime {
    * reads as a list of pages rather than a list of wrappers.
    */
   async describePages(): Promise<Page[]> {
+    /*
+     * Attached first, because the question cannot be answered otherwise.
+     *
+     * `pageEntries()` reads `this.context`, which is undefined until the runtime
+     * attaches. So a caller asking "what pages does this thread have" got an
+     * empty list rather than the pages it had, and a thread reopened after a
+     * restart reported zero pages while its restore had in fact put them back:
+     * reproduced, `pageTargets()` returned `[]` and `setActive("second")` then
+     * worked, which is the two answers disagreeing about the same thread.
+     */
+    await this.ensureAttached();
     const out: Page[] = [];
-    for (const entry of this.pageEntries()) {
-      const page = scopePage(entry.page);
+    for (const entry of await this.pageEntries()) {
+      /*
+       * Settings are applied on the way out, because this is the one place that
+       * visits every page the thread has. A page the site opened by itself has
+       * never been through here, and a UA override does not reach it otherwise:
+       * measured, a page created after the override still reported the original
+       * user agent.
+       */
+      await this.applyControls(entry.page);
+      const page = scopePage(entry.page, this.threadId);
       Object.defineProperties(page, {
         pageName: { value: entry.name, enumerable: false, configurable: true },
         pageIndex: { value: entry.index, enumerable: false, configurable: true },
@@ -407,12 +749,41 @@ export class ThreadBrowserRuntime {
    * The one place the name map and the live list are joined, so the display
    * form and the page form cannot disagree about which index is which.
    */
-  pageEntries(): Array<{ page: Page; name: string | undefined; active: boolean; index: number }> {
+  private async pageEntries(): Promise<Array<{ page: Page; name: string | undefined; active: boolean; index: number }>> {
+    /*
+     * The *current* view, without attaching, and private for that reason.
+     *
+     * The public readers above attach first, because a caller asking about a
+     * thread's pages wants the pages and not an empty list that means "not
+     * attached yet". This one stays synchronous and unattached because `step`,
+     * `closePage` and the pin checks read it from inside an operation that is
+     * already attached, where attaching would be a no-op at best and a
+     * re-entrant attach at worst.
+     *
+     * Private rather than merely documented: the failure mode it caused was a
+     * caller reading it directly and being handed `[]`, which is
+     * indistinguishable from a thread with no pages. Making it unreachable from
+     * outside is what stops that from being written again.
+     */
     if (!this.context) return [];
-    const live = this.context.pages().filter((p) => !p.isClosed());
+    /*
+     * Only this thread's pages, from a context that is now shared.
+     *
+     * The context is the browser's default one so that pages outlive a client
+     * reconnect, which means `context.pages()` returns every thread's tabs. A
+     * thread that listed them all would offer another agent's pages to the model,
+     * and `setActive` would happily switch to one. Ownership is therefore tracked
+     * here, at the single place the live list is built, and it is the async
+     * `owns` that decides.
+     */
     const names = new Map<Page, string>();
     for (const entry of this.named.values()) {
       if (!entry.page.isClosed()) names.set(entry.page, entry.name);
+    }
+    const live: Page[] = [];
+    for (const page of this.context.pages()) {
+      if (page.isClosed()) continue;
+      if (await this.owns(page)) live.push(page);
     }
     return live.map((page, index) => ({
       page,
@@ -421,6 +792,205 @@ export class ThreadBrowserRuntime {
       index,
     }));
   }
+
+  /**
+   * Whether this thread may use a page, claiming it when it is unowned.
+   *
+   * The id is resolved rather than read only off the object, and that is
+   * load-bearing: a page created by another thread arrives here as a handle with
+   * no recorded id, so an object-only check would treat a stranger's tab as
+   * unowned and claim it. Resolving it through CDP is the only way to ask the
+   * browser which target this handle is, and the answer is what the shared owner
+   * map is keyed by.
+   *
+   * An unowned page is claimed only if this thread has nothing on disk yet, or
+   * owns the file that page came from. Otherwise a fresh runtime for a brand new
+   * thread would adopt every leftover tab in the shared browser the first time it
+   * looked: measured, a second thread's `pageTargets()` returned five pages
+   * belonging to earlier runs.
+   *
+   * A page whose id cannot be resolved at all is NOT claimed. It is almost always
+   * a page in the middle of closing, and refusing it costs nothing while
+   * admitting it could hand a thread a tab it does not own.
+   */
+  private async owns(page: Page): Promise<boolean> {
+    const recorded = (page as unknown as { pageTargetId?: unknown }).pageTargetId;
+    const targetId = typeof recorded === "string" && recorded.length > 0
+      ? recorded
+      : await targetIdOf(page).catch(() => undefined);
+    if (targetId === undefined) return false;
+    if (this.claimed.has(targetId)) return true;
+    /*
+     * The owner map is consulted first, and it is the authority: it is populated
+     * from every thread's state file at first attach, so it knows about pages
+     * that outlived a client without this runtime having seen them yet.
+     */
+    if (ThreadBrowserRuntime.owners.has(targetId)) {
+      if (!isPageOwnedBy(targetId, this.threadId)) return false;
+      this.claimed.add(targetId);
+      return true;
+    }
+    /*
+     * No owner recorded anywhere, and the page is not one this thread made.
+     *
+     * It belongs to whoever put it on screen, and this thread does not adopt it:
+     * doing so is how a fresh thread came to own five leftover tabs from earlier
+     * runs, measured. Ownership is claimed at creation (`claimOwn`) and at attach
+     * from this thread's own record (`claimOwnPages`), so a page with neither is
+     * not this thread's to use.
+     */
+    return false;
+  }
+
+  /**
+   * Whether this runtime may claim pages nobody has recorded an owner for.
+   *
+   * True only while this thread is creating its own pages, and false once it has
+   * attached and reconciled with what is on screen. That window is the whole
+   * distinction between "a page I just opened" and "a page that was already
+   * here", which is the difference between owning and stealing.
+   */
+  private readonly claimed = new Set<string>();
+
+  /**
+   * Where this thread's downloads are kept, when it has a workspace.
+   *
+   * Absent for a runtime with no state path, which is a test or a one-off script:
+   * there is nowhere durable to put a file, and inventing a directory would
+   * scatter downloads outside the workspace the app-server owns.
+   */
+  private readonly downloads: DownloadVault | undefined;
+
+  /** Every file this thread has downloaded, for a caller that wants to report them. */
+  readonly downloadedFiles: VaultFile[] = [];
+
+  /** Attach the download handler to one page, once. */
+  private watchDownload(page: Page): void {
+    if (!this.downloads) return;
+    watchDownloads(page, this.downloads, this.downloadedFiles);
+  }
+
+  /**
+   * Everything in this thread's download vault, not only this session's.
+   *
+   * `downloadedFiles` holds what happened while this runtime was alive; the
+   * directory holds everything the thread ever downloaded. A program asking
+   * "where is the invoice I downloaded" wants the second, because the file may
+   * have been fetched before a restart and be exactly the reason it is asking.
+   */
+  async vaultFiles(): Promise<VaultFile[]> {
+    return this.downloads ? await this.downloads.list() : [];
+  }
+
+  /**
+   * Record a page this thread just created as its own.
+   *
+   * Called from the two places a page enters this thread's world: `newPage` and
+   * the first-page creation in `ensureAttached`. Claiming at the point of
+   * creation is what makes ownership correct by construction, rather than a
+   * window of time during which an unowned page might be adopted: the earlier
+   * version closed that window at attach, before the runtime had made the page it
+   * drives, so a thread could not see the page it had just created.
+   *
+   * A failure to resolve the id is not fatal. The page is still usable this
+   * session; it simply will not be recognised after a reconnect, which is the
+   * same outcome as any page whose id cannot be read.
+   */
+  private async claimOwn(page: Page): Promise<void> {
+    const id = await targetIdOf(page).catch(() => undefined);
+    if (id === undefined) return;
+    setPageOwner(id, this.threadId);
+    this.claimed.add(id);
+    /*
+     * Stamped on the page as well, so the scoping layer can decide ownership
+     * without a CDP round trip. See `ownerTargetId` in `scoped-page.ts`: a proxy
+     * getter cannot await, and `pages()` is read often enough that a round trip
+     * per page would be felt.
+     */
+    recordTargetId(page, id);
+  }
+
+  /**
+   * Stamp every page in this thread's set with its target id.
+   *
+   * Called after a claim pass, so the pages a thread owns are all readable
+   * synchronously by the scoping filter and by anything that has to place a page
+   * without asking the browser.
+   */
+  private async decoratePages(pages: readonly Page[]): Promise<void> {
+    for (const page of pages) {
+      if (page.isClosed()) continue;
+      const id = await targetIdOf(page).catch(() => undefined);
+      if (id !== undefined) recordTargetId(page, id);
+    }
+  }
+
+  /**
+   * Register this thread's own pages, from the record it wrote last time.
+   *
+   * Ownership has to survive a process restart, because the shared context does:
+   * a new app-server attaching to a browser whose tabs are a week old has no
+   * memory of who opened what, and the state file is the only thing that does.
+   * Without this, either every thread sees every tab (a leak) or every restored
+   * page is unowned and unusable (a dead end). Recording it is what makes
+   * "reconnect and keep working" possible at all.
+   *
+   * The record is a list of target ids under the thread's own state path, so two
+   * threads cannot claim the same tab: whichever file names the id owns it.
+   */
+  private async claimOwnPages(context: BrowserContext): Promise<void> {
+    const path = this.options.statePath;
+    /*
+     * A runtime with no state file owns nothing that is already on screen.
+     *
+     * This used to claim every page in the context, on the theory that a runtime
+     * without a state path is the only one looking. It is not: a runtime built
+     * without a state path is an ordinary second thread, and the context is now
+     * the browser's shared default one, so that branch handed a brand new thread
+     * every other thread's tabs. Measured: a test asserting thread isolation
+     * failed with "the other thread must not see this thread's page", which is
+     * exactly the leak the per-thread design exists to prevent.
+     *
+     * So a runtime with no record starts with nothing and claims only what it
+     * creates itself, through `claimOwn` at the two creation points.
+     */
+    let recorded: string[] = [];
+    if (path) {
+      try {
+        const parsed = JSON.parse(await readFile(ThreadBrowserRuntime.ownershipPath(path), "utf8")) as { targetIds?: unknown };
+        if (Array.isArray(parsed.targetIds)) recorded = parsed.targetIds.filter((id): id is string => typeof id === "string");
+      } catch {
+        /* No record yet: this thread has never had a browser. */
+      }
+    }
+    for (const id of recorded) {
+      setPageOwner(id, this.threadId);
+      this.claimed.add(id);
+    }
+  }
+
+  /** Record this thread's page target ids, so a later attach can claim them. */
+  private async saveOwnership(targetIds: string[], statePath: string): Promise<void> {
+    const target = ThreadBrowserRuntime.ownershipPath(statePath);
+    await mkdir(dirname(target), { recursive: true });
+    const temporary = `${target}.${process.pid}.tmp`;
+    await writeFile(temporary, JSON.stringify({ version: 1, targetIds }), { mode: 0o600 });
+    await rename(temporary, target);
+  }
+
+  /** Where a thread's page ownership is recorded, given its state path. */
+  private static ownershipPath(statePath: string): string {
+    return `${statePath}.pages-owner.json`;
+  }
+
+  /**
+   * Which thread owns which CDP target, shared across runtimes.
+   *
+   * Static because the target ids belong to the browser, not to any one runtime,
+   * and two runtimes for two threads have to agree about them. A per-runtime map
+   * would let each thread believe it owned every page.
+   */
+  private static readonly owners = new Map<string, string>();
 
   /**
    * This thread's pages, each with the CDP target id that names it.
@@ -437,7 +1007,8 @@ export class ThreadBrowserRuntime {
    * one, because it looks like a tab that will not load.
    */
   async pageTargets(): Promise<Array<{ targetId: string; url: string; title: string; name: string | undefined; active: boolean }>> {
-    const entries = this.pageEntries();
+    await this.ensureAttached();
+    const entries = await this.pageEntries();
     const out: Array<{ targetId: string; url: string; title: string; name: string | undefined; active: boolean }> = [];
     for (const entry of entries) {
       const targetId = await targetIdOf(entry.page).catch(() => undefined);
@@ -457,12 +1028,6 @@ export class ThreadBrowserRuntime {
   async ownsTarget(targetId: string): Promise<boolean> {
     const targets = await this.pageTargets();
     return targets.some((entry) => entry.targetId === targetId);
-  }
-
-  /** The live Page objects, in the same order `pagesForDisplay` reports them. */
-  pages(): Page[] {
-    if (!this.context) return [];
-    return this.context.pages().filter((p) => !p.isClosed());
   }
 
   /** Select the page a bare `page` will mean next. By name or by index. */
@@ -579,6 +1144,7 @@ export class ThreadBrowserRuntime {
      * heuristic: the exact wrong-tab failure the pinning exists to prevent.
      */
     this.activeTargetId = await targetIdOf(page).catch(() => undefined);
+    this.notifyPagesChanged();
     return page;
   }
 
@@ -589,6 +1155,7 @@ export class ThreadBrowserRuntime {
     }
     if (this.active === page) this.active = undefined;
     await page.close().catch(() => undefined);
+    this.notifyPagesChanged();
   }
 
   /**
@@ -741,7 +1308,7 @@ export class ThreadBrowserRuntime {
     if (!page || !context) throw new Error("the browser is not attached");
     const browser = page.context().browser();
     if (!browser) throw new Error("the page has no browser");
-    return { page: scopePage(page), browser: scopeBrowser(browser, context) };
+    return { page: scopePage(page, this.threadId), browser: scopeBrowser(browser, context, this.threadId) };
   }
 
   /**
@@ -777,7 +1344,7 @@ export class ThreadBrowserRuntime {
       startedAt: Date.now(),
       startedUrl: page.url(),
       startedTitle: await page.title().catch(() => ""),
-      startedTabs: this.pageEntries().length,
+      startedTabs: (await this.pageEntries()).length,
       navigations: [],
     };
     /*
@@ -826,7 +1393,7 @@ export class ThreadBrowserRuntime {
     const { page } = await this.ensureReady();
     const endedUrl = page.url();
     const endedTitle = await page.title().catch(() => "");
-    const endedTabs = this.pageEntries().length;
+    const endedTabs = (await this.pageEntries()).length;
 
     /*
      * Invalidate first. `observer.reset()` drops the held outline and returns
@@ -1117,6 +1684,199 @@ export class ThreadBrowserRuntime {
     }
   }
 
+  /**
+   * The browser settings this thread is running under.
+   *
+   * Held here rather than read from the page, because the page cannot be asked:
+   * `Emulation.setUserAgentOverride` has no getter, and a setting that was
+   * applied to one page is not visible from another. The runtime is the only
+   * object that knows what was asked for, so it owns the record.
+   *
+   * Starts with a stealth user agent rather than none. Presenting as automation
+   * is the difference between a page and an interstitial, and a model should not
+   * have to know to ask for it.
+   */
+  private settings: BrowserSettings = { userAgent: defaultUserAgent() };
+
+  /**
+   * Bumped whenever a setting changes, so an already-configured page is not
+   * reconfigured on every call. See `PageControls.appliedVersion`.
+   */
+  private settingsVersion = 0;
+
+  /** Per-page control channels, so each page's CDP session is created once. */
+  private readonly pageControls = new WeakMap<Page, PageControls>();
+
+  /**
+   * What could not be put back from the saved IndexedDB.
+   *
+   * Kept so a caller can say so rather than reporting a clean restore. A
+   * database that failed to open is the difference between a thread that is
+   * signed in and one that will fail a login wall on its next action, and the
+   * agent is told which it is.
+   */
+  private indexedDbRestoreNotes: string[] = [];
+
+  /**
+   * The settings in force, for a program that asks.
+   *
+   * Returned as a plain object rather than the interface, because it crosses the
+   * sandbox boundary as data and the caller reads it as such. The bandwidth
+   * block is copied so a program cannot mutate the runtime's own record by
+   * holding on to what it was handed.
+   */
+  currentSettings(): Record<string, unknown> {
+    const out: Record<string, unknown> = {
+      userAgent: this.settings.userAgent,
+      timezone: this.settings.timezone,
+      viewport: this.settings.viewport,
+      fullscreen: this.settings.fullscreen,
+      blockAds: this.settings.blockAds,
+    };
+    if (this.settings.bandwidth) out["bandwidth"] = { ...this.settings.bandwidth };
+    if (this.settings.userPreferences) out["userPreferences"] = { ...this.settings.userPreferences };
+    return out;
+  }
+
+  /**
+   * Apply the current settings to a page and remember its control channel.
+   *
+   * Called for the active page on attach, and for every page the runtime hands
+   * out, because a UA override does not propagate to a page created afterwards:
+   * measured, a new page in the same context still reported the original user
+   * agent. Applying on the way out rather than on creation is what covers the
+   * pages a site opens by itself.
+   */
+  async applyControls(page: Page): Promise<void> {
+    const context = this.context;
+    if (!context || page.isClosed()) return;
+    try {
+      const controls = await applySettingsToPage(
+        page,
+        context,
+        () => this.settings,
+        this.pageControls.get(page),
+        this.settingsVersion,
+      );
+      this.pageControls.set(page, controls);
+    } catch {
+      /*
+       * A page that closed between the check and the call is not a failure: the
+       * settings belong to a page that is gone, and the caller is about to find
+       * out when it uses it.
+       */
+    }
+  }
+
+  /**
+   * Change this thread's browser settings.
+   *
+   * Every setting is applied to the pages this thread currently has open, and
+   * recorded so pages opened later get it too. The report separates what is live
+   * from what waits for the next launch, because `userPreferences` is a Chrome
+   * profile setting with no per-page equivalent and claiming it applied would be
+   * a lie the model builds on.
+   */
+  async setSettings(patch: BrowserSettings): Promise<ControlReport> {
+    const applied: string[] = [];
+    const nextLaunch: string[] = [];
+
+    if (patch.userAgent !== undefined) {
+      this.settings.userAgent = patch.userAgent;
+      applied.push("userAgent");
+    }
+    if (patch.timezone !== undefined) {
+      this.settings.timezone = patch.timezone;
+      applied.push("timezone");
+    }
+    if (patch.viewport !== undefined) {
+      this.settings.viewport = patch.viewport;
+      /*
+       * Fullscreen and an explicit viewport are contradictory, so setting one
+       * clears the other rather than leaving whichever was set last to win by
+       * accident.
+       */
+      delete this.settings.fullscreen;
+      applied.push("viewport");
+    }
+    if (patch.fullscreen !== undefined) {
+      this.settings.fullscreen = patch.fullscreen;
+      if (patch.fullscreen) delete this.settings.viewport;
+      applied.push("fullscreen");
+    }
+    if (patch.blockAds !== undefined) {
+      this.settings.blockAds = patch.blockAds;
+      applied.push("blockAds");
+    }
+    if (patch.bandwidth !== undefined) {
+      this.settings.bandwidth = { ...this.settings.bandwidth, ...patch.bandwidth };
+      applied.push("bandwidth");
+    }
+    if (patch.mobile !== undefined) {
+      this.settings.mobile = patch.mobile;
+      applied.push("mobile");
+    }
+    if (patch.proxy !== undefined) {
+      /*
+       * A proxy is per *context*, not per page, and there is no CDP command that
+       * re-points a live one. Changing it means rebuilding this thread's context,
+       * which loses its pages, so it is reported rather than applied: a model
+       * that is told "applied" would carry on using the old route and never
+       * understand why its traffic is not proxied.
+       */
+      this.settings.proxy = patch.proxy;
+      nextLaunch.push("proxy");
+    }
+    if (patch.userPreferences !== undefined) {
+      this.settings.userPreferences = patch.userPreferences;
+      /*
+       * Chrome reads user preferences when it starts, from the profile. There is
+       * no per-page command that changes them, so this is recorded and reported
+       * as deferred rather than silently doing nothing.
+       */
+      nextLaunch.push("userPreferences");
+    }
+
+    /*
+     * Applied to the live pages. A failure on one page is not fatal to the
+     * others: a page that navigated away mid-call should not stop the setting
+     * from reaching the pages that are still open.
+     */
+    if (applied.length > 0) this.settingsVersion++;
+    const { context } = await this.ensureReady();
+    for (const page of context.pages()) {
+      if (!page.isClosed()) await this.applyControls(page);
+    }
+
+    return {
+      applied,
+      nextLaunch,
+      current: this.currentSettings(),
+      ...(nextLaunch.length > 0
+        ? { note: `${nextLaunch.join(", ")} applies when the browser next starts, not to the open page.` }
+        : {}),
+    };
+  }
+
+  /**
+   * Switch to the next user agent in the pool.
+   *
+   * The rotation a block calls for. The current string is remembered so the next
+   * pick cannot land back on it, which is what makes a rotation a change rather
+   * than a retry.
+   */
+  async rotateUserAgent(reason?: string): Promise<ControlReport> {
+    const previous = this.settings.userAgent;
+    const next = nextUserAgent(previous);
+    const report = await this.setSettings({ userAgent: next });
+    return {
+      ...report,
+      note:
+        `${reason ? `${reason}, so ` : ""}the user agent was rotated from ${previous ?? "(none)"} to ${next}. ` +
+        `A site that refused the previous one may accept this one; reload the page to find out.`,
+    };
+  }
+
   /** Write cookies and localStorage now, mid-script. */
   /**
    * Write this thread's cookies and storage to disk, now.
@@ -1135,6 +1895,15 @@ export class ThreadBrowserRuntime {
     const context = this.context;
     if (!context || !this.options.statePath) return;
     try {
+      /*
+       * IndexedDB beside the Playwright state, because Playwright's does not
+       * carry it. Verified: `storageState()` returns cookies and localStorage
+       * only, and IndexedDB is where a large share of modern apps keep the
+       * session token. Written first so a failure in the larger copy does not
+       * lose the cookies.
+       */
+      const indexedDb = await captureIndexedDb(context).catch(() => undefined);
+      if (indexedDb !== undefined) await this.saveIndexedDb(indexedDb);
       const state = await context.storageState();
       const path = this.options.statePath;
       await mkdir(dirname(path), { recursive: true });
@@ -1176,6 +1945,55 @@ export class ThreadBrowserRuntime {
   }
 
   /**
+   * Where a thread's IndexedDB is recorded.
+   *
+   * A sibling of the storage state rather than a field inside it, for the same
+   * reason the page list is: `statePath` is handed straight to
+   * `newContext({ storageState })` and has to stay a valid Playwright storage
+   * state. Adding a field Playwright does not know about would be shaping a file
+   * a library parses to suit us.
+   */
+  private static indexedDbPath(statePath: string): string {
+    return `${statePath}.indexeddb.json`;
+  }
+
+  /** Write the captured IndexedDB, atomically and private. */
+  private async saveIndexedDb(capture: StorageCapture): Promise<void> {
+    const path = this.options.statePath;
+    if (!path) return;
+    const target = ThreadBrowserRuntime.indexedDbPath(path);
+    /*
+     * Nothing to restore means the file is removed rather than left behind.
+     *
+     * A stale file would restore a database the thread has since cleared, which
+     * is the same class of bug as a stale cookie: the session looks signed in
+     * and the app disagrees.
+     */
+    if (capture.origins.length === 0) {
+      await rm(target, { force: true }).catch(() => undefined);
+      return;
+    }
+    await mkdir(dirname(target), { recursive: true });
+    const temporary = `${target}.${process.pid}.tmp`;
+    await writeFile(temporary, JSON.stringify({ version: 1, ...capture }), { mode: 0o600 });
+    await rename(temporary, target);
+  }
+
+  /** Read the saved IndexedDB, or undefined when there is none to restore. */
+  private async loadIndexedDb(): Promise<StorageCapture | undefined> {
+    const path = this.options.statePath;
+    if (!path) return undefined;
+    try {
+      const raw = await readFile(ThreadBrowserRuntime.indexedDbPath(path), "utf8");
+      const parsed = JSON.parse(raw) as StorageCapture & { version?: number };
+      if (!Array.isArray(parsed.origins)) return undefined;
+      return { origins: parsed.origins, skipped: parsed.skipped ?? [] };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Record the thread's pages so a restart can rebuild them.
    *
    * Names are kept because the agent addresses pages by name, and a restore
@@ -1187,10 +2005,49 @@ export class ThreadBrowserRuntime {
    * would fill the tab strip with blanks that mean nothing to either side.
    */
   private async savePages(statePath: string): Promise<void> {
-    const entries = this.pageEntries();
-    const pages = entries
-      .map((entry) => ({ url: entry.page.url(), name: entry.name }))
-      .filter((entry) => entry.url && entry.url !== "about:blank");
+    const entries = await this.pageEntries();
+    /*
+     * Scroll and title are captured per page, and scroll is the one that earns
+     * its round trip.
+     *
+     * It was left out at first on the theory that a restored URL is the whole of
+     * the state worth keeping. It is not: a thread that was part-way down a
+     * 40-result job listing came back at the top and the agent re-read the same
+     * twenty rows it had already dismissed, which is both a waste and a reason
+     * to make the same decision twice. It is one `evaluate` per page, and only
+     * on a save.
+     */
+    const pages: Array<{ url: string; name: string | undefined; title: string; scrollX: number; scrollY: number }> = [];
+    const owned: string[] = [];
+    for (const entry of entries) {
+      /*
+       * Ownership is recorded for every page, including a blank one.
+       *
+       * The URL filter below skips `about:blank` because reopening one is
+       * meaningless, but ownership is about *which thread may touch this tab*, and
+       * a blank tab the agent opened is still the agent's. Recording it only for
+       * pages with a URL would lose a freshly opened tab across a restart and
+       * leave it unowned, so a later attach would either leak it or refuse it.
+       */
+      const id = (entry.page as unknown as { pageTargetId?: unknown }).pageTargetId;
+      if (typeof id === "string" && id.length > 0) owned.push(id);
+      const url = entry.page.url();
+      if (!url || url === "about:blank") continue;
+      const title = await entry.page.title().catch(() => "");
+      const scroll = (await entry.page
+        .evaluate(() => ({ x: window.scrollX, y: window.scrollY }))
+        .catch(() => ({ x: 0, y: 0 }))) as { x: number; y: number };
+      pages.push({ url, name: entry.name, title, scrollX: scroll.x, scrollY: scroll.y });
+    }
+    /*
+     * Ownership is written even when there are no pages to record.
+     *
+     * The early return below is about the page list, which is empty for a thread
+     * that has only blank tabs. Ownership must still be written then, or a thread
+     * that opened ten blank tabs and restarted would come back owning none of
+     * them.
+     */
+    await this.saveOwnership(owned, statePath).catch(() => undefined);
     if (pages.length === 0) return;
     const activeIndex = Math.max(0, entries.findIndex((entry) => entry.active));
     const payload = JSON.stringify({ version: 1, pages, activeIndex });
@@ -1217,7 +2074,12 @@ export class ThreadBrowserRuntime {
   private async restorePages(context: BrowserContext): Promise<void> {
     const path = this.options.statePath;
     if (!path) return;
-    let saved: { pages?: Array<{ url?: string; name?: string }>; activeIndex?: number } | undefined;
+    let saved:
+      | {
+          pages?: Array<{ url?: string; name?: string; scrollX?: number; scrollY?: number }>;
+          activeIndex?: number;
+        }
+      | undefined;
     try {
       saved = JSON.parse(await readFile(ThreadBrowserRuntime.pagesPath(path), "utf8"));
     } catch {
@@ -1226,11 +2088,65 @@ export class ThreadBrowserRuntime {
     const pages = (saved?.pages ?? []).filter((entry) => typeof entry?.url === "string" && entry.url.length > 0);
     if (pages.length === 0) return;
 
+    /*
+     * A page that is ALREADY open is adopted, never re-navigated.
+     *
+     * This is the difference between restoring a workspace and destroying it.
+     * The loop below used to navigate every saved URL, which is right when the
+     * browser has been restarted and wrong in the case that matters most: a
+     * reconnect to a browser whose pages are still live. Navigating them reloads
+     * each document, so every typed form value, every piece of JavaScript state
+     * and every partially completed checkout is thrown away at exactly the moment
+     * the design promises to keep them. Measured: a token stamped on `window` was
+     * gone after a reconnect, while the page URL was correct, which is what a
+     * reload looks like.
+     *
+     * The live pages are matched to the saved entries by URL, and only the entries
+     * with no live match are rebuilt.
+     */
+    const liveByUrl = new Map<string, Page>();
+    for (const candidate of context.pages()) {
+      if (candidate.isClosed()) continue;
+      const url = candidate.url();
+      if (url && url !== "about:blank") liveByUrl.set(url, candidate);
+    }
+
     const restored: Page[] = [];
+    const usedLive = new Set<Page>();
     for (const [index, entry] of pages.entries()) {
       try {
-        const page = index === 0 ? (context.pages()[0] ?? (await context.newPage())) : await context.newPage();
+        const live = liveByUrl.get(entry.url!);
+        if (live !== undefined && !usedLive.has(live)) {
+          /*
+           * Already open and already carrying this URL: adopt it as it stands.
+           * The scroll is left alone too, because the live page is where the user
+           * or the agent left it and scrolling it back would be a small version
+           * of the same mistake.
+           */
+          usedLive.add(live);
+          restored.push(live);
+          if (typeof entry.name === "string" && entry.name.length > 0) {
+            this.named.set(entry.name, { name: entry.name, page: live, openedAt: Date.now() });
+          }
+          continue;
+        }
+        const page = index === 0 && usedLive.size === 0
+          ? (context.pages().find((p) => !p.isClosed() && !usedLive.has(p)) ?? (await context.newPage()))
+          : await context.newPage();
         await page.goto(entry.url!, { waitUntil: "domcontentloaded", timeout: 20_000 }).catch(() => undefined);
+        /*
+         * Put the page back where it was. Best-effort and after the load, since
+         * a scroll before the document exists does nothing, and a page that
+         * refuses the evaluation is still a page worth having.
+         */
+        if (typeof entry.scrollY === "number" || typeof entry.scrollX === "number") {
+          const x = typeof entry.scrollX === "number" ? entry.scrollX : 0;
+          const y = typeof entry.scrollY === "number" ? entry.scrollY : 0;
+          if (x !== 0 || y !== 0) {
+            await page.evaluate(`window.scrollTo(${JSON.stringify(x)}, ${JSON.stringify(y)})`).catch(() => undefined);
+          }
+        }
+        await this.claimOwn(page);
         restored.push(page);
         if (typeof entry.name === "string" && entry.name.length > 0) {
           this.named.set(entry.name, { name: entry.name, page, openedAt: Date.now() });
@@ -1275,6 +2191,12 @@ export class ThreadBrowserRuntime {
      * assertion hung forever and CI reported a timeout with no failing test to
      * look at.
      */
+    /*
+     * Marked first, so an attach still in flight tears its connection down
+     * instead of storing it. See the field's comment: without this the
+     * connection lands after shutdown and keeps the process alive.
+     */
+    this.closed = true;
     const context = this.context;
     const browser = this.browser;
     /*

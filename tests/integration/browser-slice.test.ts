@@ -22,12 +22,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { startTortureSite, type RunningTortureSite } from "../fixtures/torture-site.js";
-import { probeBrowser, skipUnless } from "../fixtures/browser-availability.js";
+import { DEFAULT_CDP_URL, probeBrowser, skipUnless } from "../fixtures/browser-availability.js";
 import { ThreadBrowsers } from "../../src/app-server/thread-browsers.js";
 import { ThreadBrowserRuntime } from "../../src/browser/thread-runtime.js";
 import { renderReceipt } from "../../src/browser/transaction.js";
 
-const CDP_URL = process.env["REAPER_CDP_URL"] ?? "http://127.0.0.1:9222";
+const CDP_URL = process.env["REAPER_CDP_URL"] ?? DEFAULT_CDP_URL;
 
 /*
  * The probe says which kind of unavailable this is, so a crashed Steel does not

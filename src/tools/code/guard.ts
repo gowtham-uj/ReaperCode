@@ -326,6 +326,26 @@ export function guardPlaywrightModule(mod: unknown, allowedCdpUrl: string | unde
     const originalConnectOverCDP = record.connectOverCDP;
     if (typeof originalConnectOverCDP === "function") {
       replace(record, "connectOverCDP", function (this: unknown, url?: string, ...rest: unknown[]) {
+        /*
+         * Raw Chrome's port is refused before the endpoint comparison, because
+         * it is wrong even if someone configured it as the allowed endpoint.
+         * Steel owns the browser, and connecting to Chrome directly reaches
+         * past it; a run that did that would look connected and skip the layer
+         * the live pane and the session lifecycle are built on.
+         *
+         * The port list is inline rather than imported for the same reason the
+         * tables above are: this function is stringified into the worker, and a
+         * name from module scope is undefined by the time it runs there. See
+         * the file header. It is the same two ports as
+         * `browser/steel-endpoint.ts`; the tests assert they agree.
+         */
+        if (typeof url === "string") {
+          const portText = (url.split("/")[2] ?? "").split(":")[1];
+          const port = portText === undefined ? NaN : Number(portText);
+          if (port === 9222 || port === 9223) {
+            throw refusal(`${name}.connectOverCDP(${url})`);
+          }
+        }
         if (allowedCdpUrl && typeof url === "string" && url !== allowedCdpUrl) {
           throw refusal(`${name}.connectOverCDP(${url})`);
         }

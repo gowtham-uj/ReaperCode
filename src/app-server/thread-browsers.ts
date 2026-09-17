@@ -55,6 +55,8 @@ export class ThreadBrowsers {
   /** When each thread's browser was last used, for the idle reaper. */
   private readonly lastUsed = new Map<string, number>();
   private reaper: NodeJS.Timeout | undefined;
+  /** Set by `close()`. See `forThread` for why a late request must not attach. */
+  private closed = false;
   /**
    * Who may drive each thread's browser.
    *
@@ -66,6 +68,19 @@ export class ThreadBrowsers {
   readonly control = new BrowserControlRegistry();
 
   constructor(private readonly options: ThreadBrowsersOptions) {}
+
+  /**
+   * The endpoint every thread's browser attaches to.
+   *
+   * Read by the gateway so the preview proxy can refuse to forward to it: it is
+   * one of Reaper's own services, so it is not a dev server and must not be
+   * reachable through a preview. Exposed rather than threaded through the
+   * options again so the endpoint the proxy reserves is provably the endpoint
+   * the browser uses, which is the property that would otherwise drift.
+   */
+  get cdpUrl(): string {
+    return this.options.cdpUrl;
+  }
 
   /**
    * The runtime for a thread, attaching on first use.
@@ -81,6 +96,31 @@ export class ThreadBrowsers {
       this.lastUsed.set(threadId, Date.now());
       return existing;
     }
+    /*
+     * After shutdown, a request that arrives late gets a runtime that will not
+     * attach.
+     *
+     * The gateway closes concurrently with this, so a live-view poll that was
+     * already in flight can call `forThread` after `close()` has cleared the
+     * map. Constructing a fresh runtime there is how a browser connection lands
+     * *after* shutdown and outlives the server: the new runtime is not in the
+     * map `close()` iterated, so nothing ever closes it. Measured as sockets to
+     * Steel still ESTABLISHED after `stop()` returned, with the process hanging
+     * on them.
+     *
+     * The runtime is still returned, because callers hold it and deserve a
+     * typed failure rather than a crash, but it is already closed so its first
+     * attach tears itself down instead of connecting.
+     */
+    const runtime = this.buildRuntime(threadId);
+    if (this.closed) runtime.close().catch(() => undefined);
+    this.runtimes.set(threadId, runtime);
+    this.lastUsed.set(threadId, Date.now());
+    return runtime;
+  }
+
+  /** Construct one thread's runtime. Split out so `forThread` stays readable. */
+  private buildRuntime(threadId: string): ThreadBrowserRuntime {
     const runtime = new ThreadBrowserRuntime({
       threadId,
       cdpUrl: this.options.cdpUrl,
@@ -90,8 +130,6 @@ export class ThreadBrowsers {
       // control and the browser tool that must respect it read one record.
       control: this.control,
     });
-    this.runtimes.set(threadId, runtime);
-    this.lastUsed.set(threadId, Date.now());
     return runtime;
   }
 
@@ -164,6 +202,7 @@ export class ThreadBrowsers {
    * made by the wrong component.
    */
   async close(): Promise<void> {
+    this.closed = true;
     if (this.reaper) clearInterval(this.reaper);
     this.reaper = undefined;
     const all = [...this.runtimes.values()];

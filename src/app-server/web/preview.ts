@@ -26,7 +26,21 @@
 
 import { request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
 
+import { reservedLoopbackPorts } from "./reserved-ports.js";
+
 const PREVIEW_PREFIX = "/preview/";
+
+/**
+ * Ports the proxy refuses even before the caller narrows them, covering the
+ * case where a caller proxies a preview without naming its own endpoints.
+ *
+ * Chrome's devtools port is the one that matters here and it is a constant
+ * because it is Chrome's, not Reaper's: it is listening whenever a browser is,
+ * regardless of which endpoint the browser attaches through. The Steel API
+ * port is added by the gateway from the configured endpoint, since that one
+ * Reaper owns and it can move.
+ */
+const ALWAYS_RESERVED_PORTS = reservedLoopbackPorts({});
 
 /**
  * Headers that describe a single connection rather than the message, plus the
@@ -70,7 +84,10 @@ export interface PreviewTarget {
  * Parse `/preview/<port>/<rest>` into a target, or return undefined when the
  * path is not a preview request or names a port that must not be proxied.
  */
-export function parsePreviewPath(rawUrl: string): PreviewTarget | undefined {
+export function parsePreviewPath(
+  rawUrl: string,
+  reservedPorts: ReadonlySet<number> = ALWAYS_RESERVED_PORTS,
+): PreviewTarget | undefined {
   const url = new URL(rawUrl, "http://localhost");
   if (!url.pathname.startsWith(PREVIEW_PREFIX)) return undefined;
 
@@ -96,11 +113,11 @@ export function parsePreviewPath(rawUrl: string): PreviewTarget | undefined {
    * A denylist rather than an allowlist of "ports the agent started", because
    * the honest set of dev-server ports is not knowable here: a project picks
    * its own, and refusing a legitimate one would break the pane this proxy
-   * exists for. The two below are the ones with no legitimate preview use.
+   * exists for. The ones with no legitimate preview use are the ports Reaper's
+   * own services listen on, and those are passed in rather than written down
+   * so they follow the configuration. See `reserved-ports.ts`.
    */
-  const CDP_PORT = 9222;
-  const gatewayPort = Number(process.env["REAPER_BFF_PORT"] ?? 4180);
-  if (port === CDP_PORT || port === gatewayPort) return undefined;
+  if (reservedPorts.has(port)) return undefined;
 
   const rest = slash === -1 ? "/" : remainder.slice(slash);
   return { port, path: `${rest || "/"}${url.search}` };

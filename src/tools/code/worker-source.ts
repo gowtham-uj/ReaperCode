@@ -707,8 +707,24 @@ async function main() {
       return reply && reply.kind === 'value' ? reply.value : undefined;
     };
     const surface = buildRemoteBrowser(callPage, workerData.browser.roots, view);
-    extraNames.push('page', 'browser', 'view', 'viewChanges', 'screenshot', 'pages');
-    extraValues.push(surface.page, surface.browser, surface.view, surface.viewChanges, surface.screenshot, surface.pages);
+    /*
+     * Every name a program may use, and the value behind it.
+     *
+     * The settings calls sit beside the observation helpers because they are the
+     * same kind of thing: a named call the host answers, not a Playwright method
+     * path. A program reads the page with \`view()\` and changes how it is being
+     * seen with \`setUserAgent()\`, and both are plain functions in scope.
+     */
+    extraNames.push(
+      'page', 'browser', 'view', 'viewChanges', 'screenshot', 'pages',
+      'set', 'setUserAgent', 'setTimezone', 'setViewport', 'setFullscreen', 'setMobile',
+      'blockAds', 'bandwidth', 'settings', 'rotateUserAgent', 'downloads', 'download', 'downloadAfter',
+    );
+    extraValues.push(
+      surface.page, surface.browser, surface.view, surface.viewChanges, surface.screenshot, surface.pages,
+      surface.set, surface.setUserAgent, surface.setTimezone, surface.setViewport, surface.setFullscreen, surface.setMobile,
+      surface.blockAds, surface.bandwidth, surface.settings, surface.rotateUserAgent, surface.downloads, surface.download, surface.downloadAfter,
+    );
   }
 
   let value = compile(workerData.compiled, extraNames).call(

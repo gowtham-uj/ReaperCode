@@ -153,24 +153,38 @@ export function LiveBrowser({ baseUrl, threadId, surface }: {
       {viewerUrl ? (
         <div className="browser-stage" data-human={human}>
           {/*
-           * `clipboard-read; clipboard-write` because the reason a human takes
-           * over is often to paste something: a one-time code, a password from
-           * a manager, a card number. Without the permission the paste silently
-           * does nothing.
+           * The blocker sits inside a wrapper rather than directly in the
+           * scrolling stage.
+           *
+           * `position: absolute` on the blocker resolves against the nearest
+           * positioned ancestor, and the stage is one. With the stage scrolling,
+           * an absolutely positioned blocker would be placed against the
+           * stage's *scroll box* and would slide up out of the visible area as
+           * the user scrolled, leaving the top of the page clickable while the
+           * agent is driving. The wrapper is that ancestor now, so the blocker
+           * covers the frame wherever the stage has been scrolled to.
            */}
-          <iframe
-            className="browser-frame"
-            src={viewerUrl}
-            title="Live browser"
-            allow="clipboard-read; clipboard-write"
-          />
-          {/*
-           * The input blocker. Only present when the human does not own the
-           * browser, and it is what stops a stray click from reaching Steel
-           * while the agent is driving. It covers the whole frame, so the page
-           * inside stays visible and scrollable-looking while being inert.
-           */}
-          {blocked ? <div className="browser-blocker" aria-hidden="true" /> : null}
+          <div className="browser-fit">
+            {/*
+             * `clipboard-read; clipboard-write` because the reason a human takes
+             * over is often to paste something: a one-time code, a password from
+             * a manager, a card number. Without the permission the paste silently
+             * does nothing.
+             */}
+            <iframe
+              className="browser-frame"
+              src={viewerUrl}
+              title="Live browser"
+              allow="clipboard-read; clipboard-write"
+            />
+            {/*
+             * The input blocker. Only present when the human does not own the
+             * browser, and it is what stops a stray click from reaching Steel
+             * while the agent is driving. It covers the whole frame, so the page
+             * inside stays visible and scrollable-looking while being inert.
+             */}
+            {blocked ? <div className="browser-blocker" aria-hidden="true" /> : null}
+          </div>
         </div>
       ) : (
         <p className="browser-note">

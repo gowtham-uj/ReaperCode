@@ -41,3 +41,29 @@ test("port text that only looks numeric is rejected", () => {
 test("the query string is preserved for the upstream request", () => {
   assert.deepEqual(parsePreviewPath("/preview/5173?foo=1"), { port: 5173, path: "/?foo=1" });
 });
+
+test("Reaper's own services are refused as preview targets", () => {
+  /*
+   * These are the ports the browser and its live view run on. Forwarding to
+   * them would hand a browser client raw CDP or Steel's unscoped cast socket,
+   * which is the authority the scoped pane exists to withhold. They are
+   * reserved by default so an unconfigured proxy still refuses them.
+   */
+  assert.equal(parsePreviewPath("/preview/9222/json/version"), undefined);
+  assert.equal(parsePreviewPath("/preview/9223/json/version"), undefined);
+  assert.equal(parsePreviewPath("/preview/3000/v1/sessions/cast"), undefined);
+  // A neighbouring dev port is still proxied: the denylist names two services,
+  // not a range.
+  assert.deepEqual(parsePreviewPath("/preview/3001/"), { port: 3001, path: "/" });
+});
+
+test("reserved ports follow the configured endpoints", () => {
+  /*
+   * The endpoint moved once (Chrome's 9222 to Steel's 3000), so the refusal
+   * is derived from configuration rather than hardcoded. A gateway told to
+   * attach to Steel on another port must refuse *that* port.
+   */
+  const reserved = new Set([9222, 9223, 4321]);
+  assert.equal(parsePreviewPath("/preview/4321/", reserved), undefined);
+  assert.deepEqual(parsePreviewPath("/preview/3000/", reserved), { port: 3000, path: "/" });
+});
