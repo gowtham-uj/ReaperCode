@@ -212,7 +212,10 @@ export class RemotePageHost {
       if (typeof current !== "function") {
         throw new Error("this object is not callable");
       }
-      return await (current as (...given: unknown[]) => unknown).apply(undefined, step.args.map((arg) => this.resolve(reviveArgument(arg))));
+      return await (current as (...given: unknown[]) => unknown).apply(
+        undefined,
+        reviveArguments(step.args, step.method).map((arg) => this.resolve(arg)),
+      );
     }
 
     const target = current as Record<string, unknown>;
@@ -242,7 +245,7 @@ export class RemotePageHost {
      * them, and Playwright itself sends a function to the browser as source, so
      * rebuilding it here is the same mechanism rather than a new one.
      */
-    const args = step.args.map((arg) => this.resolve(reviveArgument(arg)));
+    const args = reviveArguments(step.args, step.method).map((arg) => this.resolve(arg));
     return await (member as (...given: unknown[]) => unknown).apply(current, args);
   }
 
@@ -356,4 +359,47 @@ function reviveArgument(value: unknown): unknown {
     throw new Error("a function argument reached the browser bridge; functions must not cross this boundary");
   }
   return value;
+}
+
+/**
+ * The marker the sandbox uses to send a function as source.
+ *
+ * A string in a wrapper, never a function, so nothing here is ever evaluated on
+ * the host: the value is handed to Playwright, which compiles it in the browser,
+ * exactly as it compiles a function it was given directly. That is what keeps the
+ * host-side eval closed while still letting `page.evaluate(() => ...)` work.
+ *
+ * `invoked` says whether the source is a function that has to be called.
+ * `evaluate` runs its string as an expression, so a bare arrow function needs
+ * the invocation wrapped around it; `waitForFunction` compiles and calls the
+ * string itself, so it must not be. Measured on the live browser, because
+ * guessing either way is a silent wrong answer rather than an error.
+ */
+const FUNCTION_MARKER = "__reaperFunctionSource";
+
+/** Methods whose string argument is called by Playwright rather than evaluated as an expression. */
+const SELF_INVOKING_METHODS: ReadonlySet<string> = new Set(["waitForFunction", "waitForSelector"]);
+
+/** The source a marker carries, or undefined when the value is not a marker. */
+function readFunctionMarker(value: unknown): { invoked: boolean; source: string } | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const marker = value as { [FUNCTION_MARKER]?: unknown; source?: unknown };
+  const kind = marker[FUNCTION_MARKER];
+  if (kind !== "invoke" && kind !== "plain") return undefined;
+  if (typeof marker.source !== "string") return undefined;
+  return { invoked: kind === "invoke", source: marker.source };
+}
+
+function reviveArguments(args: unknown[], method: string): unknown[] {
+  return args.map((arg) => {
+    const marker = readFunctionMarker(arg);
+    if (marker === undefined) return reviveArgument(arg);
+    /*
+     * Playwright calls the string for these, so it stays a function; everywhere
+     * else the string is an expression and a function in it does nothing, so the
+     * invoke marker gets the call wrapped around it.
+     */
+    if (SELF_INVOKING_METHODS.has(method)) return marker.source;
+    return marker.invoked ? `(${marker.source})()` : marker.source;
+  });
 }

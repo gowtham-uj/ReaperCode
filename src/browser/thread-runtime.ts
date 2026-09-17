@@ -1799,15 +1799,33 @@ export class ThreadBrowserRuntime {
        * actually on, and the receipt says the tab changed.
        */
       const endedOn = (await this.ensureReady()).page;
-      if (endedOn !== startedOn && !endedOn.isClosed()) {
-        await this.capture(endedOn);
+      const movedTabs = endedOn !== startedOn && !endedOn.isClosed();
+      if (movedTabs) await this.capture(endedOn);
+      if (movedTabs) {
+        /*
+         * The note reports the tab change, but only replaces the receipt's own
+         * note when the step succeeded.
+         *
+         * This overwrote the note unconditionally, and a failed step that also
+         * changed tabs therefore arrived as `POSTCONDITION_FAILED` with a
+         * sentence about tabs and nothing about the failure: the reason the step
+         * failed was the one thing the receipt no longer said. Read from a live
+         * mission, where the agent got "The step finished on a different tab: it
+         * started at about:blank and is now at about:blank" for a step whose
+         * program had thrown, and had to guess what had gone wrong.
+         *
+         * A failure's own message is the receipt's most important line, so the
+         * tab fact is appended to it rather than put in its place.
+         */
+        const tabNote =
+          `The step finished on a different tab: it started at ${startedUrl} and is now at ${endedOn.url()}. ` +
+          `The lines above are that page, not a diff of the one you were on.`;
+        const failed = receipt.outcome !== "SUCCESS" && receipt.outcome !== "NO_CHANGE";
         return {
           result: result as T | undefined,
           receipt: {
             ...receipt,
-            note:
-              `The step finished on a different tab: it started at ${startedUrl} and is now at ${endedOn.url()}. ` +
-              `The lines above are that page, not a diff of the one you were on.`,
+            note: failed ? `${receipt.note} ${tabNote}` : tabNote,
           },
         };
       }

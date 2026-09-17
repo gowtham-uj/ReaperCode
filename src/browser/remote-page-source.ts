@@ -74,21 +74,27 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
       return { __reaperNode: marker.handle };
     }
     /*
-     * A real function is refused, which is what closes the host-side eval.
-     * Playwright accepts a source string anywhere it accepts a function, so the
-     * rewrite is always available and the message names it.
+     * A function is converted to source HERE, in the sandbox, and sent as text.
+     *
+     * It used to be refused with "pass a source string instead", which is safe
+     * but wrong for the model: \`page.evaluate(() => document.title)\` is the
+     * idiomatic Playwright call and the one every example uses, so a tool that
+     * rejects it fails the common case and spends the model's turns on a lesson
+     * about the bridge. Read from a live mission, where this cost two programs.
+     *
+     * The conversion is safe because it happens in this process, which is
+     * already the confined one, and what crosses to the host is a string that the
+     * host never evaluates: Playwright compiles it, in the browser, exactly as it
+     * compiles a function it was handed. The host-side eval this replaced was the
+     * escape; a string is not.
      *
      * The common array callbacks never reach here, because those methods are
      * handled inside the sandbox: a chain like contexts().flatMap(c => c.pages())
      * is resolved first and the callback is then run on the resulting array, in
-     * this process, against plain data. Refusing them outright would have broken
-     * the most ordinary way to write a program, and that is the trade avoided.
+     * this process, against plain data.
      */
     if (typeof value === 'function') {
-      throw new Error(
-        'a function cannot be passed to the browser bridge; pass a source string instead, ' +
-        'for example page.evaluate("document.title") or waitForFunction("window.ready")',
-      );
+      return encodeFunctionArgument(value);
     }
     if (depth > 8) return value;
     if (Array.isArray(value)) {
@@ -99,6 +105,31 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
     const out = {};
     for (const key of Object.keys(value)) out[key] = await encodeArgument(value[key], depth + 1);
     return out;
+  }
+
+  /*
+   * A function argument, as source, in the form the receiving method needs.
+   *
+   * Two shapes, because Playwright itself takes two and they are not
+   * interchangeable. Measured against the live browser:
+   *
+   *   page.evaluate("() => document.title")            -> undefined
+   *   page.evaluate("(() => document.title)()")        -> "Example Domain"
+   *   page.waitForFunction("() => x")                  -> works, returns a handle
+   *
+   * \`evaluate\` runs the string as an expression, so a bare arrow function
+   * evaluates to the function and nothing happens; the invocation has to be in
+   * the source. \`waitForFunction\` compiles the string as a predicate and calls
+   * it itself, so wrapping it there would call the predicate once and hand the
+   * result back as the thing to wait for. Choosing per method is the difference
+   * between a fix and a second bug.
+   */
+  function encodeFunctionArgument(fn) {
+    const source = String(fn).trim();
+    const callable =
+      /^(async\s+)?function\b/.test(source) ||
+      /^(async\s+)?(\([^)]*\)|[\w$]+)\s*=>/.test(source);
+    return { __reaperFunctionSource: callable ? 'invoke' : 'plain', source: source };
   }
 
   /*
