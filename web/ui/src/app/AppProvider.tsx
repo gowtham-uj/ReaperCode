@@ -290,7 +290,16 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
     if (entry.mode === "after-turn" && running) return false;
     await active.call("turn/start", { threadId: id, prompt: entry.text });
     return true;
-  }, []);
+    /*
+     * The dependencies are load-bearing now that this creates the thread.
+     *
+     * With `[]` the callback closed over the `createThread` and `client` from
+     * the first render, so the thread it made and the id it then read were both
+     * stale: the row appeared, the turn never started, and the journal stayed
+     * empty. Measured by the lifecycle test, which asserted a thread was created
+     * and then that the agent opened pages.
+     */
+  }, [createThread, setError]);
 
   const flush = useCallback(async (): Promise<void> => {
     if (flushing.current) return;
