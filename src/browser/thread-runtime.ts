@@ -1725,6 +1725,26 @@ export class ThreadBrowserRuntime {
     await this.capture(startedOn);
 
     /*
+     * Label a receipt with the page it is about when that is not the active one.
+     *
+     * A program may drive a named tab without making it active, and the receipt
+     * is rendered from the page the step captured rather than from the active
+     * one. Without this the model was told `URL: about:blank` while its program
+     * was filling a form on a named tab, thirteen times in a row on one mission,
+     * and had to infer its own work had landed from the value it returned.
+     *
+     * The active page is deliberately left unlabelled: naming the page a model is
+     * already looking at is noise on every single step.
+     */
+    const pageLabel = (target: Page): string | undefined => {
+      if (target === this.active) return undefined;
+      for (const entry of this.named.values()) {
+        if (entry.page === target) return `${entry.name} (${entry.page.isClosed() ? "closed" : entry.page.url()})`;
+      }
+      return target.isClosed() ? "an unnamed page (closed)" : `an unnamed page (${target.url()})`;
+    };
+
+    /*
      * The program is bounded, and what a bound can catch is precise.
      *
      * A program is model-written code, and a loop that never ends is a thing a
@@ -1768,7 +1788,11 @@ export class ThreadBrowserRuntime {
          * after would diff two different descriptions of the page and report the
          * whole thing as changed.
          */
-        runStep(startedOn, this.observer, () => action(page), { ...options, capture: (target) => this.capture(target) }),
+        runStep(startedOn, this.observer, () => action(page), {
+          ...options,
+          capture: (target) => this.capture(target),
+          pageLabel,
+        }),
         deadline,
       ]);
 

@@ -68,6 +68,20 @@ export interface StepReceipt {
   urlAfter: string;
   /** The lines that changed, as the model should read them. */
   changes: string;
+  /**
+   * The page this receipt is actually about, when that differs from the active one.
+   *
+   * A program can drive a named tab without making it active (`usePage("cart")`
+   * then work), and in that case the active page is an unrelated tab. The receipt
+   * is rendered from the page the step captured, so without this it reported
+   * whatever the active page happened to be: measured mid-mission, thirteen
+   * consecutive receipts read `URL: about:blank` while the programs were filling
+   * a form on a named tab. The model read a receipt that described a blank page
+   * and had to infer its own work had gone through from the returned value.
+   *
+   * Set only when the two differ, so the ordinary case is unchanged.
+   */
+  pageLabel?: string;
   /** True when `changes` is the whole outline rather than a delta. */
   wholesale: boolean;
   /** How long the action plus settle took, in milliseconds. */
@@ -192,6 +206,16 @@ export async function runStep(
      * would read a diff between a snapshot and a compile, which is every line.
      */
     capture?: ((page: Page) => Promise<void>) | undefined;
+    /**
+     * Names the page a receipt is about, or returns undefined when it is the
+     * active one and needs no naming.
+     *
+     * Injected rather than computed here, because "which page is this" is the
+     * runtime's question to answer: only it knows the names, the active page and
+     * the thread's tabs. The transaction knows the captured page, which is the
+     * thing the label has to be about.
+     */
+    pageLabel?: ((page: Page) => string | undefined) | undefined;
   } = {},
 ): Promise<{ receipt: StepReceipt; result: unknown }> {
   const started = Date.now();
@@ -308,6 +332,9 @@ export async function runStep(
    */
   const producedValue = result !== undefined;
   const noChange = pageUnchanged && !producedValue;
+  // Named before the object literal, so an "unchanged" answer omits the field
+  // rather than carrying an explicit undefined into a type that forbids it.
+  const label = options.pageLabel?.(page);
 
   return {
     result,
@@ -320,6 +347,7 @@ export async function runStep(
       urlAfter,
       changes: changes.text,
       wholesale: changes.full,
+      ...(label !== undefined ? { pageLabel: label } : {}),
       elapsedMs: Date.now() - started,
       note: noChange
         ? `The action ran and the page did not change. Nothing was clicked that had an effect, or the change is not in the accessibility tree.`
@@ -366,6 +394,14 @@ export function renderReceipt(receipt: StepReceipt): string {
     `REV ${receipt.revision} -> ${receipt.after}${receipt.navigated ? ` (navigated)` : ""}`,
     `elapsed ${receipt.elapsedMs}ms`,
   ];
+  /*
+   * The page this is about, when it is not the active one.
+   *
+   * Printed before the change lines so the model reads what the receipt
+   * describes before reading the description, which is the order that stops it
+   * applying a named tab's diff to the tab it happens to be looking at.
+   */
+  if (receipt.pageLabel !== undefined) lines.push(`PAGE: ${receipt.pageLabel}`);
   if (receipt.changes.length > 0) lines.push("", receipt.changes);
   lines.push("", receipt.note);
   return lines.join("\n");
