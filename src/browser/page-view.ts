@@ -50,6 +50,20 @@
 export const VIEW_MAX_CHARS = 3_000;
 
 /**
+ * The budget for a fallback tree, which is a page rather than a summary of one.
+ *
+ * Ten times the compiled budget, because the fallback has no named sections to
+ * open by id and a model reading it needs enough of the page to act. It is a
+ * bound and not a target: measured on the mission's worst page the whole tree
+ * was 262,631 characters, and cutting it to this is what stops one page's output
+ * being re-sent with every later call in the conversation.
+ *
+ * Overridable per look, up to no limit at all, because a page that genuinely
+ * needs all of it can still ask.
+ */
+export const VIEW_FALLBACK_MAX_CHARS = 30_000;
+
+/**
  * How deep `mode: "ai"` walks by default.
  *
  * Playwright defaults to unlimited, which on a deep page is a lot of wrappers.
@@ -169,8 +183,16 @@ export function trimOutline(outline: string, maxChars: number): { outline: strin
     used += line.length + 1;
   }
   const dropped = lines.length - kept.length;
+  /*
+   * The notice names the way to see the rest, because a cut that does not say
+   * how to undo it is a dead end. Three ways, all real: a region by selector, a
+   * deeper walk, or `observe: "full"` for the whole page when it is warranted.
+   */
   return {
-    outline: `${kept.join("\n")}\n[... ${dropped} more line${dropped === 1 ? "" : "s"} not shown; scope the view to a region to see them]`,
+    outline:
+      `${kept.join("\n")}\n[... ${dropped} more line${dropped === 1 ? "" : "s"} not shown. ` +
+      `To see them: view({ selector }) for one region, view({ depth }) for more levels, ` +
+      `or observe: "full" for the whole page.]`,
     truncated: true,
   };
 }
@@ -312,14 +334,26 @@ export class PageObserver {
      */
     untrimmed?: boolean | undefined;
   }): void {
-    if (input.untrimmed === true) {
-      this.current = input.snapshot;
-      this.wasTrimmed = false;
-    } else {
-      const trimmed = trimOutline(input.snapshot, input.maxChars ?? VIEW_MAX_CHARS);
-      this.current = trimmed.outline;
-      this.wasTrimmed = trimmed.truncated;
-    }
+    /*
+     * The fallback is bounded too, and this was a reversal.
+     *
+     * It used to be delivered whole, on the argument that cutting it removes
+     * regions with no id and no way to ask for them again. The argument is sound
+     * and the consequence was measured to be worse: on a real mission the whole
+     * tree ran to 262,631 characters on one page, and because a tool result
+     * enters the conversation it is re-sent on every later call until something
+     * compacts it. One page of output was paid for tens of times.
+     *
+     * A bounded tree that says it was cut, and how to see more, is strictly
+     * better than an unbounded one that is silently re-billed. The way to see
+     * more exists and is named in the cut notice: `view({ selector })` for a
+     * region, `view({ depth })` for more levels, and `observe: "full"` when the
+     * whole thing really is needed.
+     */
+    const budget = input.maxChars ?? (input.untrimmed === true ? VIEW_FALLBACK_MAX_CHARS : VIEW_MAX_CHARS);
+    const trimmed = trimOutline(input.snapshot, budget);
+    this.current = trimmed.outline;
+    this.wasTrimmed = trimmed.truncated;
     this.lastUrl = input.url;
     this.lastTitle = input.title;
     this.note = input.note;

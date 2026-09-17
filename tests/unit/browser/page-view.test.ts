@@ -187,7 +187,7 @@ test("the default view budget keeps a step inside a few hundred tokens", () => {
   const view = observer.view();
   assert.ok(view.text.length <= 3_200, `a default view must stay near its budget, was ${view.text.length}`);
   assert.equal(view.truncated, true, "and it must say it was cut");
-  assert.match(view.text, /scope the view to a region/);
+  assert.match(view.text, /view\(\{ selector \}\) for one region/);
 });
 
 /* ------------------------------------------------------------------ *

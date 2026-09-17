@@ -304,6 +304,40 @@ export class ThreadBrowserRuntime {
   }
 
   /**
+   * The active page at the start of the current step, to detect a switch.
+   *
+   * A program can call `browser.setActive(name)` and the bare `page` then means
+   * something else for the rest of that program. The receipt did not say so, and
+   * a silent change of what `page` refers to is indistinguishable from a bug:
+   * read from a live mission, the agent saw a click land on a page it had not
+   * meant to touch, and spent several traces on the theory that the bridge was
+   * routing clicks to the wrong tab. Recording the before-and-after turns that
+   * into one line.
+   */
+  private activeAtStepStart: Page | undefined;
+
+  /**
+   * A sentence for the receipt when the step changed which page is active.
+   *
+   * Returns undefined when nothing switched, which is almost always, so the
+   * ordinary step carries no extra line.
+   */
+  private describeActiveChange(): string | undefined {
+    const before = this.activeAtStepStart;
+    const after = this.active;
+    if (before === after) return undefined;
+    const nameOf = (page: Page | undefined): string => {
+      if (page === undefined) return "(none)";
+      for (const entry of this.named.values()) if (entry.page === page) return entry.name;
+      return page.isClosed() ? "(closed)" : page.url();
+    };
+    return (
+      `\`page\` now means a different tab: the step switched the active page from ${nameOf(before)} to ${nameOf(after)}, ` +
+      `so a bare \`page\` in a later program refers to ${nameOf(after)}.`
+    );
+  }
+
+  /**
    * The page the last step was about, or undefined when it is the active one.
    *
    * The tool renders its `PAGE:` block from this rather than from the active
@@ -1899,6 +1933,7 @@ export class ThreadBrowserRuntime {
      */
     const startedOn = page;
     const startedUrl = page.url();
+    this.activeAtStepStart = page;
     await this.capture(startedOn);
 
     /*
@@ -1990,6 +2025,24 @@ export class ThreadBrowserRuntime {
       const endedOn = (await this.ensureReady()).page;
       const movedTabs = endedOn !== startedOn && !endedOn.isClosed();
       if (movedTabs) await this.capture(endedOn);
+      /*
+       * A program that called `setActive` changed what a bare `page` means, and
+       * the receipt says so.
+       *
+       * This is not the same as finishing on a different tab: the program ended
+       * on the tab it started on, and only the *active* page moved, so `movedTabs`
+       * is false and the note below never ran. Read from a live mission: the
+       * agent switched the active page mid-program, saw a later click land
+       * somewhere it did not expect, and spent traces on the theory that the
+       * bridge was misrouting clicks. One sentence here removes that theory.
+       */
+      const activeChange = this.describeActiveChange();
+      if (activeChange !== undefined) {
+        return {
+          result: result as T | undefined,
+          receipt: { ...receipt, note: `${receipt.note} ${activeChange}` },
+        };
+      }
       if (movedTabs) {
         /*
          * The note reports the tab change, but only replaces the receipt's own
@@ -2298,6 +2351,64 @@ export class ThreadBrowserRuntime {
         `${reason ? `${reason}, so ` : ""}the user agent was rotated from ${previous ?? "(none)"} to ${next}. ` +
         `A site that refused the previous one may accept this one; reload the page to find out.`,
     };
+  }
+
+  /**
+   * Replace a page's renderer by navigating it out and back.
+   *
+   * The fix for a page that renders, reads and navigates, but silently drops
+   * every trusted input event. Measured on a live mission: clicks returned
+   * without error and dispatched nothing, typing into a focused field did
+   * nothing, and Tab never moved focus, on one origin only, while the same API
+   * worked on another tab in the same browser. The agent spent thirty trace
+   * blocks proving the page's JavaScript was fine before finding this by
+   * accident, and the fact that it works is worth naming rather than
+   * rediscovering.
+   *
+   * A cross-origin navigation replaces the renderer process, which is what
+   * clears the state. Cookies and storage live in the context, not the renderer,
+   * so a logged-in session survives; what is lost is anything the page held in
+   * memory, which is the part that was broken.
+   *
+   * The page is returned to the URL it was on, so the caller can carry on.
+   */
+  async recover(): Promise<ControlReport> {
+    const { page } = await this.ensureReady();
+    const url = page.url();
+    if (url.startsWith("about:") || url.length === 0) {
+      return {
+        applied: [],
+        nextLaunch: [],
+        current: this.currentSettings(),
+        note: "the active page is blank, so there is no renderer to replace; navigate somewhere first.",
+      };
+    }
+    try {
+      /*
+       * `about:blank` first, because a same-origin reload keeps the renderer
+       * process and would not clear the state that is broken. The two hops are
+       * the point, not a side effect.
+       */
+      await page.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 30_000 });
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
+      await this.capture(page).catch(() => undefined);
+      return {
+        applied: ["renderer"],
+        nextLaunch: [],
+        current: this.currentSettings(),
+        note:
+          `the page's renderer was replaced and it is back at ${url}. ` +
+          `Trusted input should work now; retry the click that was failing. ` +
+          `Cookie state is kept, so a login survives this.`,
+      };
+    } catch (error) {
+      return {
+        applied: [],
+        nextLaunch: [],
+        current: this.currentSettings(),
+        note: `the renderer could not be replaced: ${(error as Error).message.split("\n")[0]}. The page is at ${page.url()}.`,
+      };
+    }
   }
 
   /** Write cookies and localStorage now, mid-script. */

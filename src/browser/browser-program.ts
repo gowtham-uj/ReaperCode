@@ -93,6 +93,22 @@ export interface ControlSurface {
    * deadlocks: see the note in `observeCall`.
    */
   downloadAfter: (target: unknown) => Promise<{ name: string; path: string; bytes: number }>;
+  /**
+   * Replace a page's renderer, which fixes input a page has stopped accepting.
+   *
+   * A page can reach a state where it renders, answers reads and navigates, but
+   * silently drops every trusted input event: clicks return without error and
+   * dispatch nothing, typing into a focused field does nothing, Tab does not
+   * move focus. Measured on a live mission, where the agent spent thirty of its
+   * trace blocks proving the page's own JavaScript was fine before finding this
+   * by accident.
+   *
+   * A cross-origin navigation replaces the renderer process and clears it. That
+   * is what this does, and it exists as a name because doing it by hand is a
+   * discovery the model should not have to make: the failure looks exactly like
+   * a broken page, and there is nothing on the page to point at the browser.
+   */
+  recover: () => Promise<ControlReport>;
 }
 
 /**

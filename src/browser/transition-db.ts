@@ -285,7 +285,15 @@ export class TransitionDb {
     if (!flows || flows.transitions.length === 0) return undefined;
     const total = flows.transitions.reduce((sum, edge) => sum + edge.successes, 0);
     const path = flows.lastPath.length > 0 ? `\nPath: ${flows.lastPath.join(" -> ")}` : "";
-    return `This site has been browsed before: ${flows.transitions.length} known step${flows.transitions.length === 1 ? "" : "s"} across ${total} confirmed transition${total === 1 ? "" : "s"}.${path}`;
+    /*
+     * Written as a record of the past rather than a statement about now.
+     *
+     * "This site has been browsed before" read as a live fact, and the agent
+     * reconciled it against a page that was failing in front of it instead of
+     * trusting what it could see. The transitions are real; they are also from
+     * earlier runs, and the site may have changed since.
+     */
+    return `This site was browsed in an earlier run: ${flows.transitions.length} recorded step${flows.transitions.length === 1 ? "" : "s"} across ${total} confirmed transition${total === 1 ? "" : "s"}.${path}`;
   }
 
   /** Everything learned about a host, for the UI and the CLI to show and clear. */

@@ -454,6 +454,7 @@ function controlSurface(runtime: ThreadBrowserRuntime): ControlSurface {
     bandwidth: async (options) => await runtime.setSettings({ bandwidth: options as BandwidthSettings }),
     settings: async () => runtime.currentSettings(),
     rotateUserAgent: async () => await runtime.rotateUserAgent(),
+    recover: async () => await runtime.recover(),
     downloads: async () =>
       runtime.downloadedFiles.map((file) => ({ name: file.name, bytes: file.bytes, ...(file.url ? { url: file.url } : {}) })),
     download: async (name) => {
@@ -767,7 +768,36 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
   const surface = await pageSurface(runtime, metadata.workspaceRoot);
   const observe = args.observe ?? "auto";
   const alreadyTold = receipt.outcome === "SUCCESS" && !receipt.wholesale;
-  const shouldObserve = observe === "full" || observe === "changes" || (observe === "auto" && !alreadyTold);
+  /*
+   * A program that answered its own question does not also get the page.
+   *
+   * This is the single largest source of waste the mission measured. A program
+   * that ends with `return { registered: true, url }` has told the model exactly
+   * what it asked for, and appending the accessibility tree after it is the tool
+   * answering a question nobody asked, at tens of thousands of characters, on
+   * every step. The tree then enters the conversation and is re-sent with every
+   * later call until something compacts it: measured, one page's output ran to
+   * 262,631 characters and was paid for many times over.
+   *
+   * So a returned value suppresses the page unless the model asks for it. Asking
+   * is one word (`observe: "full"`), and the model that wants the page after a
+   * program is usually the model that did not get the answer it wanted, which is
+   * exactly the failure case below, where the page is still sent.
+   */
+  const producedValue = result !== undefined;
+  /*
+   * One rule: send the page unless the step both succeeded and answered itself.
+   *
+   * Every other case wants the page. A failure is where the model is most likely
+   * to guess; a NO_CHANGE is a step that did nothing; a wholesale change means
+   * the receipt has no usable diff. The single case that does not want it is a
+   * program that ran cleanly, changed little enough that the receipt describes
+   * it, and returned a value of its own, because then the answer is already in
+   * the receipt and the tree is a second answer to a question nobody asked.
+   */
+  const answeredItself = receipt.outcome === "SUCCESS" && !receipt.wholesale && producedValue;
+  const shouldObserve =
+    observe === "full" || observe === "changes" || (observe === "auto" && !answeredItself);
   if (shouldObserve && !runtime.observer.isPageGone()) {
     try {
       /*
@@ -838,6 +868,32 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
       "NOTE: this program acted through `evaluate`, so the events it dispatched are untrusted (`isTrusted: false`).",
       "Pages that check for that ignore them, and the step can look successful while nothing happened.",
       "Use the real input API next time: `locator.click()`, `locator.fill()`, `locator.press()` and `locator.check()` are trusted because Chrome generates the events itself.",
+    );
+  }
+
+  /*
+   * The circuit breaker for a page that has stopped accepting input.
+   *
+   * The failure it catches is indistinguishable from a broken page or from a
+   * wrong locator: a click returns without error, dispatches nothing, and the
+   * step reports NO_CHANGE. Measured on a live mission, that cost thirty trace
+   * blocks, because the model had no way to tell "my click was wrong" from "this
+   * page no longer accepts clicks" and tested the first hypothesis over and over.
+   *
+   * So when a program tried to interact and nothing happened anywhere on the
+   * page, the note says what to try instead, names the named fix, and says to
+   * stop. It is not a diagnosis: the click may simply have missed. It is a bound
+   * on how long the model may spend on the one hypothesis it cannot test.
+   */
+  const attemptedInput = /\.\s*(click|fill|type|press|check|selectOption|tap|hover|setInputFiles)\s*\(/.test(args.code ?? "");
+  if (attemptedInput && receipt.outcome === "NO_CHANGE" && !syntheticAction) {
+    lines.push(
+      "",
+      "NOTE: the page did not change at all after that interaction.",
+      "Two causes look identical from here: the action missed its target, or the page has stopped accepting input",
+      "(clicks that succeed but dispatch no event, typing into a focused field that stays empty). Look once at the",
+      "element, and if it is the one you meant, call `recover()` to replace the page's renderer and retry.",
+      "If that does not fix it within two attempts, treat the page as unable to do this and move on.",
     );
   }
 
@@ -924,8 +980,25 @@ async function flowHint(runtime: ThreadBrowserRuntime, url: string): Promise<str
   const edges = await flows.edgesFrom(host, signatureOf(url, undefined)).catch(() => []);
   if (edges.length === 0) return [line];
 
-  const known = edges.slice(0, 3).map((edge: { to: string; successes: number; program: string }) => `  ${edge.to} (worked ${edge.successes}x): ${edge.program.replace(/\s+/g, " ").slice(0, 120)}`);
-  return [line, "Known steps from here:", ...known];
+  /*
+   * Historical, and said to be.
+   *
+   * These lines used to read `(worked 2x)`, which a model reads as a fact about
+   * now. Read from a live mission: the agent was watching a Dynamic Controls
+   * click fail on the page in front of it while the hint said that step had
+   * "worked 2x", and it spent a trace reconciling the two before deciding the
+   * page was broken. The record is real, but it is a record of past runs on this
+   * host, quite possibly in another session, and the page may have changed since.
+   * Saying so costs one line and removes a contradiction the model otherwise has
+   * to resolve by guessing which source to trust.
+   */
+  const known = edges.slice(0, 3).map((edge: { to: string; successes: number; program: string }) =>
+    `  ${edge.to} (succeeded ${edge.successes}x previously): ${edge.program.replace(/\s+/g, " ").slice(0, 120)}`);
+  return [
+    line,
+    "Previously working steps from this state on this site (a record of past runs, not the current page; verify before reusing):",
+    ...known,
+  ];
 }
 
 /** The host a URL belongs to, for keying the learned graph. */

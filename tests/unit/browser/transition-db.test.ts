@@ -148,7 +148,7 @@ test("the flow line describes the site in one sentence", async () => {
   await db.record({ host: "x", from: "a", to: "b", program: "p1", succeeded: true });
   await db.record({ host: "x", from: "b", to: "c", program: "p2", succeeded: true });
   const line = await db.describe("x");
-  assert.match(line ?? "", /2 known steps/);
+  assert.match(line ?? "", /2 recorded steps/);
   assert.match(line ?? "", /a -> b -> c/, "the path is flattened for the model to read");
 });
 
