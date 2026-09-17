@@ -166,6 +166,20 @@ That costs a few dozen tokens instead of thousands, and it is the same
 information. Reach for `observe: "full"` only when you genuinely need the tree,
 and `view({ selector })` when you need one region of it.
 
+## Ask what the browser can do
+
+Do not spend calls working out whether something is possible. Ask:
+
+```js
+const caps = await capabilities();
+```
+
+It answers, from live state: whether the browser is attached, whether downloads
+can start a file on this connection, that trusted input is available (and that
+`recover()` is the fix when a page ignores it), which settings apply to the page
+now versus at the next launch, and that the download vault is shared with this
+thread's workspace. It takes a moment and it is far cheaper than the experiment.
+
 ## When an action does nothing
 
 A click that succeeds but dispatches no event, and a click that missed its
