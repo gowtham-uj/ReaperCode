@@ -290,6 +290,33 @@ export class ThreadBrowserRuntime {
   private pageWasAutoCreated = false;
 
   /**
+   * The page the last step captured, so a follow-up read describes the same one.
+   *
+   * Set by the step's page-labelling callback and read for `lastCapturedPage()`,
+   * which is what the tool uses to render its `PAGE:` block. Cleared when a page
+   * closes, so a stale handle is never handed back to a reader.
+   */
+  private lastCapturedPageRef: Page | undefined;
+
+  /** Record which page a step was about, called from the step's label callback. */
+  private rememberCapturedPage(page: Page | undefined): void {
+    this.lastCapturedPageRef = page;
+  }
+
+  /**
+   * The page the last step was about, or undefined when it is the active one.
+   *
+   * The tool renders its `PAGE:` block from this rather than from the active
+   * page, which is what stops the receipt and the page it describes from
+   * disagreeing when a program drives a named tab without switching to it.
+   */
+  lastCapturedPage(): Page | undefined {
+    const page = this.lastCapturedPageRef;
+    if (page === undefined || page.isClosed()) return undefined;
+    return page;
+  }
+
+  /**
    * Attach if needed, without resolving or changing the active page.
    *
    * The list calls need the context and nothing else, and going through
@@ -1887,6 +1914,15 @@ export class ThreadBrowserRuntime {
      * already looking at is noise on every single step.
      */
     const pageLabel = (target: Page): string | undefined => {
+      /*
+       * Remembered as well as labelled, so the step's `PAGE:` block reads the
+       * same page the receipt describes. Without this the block was rendered
+       * from the active page while the receipt was about the captured one, and
+       * the two disagreed: read from a live mission, a receipt said the page was
+       * `/ajax` while the `PAGE:` block below it showed `/dynamicid`, and the
+       * agent spent a trace trying to work out which tab it was on.
+       */
+      this.rememberCapturedPage(target);
       if (target === this.active) return undefined;
       for (const entry of this.named.values()) {
         if (entry.page === target) return `${entry.name} (${entry.page.isClosed() ? "closed" : entry.page.url()})`;

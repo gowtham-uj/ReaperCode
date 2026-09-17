@@ -770,7 +770,23 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
   const shouldObserve = observe === "full" || observe === "changes" || (observe === "auto" && !alreadyTold);
   if (shouldObserve && !runtime.observer.isPageGone()) {
     try {
-      const view = observe === "changes" ? { text: renderReceipt(receipt) } : await runtime.view({ ...(args.selector !== undefined ? { selector: args.selector } : {}) });
+      /*
+       * Read the page the receipt is about, not the active one.
+       *
+       * A program can drive a named tab without switching to it, and this block
+       * was rendered from the active page while the receipt above it described
+       * the captured one. Read from a live mission: a receipt reported the page
+       * at `/ajax` and the block below it showed `/dynamicid`, and the agent
+       * spent a trace working out which tab it was on. `view` already accepted a
+       * page; nothing was passing one.
+       */
+      const about = runtime.lastCapturedPage();
+      const view = observe === "changes"
+        ? { text: renderReceipt(receipt) }
+        : await runtime.view({
+            ...(args.selector !== undefined ? { selector: args.selector } : {}),
+            ...(about !== undefined ? { page: about } : {}),
+          });
       lines.push("", "PAGE:", view.text);
     } catch {
       /*

@@ -16,6 +16,16 @@ export interface ThreadTool {
 }
 
 /**
+ * The gateway's HTTP origin, for links the browser fetches itself.
+ *
+ * The same expression `AppProvider` uses, repeated here rather than imported:
+ * this is a leaf component and `AppProvider` is the root of the tree, so
+ * importing it would make a module cycle for one string. `VITE_BFF_URL` is the
+ * same build-time value in both places, so they cannot disagree.
+ */
+const BFF_HTTP = import.meta.env.VITE_BFF_URL ?? window.location.origin;
+
+/**
  * Per-thread agent configuration.
  *
  * Everything here is scoped to one thread and written through the app-server,
@@ -324,6 +334,44 @@ export function ThreadSettingsDialog({ open, onClose, client, thread, threadId, 
                   Commands run in a sandbox that contains this thread&apos;s workspace and the read-only system
                   directories, and nothing else, so a path outside the workspace does not exist for them to reach.
                   Network access is unchanged. Applies to the next command, including during a turn already running.
+                </small>
+              </div>
+
+              {/*
+                The thread's transcript, as a file.
+                *
+                * It is the whole conversation: every user message, every model
+                * response including its thinking, and every tool call with its
+                * result. Reading it is how a person audits what an agent did,
+                * and it lives in the thread's own `.reaper/sessions` directory,
+                * which the file pane deliberately does not list. A download is
+                * the difference between having that record and having to open a
+                * shell on the server to fetch it.
+                *
+                * A plain link, not a fetch-and-blob: the browser's own download
+                * handling gets the filename from the response header, and a
+                * multi-megabyte journal never has to pass through JavaScript.
+              */}
+              <div className="field">
+                <span>Session transcript</span>
+                <a
+                  className="button"
+                  data-variant="ghost"
+                  href={threadId ? `${BFF_HTTP}/api/transcript?threadId=${encodeURIComponent(threadId)}` : undefined}
+                  download
+                  aria-disabled={threadId === undefined || !hasHistory}
+                  data-disabled={threadId === undefined || !hasHistory || undefined}
+                  onClick={(event) => {
+                    // Nothing to download without a thread, or before it has run.
+                    if (threadId === undefined || !hasHistory) event.preventDefault();
+                  }}
+                >
+                  Download session JSONL
+                </a>
+                <small>
+                  {hasHistory
+                    ? "Every message, thinking block and tool result for this thread, as newline-delimited JSON."
+                    : "This thread has not run yet, so there is nothing recorded."}
                 </small>
               </div>
 

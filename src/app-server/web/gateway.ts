@@ -20,7 +20,8 @@
  * capped. Nothing here widens the loopback boundary on its own.
  */
 
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
+import path from "node:path";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 
@@ -313,6 +314,25 @@ export async function startBrowserGateway(options: BrowserGatewayOptions): Promi
       });
       return;
     }
+    /*
+     * The session journal, for downloading a thread's transcript.
+     *
+     * Routed here with the other streaming routes because it answers a body
+     * rather than JSON. The session name comes from the thread the request
+     * names, so a request cannot ask for an arbitrary file.
+     */
+    if (parsed.pathname === "/api/transcript") {
+      const threadId = parsed.searchParams.get("threadId");
+      if (!threadId) {
+        sendJson(response, 400, { error: "thread_id_required" });
+        return;
+      }
+      void resolveThreadRoot(threadId).then((root) => {
+        if (!root) return sendJson(response, 404, { error: "unknown_thread" });
+        return handleTranscript(request, response, root, `app-${threadId}`);
+      });
+      return;
+    }
     if (parsed.pathname === "/api/screenshot") {
       const screenshotPath = parsed.searchParams.get("path");
       if (screenshotPath) {
@@ -488,6 +508,68 @@ export async function startBrowserGateway(options: BrowserGatewayOptions): Promi
  * Serve one browser screenshot. Binary, so it sits outside the JSON handler;
  * the sandbox and the png-only constraint live in `readBrowserScreenshot`.
  */
+/**
+ * Serve one thread's session journal as a download.
+ *
+ * The journal is the whole conversation: every user message, every model
+ * response including its thinking, and every tool call with its result. It is
+ * the file a person needs to audit what an agent actually did, and until now the
+ * only way to read it was off the filesystem of the machine running the server.
+ *
+ * The path is derived from the thread id, never from the request, and that is
+ * the whole of the sandboxing: `threadId` names a thread, the store maps it to a
+ * session name, and the journal is looked up under the workspace the server
+ * already resolved for that thread. A request cannot name a path, so there is
+ * nothing to escape. It is the same rule the file routes follow, applied to a
+ * file those routes deliberately refuse to serve (`.reaper/sessions` is excluded
+ * from the workspace listing).
+ */
+async function handleTranscript(
+  request: IncomingMessage,
+  response: ServerResponse,
+  workspaceRoot: string,
+  sessionName: string,
+): Promise<void> {
+  if (request.method !== "GET") {
+    response.writeHead(405, { "content-type": "application/json", "cache-control": "no-store" });
+    response.end(JSON.stringify({ error: "method_not_allowed" }));
+    return;
+  }
+  try {
+    const journal = journalPathFor(workspaceRoot, sessionName);
+    /*
+     * `readFile` rather than a stream: a journal is a few megabytes at most, and
+     * reading it whole means a missing file is a clean 404 instead of a broken
+     * transfer halfway through a body that has already sent its 200.
+     */
+    const bytes = await readFile(journal);
+    response.writeHead(200, {
+      "content-type": "application/x-ndjson; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+      // Named so a browser saves it as a file rather than rendering it.
+      "content-disposition": `attachment; filename="${sessionName}.jsonl"`,
+      "content-length": String(bytes.byteLength),
+    });
+    response.end(bytes);
+  } catch {
+    response.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
+    response.end(JSON.stringify({ error: "no_transcript" }));
+  }
+}
+
+/** Where a thread's session journal lives, from the session name alone. */
+function journalPathFor(workspaceRoot: string, sessionName: string): string {
+  /*
+   * The same layout `session-journal.ts` writes, reproduced here rather than
+   * imported, because that module's `journalPath` is private and the shape is
+   * one line: `<workspaceRoot>/.reaper/sessions/<name>/session.jsonl`. A comment
+   * is cheaper than a new export for a path that is already a contract between
+   * writer and reader.
+   */
+  return path.join(workspaceRoot, ".reaper", "sessions", sessionName, "session.jsonl");
+}
+
 async function handleScreenshot(
   request: IncomingMessage,
   response: ServerResponse,
