@@ -43,7 +43,7 @@ import {
 
 import { perceive, type PerceptionResult } from "./engine.js";
 import { assertNotRawChrome, assertSteelManagedEndpoint } from "./steel-endpoint.js";
-import { resetUnresponsiveTargets } from "./cdp-health.js";
+import { connectWithRecovery } from "./cdp-health.js";
 import { applySettingsToPage, type BrowserSettings, type PageControls } from "./session-controls.js";
 import { captureIndexedDb, restoreIndexedDb, type StorageCapture } from "./storage-state.js";
 import { DownloadVault, watchDownloads, type VaultFile } from "./downloads.js";
@@ -301,35 +301,32 @@ export class ThreadBrowserRuntime {
     assertSteelManagedEndpoint(this.options.cdpUrl);
     await assertNotRawChrome(this.options.cdpUrl);
     /*
-     * Clear any page whose renderer has stopped answering, before the handshake.
+     * Attach, and recover from a wedged page if the handshake fails.
      *
-     * `connectOverCDP` attaches to every target and waits for each one, so one
-     * wedged renderer makes the connect hang until it times out, permanently and
-     * for every caller. Measured: three consecutive 120s timeouts against a
-     * browser whose twelve other pages answered in under 150ms, and a connect
-     * that took 11s the moment the one wedged page was closed. The sweep talks
-     * raw CDP precisely because it has to run when Playwright cannot connect.
+     * `connectOverCDP` attaches to every target and waits for each one, so a
+     * single wedged renderer makes the connect hang until it times out,
+     * permanently and for every caller. Measured: three consecutive 120s
+     * timeouts against a browser whose twelve other pages answered in under
+     * 150ms, and a connect that took 11s the moment the one wedged page was
+     * closed.
      *
-     * Best effort: if the sweep itself cannot run (Steel down, socket refused)
-     * it returns and the connect below reports the real problem.
+     * The sweep runs only in the failure path, and that ordering is deliberate.
+     * Sweeping first, as an earlier version did, meant a busy-but-healthy page
+     * could miss its probes and be closed: on a loaded machine it closed a GitHub
+     * tab a live mission was using. Nothing has to guess here: a connect fails
+     * only when something is genuinely wrong, so the sweep runs exactly then.
+     *
+     * 45s rather than 30s, because a healthy attach on a large session is real
+     * work rather than instant (11s measured for eleven pages).
      */
-    const health = await resetUnresponsiveTargets(this.options.cdpUrl).catch(() => undefined);
-    if (health !== undefined && health.closed.length > 0) {
-      this.lastHealthNote =
-        `Closed ${health.closed.length} page(s) whose renderer had stopped answering, ` +
-        `which would otherwise have made this browser impossible to attach to: ` +
-        `${health.closed.map((page) => page.url || page.targetId).join(", ")}.`;
-    }
-    const { chromium } = await import("playwright");
-    const browser = await chromium.connectOverCDP(this.options.cdpUrl, {
-      /*
-       * 45s rather than 30s. A healthy attach is not instant: measured at 11s for
-       * a session with eleven pages, because the handshake is per target. With
-       * the sweep above removing the one case that hangs rather than merely
-       * slows, the remaining cost is real work, and 30s left too little room for
-       * a session in the twenties.
-       */
-      timeout: this.options.cdpTimeoutMs ?? 45_000,
+    const browser = await connectWithRecovery(this.options.cdpUrl, {
+      timeoutMs: this.options.cdpTimeoutMs ?? 45_000,
+      onClose: (report) => {
+        this.lastHealthNote =
+          `Closed ${report.closed.length} page(s) whose renderer had stopped answering, ` +
+          `which would otherwise have made this browser impossible to attach to: ` +
+          `${report.closed.map((page) => page.url || page.targetId).join(", ")}.`;
+      },
     });
     /*
      * The runtime was closed while this connect was in flight.

@@ -22,7 +22,7 @@ import { readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import { BrowserControlRegistry } from "../browser/control-lease.js";
-import { resetUnresponsiveTargets } from "../browser/cdp-health.js";
+import { connectWithRecovery } from "../browser/cdp-health.js";
 import { forgetPage } from "../browser/page-ownership.js";
 import { readOwnedTargetIds, sweepOrphanPages, type OrphanSweepResult } from "../browser/orphan-reaper.js";
 import { ThreadBrowserRuntime } from "../browser/thread-runtime.js";
@@ -223,19 +223,18 @@ export class ThreadBrowsers {
    * is called directly after a thread is deleted so the common case is immediate
    * rather than eventually.
    *
-   * It attaches to the browser to do this, so it clears wedged pages first. That
-   * ordering is the fix for a failure worth naming: `connectOverCDP` waits on
-   * every target, so a page whose renderer stopped answering made the attach
-   * hang until it timed out, which meant this pass could never run on the one
-   * browser that needed it, and a browser in that state stayed unattachable
-   * until it was restarted by hand. Sweeping health before attaching removes
-   * that deadlock: the sweep talks raw CDP, so it works exactly when the
-   * Playwright attach does not.
+   * It attaches to the browser to do this, so it goes through recovery rather
+   * than a bare connect. That is what stops a failure worth naming: a page whose
+   * renderer stopped answering makes `connectOverCDP` hang until it times out,
+   * which meant this pass could never run on the one browser that needed it, so
+   * a browser in that state stayed unattachable until it was restarted by hand.
+   *
+   * The sweep runs only after a failed connect, so a healthy browser is never
+   * touched by it. Sweeping first closed a page a live mission was using under
+   * load, which is why the order is the way it is.
    */
   async sweepOrphans(): Promise<OrphanSweepResult | undefined> {
     if (this.closed) return undefined;
-    // Before anything attaches: a wedged page would hang the attach below.
-    await resetUnresponsiveTargets(this.options.cdpUrl).catch(() => undefined);
     const owned = await readOwnedTargetIds(this.workspaceRoot).catch(() => undefined);
     if (owned === undefined) return undefined;
     /*
@@ -245,10 +244,9 @@ export class ThreadBrowsers {
      */
     if (owned.size === 0) return undefined;
 
-    const { chromium } = await import("playwright");
     let browser;
     try {
-      browser = await chromium.connectOverCDP(this.options.cdpUrl, { timeout: this.options.sweepAttachTimeoutMs ?? 30_000 });
+      browser = await connectWithRecovery(this.options.cdpUrl, { timeoutMs: this.options.sweepAttachTimeoutMs ?? 45_000 });
     } catch (error) {
       /*
        * A browser that cannot be attached to is the failure this pass exists to
@@ -338,17 +336,15 @@ export class ThreadBrowsers {
     if (targetIds.length === 0) return;
 
     /*
-     * Clear wedged pages before attaching, for the same reason the sweep before
-     * the orphan pass does: this is a delete, and a delete that hangs because
-     * some page stopped answering is a thread the user cannot remove. The sweep
-     * closes any wedged page and not only this thread's, which is correct rather
-     * than overreaching: a page whose renderer is gone cannot be used by any
-     * thread, and leaving it would block every delete and every attach from here
-     * on.
+     * Through recovery, for the same reason the orphan sweep is: this is a
+     * delete, and a delete that hangs because some page stopped answering is a
+     * thread the user cannot remove. Recovery closes any wedged page and not only
+     * this thread's, which is correct rather than overreaching: a page whose
+     * renderer is gone cannot be used by any thread, and leaving it would block
+     * every delete and every attach from here on. It runs only after a failed
+     * connect, so a busy but healthy browser is never touched.
      */
-    await resetUnresponsiveTargets(this.options.cdpUrl).catch(() => undefined);
-    const { chromium } = await import("playwright");
-    const browser = await chromium.connectOverCDP(this.options.cdpUrl, { timeout: 45_000 });
+    const browser = await connectWithRecovery(this.options.cdpUrl, { timeoutMs: 45_000 });
     try {
       const context = browser.contexts()[0];
       if (context === undefined) return;

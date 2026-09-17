@@ -15,7 +15,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { WebSocketServer, WebSocket } from "ws";
 
-import { closeTargets, findUnresponsiveTargets, resetUnresponsiveTargets } from "../../../src/browser/cdp-health.js";
+import { closeTargets, connectWithRecovery, findUnresponsiveTargets, resetUnresponsiveTargets } from "../../../src/browser/cdp-health.js";
 
 interface FakeTarget {
   targetId: string;
@@ -41,15 +41,18 @@ interface FakeTarget {
  * what was measured against the live browser: the attach succeeded, the renderer
  * did not answer, and the client waited until it gave up.
  */
-function startFakeSteel(targets: FakeTarget[]): Promise<{ url: string; closed: string[]; stop: () => Promise<void> }> {
+function startFakeSteel(targets: FakeTarget[]): Promise<{ url: string; closed: string[]; probed: number; stop: () => Promise<void> }> {
   const wss = new WebSocketServer({ port: 0 });
   const closed: string[] = [];
+  // Counts liveness probes, so a test can assert the sweep was never reached.
+  const counters = { probed: 0 };
   return new Promise((resolve) => {
     wss.on("listening", () => {
       const address = wss.address() as { port: number };
       resolve({
         url: `ws://127.0.0.1:${address.port}`,
         closed,
+        get probed() { return counters.probed; },
         stop: () => new Promise<void>((done) => wss.close(() => done())),
       });
     });
@@ -67,6 +70,7 @@ function startFakeSteel(targets: FakeTarget[]): Promise<{ url: string; closed: s
             return;
           }
           case "Runtime.evaluate": {
+            counters.probed += 1;
             const sessionId = (message as unknown as { sessionId?: string }).sessionId ?? "";
             const id = sessionId.replace("session-", "");
             const target = targets.find((t) => t.targetId === id);
@@ -207,4 +211,72 @@ test("an unreachable endpoint is skipped rather than thrown", async () => {
 test("closing an empty list does nothing and opens nothing", async () => {
   const closed = await closeTargets("ws://127.0.0.1:1", []);
   assert.deepEqual(closed, []);
+});
+
+test("a successful connect never probes or closes anything", async () => {
+  /*
+   * The safety property of the recovery-first ordering, and the one the earlier
+   * design got wrong: on a browser carrying eleven heavy tabs at load 16, a
+   * preventive sweep reported a healthy page as silent and closed it while a
+   * mission was using it. Here the sweep is only reached after a connect has
+   * already failed, so a healthy browser cannot have a page closed.
+   *
+   * The connector is injected so the property is checked directly: a connect
+   * that succeeds, and a sweep that would record being reached.
+   */
+  const steel = await startFakeSteel([{ targetId: "a", type: "page", url: "https://healthy.example/" }]);
+  try {
+    const browser = await connectWithRecovery(steel.url, {
+      connect: async () => ({ ok: true }) as never,
+    });
+    assert.deepEqual(browser, { ok: true });
+    assert.equal(steel.probed, 0, "a successful connect must not probe any target");
+    assert.deepEqual(steel.closed, [], "and must not close any");
+  } finally {
+    await steel.stop();
+  }
+});
+
+test("a failed connect sweeps and retries", async () => {
+  // The mechanism itself: the first connect throws, the sweep finds the wedged
+  // page, and the second connect succeeds. Without this the browser would stay
+  // unattachable for every caller.
+  const steel = await startFakeSteel([
+    { targetId: "a", type: "page", url: "https://healthy.example/" },
+    { targetId: "b", type: "page", url: "http://wedged.example/", wedged: true },
+  ]);
+  try {
+    let calls = 0;
+    const closed: string[] = [];
+    const browser = await connectWithRecovery(steel.url, {
+      connect: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("browserType.connectOverCDP: Timeout 45000ms exceeded.");
+        return { ok: true } as never;
+      },
+      onClose: (report) => { for (const t of report.closed) closed.push(t.targetId); },
+    });
+    assert.equal(calls, 2, "the connect is retried once");
+    assert.deepEqual(browser, { ok: true });
+    assert.deepEqual(closed, ["b"], "the wedged page was closed and reported");
+    assert.deepEqual(steel.closed, ["b"]);
+  } finally {
+    await steel.stop();
+  }
+});
+
+test("a retry that is not helped by the sweep still throws", async () => {
+  // The browser is not attachable for some other reason, so the caller must get
+  // the real failure rather than a silent success or a diagnostic one.
+  const steel = await startFakeSteel([{ targetId: "a", type: "page", url: "https://healthy.example/" }]);
+  try {
+    await assert.rejects(
+      () => connectWithRecovery(steel.url, {
+        connect: async () => { throw new Error("browserType.connectOverCDP: Timeout 45000ms exceeded."); },
+      }),
+      /Timeout 45000ms/,
+    );
+  } finally {
+    await steel.stop();
+  }
 });

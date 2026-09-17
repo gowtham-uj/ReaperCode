@@ -24,10 +24,27 @@
  * the pane, reasonably concluded the browser had crashed and stopped.
  *
  * Playwright offers no way to skip a target or to attach partially, and Steel
- * has no page-level API, so the only place to fix this is before the handshake:
+ * has no page-level API, so the only place to fix this is around the handshake:
  * find the targets whose renderers have stopped answering, close those, and let
  * the connect proceed. A page that cannot execute `1+1` in this budget is a page
  * no thread can use, so closing it loses nothing.
+ *
+ * ## Recovery, not prevention
+ *
+ * The first version swept before every attach as a preventive check. That was
+ * wrong, and the live mission proved it: on a browser carrying eleven heavy tabs
+ * at a load average of 16 on 8 cores, the GitHub page missed its probes and was
+ * closed while it was a page the mission was actively using. Closing a page a
+ * thread is using is a worse outcome than the hang this exists to fix, so a
+ * check that can produce it must not run when nothing is wrong.
+ *
+ * So the sweep is now reached only after a connect has actually failed:
+ * `connectWithRecovery` tries the attach, and only on failure runs the sweep and
+ * retries. A healthy browser therefore never has a page closed by construction,
+ * because the sweep does not run at all. Under load a slow-but-healthy attach
+ * still succeeds, so it is never mistaken for a wedged one. The cost is that
+ * recovery pays for one failed handshake first, which is the right trade against
+ * losing a tab.
  *
  * This talks CDP directly rather than through Playwright, and that is the whole
  * point: it has to run when `connectOverCDP` cannot.
@@ -343,4 +360,62 @@ export async function resetUnresponsiveTargets(
   }
   const closed = await closeTargets(cdpUrl, hung, Math.max(1_000, (options.budgetMs ?? DEFAULT_BUDGET_MS) - (Date.now() - started)));
   return { checked, hung, closed, elapsedMs: Date.now() - started };
+}
+
+/**
+ * Attach to the browser, and if the handshake fails, sweep and try again.
+ *
+ * The order is the point. A connect only fails when something is genuinely
+ * wrong, so the sweep runs exactly then and never on a healthy browser. That
+ * removes the false positive by construction: the earlier design swept first,
+ * and on a loaded machine it closed a page a live mission was using because a
+ * busy renderer missed its probes. Here a busy renderer cannot cause a close,
+ * because a busy renderer still connects.
+ *
+ * The failure that motivates this is measurable and was measured: a session with
+ * one wedged page timed out at 120s on three consecutive connects, and connected
+ * in 11s the moment that page was closed.
+ *
+ * Returns the browser, or throws the *second* failure when recovery did not
+ * help, because that one is the honest description of a browser that is still
+ * not attachable after the known cause was removed. The first error is reported
+ * through `onRecover` so a caller can say a page was closed and why.
+ */
+export type CdpConnector = (
+  timeoutMs: number,
+) => Promise<Awaited<ReturnType<typeof import("playwright").chromium.connectOverCDP>>>;
+
+export async function connectWithRecovery(
+  cdpUrl: string,
+  options: { timeoutMs?: number; onClose?: (report: HealthReport) => void; connect?: CdpConnector } = {},
+): Promise<Awaited<ReturnType<typeof import("playwright").chromium.connectOverCDP>>> {
+  const timeout = options.timeoutMs ?? 45_000;
+  /*
+   * The connect is injectable so the ordering can be tested without a browser.
+   *
+   * The ordering is the safety property here (sweep only after a failure), and a
+   * property that can only be checked against a live wedged page is a property
+   * that will regress unobserved. The real connector stays the default, so
+   * production behaviour is unchanged.
+   */
+  const connect: CdpConnector = options.connect ?? (async (ms) => {
+    const { chromium } = await import("playwright");
+    return await chromium.connectOverCDP(cdpUrl, { timeout: ms });
+  });
+  try {
+    return await connect(timeout);
+  } catch (first) {
+    /*
+     * The connect failed. Before giving up, remove the one cause that can make a
+     * working browser permanently unattachable, then try once more.
+     *
+     * A sweep that cannot run is not reported as a second failure: it usually
+     * means Steel itself is down, and the retry below will say so with a real
+     * error rather than a diagnostic one.
+     */
+    const report = await resetUnresponsiveTargets(cdpUrl).catch(() => undefined);
+    if (report !== undefined && report.closed.length > 0) options.onClose?.(report);
+    void first;
+    return await connect(timeout);
+  }
 }
