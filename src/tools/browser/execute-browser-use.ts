@@ -217,6 +217,67 @@ const PROGRAM_PARAMS = [
  * Throws on a genuine syntax error, which is the model's own and is reported as
  * such by the caller.
  */
+/**
+ * Whether a program dispatches a DOM event from inside page script.
+ *
+ * This is the question the untrusted-events note is really asking: a click made
+ * with `locator.click()` is trusted because Chrome generates the event, and a
+ * click made with `el.click()` inside `evaluate` is not, because the page script
+ * calls it. A program that does both (read with `evaluate`, click with the real
+ * API) is the common, correct shape and must not be warned about.
+ *
+ * Scans the argument of each `evaluate` call for a dispatching call, rather than
+ * the whole program for the word `evaluate`. The scan is brace and quote aware so
+ * it does not run past the end of the argument into a later `locator.click()`,
+ * which is the false positive that made the note fire on almost every step of a
+ * live mission and taught the model to ignore it.
+ */
+export function dispatchesEventFromScript(code: string): boolean {
+  const opens = ["evaluate(", "evaluateHandle("];
+  for (const open of opens) {
+    let from = 0;
+    for (;;) {
+      const at = code.indexOf(open, from);
+      if (at === -1) break;
+      from = at + open.length;
+      const body = readCallArgument(code, from);
+      if (body === undefined) continue;
+      if (/\b(?:click|submit|dispatchEvent)\s*\(/.test(body)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The text of one call argument, brace and quote aware.
+ *
+ * Stops at the comma or close paren that ends the first argument at depth zero,
+ * so a following `locator.click()` in the same program is not swallowed into it.
+ * Returns undefined when the call is never closed, which means the program does
+ * not parse and the compile step will say so properly.
+ */
+function readCallArgument(code: string, start: number): string | undefined {
+  let depth = 0;
+  let quote: string | undefined;
+  for (let i = start; i < code.length; i++) {
+    const ch = code[i]!;
+    if (quote !== undefined) {
+      if (ch === "\\") { i++; continue; }
+      if (ch === quote) quote = undefined;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") { quote = ch; continue; }
+    if (ch === "(" || ch === "{" || ch === "[") { depth++; continue; }
+    if (ch === ")" || ch === "}" || ch === "]") {
+      if (depth === 0) return code.slice(start, i);
+      depth--;
+      continue;
+    }
+    if (ch === "," && depth === 0) return code.slice(start, i);
+  }
+  return undefined;
+}
+
 export function compileBrowserSource(code: string): string {
   const verify = (source: string): boolean => {
     try {
@@ -721,20 +782,26 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
    * block page would change the user agent several times for one page.
    */
   /*
-   * A program that acted through page JavaScript instead of the input API.
+   * A program that dispatched its own DOM event from page script.
    *
-   * The events it dispatched are untrusted, and a site that checks
-   * `event.isTrusted` will ignore them: the click lands, nothing happens, and
-   * the receipt says the step succeeded. That is the worst shape a failure can
-   * take, so it is named here rather than left for the model to discover when a
-   * form mysteriously does not submit.
+   * The events such a program creates are untrusted, and a site that checks
+   * `event.isTrusted` ignores them: the click lands, nothing happens, and the
+   * receipt says the step succeeded. That is the worst shape a failure can take,
+   * so it is named here rather than left for the model to discover when a form
+   * mysteriously does not submit.
    *
-   * Detected from the program's own source, which is the only place the
-   * difference is visible: by the time the page is read, both paths look the
-   * same. `isTrusted` cannot be faked, so the answer is to rewrite the program,
-   * and the message says exactly which call to change.
+   * What is checked is the argument to `evaluate`, not the presence of the word.
+   * The first version tested the whole program for `evaluate` and for `.click(`,
+   * which meant any program that read a value with `evaluate` and then clicked
+   * with the real API was told its click was untrusted. Measured in a live
+   * mission: the note fired on most steps, so the model learned to skip it, and
+   * the one note that matters had lost its meaning by the time it was needed.
+   *
+   * Inside an `evaluate` call there is no Playwright input API to dispatch with,
+   * so any click or submit there is necessarily a DOM event. That is the
+   * distinction the warning is actually about, and it is what this matches.
    */
-  const syntheticAction = /\.\s*(click|submit)\s*\(/.test(args.code ?? "") && /evaluate/.test(args.code ?? "");
+  const syntheticAction = dispatchesEventFromScript(args.code ?? "");
   if (syntheticAction) {
     lines.push(
       "",
