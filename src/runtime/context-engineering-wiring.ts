@@ -6,6 +6,7 @@
 import { randomUUID } from "node:crypto";
 import { shakeConversationWithBreaker, truncateHeadForPTLRecovery } from "../context/shake.js";
 import { maybeTimeBasedMicrocompact } from "../context/time-microcompact.js";
+import { supersedePageObservations } from "../context/supersede-page-observations.js";
 import { compactToolHistory } from "../context/history-compaction.js";
 import { pruneSupersededToolResults } from "../context/supersede-prune.js";
 import { pruneToolOutputs } from "../context/tool-output-prune.js";
@@ -1270,6 +1271,39 @@ export function createContextEngineeringHooks(
           }
         } catch {
           /* swallow */
+        }
+      }
+
+      /*
+       * Supersede stale page observations, before the time-based pass.
+       *
+       * Order matters. Time microcompaction blanks a whole tool result once it is
+       * old enough, which loses the outcome and the changed lines along with the
+       * page. This pass runs first and drops only the page text from browser
+       * results a later result has replaced, keeping the facts. What is left for
+       * the time pass is genuinely stale rather than merely large.
+       *
+       * It is the direct answer to the measured cost: one browser result of
+       * 262,631 characters, re-sent on every later call because a tool result
+       * stays in the conversation.
+       */
+      if (cm.timeMicrocompactEnabled) {
+        try {
+          const superseded = supersedePageObservations(messages as Array<Record<string, unknown>>, {
+            keepRecent: cm.timeMicrocompactKeepRecent,
+          });
+          if (superseded.superseded > 0) {
+            noteContext({
+              phase: "completed",
+              technique: "supersede",
+              savedChars: superseded.savedChars,
+              messagesBefore: Array.isArray(messages) ? messages.length : 0,
+              messagesAfter: Array.isArray(messages) ? messages.length : 0,
+              detail: `${superseded.superseded} superseded page observation${superseded.superseded === 1 ? "" : "s"} trimmed`,
+            });
+          }
+        } catch {
+          /* best-effort: a pass that cannot run must not stop the turn */
         }
       }
 
