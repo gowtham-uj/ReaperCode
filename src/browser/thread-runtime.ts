@@ -908,7 +908,53 @@ export class ThreadBrowserRuntime {
      * per page would be felt.
      */
     recordTargetId(page, id);
+    /*
+     * Written to disk NOW, not at the end of the step.
+     *
+     * Ownership was only persisted inside `save()`, which runs after a program
+     * returns. A program that opens ten tabs and is still running when the
+     * app-server dies leaves a record of only the pages that existed when the
+     * last save happened: measured on the mission, the file held 2 ids while
+     * Chrome held 28 pages, so after the restart the thread owned almost nothing
+     * and the pane showed zero tabs on a browser that was perfectly alive.
+     *
+     * One small file write per new page, which happens a handful of times in a
+     * session, is the right price for a claim that survives a crash.
+     */
+    void this.persistOwnership().catch(() => undefined);
   }
+
+  /**
+   * Write the current ownership set, merging in anything already on disk.
+   *
+   * Merged rather than replaced, because a page that was closed during this
+   * session still belongs to this thread's history: a target id that reappears
+   * (a restored tab) must not be re-claimed by another thread in the gap. The
+   * union is what makes the file a durable record rather than a snapshot that
+   * can lose an entry to a race with a page close.
+   */
+  private async persistOwnership(): Promise<void> {
+    const path = this.options.statePath;
+    if (!path) return;
+    if (this.ownershipWrite === undefined) {
+      this.ownershipWrite = (async () => {
+        const merged = new Set<string>(this.claimed);
+        try {
+          const parsed = JSON.parse(await readFile(ThreadBrowserRuntime.ownershipPath(path), "utf8")) as { targetIds?: unknown };
+          if (Array.isArray(parsed.targetIds)) {
+            for (const id of parsed.targetIds) if (typeof id === "string") merged.add(id);
+          }
+        } catch {
+          /* No file yet, which is the first write. */
+        }
+        await this.saveOwnership([...merged], path);
+      })().finally(() => { this.ownershipWrite = undefined; });
+    }
+    await this.ownershipWrite;
+  }
+
+  /** The in-flight ownership write, so two claims do not race the same file. */
+  private ownershipWrite: Promise<void> | undefined;
 
   /**
    * Stamp every page in this thread's set with its target id.
