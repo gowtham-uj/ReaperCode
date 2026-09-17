@@ -26,6 +26,17 @@ const pending = page.context().browser().contexts().flatMap(c => c.pages());
 if (pending.length === 0) { /* never true: pending.length is not a number */ }
 ```
 
+**A callback returning a promise makes the whole call a promise.**
+
+```js
+const wrong = list.find(async (p) => (await p.url()).includes("/cart"));   // a promise
+const right = await list.find(async (p) => (await p.url()).includes("/cart")); // the page
+```
+
+So await the *call*, not a property of what it returns. `await wrong.pageName`
+awaits a property of a promise and gives you `undefined`, which then fails
+somewhere else with a message about a page that was never a page.
+
 Everything else is ordinary Playwright. `getByRole`, `locator`, `click`, `fill`,
 `selectOption`, `inputValue`, `.catch()`, `.nth()`, arrays from `.all()` — all of
 it behaves as it does outside, because the host is running the same library you
@@ -190,8 +201,18 @@ await page.url();                                // the bare `page` is the cart 
 await browser.closePage(cart);                   // and this one closes only it
 ```
 
-`page` is always the active page, and each thread's pages are its own: another
-agent's tabs are not reachable from here.
+`page` is always the *active* page, so it follows `browser.setActive` and
+`browser.newPage`. A handle you keep names one specific page and stays with it,
+which is how you come back to a tab you left:
+
+```js
+const [list] = await browser.pages();     // a handle to a specific tab
+await browser.newPage("cart");            // `page` is the new tab now
+await page.url();                         // ...the cart
+await browser.setActive(list);            // back to the tab the handle names
+```
+
+Each thread's pages are its own: another agent's tabs are not reachable from here.
 
 Prefer names to indices. `browser.setActive(1)` breaks the moment a page closes,
 which is the reason pages are named at all: a model that opens a tab, works

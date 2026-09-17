@@ -529,11 +529,24 @@ test("scoping does not break ordinary browsing", { skip }, async () => {
     rt,
     {
       code: `
-        await page.locator("#first").fill("Ada");
+        /*
+         * Two ways to refer to a page, and the difference is the point.
+         *
+         * The bare page is a live root: it means "the active page", always, so
+         * after a switch it refers to the new one. A handle from browser.pages()
+         * or newPage() names one specific page and stays with it. A program that
+         * wants to come back to a tab holds the handle; one that wants whatever
+         * is active uses the bare page.
+         */
+        const [formTab] = await browser.pages();
+        await formTab.locator("#first").fill("Ada");
         const tabs = await browser.newPage("extra");
         await tabs.goto("${site!.origin}/canvas");
         const active = await browser.setActive("extra");
-        ({ filled: await page.locator("#first").inputValue().catch(() => "gone"), newTabUrl: await tabs.url(), activeUrl: await active.url() })
+        const bareFollowed = (await page.url()).includes("/canvas");
+        await browser.setActive(formTab);
+        const held = await formTab.locator("#first").inputValue().catch(() => "gone");
+        ({ held, newTabUrl: await tabs.url(), activeUrl: await active.url(), bareFollowed })
       `,
       observe: "none",
     } as never,
@@ -543,13 +556,22 @@ test("scoping does not break ordinary browsing", { skip }, async () => {
   assert.equal(result.outcome, "SUCCESS", result.output);
   /*
    * The scoped page still behaves like a page: it filled a field, opened a tab,
-   * navigated it, and the handles all report where they are. `page` here is the
-   * one the program started with, so it stays on the form — which is correct,
-   * and is why this asserts on the tab handles rather than on `page.url()`.
+   * navigated it, and every handle reports where it is.
+   *
+   * The bare page is the *active* page by contract, which the skill states
+   * outright, so after newPage("extra") it is the extra tab and
+   * setActive("page-1") puts it back. A page handle taken from newPage or
+   * setActive is how a program works with a tab other than the active one.
+   *
+   * This asserted the opposite before, because the page was bound once at the
+   * start: it never followed newPage or setActive, so a program that switched
+   * tabs and then used it drove the tab it had just left, and the skill's own
+   * sentence was false.
    */
-  assert.match(result.output, /"filled":"Ada"/, "the original page must still work after a tab is opened");
+  assert.match(result.output, /"held":"Ada"/, "a handle from pages() must stay with its own page");
   assert.match(result.output, /"newTabUrl":"[^"]*\/canvas"/, "the new tab must be scoped and drivable");
   assert.match(result.output, /"activeUrl":"[^"]*\/canvas"/, "and setActive must return it");
+  assert.match(result.output, /"bareFollowed":true/, "and the bare page must follow the active tab");
 });
 
 /* ------------------------------------------------------------------ *
@@ -689,4 +711,62 @@ test("a tab opened through the facade is scoped too", { skip }, async () => {
   } finally {
     await other.close();
   }
+});
+
+/*
+ * An array returned from the host answers both kinds of callback.
+ *
+ * This is the trap that cost a live run: `pages.find(async (p) => (await
+ * p.url()).includes("microsoft"))` returned the *first* page, because `find`
+ * tests its callback's result for truthiness synchronously and a Promise is
+ * always truthy. The model then switched to a tab it had not selected, and the
+ * error it saw was about the wrong page.
+ *
+ * The other half matters as much: the fix must not make every method async, or
+ * `p.map((p) => p.url()).slice(0, 3)` fails with "slice is not a function" for
+ * a callback that is perfectly synchronous. Both are asserted here, against a
+ * page that is deliberately the *second* one in the list.
+ */
+test("a returned array handles async callbacks without breaking sync ones", { skip }, async () => {
+  const rt = await runtime();
+  const { page } = await rt.ensureReady();
+  await page.goto(`${site!.origin}/basic`, { waitUntil: "domcontentloaded" });
+  await rt.newPage("second");
+  await (await rt.ensureReady()).page.goto(`${site!.origin}/form`, { waitUntil: "domcontentloaded" });
+  await rt.setActive(0);
+
+  const result = await executeBrowserUse(
+    rt,
+    {
+      code: `
+        const list = await browser.pages();
+        // The page we want is second, so a broken async find returns the wrong one.
+        const hit = await list.find(async (p) => (await p.url()).includes("/form"));
+        const kept = await list.filter(async (p) => (await p.url()).includes("/form"));
+        const mapped = list.map((p) => p.pageIndex);
+        return {
+          found: hit ? await hit.url() : null,
+          kept: kept.length,
+          syncMap: Array.isArray(mapped) ? mapped.length : "not an array",
+        };
+      `,
+      observe: "none",
+    } as never,
+    metadata,
+  );
+
+  assert.equal(result.outcome, "SUCCESS", result.output);
+  const value = JSON.parse(result.output.split("RETURNED:")[1]!.trim()) as {
+    found: string | null; kept: number; syncMap: number | string;
+  };
+  assert.ok(value.found?.includes("/form"), `async find returned ${value.found}`);
+  assert.equal(value.kept, 1, "async filter must keep only the matching page");
+  /*
+   * Proving the sync path stayed synchronous needs the count to be knowable,
+   * and this suite shares one runtime, so earlier tests leave pages open: an
+   * assertion of `2` passed alone and failed in the suite with `6`. The count is
+   * therefore not asserted; what matters is that `Array.isArray` was true, which
+   * a Promise cannot be. A wrong count would still have been an array.
+   */
+  assert.equal(typeof value.syncMap, "number", "a sync map must return a plain array, not a Promise");
 });

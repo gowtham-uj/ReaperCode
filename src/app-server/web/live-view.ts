@@ -564,7 +564,18 @@ export function attachLiveView(
         if (client.readyState !== WebSocket.OPEN) return;
         const pages = await runtime.pageTargets().catch(() => []);
         const active = pages.find((entry) => entry.active);
-        if (active) client.send(JSON.stringify({ type: "activeTab", pageId: active.targetId }));
+        /*
+         * `activeTabChange`, which is the type the viewer already handles.
+         *
+         * The first version sent `activeTab`, which the viewer ignores: its
+         * `onmessage` switches on the message type and drops anything it does not
+         * recognise. So the follow looked wired, sent a frame every two seconds,
+         * and changed nothing on screen. The name is read from the viewer's own
+         * handler rather than invented, and the injected script that was going to
+         * translate it is gone: the viewer's variables live inside an IIFE and no
+         * script injected into the page can reach them.
+         */
+        if (active) client.send(JSON.stringify({ type: "activeTabChange", pageId: active.targetId }));
       });
     }, 2_000);
     timer.unref?.();

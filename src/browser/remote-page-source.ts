@@ -101,6 +101,170 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
     return out;
   }
 
+  /*
+   * An array from the host, with its callback-taking methods made await-aware.
+   *
+   * A returned array is a real array of decoded values, so find, filter, some
+   * and friends are the native ones. That is wrong for this API, and it fails
+   * silently: an async predicate returns a Promise, a Promise is truthy, so
+   * pages.find(async (p) => (await p.url()).includes("x")) returns the *first*
+   * page however the page actually matches. Observed on a live run: the model
+   * wrote exactly that, got the wrong tab, and the error it saw was about the
+   * page it had not meant to select.
+   *
+   * Only arrays that come back from the host are wrapped, and only their
+   * callback-taking methods, so everything else keeps native behaviour and
+   * identity. The wrapper is a Proxy rather than a subclass so Array.isArray
+   * and length stay true, which matters because a model checks both.
+   */
+  function decodeArray(value, depth) {
+    const decoded = value.map((item) => decodeValue(item, depth + 1));
+    /*
+     * The callback-taking methods run the callback once per element themselves,
+     * and only become a Promise when something actually awaits.
+     *
+     * Two constraints, and they pull in opposite directions.
+     *
+     * Delegating to the native method is wrong: filter and find test the
+     * callback's return value for truthiness *synchronously*, so wrapping the
+     * callback to return a Promise makes every element a match. Reproduced:
+     * pages.filter(async (p) => (await p.url()).includes("x")) returned every
+     * page.
+     *
+     * Making every method async is also wrong, and less obviously: p.map(fn)
+     * would return a Promise even for a synchronous fn, so the ordinary
+     * p.map((p) => p.url()).slice(0, 3) fails with "slice is not a function".
+     * A model writes that without thinking, and being told its correct code is
+     * broken is worse than the bug it was working around.
+     *
+     * So the callback is called exactly once per element, the raw results are
+     * kept, and the method decides afterwards: all plain values means a plain
+     * array is returned and the chain continues natively, and any Promise means
+     * the whole thing resolves asynchronously. Calling once is what makes this
+     * safe: a callback with a side effect is not run twice to find out which
+     * world it is in.
+     */
+    const isThenable = (candidate) => candidate !== null && typeof candidate === 'object' && typeof candidate.then === 'function';
+
+    /*
+     * Calls the callback once per element until one returns a Promise, then
+     * returns what it has plus where it stopped. The pending Promise is
+     * returned already called, so the async continuation awaits that value
+     * rather than calling the callback a second time.
+     */
+    function collect(callback) {
+      const raw = [];
+      for (let index = 0; index < decoded.length; index++) {
+        const produced = callback(decoded[index], index, decoded);
+        if (isThenable(produced)) return { async: true, from: index, raw, pending: produced };
+        raw.push(produced);
+      }
+      return { async: false, raw };
+    }
+
+    /** Finish the same pass asynchronously, awaiting each remaining callback. */
+    async function collectAsync(callback, already) {
+      const raw = already.raw.slice();
+      raw.push(await already.pending);
+      for (let index = already.from + 1; index < decoded.length; index++) {
+        raw.push(await callback(decoded[index], index, decoded));
+      }
+      return raw;
+    }
+
+    /** Apply one method's semantics to already-collected callback results. */
+    function finish(method, raw, initial, hasInitial) {
+      switch (method) {
+        case 'map':
+          return raw;
+        case 'flatMap':
+          return raw.reduce((out, item) => out.concat(item), []);
+        case 'filter':
+          return decoded.filter((_value, index) => Boolean(raw[index]));
+        case 'find':
+          return decoded.find((_value, index) => Boolean(raw[index]));
+        case 'findIndex':
+          return decoded.findIndex((_value, index) => Boolean(raw[index]));
+        case 'some':
+          return raw.some(Boolean);
+        case 'every':
+          return raw.every(Boolean);
+        case 'forEach':
+          return undefined;
+        case 'reduce':
+        case 'reduceRight': {
+          const order = method === 'reduce'
+            ? decoded.map((_value, index) => index)
+            : decoded.map((_value, index) => index).reverse();
+          let accumulator = hasInitial ? initial : decoded[order.shift()];
+          for (const index of order) accumulator = raw[index];
+          return accumulator;
+        }
+        default:
+          return undefined;
+      }
+    }
+
+    return new Proxy(decoded, {
+      get(target, property) {
+        if (typeof property !== 'string') return target[property];
+        switch (property) {
+          case 'map':
+          case 'flatMap':
+          case 'filter':
+          case 'find':
+          case 'findIndex':
+          case 'some':
+          case 'every':
+          case 'forEach':
+            return function (callback) {
+              if (typeof callback !== 'function') return target[property](callback);
+              const collected = collect(callback);
+              if (!collected.async) return finish(property, collected.raw, undefined, false);
+              return collectAsync(callback, collected).then((raw) => finish(property, raw, undefined, false));
+            };
+          case 'reduce':
+          case 'reduceRight':
+            return function (callback, initial) {
+              if (typeof callback !== 'function') return target[property](callback);
+              const hasInitial = arguments.length > 1;
+              /*
+               * Reduce carries an accumulator rather than a per-element value,
+               * so it is run in order. The first result that turns out to be a
+               * Promise switches the whole call to the async path, and the
+               * accumulator chain resumes from there.
+               */
+              const order = property === 'reduce'
+                ? target.map((_value, index) => index)
+                : target.map((_value, index) => index).reverse();
+              if (!hasInitial && order.length === 0) {
+                throw new TypeError('Reduce of empty array with no initial value');
+              }
+              let accumulator = hasInitial ? initial : target[order.shift()];
+              const remaining = order.map((index) => target[index]);
+              const positions = order;
+              for (let step = 0; step < remaining.length; step++) {
+                const produced = callback(accumulator, remaining[step], positions[step], target);
+                if (isThenable(produced)) {
+                  return (async () => {
+                    accumulator = await produced;
+                    for (let rest = step + 1; rest < remaining.length; rest++) {
+                      accumulator = await callback(accumulator, remaining[rest], positions[rest], target);
+                    }
+                    return accumulator;
+                  })();
+                }
+                accumulator = produced;
+              }
+              return accumulator;
+            };
+          default:
+            return target[property];
+        }
+      },
+    });
+  }
+
   function decodeValue(value, depth) {
     if (value === null || typeof value !== 'object') return value;
     if (typeof value.__reaperHandle === 'number') {
@@ -108,7 +272,7 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
       return makeNode(value.__reaperHandle, []);
     }
     if (depth > 8) return value;
-    if (Array.isArray(value)) return value.map((item) => decodeValue(item, depth + 1));
+    if (Array.isArray(value)) return decodeArray(value, depth);
     const out = {};
     for (const key of Object.keys(value)) out[key] = decodeValue(value[key], depth + 1);
     return out;

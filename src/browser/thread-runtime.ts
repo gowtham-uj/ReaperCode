@@ -242,12 +242,36 @@ export class ThreadBrowserRuntime {
     const pages = context.pages().filter((p) => !p.isClosed());
     const page = pages[0] ?? (await context.newPage());
     this.active = page;
+    /*
+     * The first page is named like any other, and that is not cosmetic.
+     *
+     * Pages opened through `newPage` get a generated name, but the page the
+     * context starts with was never named, so `pageName` on it was `undefined`.
+     * A model that finds a page by URL and then calls
+     * `setActive(await p.pageName)` — which is the shape the skill and the tool
+     * description both suggest — passed `undefined` and got a failure for code
+     * that would be right on any other tab. Observed on a live run, twice.
+     *
+     * Named here rather than in `attach` so a thread whose context was created
+     * empty (the restore path) and a thread that attaches to an existing page
+     * both get the same treatment.
+     */
+    if (![...this.named.values()].some((entry) => entry.page === page)) {
+      const name = `page-${++this.anonymousCount}`;
+      this.named.set(name, { name, page, openedAt: Date.now() });
+    }
     try {
       this.activeTargetId = await targetIdOf(page);
     } catch {
       this.activeTargetId = undefined;
     }
+    recordTargetId(page, this.activeTargetId);
     return page;
+  }
+
+  /** The page a bare `page` means, as the runtime has it right now. */
+  get activePage(): Page | undefined {
+    return this.active && !this.active.isClosed() ? this.active : undefined;
   }
 
   /** The CDP target id the active page is pinned to, when it is pinned. */
@@ -271,6 +295,7 @@ export class ThreadBrowserRuntime {
     const target = page ?? (await this.ensureReady()).page;
     this.active = target;
     this.activeTargetId = await targetIdOf(target).catch(() => undefined);
+    recordTargetId(target, this.activeTargetId);
     return this.activeTargetId;
   }
 
@@ -312,6 +337,7 @@ export class ThreadBrowserRuntime {
      * a popup those heuristics are exactly what picks the wrong one.
      */
     this.activeTargetId = await targetIdOf(page).catch(() => undefined);
+    recordTargetId(page, this.activeTargetId);
     return page;
   }
 
@@ -352,16 +378,27 @@ export class ThreadBrowserRuntime {
    * Non-enumerable so the serializer does not walk them and a returned list
    * reads as a list of pages rather than a list of wrappers.
    */
-  describePages(): Page[] {
-    return this.pageEntries().map((entry) => {
+  async describePages(): Promise<Page[]> {
+    const out: Page[] = [];
+    for (const entry of this.pageEntries()) {
       const page = scopePage(entry.page);
       Object.defineProperties(page, {
         pageName: { value: entry.name, enumerable: false, configurable: true },
         pageIndex: { value: entry.index, enumerable: false, configurable: true },
         isActivePage: { value: entry.active, enumerable: false, configurable: true },
+        /*
+         * The CDP target id, recorded so a page that travels back through the
+         * sandbox can still be identified. See `targetIdOf`.
+         */
+        pageTargetId: {
+          value: await targetIdOf(entry.page).catch(() => undefined),
+          enumerable: false,
+          configurable: true,
+        },
       });
-      return page;
-    });
+      out.push(page);
+    }
+    return out;
   }
 
   /**
@@ -429,8 +466,80 @@ export class ThreadBrowserRuntime {
   }
 
   /** Select the page a bare `page` will mean next. By name or by index. */
-  async setActive(selector: string | number): Promise<Page> {
+  async setActive(selector: string | number | Page): Promise<Page> {
     const { context } = await this.ensureReady();
+    /*
+     * A Promise here is almost always a missing await, and the message says so.
+     *
+     * `pages.find(async (p) => ...)` returns a Promise, and a program that then
+     * writes `await ms.pageName` awaits the *property* of a Promise rather than
+     * the call, getting `undefined`. Observed on live runs, twice. Playwright's
+     * own methods are promises, so awaiting everything is the habit the skill
+     * teaches; a Promise arriving at a parameter is a specific enough symptom to
+     * name the cause rather than reporting `undefined` as a page name.
+     */
+    if (selector !== null && typeof selector === "object" && typeof (selector as { then?: unknown }).then === "function") {
+      throw new Error(
+        "setActive received a Promise rather than a page, which usually means a missing `await`: " +
+        "`await browser.pages()` gives the list, and a list method with an async callback is itself a promise, " +
+        "so `const one = await pages.find(async (p) => ...)` is the shape that works.",
+      );
+    }
+    /*
+     * A page object is accepted, and it has to be.
+     *
+     * `browser.pages()` returns real pages, so the natural way to switch is to
+     * hold one and pass it: `await browser.setActive(pageIKept)`. That failed
+     * with "no page at index [object Object]; 2 open", because the parameter was
+     * only a name or an index. Observed on the first live run of the pane: the
+     * model found the Microsoft page by URL, called `setActive(ms)`, and the
+     * error taught it that its correct code was wrong.
+     *
+     * Recognised structurally rather than with `instanceof`, because a page that
+     * arrived from the sandbox is a proxy for a Playwright object and Playwright
+     * ships more than one class of that name.
+     */
+    if (isPage(selector)) {
+      if (selector.isClosed()) throw new Error("that page is closed, so it cannot be made active");
+      /*
+       * Matched by target id, not by object identity.
+       *
+       * `live.includes(selector)` is always false for a page that came back
+       * through the sandbox: the program holds a proxy and the host holds the
+       * real object, so `===` cannot hold however correct the caller is. That
+       * check refused the model's own correct program with "belongs to another
+       * browser context", which is a statement about the wrong thing.
+       *
+       * The CDP target id is the identity that survives the boundary, and it is
+       * the same one the runtime pins pages by. A page from another thread's
+       * context has a different id and is still refused, which is the check that
+       * was actually wanted.
+       */
+      const wantedId = await targetIdOf(selector).catch(() => undefined);
+      if (wantedId === undefined) throw new Error("that page has no browser target, so it cannot be made active");
+      /*
+       * The host's own handle for that target is preferred over the caller's.
+       *
+       * A page that arrived through the sandbox is a proxy; the runtime's other
+       * calls go through the real object, and mixing the two would mean two
+       * handles for one target, drifted apart the moment either navigated. So
+       * the live list is searched for the same target id and that handle is
+       * adopted. When there is none — a page the program opened itself, which
+       * the runtime only knows as a proxy — the caller's page is adopted and
+       * pinned, because it is the only handle in existence.
+       */
+      for (const candidate of context.pages().filter((p) => !p.isClosed())) {
+        if (candidate === selector) continue;
+        if ((await targetIdOf(candidate).catch(() => undefined)) === wantedId) {
+          this.active = candidate;
+          this.activeTargetId = wantedId;
+          return candidate;
+        }
+      }
+      this.active = selector;
+      this.activeTargetId = wantedId;
+      return selector;
+    }
     if (typeof selector === "string") {
       const entry = this.named.get(selector);
       if (entry && !entry.page.isClosed()) {
@@ -442,8 +551,34 @@ export class ThreadBrowserRuntime {
     }
     const live = context.pages().filter((p) => !p.isClosed());
     const page = live[selector];
-    if (!page) throw new Error(`no page at index ${selector}; ${live.length} open`);
+    if (!page) {
+      /*
+       * `undefined` gets the missing-await explanation, not an index message.
+       *
+       * It is the signature of `await promise.pageName`: awaiting a property of
+       * a Promise yields `undefined`, so the model's mistake arrives here as a
+       * page name that was never a name. Reporting "no page at index undefined"
+       * describes the symptom and hides the cause.
+       */
+      if (selector === undefined || (typeof selector === "number" && Number.isNaN(selector))) {
+        throw new Error(
+          "setActive received no page. This is usually a missing `await`: a list method with an async " +
+          "callback returns a promise, so a property read before awaiting it is undefined. " +
+          "Write `const one = await pages.find(async (p) => ...)` and then `await browser.setActive(one)`.",
+        );
+      }
+      throw new Error(`no page at index ${selector}; ${live.length} open`);
+    }
     this.active = page;
+    /*
+     * Re-pinned, which the first version forgot.
+     *
+     * `setActive(1)` moved `this.active` and left `activeTargetId` pointing at
+     * the page it just moved away from, so `step` compared the new page's target
+     * against the old id, decided the handle was stale, and re-resolved by
+     * heuristic: the exact wrong-tab failure the pinning exists to prevent.
+     */
+    this.activeTargetId = await targetIdOf(page).catch(() => undefined);
     return page;
   }
 
@@ -1220,7 +1355,41 @@ function statsOf(perceived: PerceptionResult): SnapshotStats {
  * Taken through a temporary session rather than a long-lived one, so a pinning
  * check does not itself become a resource that has to be torn down.
  */
+/**
+ * Record a page's target id on the page itself.
+ *
+ * The id has to live on the object, because the runtime sometimes receives a
+ * page back *through* the sandbox and cannot ask the browser about it: a scoped
+ * page refuses `newCDPSession`, which is the guard working as designed. A
+ * property survives that round trip, because the scoping proxy forwards reads it
+ * does not itself handle.
+ *
+ * Non-enumerable and best-effort, so a frozen or exotic page is not an error
+ * here and a serialized page does not gain a field.
+ */
+function recordTargetId(page: Page, targetId: string | undefined): void {
+  if (targetId === undefined) return;
+  try {
+    Object.defineProperty(page, "pageTargetId", { value: targetId, enumerable: false, configurable: true });
+  } catch {
+    /* A page that refuses the property simply has no recorded id. */
+  }
+}
+
 async function targetIdOf(page: Page): Promise<string | undefined> {
+  /*
+   * A recorded id is used when there is one, before asking the browser.
+   *
+   * `describePages` attaches the target id to each page it hands out, and that
+   * matters because a page which came back *through* the sandbox is a proxy
+   * whose `context()` is scoped: `newCDPSession` on it is refused, which is the
+   * guard working as designed and which would make this function fail for the
+   * one caller that legitimately has such a page. Reading the recorded id avoids
+   * needing an unguarded handle at all, and it is not a secret: the id is what
+   * the live-view tab list already publishes.
+   */
+  const recorded = (page as unknown as { pageTargetId?: unknown }).pageTargetId;
+  if (typeof recorded === "string" && recorded.length > 0) return recorded;
   const session = await page.context().newCDPSession(page);
   try {
     const info = (await session.send("Target.getTargetInfo")) as { targetInfo?: { targetId?: string } };

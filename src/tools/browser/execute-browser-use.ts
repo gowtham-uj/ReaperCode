@@ -139,7 +139,7 @@ export interface BrowserSurface {
    */
   pages(): Page[] | Promise<Page[]>;
   page(selector?: string | number): Promise<Page>;
-  setActive(selector: string | number): Promise<Page>;
+  setActive(selector: string | number | Page): Promise<Page>;
   /**
    * Write cookies and storage now, mid-program.
    *

@@ -94,6 +94,22 @@ export class RemotePageHost {
   private readonly handles = new Map<number, unknown>();
   private nextHandle = 1;
   private readonly rootHandles: Record<string, number> = {};
+  /**
+   * A root whose object is resolved on each use, rather than fixed at start.
+   *
+   * `page` is the root that has to be live: `browser.setActive(name)` changes
+   * which page a bare `page` means, and the skill documents exactly that
+   * ("`page` is always the active page"). Binding the page object once at
+   * construction made it the page that existed when the program started, so
+   * after a switch the model's `page.click()` still hit the tab it had just
+   * navigated away from. Reproduced: `await browser.setActive('hn'); await
+   * page.url()` returned the *microsoft* page.
+   *
+   * Resolved per call rather than re-pointed after every `setActive`, because
+   * re-pointing means knowing every path that can change the active page, and a
+   * page the runtime switches internally would be missed.
+   */
+  private readonly liveRoots = new Map<number, () => unknown>();
 
   /**
    * Take the objects a program's surface roots at.
@@ -102,14 +118,25 @@ export class RemotePageHost {
    * by construction: the names are the same words, and adding a root means
    * adding it in both places rather than shifting every index by one.
    */
-  constructor(primary: unknown, roots: Record<string, unknown> = {}) {
-    this.handles.set(0, primary);
+  constructor(primary: unknown | (() => unknown), roots: Record<string, unknown> = {}) {
+    if (typeof primary === "function") {
+      this.liveRoots.set(0, primary as () => unknown);
+    } else {
+      this.handles.set(0, primary);
+    }
     this.rootHandles["page"] = 0;
     for (const [name, value] of Object.entries(roots)) {
       const handle = this.nextHandle++;
       this.handles.set(handle, value);
       this.rootHandles[name] = handle;
     }
+  }
+
+  /** The object a handle names, resolving a live root at the moment of use. */
+  private targetFor(handle: number): unknown {
+    const live = this.liveRoots.get(handle);
+    if (live !== undefined) return live();
+    return this.handles.get(handle);
   }
 
   /** The handles the program's surface roots at, by name. */
@@ -127,7 +154,7 @@ export class RemotePageHost {
    * Playwright's internals.
    */
   async call(handle: number, path: CallStep[]): Promise<CallResult> {
-    const start = this.handles.get(handle);
+    const start = this.targetFor(handle);
     if (start === undefined) {
       return { kind: "error", name: "StaleHandle", message: `the object this call was made on is no longer available (handle ${handle})` };
     }
@@ -267,7 +294,17 @@ export class RemotePageHost {
     if (Array.isArray(value)) return value.map((item) => this.resolve(item));
     const candidate = value as { __reaperNode?: unknown };
     if (typeof candidate.__reaperNode !== "number") return value;
-    const held = this.handles.get(candidate.__reaperNode);
+    /*
+     * `targetFor`, not `handles.get`.
+     *
+     * Handle 0 is the live `page` root and has no entry in `handles`, so reading
+     * the map directly returned `undefined` for a program that passed `page` as
+     * an argument: `view(page)` or `page.locator(page)`. Playwright then received
+     * `undefined` where it expected an object, and the failure surfaced as
+     * "Maximum call stack size exceeded" rather than as anything about the
+     * argument.
+     */
+    const held = this.targetFor(candidate.__reaperNode);
     if (held === undefined) {
       throw new Error(`the object passed as an argument is no longer available (handle ${candidate.__reaperNode})`);
     }

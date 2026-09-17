@@ -63,7 +63,12 @@ export interface ObserveSurface {
  * a few steps later.
  */
 export class BrowserFacade {
-  constructor(private readonly runtime: ThreadBrowserRuntime) {}
+  constructor(private readonly runtime: ThreadBrowserRuntime) {
+    this.initial = runtime.activePage;
+  }
+
+  /** The page that was active when this facade was made, as a fallback. */
+  private readonly initial: Page | undefined;
 
   /*
    * Every page this hands out is SCOPED, and that is not a detail.
@@ -124,17 +129,17 @@ export class BrowserFacade {
    * runtime call, so there is one behaviour and three doors to it, and a model
    * that reaches for any of them is right rather than nearly right.
    */
-  async setActive(selector: string | number): Promise<Page> {
+  async setActive(selector: string | number | Page): Promise<Page> {
     return this.scoped(await this.runtime.setActive(selector));
   }
 
   /** The same call, spelled the way the skill's examples show it. */
-  async page(selector: string | number): Promise<Page> {
+  async page(selector: string | number | Page): Promise<Page> {
     return this.scoped(await this.runtime.setActive(selector));
   }
 
   /** The same call under the name that reads best in a program. */
-  async usePage(selector: string | number): Promise<Page> {
+  async usePage(selector: string | number | Page): Promise<Page> {
     return this.scoped(await this.runtime.setActive(selector));
   }
 
@@ -146,6 +151,22 @@ export class BrowserFacade {
   /** The page a bare `page` currently means. */
   async current(): Promise<Page> {
     return this.scoped((await this.runtime.ensureReady()).page);
+  }
+
+  /**
+   * The active page, scoped, for the host to root `page` at.
+   *
+   * Scoped here rather than left raw, because this is what the program's `page`
+   * resolves to on every call: handing back the runtime's own handle would let
+   * a program that switched tabs walk `page.context().browser().contexts()` out
+   * of its thread, which is the isolation the `scoped-page` boundary exists to
+   * hold. A fresh proxy per call is deliberate and cheap: the proxy forwards to
+   * the same real object, so identity of the *target* is preserved while the
+   * guard is applied to whatever page is active at that moment.
+   */
+  currentPage(): Page | undefined {
+    const active = this.runtime.activePage ?? this.initial;
+    return active === undefined ? undefined : this.scoped(active);
   }
 
   /** Write this thread's cookies now, mid-program. */
@@ -189,7 +210,18 @@ export class BrowserProgramHost {
      * exactly the wrong thing to root a program at.
      */
     const facade = new BrowserFacade(runtime);
-    this.inner = new RemotePageHost(page, {
+    /*
+     * `page` is resolved on every use rather than bound once.
+     *
+     * The bare `page` a program reads must be the *active* page, because
+     * `browser.setActive(name)` is documented to change what it means. Binding
+     * the page object at construction made it the page that existed when the
+     * program started, so a program that switched tabs and then used `page`
+     * drove the tab it had just left: reproduced with
+     * `await browser.setActive('hn'); await page.url()` returning the microsoft
+     * page.
+     */
+    this.inner = new RemotePageHost(() => facade.currentPage() ?? page, {
       browser: facade,
       /*
        * `pages` roots at the *method*, not at the facade.
