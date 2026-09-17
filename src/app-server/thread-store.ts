@@ -107,6 +107,22 @@ export class ThreadStore {
     return `app-${threadId}`;
   }
 
+  /** Where a thread's record lives, so a caller can remove it. */
+  pathFor(threadId: string): string {
+    if (!isValidSessionName(threadId)) throw new Error(`Invalid thread ID: ${threadId}`);
+    return path.join(this.threadsDirectory, `${threadId}.json`);
+  }
+
+  /**
+   * Forget a thread's record.
+   *
+   * A missing file is not an error: deleting a thread twice, or one whose record
+   * was never written, is the same outcome the caller asked for.
+   */
+  async delete(threadId: string): Promise<void> {
+    await rm(this.pathFor(threadId), { force: true });
+  }
+
   createMetadata(input: CreateThreadMetadataInput): ThreadMetadata {
     const threadId = input.threadId ?? randomUUID();
     if (!isValidSessionName(threadId)) throw new Error(`Invalid thread ID: ${threadId}`);

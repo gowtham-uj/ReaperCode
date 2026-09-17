@@ -751,6 +751,19 @@ export class AppServerMessageProcessor {
         await this.options.manager.closeThread(params.threadId);
         return { closed: true };
       }
+      case "thread/delete": {
+        /*
+         * Close is "stop working on this"; delete is "forget it existed". The
+         * difference the user sees is that a deleted thread's browser pages are
+         * gone and its workspace state is removed, so the shared browser does not
+         * accumulate tabs nothing can claim.
+         */
+        const params = ThreadIdParamsSchema.parse(request.params);
+        connection.subscriptions.get(params.threadId)?.();
+        connection.subscriptions.delete(params.threadId);
+        const outcome = await this.options.manager.deleteThread(params.threadId);
+        return { deleted: true, removed: outcome.removed };
+      }
       case "thread/loaded/list": {
         ThreadListParamsSchema.parse(request.params ?? {});
         const loaded = (await this.options.manager.listThreads())

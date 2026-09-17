@@ -1,3 +1,6 @@
+import { rm, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
+
 import type { ProviderCredentialStore } from "../config/provider-credentials.js";
 import type { ToolApprovalDecision } from "../tools/approval.js";
 import type { PermissionMode } from "../policy/classifier.js";
@@ -211,6 +214,40 @@ export class ReaperThreadManager {
     await thread.close();
   }
 
+  /**
+   * Delete a thread and everything it owned.
+   *
+   * Distinct from `closeThread`, which only stops it: a closed thread can be
+   * resumed and still owns its browser pages, its cookies and its downloaded
+   * files. Deleting is for a conversation the user is done with, and leaving any
+   * of that behind is how a shared browser fills up with tabs nobody can see and
+   * a workspace fills up with directories nothing references.
+   *
+   * What is removed, in the order it has to happen:
+   *
+   *   1. the browser, which releases its pages and its ownership record. This is
+   *      first because a page that outlives its thread is a page no thread can
+   *      claim, and the shared context would keep it until Chrome restarts.
+   *   2. the thread record, which is what `listThreads` reads.
+   *   3. the conversation journal.
+   *   4. the thread's own workspace directory, when it had one of its own. The
+   *      check is deliberate: a thread whose workspace is a directory the user
+   *      chose (`/work`, a repo) must not have that directory deleted, only the
+   *      `.reaper` state inside it.
+   */
+  async deleteThread(threadId: string): Promise<{ removed: string[] }> {
+    const removed: string[] = [];
+    /*
+     * The browser first, and by thread id rather than through a runtime, because
+     * the runtime may not exist after a restart while the disk state does.
+     */
+    await this.options.threadBrowsers?.closeThread(threadId).catch(() => undefined);
+    removed.push(...await closeThreadDiskState(this.store.pathFor(threadId)));
+    await this.store.delete(threadId).then(() => removed.push("thread-record")).catch(() => undefined);
+    this.threads.delete(threadId);
+    return { removed };
+  }
+
   peekThread(threadId: string): ManagedReaperThread | undefined {
     return this.threads.get(threadId);
   }
@@ -365,4 +402,47 @@ function abortError(signal: AbortSignal): Error {
   const error = new Error(typeof reason === "string" ? reason : "Operation aborted");
   error.name = "AbortError";
   return error;
+}
+
+/**
+ * Remove the files one thread left on disk.
+ *
+ * Beside its record, a thread owns a browser state file, a page-ownership
+ * record, a saved page list, an IndexedDB snapshot and a directory of downloads.
+ * They are named after the record rather than kept in a registry, so they are
+ * found by prefix, which is also why deleting the record alone would leave them
+ * behind as files nothing will ever read again.
+ *
+ * A thread's journal lives in its own workspace and is removed by the caller
+ * that knows where that is; this only handles the state under `.reaper`.
+ */
+async function closeThreadDiskState(recordPath: string): Promise<string[]> {
+  const removed: string[] = [];
+  const browserDir = join(dirname(dirname(dirname(recordPath))), "browser");
+  const threadId = recordPath.slice(recordPath.lastIndexOf("/") + 1).replace(/\.json$/, "");
+  /*
+   * Every file whose name begins with the thread id: the state file, and the
+   * three suffixes that sit beside it. Matched by prefix because that is how they
+   * are written, so a new sibling added later is cleaned up without this list
+   * having to know about it.
+   */
+  const { readdir } = await import("node:fs/promises");
+  const entries = await readdir(browserDir).catch(() => [] as string[]);
+  for (const name of entries) {
+    if (!name.startsWith(threadId)) continue;
+    const target = join(browserDir, name);
+    /*
+     * A directory here is the thread's download vault, and it is only removed
+     * when it is the vault: a name that matches the thread id but is a directory
+     * for any other reason is left alone rather than recursively deleted.
+     */
+    const info = await stat(target).catch(() => undefined);
+    if (info?.isDirectory() && name !== threadId) {
+      await rm(target, { recursive: true, force: true }).catch(() => undefined);
+    } else {
+      await rm(target, { force: true }).catch(() => undefined);
+    }
+    removed.push(name);
+  }
+  return removed;
 }
