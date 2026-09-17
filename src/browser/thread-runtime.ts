@@ -171,6 +171,78 @@ export class ThreadBrowserRuntime {
   }
 
   /**
+   * Turn on downloads for the connected browser, which CDP does not do by itself.
+   *
+   * This is the root cause of every download the tool could not do, and it was
+   * invisible because nothing errored: a link with
+   * `Content-Disposition: attachment` simply produced no `download` event, so
+   * `downloadAfter` waited its 30s and the vault stayed empty. Measured: a plain
+   * attachment link on a fresh page fired no event, with raw Playwright, outside
+   * this codebase entirely.
+   *
+   * Read out of Playwright's own source, which is where the mechanism is:
+   * `CRBrowserContext.initialize()` sends `Browser.setDownloadBehavior` for a
+   * context it was asked to CREATE, and it skips the command entirely when
+   * `acceptDownloads` is `"internal-browser-default"`. Over `connectOverCDP` the
+   * default context already exists, so it is never created by Playwright and the
+   * command is never sent. The browser is left in its own default, which is to
+   * hand the file to whatever the download directory setting says, with no event
+   * and no path this process can reach.
+   *
+   * So it is sent here. `allowAndName` is what Playwright itself uses for
+   * `acceptDownloads: "accept"` and it is the behaviour the vault needs: Chrome
+   * keeps the file and names it by its GUID, the `download` event fires with a
+   * path, and the vault copies it somewhere stable. `eventsEnabled` is what makes
+   * the event fire at all.
+   *
+   * Best effort. A browser that refuses the command still browses; it just
+   * cannot download, which is reported by `downloadAfter` when it times out
+   * rather than here, where nothing is waiting for a file yet.
+   */
+  private async enableDownloads(browser: Browser, context: BrowserContext): Promise<void> {
+    if (!this.downloads) return;
+    const directory = await this.downloads.ensure().catch(() => undefined);
+    if (directory === undefined) return;
+    try {
+      /*
+       * A page-level session, because `Browser.setDownloadBehavior` is accepted
+       * on any session of the connection and the browser object exposes no
+       * session of its own. The first page is enough: the command is
+       * browser-scoped, not page-scoped, so where it is sent from does not
+       * change what it does.
+       */
+      const page = context.pages().find((candidate) => !candidate.isClosed());
+      if (page === undefined) return;
+      const session = await context.newCDPSession(page);
+      await session.send("Browser.setDownloadBehavior", {
+        behavior: "allowAndName",
+        downloadPath: directory,
+        eventsEnabled: true,
+      });
+      await session.detach().catch(() => undefined);
+      this.downloadsEnabled = true;
+    } catch {
+      /* Reported later, by the wait that times out, with a message about the file. */
+    }
+    void browser;
+  }
+
+  /** True when the browser accepted the download command on this connection. */
+  private downloadsEnabled = false;
+
+  /**
+   * Whether downloads can start a file at all on this connection.
+   *
+   * Public because the tool has to tell the two failures apart: a page that
+   * produced no file, and a browser that was never able to. They need opposite
+   * responses from the model, and read from a live mission the difference cost
+   * ten tool calls clicking a link that was never the problem.
+   */
+  get downloadsAreEnabled(): boolean {
+    return this.downloadsEnabled;
+  }
+
+  /**
    * Attach if not already attached, and return the live handles.
    *
    * Concurrency-safe by construction: `connecting` holds the in-flight promise
@@ -205,6 +277,17 @@ export class ThreadBrowserRuntime {
    * that sends a model hunting for a cause that is not there.
    */
   private lastHealthNote: string | undefined;
+
+  /**
+   * Set when the last page resolution had to open a page from nothing.
+   *
+   * Read and cleared by the tool result, so a step that closed this thread's
+   * last page is followed by a sentence saying a blank was opened and why. Read
+   * from a live mission, where the agent closed all its pages and then reported
+   * that "the pages keep getting recreated as about:blank" with no way to find
+   * out who was creating them.
+   */
+  private pageWasAutoCreated = false;
 
   /**
    * Attach if needed, without resolving or changing the active page.
@@ -374,6 +457,7 @@ export class ThreadBrowserRuntime {
       // Applied per page rather than to the context, which is shared.
       void this.options.viewport;
     }
+    await this.enableDownloads(browser, context);
     /*
      * The thread's saved cookies are seeded into the context, so a restart does
      * not cost every login. A missing file is skipped and the context keeps
@@ -563,8 +647,20 @@ export class ThreadBrowserRuntime {
       if (candidate.isClosed()) continue;
       if (await this.owns(candidate)) mine.push(candidate);
     }
+    /*
+     * A page is made only when the thread has none, and the fact is recorded so
+     * the step can say so.
+     *
+     * This is the other half of the blank-page confusion: the agent closed every
+     * page it owned, and the next call silently made one. It is not avoidable,
+     * because a thread with no page cannot be asked to do anything, but it is
+     * explainable, and `pageWasAutoCreated` is what lets the receipt explain it
+     * rather than leave a tab that appeared from nowhere.
+     */
+    const created = mine.length === 0;
     const page = mine[0] ?? (await context.newPage());
-    if (mine.length === 0) await this.claimOwn(page);
+    if (created) await this.claimOwn(page);
+    this.pageWasAutoCreated = created;
     /*
      * Settings applied to whichever page this resolves to.
      *
@@ -643,17 +739,55 @@ export class ThreadBrowserRuntime {
    * prevent: it looks like a page, it reports its old URL, and every call on it
    * rejects.
    */
-  private async replaceClosedPage(): Promise<Page | undefined> {
+  private async replaceClosedPage(): Promise<{ page?: Page; created: boolean }> {
     this.active = undefined;
     this.activeTargetId = undefined;
     const context = this.context;
-    if (!context) return undefined;
-    const live = context.pages().filter((candidate) => !candidate.isClosed());
-    const page = live[0] ?? (await context.newPage().catch(() => undefined));
-    if (!page) return undefined;
+    if (!context) return { created: false };
+    /*
+     * Only this thread's own pages are candidates.
+     *
+     * This took `context.pages()[0]`, and the context is now the shared default
+     * one, so a thread that closed its last page adopted whatever tab was first
+     * in the browser, which belonged to another thread or to a probe. The thread
+     * would then drive a page it never opened, and the tab's real owner would
+     * find its page had moved under it. `owns` is the same check
+     * `resolveActivePage` uses, for the same reason.
+     */
+    const mine: Page[] = [];
+    for (const candidate of context.pages()) {
+      if (candidate.isClosed()) continue;
+      if (await this.owns(candidate)) mine.push(candidate);
+    }
+    if (mine.length > 0) {
+      const page = mine[0]!;
+      this.active = page;
+      this.activeTargetId = await targetIdOf(page).catch(() => undefined);
+      return { page, created: false };
+    }
+    /*
+     * Nothing of this thread's is left, so one is made.
+     *
+     * Reported to the caller rather than done quietly, because a page appearing
+     * that nobody asked for is the thing the model cannot explain. Read from a
+     * live mission, where the agent closed all twelve of its pages and then
+     * watched blanks "keep getting recreated", concluded "the harness always
+     * keeps at least one page open", and gave up on reaching zero. It was right
+     * about the mechanism and wrong about the reason: the page exists because a
+     * thread with no page cannot be asked to do anything, and the next call
+     * would have failed instead. Saying so turns an unexplained tab into a
+     * documented one.
+     */
+    const page = await context.newPage().catch(() => undefined);
+    if (!page) return { created: false };
+    await this.claimOwn(page);
+    await this.applyControls(page).catch(() => undefined);
+    const name = this.anonymousName();
+    this.named.set(name, { name, page, openedAt: Date.now() });
     this.active = page;
     this.activeTargetId = await targetIdOf(page).catch(() => undefined);
-    return page;
+    recordTargetId(page, this.activeTargetId);
+    return { page, created: true };
   }
 
   /** Open a page, optionally naming it. Returns the RAW handle, for the runtime. */
@@ -1410,6 +1544,25 @@ export class ThreadBrowserRuntime {
     return note;
   }
 
+  /**
+   * Take the blank-page note, if the last resolution had to open one.
+   *
+   * Read once and cleared, for the same reason the health note is: a sentence
+   * that repeats on every step stops being read. This one matters on exactly the
+   * step after a close-all, which is the step where the model is asking how many
+   * pages are left.
+   */
+  takePageCreationNote(): string | undefined {
+    if (!this.pageWasAutoCreated) return undefined;
+    this.pageWasAutoCreated = false;
+    const count = this.context?.pages().filter((page) => !page.isClosed()).length ?? 0;
+    return (
+      `This thread had no pages left, so a blank page was opened to keep it usable. ` +
+      `A thread with no page cannot run a program, which is why one always exists. ` +
+      `The browser now holds ${count} page(s); a closed page stays closed unless you open another.`
+    );
+  }
+
   /** The whole page, as the model should read it. */
   async view(options: PageViewOptions = {}): Promise<{
     text: string;
@@ -1861,7 +2014,7 @@ export class ThreadBrowserRuntime {
        * the stale handle, which is what makes "a new page" actually new.
        */
       if (/Target (page|closed)|has been closed|Session closed|page has been closed/i.test((error as Error).message)) {
-        const replaced = await this.replaceClosedPage().catch(() => undefined);
+        const replaced = await this.replaceClosedPage().catch(() => ({ created: false }) as { page?: Page; created: boolean });
         return {
           result: undefined,
           receipt: {
@@ -1870,13 +2023,21 @@ export class ThreadBrowserRuntime {
             after: this.observer.revision,
             navigated: false,
             urlBefore: "",
-            urlAfter: replaced?.url() ?? "",
+            urlAfter: replaced.page?.url() ?? "",
             changes: "",
             wholesale: false,
             elapsedMs: Date.now() - stepStarted,
-            note: replaced
-              ? `The page was closed, so the step could not be observed. A new page is open at ${replaced.url()} and the browser is connected: continue there.`
-              : `The page was closed and could not be replaced, so the browser needs re-attaching.`,
+            note: replaced.page === undefined
+              ? `The page was closed and could not be replaced, so the browser needs re-attaching.`
+              : replaced.created
+                ? /*
+                   * Named as created, because it was, and a page the model did
+                   * not open is otherwise a mystery. The count of its remaining
+                   * pages is the fact the model is usually trying to establish
+                   * when it closes things.
+                   */
+                  `The page was closed, so the step could not be observed. This thread had no pages left, so one was opened for you at ${replaced.page.url()}; nothing else was touched.`
+                : `The page was closed, so the step could not be observed. Another of this thread's pages is now active at ${replaced.page.url()}: continue there.`,
           },
         };
       }

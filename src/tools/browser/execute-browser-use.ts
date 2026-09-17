@@ -502,9 +502,21 @@ function controlSurface(runtime: ThreadBrowserRuntime): ControlSurface {
       }
       const file = runtime.downloadedFiles[runtime.downloadedFiles.length - 1];
       if (file === undefined) {
+        /*
+         * The refusal names the two causes that are actually distinguishable
+         * from here, because they need opposite responses. A browser that never
+         * accepted the download command will never produce a file however many
+         * times the click is retried, and telling the model to "check the
+         * control" would send it round the loop the mission already ran: ten
+         * tool calls clicking a link that was never the problem.
+         */
         throw new Error(
-          "no download started. The click landed but the page produced no file: check that it hit a real download control, " +
-          "and that the page does not want a dialog answered first.",
+          runtime.downloadsAreEnabled
+            ? "no download started. The click landed but the page produced no file: check that it hit a real download control, " +
+              "and that the page does not want a dialog answered first."
+            : "downloads are not enabled on this browser, so the click could not produce a file. " +
+              "This is a fault in the browser connection rather than in the page: report it, and use download() to " +
+              "check the vault in case the file is already there from an earlier step.",
         );
       }
       return { name: file.name, path: file.path, bytes: file.bytes };
@@ -557,12 +569,14 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
      * set would repeat it on every later step until something else tripped it.
      */
     const health = runtime.takeHealthNote();
+    const created = runtime.takePageCreationNote();
     return {
       output:
         `${view.text}\n\n[${stats.lines} lines, ${stats.chars} chars, ${stats.elements} elements]` +
         `\n(REV ${runtime.observer.revision} - pass expected_revision with your next program)` +
         (flows.length > 0 ? `\n\n${flows.join("\n")}` : "") +
-        (health !== undefined ? `\n\nBROWSER: ${health}` : ""),
+        (health !== undefined ? `\n\nBROWSER: ${health}` : "") +
+        (created !== undefined ? `\n\nPAGES: ${created}` : ""),
       outcome: "SUCCESS",
       rev: runtime.observer.revision,
     };
@@ -864,6 +878,8 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
    */
   const health = runtime.takeHealthNote();
   if (health !== undefined) lines.push("", `BROWSER: ${health}`);
+  const created = runtime.takePageCreationNote();
+  if (created !== undefined) lines.push("", `PAGES: ${created}`);
 
   return {
     output: lines.join("\n"),
