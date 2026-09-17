@@ -22,7 +22,7 @@ describe("thread workspace controls", () => {
 
   it("creates either a fresh isolated thread or a thread pointed at an existing project", async () => {
     const user = userEvent.setup();
-    const onCreate = vi.fn(async () => undefined);
+    const onCreate = vi.fn(async () => "test-thread");
     render(
       <ThreadList
         client={client}
@@ -62,7 +62,7 @@ describe("thread workspace controls", () => {
         threads={[]}
         loading={false}
         onRefresh={vi.fn()}
-        onCreate={vi.fn(async () => undefined)}
+        onCreate={vi.fn(async () => "test-thread")}
         onSwitch={vi.fn(async () => undefined)}
       />,
     );
@@ -88,7 +88,7 @@ describe("thread workspace controls", () => {
         ]}
         loading={false}
         onRefresh={vi.fn()}
-        onCreate={vi.fn(async () => undefined)}
+        onCreate={vi.fn(async () => "test-thread")}
         onSwitch={onSwitch}
       />,
     );

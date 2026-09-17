@@ -65,7 +65,7 @@ export interface AppContextValue {
   threads: ThreadSummary[];
   threadsLoading: boolean;
   refreshThreads(): void;
-  createThread(input: { workspaceRoot?: string; title?: string }): Promise<void>;
+  createThread(input: { workspaceRoot?: string; title?: string }): Promise<string>;
   switchThread(id: string): Promise<void>;
   /** Remove a thread, its workspace and its browser pages. */
   deleteThread(id: string): Promise<void>;
@@ -174,9 +174,19 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
     void catalog.refresh(client);
   }, [client]); // Catalog object changes when data changes; refresh only on connection identity.
 
-  const createThread = useCallback(async (input: { workspaceRoot?: string; title?: string }): Promise<void> => {
-    await session.createThread(input);
+  /**
+   * Start a thread and answer with its id.
+   *
+   * The id is returned rather than only stored, because a caller that has just
+   * created a thread usually wants to act on it immediately: the first message
+   * creates the thread and then starts a turn in it, and reading the id back out
+   * of state would race React's update. `session.createThread` already answers
+   * with it, so passing it through costs nothing.
+   */
+  const createThread = useCallback(async (input: { workspaceRoot?: string; title?: string }): Promise<string> => {
+    const id = await session.createThread(input);
     refreshThreads();
+    return id;
   }, [refreshThreads, session]);
   const switchThread = useCallback(async (id: string): Promise<void> => {
     await session.switchThread(id);
@@ -194,6 +204,24 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
    */
   const deleteThread = useCallback(async (id: string): Promise<void> => {
     if (!client) return;
+    /*
+     * Attach to the thread before deleting it.
+     *
+     * The gateway requires a tab to be watching a thread before it may mutate
+     * one, which is the boundary that stops a page on another origin renaming or
+     * repointing a conversation it never opened. `thread/delete` is subject to
+     * it, and a tab that has not opened a thread is not watching it, so deleting
+     * a row straight from the sidebar failed with "Not attached to this thread"
+     * while every other mutation worked: measured, the call went out and the row
+     * stayed.
+     *
+     * The fix is to genuinely attach rather than to exempt the method. A resume
+     * with `subscribe: false` registers this tab as a watcher without pulling
+     * the thread's transcript into a session that is not showing it, and it is
+     * the same call opening the thread makes, so the boundary is honoured rather
+     * than bypassed.
+     */
+    await client.call("thread/resume", { threadId: id, subscribe: false }).catch(() => undefined);
     await client.call("thread/delete", { threadId: id });
     if (threadIdRef.current === id) session.clearThread();
     refreshThreads();
@@ -257,8 +285,17 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
          * because `flush` reads it synchronously and a later entry in the same
          * flush would not see a state update.
          */
-        await createThread({ title: titleFromText(entry.text) });
-        id = threadIdRef.current;
+        /*
+         * The id comes from the call, not from the ref.
+         *
+         * `session.createThread` sets state, and a ref is not updated by a state
+         * setter, so reading `threadIdRef.current` here returned `undefined`:
+         * `turn/start` then went out with a `prompt` and no `threadId` and was
+         * rejected as invalid, so the thread was created and the agent never
+         * ran. Measured by watching the frame the UI sent.
+         */
+        id = await createThread({ title: titleFromText(entry.text) });
+        threadIdRef.current = id;
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : "Could not start a conversation");
         return false;

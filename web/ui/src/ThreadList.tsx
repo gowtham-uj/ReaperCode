@@ -69,7 +69,7 @@ export function ThreadList({ client, activeThreadId, threads, loading, onRefresh
   threads: ThreadSummary[];
   loading: boolean;
   onRefresh(): void;
-  onCreate(input: { workspaceRoot?: string; title?: string }): Promise<void>;
+  onCreate(input: { workspaceRoot?: string; title?: string }): Promise<string>;
   onSwitch(id: string): Promise<void>;
   /** Remove a thread, its workspace and its browser pages. */
   onDelete?(id: string): Promise<void>;
