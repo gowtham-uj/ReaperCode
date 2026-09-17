@@ -87,6 +87,42 @@ code, pre, [data-diff], [data-read], [data-terminal] { font-family: var(--ds-fon
 .thread-entry-path { display: flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; color: var(--dsw-alias-label-caption); font-size: 11px; line-height: 16px; white-space: nowrap; }
 .thread-entry-project { overflow: hidden; text-overflow: ellipsis; }
 .thread-entry-path > span:last-child { flex: none; }
+/*
+ * A thread row: the entry and its delete control, side by side.
+ *
+ * The row is a flex container so the delete button can sit at the trailing
+ * edge without overlapping the name, which is what an absolutely positioned
+ * control would do on a narrow sidebar.
+ */
+.thread-row { position: relative; display: flex; align-items: center; gap: 2px; }
+.thread-row .thread-entry { flex: 1; min-width: 0; }
+/*
+ * Delete is always visible rather than revealed on hover.
+ *
+ * It is dimmed to the caption colour and brightens on hover or focus, so it
+ * reads as secondary without being hidden: a control that only exists under the
+ * pointer cannot be reached by keyboard and cannot be found by anyone who does
+ * not already know it is there. It turns red on hover, which is the one place
+ * in this sidebar where colour carries a warning.
+ */
+.thread-delete {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--dsw-alias-label-caption);
+  cursor: pointer;
+}
+.thread-delete:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-state-error-primary, #ef4444); }
+.thread-delete:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 1px; }
+.thread-delete:disabled { opacity: .4; cursor: default; }
+
 .sidebar-empty { padding: 12px; color: var(--dsw-alias-label-caption); font-size: 12px; text-align: center; }
 .new-thread-button { order: -1; display: flex; flex: none; align-items: center; justify-content: center; gap: 6px; height: 38px; margin: 0 2px 8px; padding: 8px 16px; overflow: hidden; border: .5px solid var(--dsw-alias-border-l3); border-radius: 12px; background: var(--dsw-alias-button-elevated-fill); color: var(--dsw-alias-label-primary); font-size: 14px; font-weight: 500; line-height: 22px; cursor: pointer; }
 .new-thread-button:hover { background: var(--dsw-alias-button-floating-hover); }

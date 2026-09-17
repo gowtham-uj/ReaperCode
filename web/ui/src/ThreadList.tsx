@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { JsonRpcClient } from "@reaper/web-shared";
 
+import { TrashIcon } from "./icons.jsx";
+
 export interface ThreadSummary {
   id: string;
   name?: string;
@@ -61,7 +63,7 @@ export function threadAgeLabel(updatedAt: string | undefined, now: number): stri
   return new Date(stamp).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-export function ThreadList({ client, activeThreadId, threads, loading, onRefresh, onCreate, onSwitch, collapsed = false, creationRequest = 0, onRequestCreate }: {
+export function ThreadList({ client, activeThreadId, threads, loading, onRefresh, onCreate, onSwitch, onDelete, collapsed = false, creationRequest = 0, onRequestCreate }: {
   client: JsonRpcClient | undefined;
   activeThreadId: string | undefined;
   threads: ThreadSummary[];
@@ -69,6 +71,8 @@ export function ThreadList({ client, activeThreadId, threads, loading, onRefresh
   onRefresh(): void;
   onCreate(input: { workspaceRoot?: string; title?: string }): Promise<void>;
   onSwitch(id: string): Promise<void>;
+  /** Remove a thread, its workspace and its browser pages. */
+  onDelete?(id: string): Promise<void>;
   collapsed?: boolean;
   creationRequest?: number;
   onRequestCreate?(): void;
@@ -194,7 +198,14 @@ export function ThreadList({ client, activeThreadId, threads, loading, onRefresh
         ) : (
           <ul className="thread-list">
             {threads.map((entry) => (
-              <li key={entry.id}>
+              <li key={entry.id} className="thread-row">
+                {/*
+                  The row is a div rather than a button, because it holds two
+                  buttons now and a button inside a button is invalid HTML that
+                  browsers resolve by dropping one of them. The click target is
+                  the larger of the two, so the row still behaves like the single
+                  control it mostly is.
+                */}
                 <button
                   className="thread-entry"
                   type="button"
@@ -205,6 +216,28 @@ export function ThreadList({ client, activeThreadId, threads, loading, onRefresh
                 >
                   <span className="thread-entry-name">{threadLabel(entry, entry.id)}</span>
                   <ThreadEntryMeta entry={entry} now={now} />
+                </button>
+                {/*
+                  Delete, at the trailing edge of the card.
+                  *
+                  * Always present rather than revealed on hover: a control that
+                  * exists only under the pointer cannot be reached with a
+                  * keyboard and cannot be found by anyone who does not already
+                  * know it is there. `Delete` asks once and then removes the
+                  * thread, its workspace and its browser pages.
+                */}
+                <button
+                  className="thread-delete"
+                  type="button"
+                  disabled={busy}
+                  aria-label={`Delete ${threadLabel(entry, entry.id)}`}
+                  title="Delete this thread"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void onDelete?.(entry.id);
+                  }}
+                >
+                  <TrashIcon />
                 </button>
               </li>
             ))}

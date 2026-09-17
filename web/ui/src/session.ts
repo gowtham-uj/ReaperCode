@@ -34,6 +34,8 @@ export interface Session {
   retryNow(): void;
   createThread(input?: { workspaceRoot?: string; title?: string }): Promise<string>;
   switchThread(id: string): Promise<void>;
+  /** Forget the open thread, leaving no thread selected. */
+  clearThread(): void;
   close(): void;
 }
 
@@ -104,28 +106,6 @@ export function useSession(url: string, store: TranscriptStore, handlers: Sessio
     }
   }, [store]);
 
-  /**
-   * The most recent thread that has never run a turn, or `undefined`.
-   *
-   * Read from the server rather than from `threads` so it does not depend on
-   * the sidebar having finished its own fetch — `attach` runs on connect, and
-   * the list may not have landed yet. A failure here is not worth surfacing:
-   * the caller simply creates a thread instead.
-   */
-  const findUnusedThread = useCallback(async (active: JsonRpcClient): Promise<string | undefined> => {
-    try {
-      const result = await active.call<{ data?: Array<Record<string, unknown>> }>("thread/list", { limit: 100 });
-      const entries = result.data ?? [];
-      // The list arrives newest-first, so the first match is the most recent
-      // scratch thread — which is the one the user most likely meant.
-      const entry = entries.find((candidate) => candidate.hasTurns === false && candidate.ephemeral !== true);
-      const id = entry?.id;
-      return typeof id === "string" && id ? id : undefined;
-    } catch {
-      return undefined;
-    }
-  }, []);
-
   const startFresh = useCallback(async (
     active: JsonRpcClient,
     input: { workspaceRoot?: string; title?: string },
@@ -174,36 +154,22 @@ export function useSession(url: string, store: TranscriptStore, handlers: Sessio
       }
     }
     /*
-     * Nothing to resume, so this is a first visit or a discarded thread. An
-     * unused scratch thread from an earlier visit is reused rather than
-     * creating another: every load used to mint one, so the sidebar filled with
-     * a column of identically named rows and no way to tell which was which.
-     * A thread only counts as unused if no turn ever ran in it — one with turns
-     * is somebody's conversation, and opening it uninvited would be worse than
-     * a duplicate row.
+     * Nothing to resume, and nothing is created.
+     *
+     * This used to reuse an unused scratch thread and, failing that, mint one
+     * named "New chat". Both were wrong for the same reason: a thread is a
+     * conversation, and a conversation starts when somebody says something. The
+     * eager versions meant every page load and every deleted thread produced a
+     * row the user never asked for, so the sidebar filled with empty chats and
+     * deleting one appeared to spawn another.
+     *
+     * So a session with no thread to resume simply has none, and the UI shows
+     * the empty state. The first message is what creates a thread, in
+     * `sendFirstMessage` below.
      */
-    const reusable = await findUnusedThread(active);
-    if (reusable) {
-      try {
-        const resumed = await active.call<ResumeResult>("thread/resume", {
-          threadId: reusable,
-          subscribe: true,
-          afterSequence: 0,
-        });
-        store.seedThread(resumed.thread ?? {});
-        setThreadId(reusable);
-        rememberThread(reusable);
-        return;
-      } catch {
-        // Fall through and start a fresh one; a thread that cannot be resumed
-        // is exactly the case where creating is the right answer.
-      }
-    }
-    // Auto-attach has no user-supplied name, and a thread with no title falls
-    // through to "Untitled thread" in the sidebar. Name it for what it is so
-    // the list stays readable; the user can still rename it.
-    await startFresh(active, { title: "New chat" });
-  }, [backfill, drain, findUnusedThread, setThreadId, startFresh, store]);
+    setThreadId(undefined);
+    store.hydrate({});
+  }, [store]);
 
   const scheduleRetry = useCallback((): void => {
     if (disposedRef.current || retryTimerRef.current !== undefined) return;
@@ -312,9 +278,24 @@ export function useSession(url: string, store: TranscriptStore, handlers: Sessio
     }
   }, [backfill, drain, setThreadId, store]);
 
+  /**
+   * Drop the open thread without opening another.
+   *
+   * Used when the thread that was open is deleted: the session has no thread,
+   * the UI shows the empty state, and the next message starts a new one. Doing
+   * nothing here would leave `threadId` pointing at a record that no longer
+   * exists, so the composer would send into a thread the server has forgotten.
+   */
+  const clearThread = useCallback((): void => {
+    forgetThread();
+    setThreadId(undefined);
+    store.hydrate({});
+  }, [setThreadId, store]);
+
   return useMemo(() => ({
     status,
     threadId,
+    clearThread,
     client,
     catchingUp,
     recovered,

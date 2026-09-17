@@ -244,6 +244,17 @@ export class ReaperThreadManager {
     await this.options.threadBrowsers?.closeThread(threadId).catch(() => undefined);
     removed.push(...await closeThreadDiskState(this.store.pathFor(threadId)));
     await this.store.delete(threadId).then(() => removed.push("thread-record")).catch(() => undefined);
+    /*
+     * A sweep right after the records are gone.
+     *
+     * `closeThread` closes the pages this thread's record names, but a page that
+     * was never recorded (opened in a step that did not reach a save) is an
+     * orphan the moment the record disappears, and the only thing that can find
+     * it is a pass that compares the browser against every remaining record.
+     * Waiting for the timer would leave it for up to five minutes, which during a
+     * delete-heavy cleanup is how the accumulation happens.
+     */
+    void this.options.threadBrowsers?.sweepOrphans().catch(() => undefined);
     this.threads.delete(threadId);
     return { removed };
   }

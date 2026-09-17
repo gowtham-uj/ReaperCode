@@ -18,7 +18,12 @@
  * to nothing else. A thread that wants to start over closes its own context.
  */
 
+import { readFile } from "node:fs/promises";
+import { dirname } from "node:path";
+
 import { BrowserControlRegistry } from "../browser/control-lease.js";
+import { forgetPage } from "../browser/page-ownership.js";
+import { readOwnedTargetIds, sweepOrphanPages, type OrphanSweepResult } from "../browser/orphan-reaper.js";
 import { ThreadBrowserRuntime } from "../browser/thread-runtime.js";
 import type { TransitionDb } from "../browser/transition-db.js";
 
@@ -46,9 +51,22 @@ export interface ThreadBrowsersOptions {
    * (`statePathFor`) rather than the recipe.
    */
   flows?: TransitionDb | undefined;
+  /**
+   * The workspace root the ownership records live under.
+   *
+   * Passed in rather than derived so a caller that moves its `.reaper` root has
+   * one place to say so. Defaults to the directory the state files imply, which
+   * is what every caller already means.
+   */
+  workspaceRoot?: string;
+  /** How long the orphan sweep waits to attach. Overridable for a test. */
+  sweepAttachTimeoutMs?: number;
 }
 
 const DEFAULT_IDLE_MS = 10 * 60_000;
+
+/** How often pages nobody owns are closed. See `sweepOrphans`. */
+const ORPHAN_SWEEP_MS = 5 * 60_000;
 
 export class ThreadBrowsers {
   private readonly runtimes = new Map<string, ThreadBrowserRuntime>();
@@ -57,6 +75,8 @@ export class ThreadBrowsers {
   private reaper: NodeJS.Timeout | undefined;
   /** Set by `close()`. See `forThread` for why a late request must not attach. */
   private closed = false;
+  /** The orphan sweep's timer. See `start`. */
+  private sweeper: NodeJS.Timeout | undefined;
   /**
    * Who may drive each thread's browser.
    *
@@ -80,6 +100,21 @@ export class ThreadBrowsers {
    */
   get cdpUrl(): string {
     return this.options.cdpUrl;
+  }
+
+  /**
+   * The workspace root the ownership records live under.
+   *
+   * Derived from where a thread's state file goes, rather than a second setting
+   * that could disagree with it: the records are written beside the state files,
+   * so the directory that holds one holds the other.
+   */
+  private get workspaceRoot(): string {
+    if (this.options.workspaceRoot !== undefined) return this.options.workspaceRoot;
+    const sample = this.options.statePathFor?.("probe");
+    if (sample === undefined) return process.cwd();
+    // `<root>/.reaper/browser/probe.json` -> `<root>`
+    return dirname(dirname(dirname(sample)));
   }
 
   /**
@@ -160,6 +195,74 @@ export class ThreadBrowsers {
       void this.reap(idleMs);
     }, Math.max(60_000, Math.floor(idleMs / 4)));
     this.reaper.unref?.();
+
+    /*
+     * The orphan sweep, on its own slower timer.
+     *
+     * Separate from the idle reaper because it answers a different question:
+     * that one closes browsers nobody is *using*, this one closes pages nobody
+     * *owns*. A page can be owned by a thread that has been idle for an hour and
+     * must not be touched; a page can be an orphan one second after its thread
+     * is deleted. Coupling them would mean either closing live work or leaving
+     * orphans for up to the idle interval.
+     *
+     * Five minutes, and it does not attach unless there is something to check:
+     * the cost when there are no orphans is a directory read.
+     */
+    this.sweeper = setInterval(() => {
+      void this.sweepOrphans();
+    }, ORPHAN_SWEEP_MS);
+    this.sweeper.unref?.();
+  }
+
+  /**
+   * Close pages no thread owns.
+   *
+   * Runs on a timer so the browser cannot quietly fill up between restarts, and
+   * is called directly after a thread is deleted so the common case is immediate
+   * rather than eventually.
+   *
+   * It attaches to the browser to do this, which is the one cost worth naming: a
+   * browser that is already too clogged to attach to cannot be swept, so the
+   * first cleanup after a bad run needs a restart. Every run after that is kept
+   * clear by this pass, which is the property that matters going forward.
+   */
+  async sweepOrphans(): Promise<OrphanSweepResult | undefined> {
+    if (this.closed) return undefined;
+    const owned = await readOwnedTargetIds(this.workspaceRoot).catch(() => undefined);
+    if (owned === undefined) return undefined;
+    /*
+     * Only attach when there are ownership records to check against. A workspace
+     * with none has nothing to compare, and `sweepOrphanPages` refuses to act in
+     * that state anyway, so paying for an attach to learn that would be waste.
+     */
+    if (owned.size === 0) return undefined;
+
+    const { chromium } = await import("playwright");
+    let browser;
+    try {
+      browser = await chromium.connectOverCDP(this.options.cdpUrl, { timeout: this.options.sweepAttachTimeoutMs ?? 30_000 });
+    } catch (error) {
+      /*
+       * A browser that cannot be attached to is the failure this pass exists to
+       * prevent, and by the time it happens there is nothing to do but report
+       * it: nothing here can attach, so nothing here can clean up.
+       */
+      return {
+        examined: 0,
+        closed: 0,
+        kept: 0,
+        closedIds: [],
+        errors: [`could not attach to sweep orphan pages: ${(error as Error).message}`],
+      };
+    }
+    try {
+      const result = await sweepOrphanPages(browser, owned);
+      for (const id of result.closedIds) forgetPage(id);
+      return result;
+    } finally {
+      await browser.close().catch(() => undefined);
+    }
   }
 
   /** Close the browsers of threads that have not been used for a while. */
@@ -186,7 +289,77 @@ export class ThreadBrowsers {
     this.lastUsed.delete(threadId);
     const runtime = this.runtimes.get(threadId);
     this.runtimes.delete(threadId);
-    await runtime?.close().catch(() => undefined);
+    if (runtime !== undefined) {
+      await runtime.close().catch(() => undefined);
+      return;
+    }
+    /*
+     * No runtime: this thread is being deleted after a restart, and its pages
+     * are still open in the browser.
+     *
+     * This is the case that leaked. `close()` on a runtime closes that runtime's
+     * pages, but a restarted server has no runtime for a thread it has not
+     * resumed, so nothing closed anything and the pages stayed. Measured: the
+     * mission's runs left twenty-six pages open, and `connectOverCDP` stopped
+     * being able to complete its handshake, because every attach enumerates
+     * every target in the browser.
+     *
+     * The ownership record on disk names the pages, and a target id is what the
+     * browser answers to, so the pages can be closed without a runtime at all.
+     */
+    await this.closeRecordedPages(threadId).catch(() => undefined);
+  }
+
+  /**
+   * Close the pages a thread's own record names, with no runtime involved.
+   *
+   * Best-effort by design: a delete must not fail because the browser is down,
+   * and the next delete or the next reaper pass will try again. What it must not
+   * do is leave the pages, which is what it did before.
+   */
+  private async closeRecordedPages(threadId: string): Promise<void> {
+    const path = this.options.statePathFor?.(threadId);
+    if (path === undefined) return;
+    let targetIds: string[] = [];
+    try {
+      const raw = await readFile(`${path}.pages-owner.json`, "utf8");
+      const parsed = JSON.parse(raw) as { targetIds?: unknown };
+      if (Array.isArray(parsed.targetIds)) targetIds = parsed.targetIds.filter((id): id is string => typeof id === "string");
+    } catch {
+      return;
+    }
+    if (targetIds.length === 0) return;
+
+    const { chromium } = await import("playwright");
+    const browser = await chromium.connectOverCDP(this.options.cdpUrl, { timeout: 30_000 });
+    try {
+      const context = browser.contexts()[0];
+      if (context === undefined) return;
+      const wanted = new Set(targetIds);
+      for (const page of context.pages()) {
+        if (page.isClosed()) continue;
+        /*
+         * The id is asked for rather than trusted from the page object, because
+         * these pages were opened by a process that is gone and carry no stamp.
+         */
+        const session = await context.newCDPSession(page).catch(() => undefined);
+        if (session === undefined) continue;
+        const info = await session.send("Target.getTargetInfo").catch(() => undefined);
+        await session.detach().catch(() => undefined);
+        const id = (info as { targetInfo?: { targetId?: string } } | undefined)?.targetInfo?.targetId;
+        if (id !== undefined && wanted.has(id)) {
+          await page.close().catch(() => undefined);
+          /*
+           * Ownership is released with the page. A closed tab that keeps its
+           * owner would make the next page to reuse that id answer to a thread
+           * that has been deleted.
+           */
+          forgetPage(id);
+        }
+      }
+    } finally {
+      await browser.close().catch(() => undefined);
+    }
   }
 
   /** How many threads currently hold a browser, for status and tests. */
@@ -205,6 +378,8 @@ export class ThreadBrowsers {
     this.closed = true;
     if (this.reaper) clearInterval(this.reaper);
     this.reaper = undefined;
+    if (this.sweeper) clearInterval(this.sweeper);
+    this.sweeper = undefined;
     const all = [...this.runtimes.values()];
     this.runtimes.clear();
     this.lastUsed.clear();

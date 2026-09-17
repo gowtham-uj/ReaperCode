@@ -940,15 +940,40 @@ export class ThreadBrowserRuntime {
     if (this.ownershipWrite === undefined) {
       this.ownershipWrite = (async () => {
         const merged = new Set<string>(this.claimed);
+        /*
+         * Names are written beside ownership, keyed by target id.
+         *
+         * They used to live only in memory, keyed by the `Page` object, which a
+         * reconnect replaces: `resetHandles()` cleared the map and every recovered
+         * page came back nameless, so `setActive("npm")` failed on a tab that was
+         * plainly open. The mission agent hit this and reported it itself. A
+         * target id is what survives a reconnect, so that is what a name has to
+         * be stored against.
+         */
+        const names: Record<string, string> = {};
+        for (const [name, entry] of this.named) {
+          if (entry.page.isClosed()) continue;
+          const id = (entry.page as unknown as { pageTargetId?: unknown }).pageTargetId;
+          if (typeof id === "string" && id.length > 0) names[id] = name;
+        }
         try {
-          const parsed = JSON.parse(await readFile(ThreadBrowserRuntime.ownershipPath(path), "utf8")) as { targetIds?: unknown };
+          const parsed = JSON.parse(await readFile(ThreadBrowserRuntime.ownershipPath(path), "utf8")) as {
+            targetIds?: unknown;
+            names?: unknown;
+          };
           if (Array.isArray(parsed.targetIds)) {
             for (const id of parsed.targetIds) if (typeof id === "string") merged.add(id);
+          }
+          if (parsed.names !== null && typeof parsed.names === "object") {
+            for (const [id, name] of Object.entries(parsed.names as Record<string, unknown>)) {
+              // A name this session has just assigned wins over the stored one.
+              if (typeof name === "string" && names[id] === undefined) names[id] = name;
+            }
           }
         } catch {
           /* No file yet, which is the first write. */
         }
-        await this.saveOwnership([...merged], path);
+        await this.saveOwnership([...merged], path, names);
       })().finally(() => { this.ownershipWrite = undefined; });
     }
     await this.ownershipWrite;
@@ -1031,10 +1056,19 @@ export class ThreadBrowserRuntime {
      * creates itself, through `claimOwn` at the two creation points.
      */
     let recorded: string[] = [];
+    let recordedNames: Record<string, string> = {};
     if (path) {
       try {
-        const parsed = JSON.parse(await readFile(ThreadBrowserRuntime.ownershipPath(path), "utf8")) as { targetIds?: unknown };
+        const parsed = JSON.parse(await readFile(ThreadBrowserRuntime.ownershipPath(path), "utf8")) as {
+          targetIds?: unknown;
+          names?: unknown;
+        };
         if (Array.isArray(parsed.targetIds)) recorded = parsed.targetIds.filter((id): id is string => typeof id === "string");
+        if (parsed.names !== null && typeof parsed.names === "object") {
+          for (const [id, name] of Object.entries(parsed.names as Record<string, unknown>)) {
+            if (typeof name === "string" && name.length > 0) recordedNames[id] = name;
+          }
+        }
       } catch {
         /* No record yet: this thread has never had a browser. */
       }
@@ -1043,14 +1077,39 @@ export class ThreadBrowserRuntime {
       setPageOwner(id, this.threadId);
       this.claimed.add(id);
     }
+    /*
+     * The names come back with the ownership, matched to live pages by target id.
+     *
+     * This is what makes `browser.setActive("npm")` work again after a reconnect.
+     * A page whose id is recorded but which is no longer open is simply skipped:
+     * a closed tab keeping its name would make the next page to reuse that id
+     * answer to the wrong name.
+     */
+    if (Object.keys(recordedNames).length > 0) {
+      for (const page of context.pages()) {
+        if (page.isClosed()) continue;
+        const id = await targetIdOf(page).catch(() => undefined);
+        if (id === undefined) continue;
+        const name = recordedNames[id];
+        if (name === undefined || this.named.has(name)) continue;
+        recordTargetId(page, id);
+        this.named.set(name, { name, page, openedAt: Date.now() });
+      }
+    }
   }
 
   /** Record this thread's page target ids, so a later attach can claim them. */
-  private async saveOwnership(targetIds: string[], statePath: string): Promise<void> {
+  private async saveOwnership(targetIds: string[], statePath: string, names: Record<string, string>): Promise<void> {
     const target = ThreadBrowserRuntime.ownershipPath(statePath);
     await mkdir(dirname(target), { recursive: true });
     const temporary = `${target}.${process.pid}.tmp`;
-    await writeFile(temporary, JSON.stringify({ version: 1, targetIds }), { mode: 0o600 });
+    /*
+     * Names ride along with ownership. Both answer "which tabs are mine and what
+     * did I call them", both are keyed by target id, and both have to survive a
+     * reconnect: writing them together means one file read restores a thread's
+     * whole view of its browser, with no way for the two to disagree.
+     */
+    await writeFile(temporary, JSON.stringify({ version: 1, targetIds, names }), { mode: 0o600 });
     await rename(temporary, target);
   }
 
@@ -2116,14 +2175,14 @@ export class ThreadBrowserRuntime {
       pages.push({ url, name: entry.name, title, scrollX: scroll.x, scrollY: scroll.y });
     }
     /*
-     * Ownership is written even when there are no pages to record.
+     * Ownership is NOT written here any more.
      *
-     * The early return below is about the page list, which is empty for a thread
-     * that has only blank tabs. Ownership must still be written then, or a thread
-     * that opened ten blank tabs and restarted would come back owning none of
-     * them.
+     * `persistOwnership` writes it, with names, on every claim, which is both
+     * sooner (a crash does not lose a page opened this step) and the only writer:
+     * two paths writing the same file could interleave a read-modify-write and
+     * lose an entry. What stays here is the page list, which is the part that
+     * needs a settled page and so can only be written at the end of a step.
      */
-    await this.saveOwnership(owned, statePath).catch(() => undefined);
     if (pages.length === 0) return;
     const activeIndex = Math.max(0, entries.findIndex((entry) => entry.active));
     const payload = JSON.stringify({ version: 1, pages, activeIndex });
@@ -2293,14 +2352,23 @@ export class ThreadBrowserRuntime {
      */
     if (context) await this.save().catch(() => undefined);
 
-    this.resetHandles();
-
     /*
-     * The context first: closing it releases this thread's cookies and pages,
-     * and doing it before the connection goes means a half-finished close still
-     * leaves the browser in a known state.
+     * This thread's pages, closed by target id.
+     *
+     * `context.close()` was the wrong call once the context became the browser's
+     * shared default one: it would close every thread's pages, and the `.catch`
+     * that swallowed the failure hid that. Measured on the mission: pages were
+     * never released, twenty-six of them accumulated across runs, and
+     * `connectOverCDP` eventually could not finish its handshake at all because
+     * every attach enumerates every target. A browser that cannot be attached to
+     * is the failure this whole design exists to prevent.
+     *
+     * Closed individually and before the handles are cleared, because the target
+     * id is what identifies a page and `resetHandles` is what forgets it.
      */
-    if (context) await context.close().catch(() => undefined);
+    await this.closeOwnedPages().catch(() => undefined);
+
+    this.resetHandles();
 
     /*
      * `browser.close()` on a CDP connection detaches *this* connection. It does
@@ -2309,6 +2377,36 @@ export class ThreadBrowserRuntime {
      * this must do, and it must actually happen, which is the bug above.
      */
     if (browser) await browser.close().catch(() => undefined);
+  }
+
+  /**
+   * Close every page this thread owns, by target id.
+   *
+   * A target id survives a reconnect and a restart, so this works from the
+   * thread's own record even when no runtime is live: which is exactly the case
+   * that leaked, since a deleted thread whose server had restarted had no
+   * runtime to close anything.
+   *
+   * Best-effort per page. One page that refuses to close must not stop the
+   * others from being released, because the cost of a stubborn page is a slow
+   * attach for every thread and the cost of abandoning the rest is the same
+   * problem this fixes.
+   */
+  private async closeOwnedPages(): Promise<void> {
+    const context = this.context;
+    if (!context) return;
+    for (const page of context.pages()) {
+      if (page.isClosed()) continue;
+      const id = (page as unknown as { pageTargetId?: unknown }).pageTargetId;
+      const resolved = typeof id === "string" && id.length > 0 ? id : await targetIdOf(page).catch(() => undefined);
+      /*
+       * Only pages this thread owns are closed. A page with no owner is somebody
+       * else's, or one the browser opened for itself, and closing it from here
+       * would reach outside this thread.
+       */
+      if (resolved === undefined || !isPageOwnedBy(resolved, this.threadId)) continue;
+      await page.close().catch(() => undefined);
+    }
   }
 }
 

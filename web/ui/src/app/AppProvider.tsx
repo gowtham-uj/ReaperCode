@@ -67,6 +67,8 @@ export interface AppContextValue {
   refreshThreads(): void;
   createThread(input: { workspaceRoot?: string; title?: string }): Promise<void>;
   switchThread(id: string): Promise<void>;
+  /** Remove a thread, its workspace and its browser pages. */
+  deleteThread(id: string): Promise<void>;
   queued: QueuedMessage[];
   /** Queue a message. Defaults to `next-step` when no mode is given. */
   sendMessage(text: string, mode?: QueueMode): void;
@@ -181,6 +183,22 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
     refreshThreads();
   }, [refreshThreads, session]);
 
+  /**
+   * Delete a thread, and open nothing in its place.
+   *
+   * `thread/delete` releases the browser pages that thread owned and removes its
+   * state, so the sidebar row going away is the visible half of real cleanup.
+   * When the deleted thread was the open one, the session is cleared rather than
+   * replaced with a new one: creating a thread to fill the gap is the eager
+   * behaviour that made deleting appear to spawn rows.
+   */
+  const deleteThread = useCallback(async (id: string): Promise<void> => {
+    if (!client) return;
+    await client.call("thread/delete", { threadId: id });
+    if (threadIdRef.current === id) session.clearThread();
+    refreshThreads();
+  }, [client, refreshThreads, session]);
+
   const decide = useCallback((approvalId: string, decision: string): void => {
     client?.notify("approval/respond", { approvalId, decision });
     setApprovals((current) => current.filter((entry) => entry.approvalId !== approvalId));
@@ -217,8 +235,35 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
    */
   const flushOne = useCallback(async (entry: QueuedMessage): Promise<boolean> => {
     const active = clientRef.current;
-    const id = threadIdRef.current;
-    if (!active || !id) return false;
+    if (!active) return false;
+    /*
+     * The thread is created here, on the first message, and nowhere else.
+     *
+     * This is the one place a conversation begins, which is what makes "no
+     * thread exists until you say something" true rather than a description of
+     * the empty state. Creating it earlier meant every page load and every
+     * deleted thread produced a row nobody asked for.
+     *
+     * Named from the message rather than "New chat" so the sidebar reads as a
+     * list of conversations: a thread that exists only because a sentence was
+     * typed should be labelled with that sentence.
+     */
+    let id = threadIdRef.current;
+    if (!id) {
+      try {
+        /*
+         * `createThread` sets the session's thread id and remembers it, so
+         * there is nothing to assign here. The ref is written directly as well,
+         * because `flush` reads it synchronously and a later entry in the same
+         * flush would not see a state update.
+         */
+        await createThread({ title: titleFromText(entry.text) });
+        id = threadIdRef.current;
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "Could not start a conversation");
+        return false;
+      }
+    }
     const running = activeTurnRef.current;
     if (entry.mode === "next-step" && running) {
       /*
@@ -320,7 +365,16 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
 
   const sendMessage = useCallback((raw: string, mode: QueueMode = "next-step"): void => {
     const text = raw.trim();
-    if (!text || !clientRef.current || !threadIdRef.current) return;
+    /*
+     * A message with no thread yet is queued, not dropped.
+     *
+     * This required a thread and silently returned without one, so the first
+     * message a user typed into an empty session went nowhere: the composer
+     * cleared and nothing happened, which read as the app being broken. The
+     * thread is created by the send itself, in `flushOne`, because sending a
+     * message is what starts a conversation.
+     */
+    if (!text || !clientRef.current) return;
     setError(undefined);
     queueSeq.current += 1;
     setQueued((entries) => [...entries, { id: `q-${queueSeq.current}`, text, sent: false, mode }]);
@@ -355,6 +409,7 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
     refreshThreads,
     createThread,
     switchThread,
+    deleteThread,
     queued,
     sendMessage,
     dropQueued,
@@ -382,4 +437,19 @@ export function latestFileChange(items: AppThreadItem[]): string | undefined {
     if (item.type === "fileChange" && item.changes.length > 0) value = item.changes.at(-1)?.path;
   }
   return value;
+}
+
+/**
+ * A thread title from the message that started it.
+ *
+ * A thread exists because somebody typed a sentence, so the sentence is the
+ * most honest label available: "New chat" for every row made the sidebar a
+ * column of identical entries with no way to tell which was which. Trimmed to
+ * one line and a readable length, and falling back rather than throwing on a
+ * message that is only whitespace or punctuation.
+ */
+function titleFromText(text: string): string {
+  const firstLine = text.split("\n").find((line) => line.trim().length > 0)?.trim() ?? "";
+  if (firstLine.length === 0) return "New chat";
+  return firstLine.length > 60 ? `${firstLine.slice(0, 57)}...` : firstLine;
 }

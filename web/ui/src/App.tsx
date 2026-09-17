@@ -366,6 +366,7 @@ function WorkspacePage() {
             onRefresh={app.refreshThreads}
             onCreate={app.createThread}
             onSwitch={app.switchThread}
+            onDelete={app.deleteThread}
             collapsed={sidebarCollapsed}
             creationRequest={threadCreationRequest}
             onRequestCreate={requestThreadCreation}
