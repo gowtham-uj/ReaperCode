@@ -142,24 +142,37 @@ export const EVAL_TOOL_DESCRIPTION =
   "Execute JavaScript in a real Node.js runtime: the full language, npm packages, node:* builtins, child processes and parallel execution.\n" +
   "It runs confined to this thread's workspace in a mount namespace: the filesystem outside the workspace is not mounted and **there is no network access**, so `fetch` to any host fails. Read and write inside the workspace, and use `bash` or a tool for anything that needs the network.\n" +
   /*
-   * The "not for this" list goes first, and it is doing more work than any other
-   * sentence here.
+   * "When to use it" now comes before "when not to", and that order is the fix
+   * for a measured problem rather than a preference.
    *
-   * A model handed a code interpreter reaches for it constantly, and for most
-   * tasks that is a straight loss: creating a file, reading one file, running a
-   * test, a git command — each already has a tool that does it in one step, and
-   * wrapping it in a script adds a layer between the model and the work, hides
-   * the operation from the transcript, and buys nothing. Naming those cases
-   * explicitly is what keeps the routing decision honest.
+   * The guards used to lead, on the theory that a model handed a code
+   * interpreter reaches for it constantly. The measurement says the opposite:
+   * across every session journal on this machine there was not one eval call,
+   * while the description opened with two prohibitions and only reached "Use
+   * eval when..." third. A model deciding whether this tool fits its loop had to
+   * read past two "do not"s to find the answer, and the only place the positive
+   * case appeared at all was here and in a skill it had to choose to load.
+   *
+   * Both halves are kept and the guards still name every case they named. What
+   * changed is that a reader now learns what the tool is FOR before being told
+   * where it does not belong, which is the order a routing decision is actually
+   * made in.
    */
+  "Use eval when one step needs what a single call cannot express: the same operation over many items, a loop or fan-out, filtering or aggregating a large result down to a small answer, or dependent steps that chain with no reasoning needed between them. Load the `codemode` skill first for the return semantics and worked examples.\n" +
   "Do not use eval for a single ordinary operation: creating or editing a file, reading one file, listing a directory, searching, running a build, a test, or a git command. Call that tool directly — same round trips, clearer transcript.\n" +
   "Do not use eval when you need to see a result before deciding the next step. Call the tool and look.\n" +
-  "Use eval when the user asks for it, or when the task needs what a single call cannot express: the same operation over many items, a loop or fan-out, filtering or aggregating a large result to a small answer, or dependent steps that chain with no reasoning needed between them.\n" +
+  /*
+   * The specific confusion that made this description worth rewriting: a model
+   * that wants a program and reaches for `bash` instead. Naming it is the only
+   * thing that stops it, and the cost of not naming it is high — an interpreter
+   * run through bash leaves the sandbox, hides its inner calls from the audit
+   * log, and reaches no tools at all.
+   */
+  "NEVER write a program as `bash` running `node -e`, `node --input-type`, a heredoc, or `python -c`. bash runs commands; eval runs programs. Code smuggled through bash leaves the sandbox and cannot reach Reaper's tools.\n" +
   "It is a real Node runtime, and Reaper's own tools are available inside it through `tools.*` — every tool this agent can call, including any whose schema is not in your context, with nothing to unlock first. Use whichever fits each step; reading with `tools.file_view` and parsing with a package is one script, not two styles. `tools.search_tools({ query })` finds a tool by capability, `tools.describe(name)` gives its arguments, `tools.list()` gives the catalogue. `eval` itself is the one exception: a script cannot call eval.\n" +
   "`await models.call({ messages: [...] })` reaches this thread's chat model, and `Promise.all` over several is real concurrency — for when one program needs several answers to compare or combine.\n" +
   "End with the value: the result is the last *expression*'s value, so a trailing declaration, loop, or `console.log(x)` returns nothing (`log` gives `undefined` however much it printed). `const r = await tools.grep_search(…); r.matches.length` works; stopping after the `const` does not. Keep intermediate data in JavaScript and return a compact final result.\n" +
   "A `tools.*` call carries the workspace, the permission checks, and the audit log, so it is the better choice when one does the job — and when none does, write the code.\n" +
-  "Load the `codemode` skill with activate_skill before writing a script that loops or batches more than a couple of calls: it has the return semantics, the APIs, and worked examples.\n" +
   "Pass `timeout_ms` if the script waits on something slow: the default is 2 minutes and a model call can take a minute.\n" +
   "Each eval starts with a fresh environment, so variables from an earlier eval are not visible here. The script is confined to the workspace: only it is writable, and paths outside it do not resolve. Destructive writes there are irreversible.";
 
