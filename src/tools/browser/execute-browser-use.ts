@@ -515,20 +515,67 @@ function controlSurface(runtime: ThreadBrowserRuntime): ControlSurface {
        */
       const page = (await runtime.ensureReady()).page;
       const before = runtime.downloadedFiles.length;
-      const download = page.waitForEvent("download", { timeout: 30_000 });
+      /*
+       * The argument is validated BEFORE the wait is armed, and the wait carries
+       * its own handler from the moment it exists. Both halves are the fix for a
+       * crash that took the whole app-server down, and neither is decoration.
+       *
+       * Measured on a live mission: the agent called
+       * `downloadAfter(page.locator('a[href$="/download_invoice/..."]'))`, the
+       * click did not produce a download, and thirty-three seconds later the
+       * server logged
+       *
+       *   unhandledRejection: page.waitForEvent: Timeout 30000ms exceeded while
+       *   waiting for event "download"
+       *
+       * and exited. The UI went to "reconnecting", every thread vanished from the
+       * sidebar, and the mission kept running as a zombie because its two gauges
+       * do not go through this process.
+       *
+       * The shape of the bug is a promise whose rejection has no handler at the
+       * moment it rejects. `page.waitForEvent(...)` was created here, the
+       * argument check could throw before anything caught it, and the click was
+       * awaited before `download.catch(...)` was attached. Either a rejected
+       * argument or a click slower than the 30s timeout left that promise
+       * unhandled, and in this codebase an unhandled rejection is fatal by
+       * design. Attaching the handler at creation removes the window entirely:
+       * once this promise exists, its rejection is always handled, whatever
+       * happens to the click.
+       */
       const clickable = target as unknown as { click?: () => Promise<void> };
       if (typeof clickable?.click !== "function") {
         throw new Error("downloadAfter takes the element that starts the download, for example page.getByRole(\"link\", { name: \"Invoice\" })");
       }
+      const download = page.waitForEvent("download", { timeout: 30_000 }).then(
+        () => true,
+        () => false,
+      );
+      /*
+       * A click that fails is not the interesting fact here: the click is
+       * allowed to throw (a detached element, a page that navigated), and what
+       * the caller needs is whether a file arrived. Its error is swallowed on
+       * purpose, and the download wait below is what decides the outcome.
+       */
       await clickable.click().catch(() => undefined);
       /*
        * The event is awaited, and so is the copy into the vault, which happens
        * asynchronously in the download handler. Waiting for the file to appear
        * rather than for the event alone is what stops a caller from being handed
        * a name for a file that is still being written.
+       *
+       * `download` is already a resolved boolean by now: it was created with both
+       * handlers attached, so this await cannot reject and the timeout arrives
+       * here as `false` rather than as an unhandled rejection that kills the
+       * server.
        */
-      await download.catch(() => undefined);
-      for (let i = 0; i < 60 && runtime.downloadedFiles.length === before; i++) {
+      const arrived = await download;
+      /*
+       * The vault copy is asynchronous, so the file is polled for. Bounded by the
+       * event: a download that never fired is not waited on for six more seconds,
+       * because there is nothing to wait for and the refusal below is the honest
+       * answer.
+       */
+      for (let i = 0; i < (arrived ? 60 : 5) && runtime.downloadedFiles.length === before; i++) {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
       const file = runtime.downloadedFiles[runtime.downloadedFiles.length - 1];

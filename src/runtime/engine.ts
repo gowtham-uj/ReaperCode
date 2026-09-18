@@ -210,6 +210,16 @@ export interface RuntimeEngineInput {
    */
   threadBrowser?: ThreadBrowserRuntime | undefined;
   /**
+   * Called when an error escapes this run, instead of the process exiting.
+   *
+   * The app-server passes one so a fault is confined to the thread that caused
+   * it: an escaped error in one thread's tool call must not take down the
+   * gateway, the other threads, or the UI. A CLI run passes nothing and keeps
+   * the fail-fast behaviour that is correct for a single-agent process. See
+   * `handleFatalError`.
+   */
+  onRunFault?: ((error: Error, cause: string) => void) | undefined;
+  /**
    * Extra instructions for this run, appended after the built-in prompt.
    *
    * Appended, never substituted. The built-in text is the contract the tool
@@ -1028,6 +1038,12 @@ export class RuntimeEngine {
           },
         ),
       ),
+      /*
+       * Only the app-server supplies this. Without it the scope cannot be
+       * cancelled and an escaped error is a process fault, which is the CLI's
+       * behaviour and is left exactly as it was.
+       */
+      this.input.onRunFault ? { onFault: this.input.onRunFault } : {},
     );
   }
 

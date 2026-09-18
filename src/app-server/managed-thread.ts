@@ -465,11 +465,44 @@ export class ManagedReaperThread implements ToolApprovalRequester {
        * attachment on its next turn without anything above knowing that happened.
        */
       ...(this.options.threadBrowsers ? { threadBrowser: this.options.threadBrowsers.forThread(this.threadId) } : {}),
+      /*
+       * An error that escapes this turn cancels this turn, and only this turn.
+       *
+       * The engine's crash handler calls this instead of exiting the process
+       * when the fault belongs to a run. Aborting the turn is what makes the
+       * failure recoverable: `executeTurn` below sees the aborted signal, closes
+       * the turn as aborted, and the thread is left ready for the next message.
+       * Every other thread, the gateway and the UI are untouched, and the
+       * browser keeps its pages because nothing here closes them.
+       */
+      onRunFault: (error, cause) => {
+        /*
+         * Logged, not published as an event: the abort below already closes the
+         * turn as aborted, and `executeTurn`'s catch reports the failure through
+         * the paths the UI already renders. A bespoke event type would be a
+         * second channel for the same fact, and every reader would have to learn
+         * it.
+         */
+        console.error(`[reaper] run fault in thread ${this.threadId} (${cause}); cancelling the turn:`, error);
+        active.abortController.abort(new RunFaultError(cause, error.message));
+      },
     };
 
     try {
       const result = await this.options.runTurn(runnerInput);
       if (active.abortController.signal.aborted) {
+        /*
+         * Same distinction as the catch below: an abort with a fault reason is
+         * a failure, and reporting it as a plain abort would lose the cause.
+         */
+        const reason = active.abortController.signal.reason;
+        if (reason instanceof RunFaultError) {
+          return await this.finishTurn(active, {
+            status: "failed",
+            assistantMessage: result.assistantMessage ?? "",
+            error: { name: "run_fault", message: runFaultMessage(reason) },
+          });
+        }
         return await this.finishTurn(active, { status: "aborted", assistantMessage: "" });
       }
       /*
@@ -503,6 +536,24 @@ export class ManagedReaperThread implements ToolApprovalRequester {
     } catch (error) {
       const normalized = error instanceof Error ? error : new Error(String(error));
       if (active.abortController.signal.aborted || normalized.name === "AbortError") {
+        /*
+         * An abort carries a reason when something other than the user asked for
+         * it. A run fault aborts with the error that caused it, so the cause is
+         * read back off the signal: without this a fault was indistinguishable
+         * from a user pressing stop, and the thread closed as "aborted" with an
+         * empty message, which tells the reader nothing about what happened.
+         *
+         * A user interrupt still aborts with a plain error and still reads as a
+         * plain abort, because that is what it is.
+         */
+        const reason = active.abortController.signal.reason;
+        if (reason instanceof RunFaultError) {
+          return await this.finishTurn(active, {
+            status: "failed",
+            assistantMessage: "",
+            error: { name: "run_fault", message: runFaultMessage(reason) },
+          });
+        }
         return await this.finishTurn(active, { status: "aborted", assistantMessage: "" });
       }
       return await this.finishTurn(active, {
@@ -594,4 +645,37 @@ export class ManagedThreadError extends Error {
     super(message);
     this.name = "ManagedThreadError";
   }
+}
+
+/**
+ * An error that escaped a run and was confined to it.
+ *
+ * Aborted onto the turn's signal by the `onRunFault` handler, and read back by
+ * `executeTurn` to close the turn as a failure carrying the cause rather than as
+ * a bare "aborted". A class rather than a shape test on purpose: a user
+ * interrupt aborts with a plain `Error("Turn interrupted")`, and inferring
+ * "this was a fault" from the reason's shape would report a user pressing stop
+ * as a runtime failure.
+ */
+export class RunFaultError extends Error {
+  constructor(readonly cause: string, message: string) {
+    super(message);
+    this.name = "RunFaultError";
+  }
+}
+
+/**
+ * What a confined failure tells the reader.
+ *
+ * Two jobs: name what actually failed, and state plainly that the rest survived.
+ * The second matters as much as the first, because the failure this replaces was
+ * a process death where the honest report was "the server is gone and your
+ * threads with it".
+ */
+function runFaultMessage(fault: RunFaultError): string {
+  return (
+    `${fault.message}\n\nSomething in this turn raised an error the runtime could not hand back to a tool, ` +
+    `so the turn was stopped. The failure was confined to this thread: the server, your other threads, and the ` +
+    `browser with its open pages are all intact. Send the message again, or switch models in the composer if it repeats.`
+  );
 }

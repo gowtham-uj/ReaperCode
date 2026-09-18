@@ -36,6 +36,17 @@ export interface ManagedTurnRunnerInput {
    * no browser is attached rather than hanging on a connection that cannot exist.
    */
   threadBrowser?: ThreadBrowserRuntime;
+  /**
+   * Called when an error escapes the run, to cancel this turn rather than the
+   * process.
+   *
+   * The app-server hosts every thread in one process, so a fault raised inside
+   * one thread's tool call must stop that thread and nothing else. The thread
+   * supplies this because it owns the turn's AbortController; the engine calls
+   * it from its crash handler when the run scope is on the stack. Absent means
+   * the process exits on an escaped error, which is the CLI's behaviour.
+   */
+  onRunFault?: ((error: Error, cause: string) => void) | undefined;
   /** Snapshotted from the thread's metadata when the turn starts. */
   systemPrompt?: string;
   disabledTools?: string[];
@@ -192,6 +203,7 @@ export const runManagedTurn: ManagedTurnRunner = async (input) => {
       ...(input.disabledTools?.length ? { disabledTools: input.disabledTools } : {}),
       ...(input.filesystemSandbox === false ? { filesystemSandbox: false } : {}),
       ...(input.threadBrowser ? { threadBrowser: input.threadBrowser } : {}),
+      ...(input.onRunFault ? { onRunFault: input.onRunFault } : {}),
     });
     return await engine.run();
   } finally {
