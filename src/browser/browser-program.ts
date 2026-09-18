@@ -461,6 +461,28 @@ export class BrowserProgramHost {
           return { kind: "value", value: await this.observe.control.downloads() };
         case "download":
           return { kind: "value", value: await this.observe.control.download(String(args[0] ?? "")) };
+        /*
+         * The three diagnostics, and the third place this surface had to be
+         * completed.
+         *
+         * They were documented, listed in `BROWSER_PROGRAM_PARAMS`, absent from
+         * the sandbox's returned object, and absent from here. A model told to
+         * call `capabilities()` before spending steps got "capabilities is not
+         * defined", then probed the scope and got a false positive from the
+         * membrane proxy, then gave up and discovered the API by hand. Three
+         * omissions for one documented call, which is why the pairing of this
+         * switch with the surface is now asserted rather than assumed.
+         *
+         * `target` is optional on all three. `recover()` with no argument means
+         * the active page, which is the common case; a program that names one
+         * gets that page.
+         */
+        case "recover":
+          return { kind: "value", value: await this.observe.control.recover(target) };
+        case "probeInput":
+          return { kind: "value", value: await this.observe.control.probeInput(target) };
+        case "capabilities":
+          return { kind: "value", value: await this.observe.control.capabilities() };
         default:
           /*
            * A screenshot is the only helper that returns an image, and an

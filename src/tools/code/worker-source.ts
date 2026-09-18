@@ -708,23 +708,27 @@ async function main() {
     };
     const surface = buildRemoteBrowser(callPage, workerData.browser.roots, view);
     /*
-     * Every name a program may use, and the value behind it.
+     * Every name a program may use, taken from the surface itself.
      *
-     * The settings calls sit beside the observation helpers because they are the
-     * same kind of thing: a named call the host answers, not a Playwright method
-     * path. A program reads the page with \`view()\` and changes how it is being
-     * seen with \`setUserAgent()\`, and both are plain functions in scope.
+     * This was a hand-maintained second list of names beside a hand-maintained
+     * list of the values behind them, and the two lists drifted: \`recover\`,
+     * \`probeInput\` and \`capabilities\` were in the documentation and in
+     * \`BROWSER_PROGRAM_PARAMS\`, and in neither list here. The host therefore
+     * bound nothing under those names, and a program that called the documented
+     * \`capabilities()\` got "capabilities is not defined" while the sandbox's
+     * membrane proxy made \`typeof browser.capabilities\` answer "function".
+     *
+     * Reading the names off the object removes the failure mode instead of
+     * correcting one instance of it: there is no second list to forget, so a
+     * name the surface exposes is a name a program has, by construction. The
+     * order is \`Object.keys\`, which is insertion order for string keys, and both
+     * arrays are built from the same iteration in the same pass, so a name and
+     * its value cannot get out of step either.
      */
-    extraNames.push(
-      'page', 'browser', 'view', 'viewChanges', 'screenshot', 'pages',
-      'set', 'setUserAgent', 'setTimezone', 'setViewport', 'setFullscreen', 'setMobile',
-      'blockAds', 'bandwidth', 'settings', 'rotateUserAgent', 'downloads', 'download', 'downloadAfter',
-    );
-    extraValues.push(
-      surface.page, surface.browser, surface.view, surface.viewChanges, surface.screenshot, surface.pages,
-      surface.set, surface.setUserAgent, surface.setTimezone, surface.setViewport, surface.setFullscreen, surface.setMobile,
-      surface.blockAds, surface.bandwidth, surface.settings, surface.rotateUserAgent, surface.downloads, surface.download, surface.downloadAfter,
-    );
+    for (const [name, value] of Object.entries(surface)) {
+      extraNames.push(name);
+      extraValues.push(value);
+    }
   }
 
   let value = compile(workerData.compiled, extraNames).call(

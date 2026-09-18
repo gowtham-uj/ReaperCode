@@ -711,7 +711,42 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
   async function downloadAfter(target) {
     return callHelper('downloadAfter', [target]);
   }
+  /*
+   * The three diagnostics, and they were documented but not bound.
+   *
+   * \`BROWSER_PROGRAM_PARAMS\` lists these names and the tool description tells
+   * the model to call \`capabilities()\` before spending steps on a guess, so a
+   * program that follows the documentation gets "capabilities is not defined".
+   * Read from a live session, and it is the worst kind of failure to diagnose
+   * from inside the sandbox: \`typeof browser.capabilities\` returns "function"
+   * because \`browser\` is a membrane proxy that answers every property with a
+   * callable, so the model's own existence check produced a false positive and it
+   * went looking for a scope problem that did not exist. Adding them to the list
+   * without adding them here is exactly the drift the list was meant to prevent,
+   * which is why the list is now checked against this object by a test rather
+   * than by a comment.
+   */
+  async function recover(target) {
+    return callHelper('recover', [target]);
+  }
+  async function probeInput(target) {
+    return callHelper('probeInput', [target]);
+  }
+  async function capabilities() {
+    return callHelper('capabilities', []);
+  }
 
+  /*
+   * The surface, and every name here must also appear in the returned object.
+   *
+   * Written as one object literal and returned directly, rather than assembled
+   * name by name somewhere else. That assembly was the bug: the worker kept its
+   * own list of names beside its own list of values, and both were missing the
+   * three diagnostics above, so the host passed three \`undefined\`s under names
+   * that never appeared. A test now compares the keys of this object against
+   * \`BROWSER_PROGRAM_PARAMS\`, so a name added to one and not the other fails
+   * loudly instead of silently becoming \`undefined\` in a model's program.
+   */
   return {
     page: makeNode(__pageRoot.page, []),
     browser: makeNode(__pageRoot.browser, []),
@@ -732,6 +767,9 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
     downloads,
     download,
     downloadAfter,
+    recover,
+    probeInput,
+    capabilities,
   };
 }
 
