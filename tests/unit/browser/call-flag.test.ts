@@ -102,3 +102,58 @@ test("the tool and the sandbox bind the same parameter names", () => {
     assert.ok(PROGRAM_PARAMS.includes(name as never), `${name} must be reachable from a program`);
   }
 });
+
+test("a RegExp nested inside an options object is rebuilt too", () => {
+  /*
+   * The shape every Playwright call actually uses, and the one the first fix
+   * missed. Measured on a live mission: `getByRole("tab", { name: /x/ })` sent
+   * the RegExp through unchanged and Playwright answered
+   * `InvalidSelectorError: ... selector 'tab[name=[object Object]]'`, which reads
+   * as a malformed selector rather than as an argument the bridge did not rebuild.
+   */
+  let received: unknown;
+  const page = { getByRole: (role: string, options: unknown) => { received = { role, options }; return "ok"; } };
+  const host = new RemotePageHost(() => page as never, { browser: {} as never });
+
+  return host
+    .call(0, [{
+      method: "getByRole",
+      args: [
+        "tab",
+        { name: { __reaperRegExp: true, source: "Dynamic ID", flags: "i" } } as never,
+      ],
+      called: true,
+    }])
+    .then(() => {
+      const options = (received as { options: { name: unknown } }).options;
+      assert.ok(options.name instanceof RegExp, "the nested RegExp was rebuilt");
+      assert.equal((options.name as RegExp).test("Button with Dynamic ID"), true);
+    });
+});
+
+test("the object walk does not corrupt a nested value it does not recognise", () => {
+  /*
+   * The new recursion walks every argument object to find RegExp markers. The
+   * risk it introduces is corrupting something else on the way, so this pins the
+   * two things that must survive: a nested plain value arrives as itself, and a
+   * nested handle marker is walked by `resolve` rather than left as data.
+   *
+   * Kept to plain objects with no Playwright machinery, because the point is the
+   * walk, not the handle table.
+   */
+  let received: unknown;
+  const page = { evaluate: (arg: unknown) => { received = arg; return "ok"; } };
+  const host = new RemotePageHost(() => page as never, { browser: {} as never });
+
+  return host
+    .call(0, [{
+      method: "evaluate",
+      args: [{ opts: { label: "plain", depth: { nested: [1, 2, { deep: true }] } } } as never],
+      called: true,
+    }])
+    .then(() => {
+      const arg = received as { opts: { label: string; depth: { nested: unknown[] } } };
+      assert.equal(arg.opts.label, "plain", "a plain string survives the walk");
+      assert.deepEqual(arg.opts.depth.nested, [1, 2, { deep: true }], "and so does a nested array of objects");
+    });
+});

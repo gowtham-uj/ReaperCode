@@ -375,6 +375,20 @@ function handleFailure(): string {
 function reviveArgument(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
   if (Array.isArray(value)) return value.map((item) => reviveArgument(item));
+  /*
+   * A RegExp nested in an options object, which is the shape most Playwright
+   * calls actually use.
+   *
+   * `reviveArguments` checks a top-level argument, which covers
+   * `waitForURL(/secure/)` and missed everything else. Measured on a live
+   * mission: `getByRole("tab", { name: /Button with Dynamic ID/ })` sent the
+   * RegExp through unchanged, and Playwright reported
+   * `InvalidSelectorError: ... selector 'tab[name=[object Object]]'` — a message
+   * about a malformed selector for what was really a nested argument the bridge
+   * did not rebuild.
+   */
+  const asRegExp = readRegExpMarker(value);
+  if (asRegExp !== undefined) return asRegExp;
   const candidate = value as { __reaperFn?: unknown };
   /*
    * Belt to the sandbox's braces. The worker refuses to encode a function, so a
@@ -384,7 +398,14 @@ function reviveArgument(value: unknown): unknown {
   if (typeof candidate.__reaperFn === "string") {
     throw new Error("a function argument reached the browser bridge; functions must not cross this boundary");
   }
-  return value;
+  /*
+   * Recursed, so a marker anywhere in the tree is rebuilt. Every other object
+   * goes through this walk already; leaving the leaves alone is what made a
+   * nested marker inert while a top-level one worked.
+   */
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(value)) out[key] = reviveArgument((value as Record<string, unknown>)[key]);
+  return out;
 }
 
 /**
