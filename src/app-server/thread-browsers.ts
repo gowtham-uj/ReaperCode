@@ -62,6 +62,20 @@ export interface ThreadBrowsersOptions {
   workspaceRoot?: string;
   /** How long the orphan sweep waits to attach. Overridable for a test. */
   sweepAttachTimeoutMs?: number;
+  /**
+   * Whether a thread has a turn in flight.
+   *
+   * The reaper's last line of defence, and the reason it exists is that the
+   * activity clock cannot see everything. A model can think for longer than the
+   * idle window between two browser calls, and during that gap the clock is
+   * honest: the browser really was untouched. But the thread is not idle in any
+   * sense a user would recognise, and retiring it would still close the tabs of
+   * a turn that is going to ask for them next.
+   *
+   * Supplied by the app-server, which owns the answer. Absent means "nothing is
+   * running", which is the right default for a test that has no turns.
+   */
+  threadIsRunning?: ((threadId: string) => boolean) | undefined;
 }
 
 const DEFAULT_IDLE_MS = 10 * 60_000;
@@ -286,6 +300,15 @@ export class ThreadBrowsers {
      */
     for (const [threadId, runtime] of this.runtimes) {
       if (runtime.idleForMs() < idleMs) continue;
+      /*
+       * A thread with a turn in flight is never reaped, however long its browser
+       * has sat untouched. `idleForMs` answers "when was this browser last
+       * driven", which is the right question for a thread whose agent is done,
+       * and the wrong one for a thread whose agent is thinking: a model can
+       * reason for longer than the idle window and then ask for the tabs it left
+       * open. Checked after the clock so the common case costs one number.
+       */
+      if (this.options.threadIsRunning?.(threadId) === true) continue;
       this.runtimes.delete(threadId);
       this.lastUsed.delete(threadId);
       /*

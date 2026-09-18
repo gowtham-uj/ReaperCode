@@ -183,6 +183,18 @@ export class ReaperThreadManager {
    * because it can never become valid again: nothing recreates a record under the
    * same id.
    */
+  /**
+   * Whether a thread has a turn in flight, answered without touching disk.
+   *
+   * Synchronous on purpose: the browser reaper asks this on a timer for every
+   * thread it holds, and a question that can be answered from memory must not
+   * become a file read. Only a thread already in memory can be mid-turn, so an
+   * absent entry is an honest `false`.
+   */
+  isThreadRunning(threadId: string): boolean {
+    return this.threads.get(threadId)?.isRunning === true;
+  }
+
   async listThreads(): Promise<ThreadMetadata[]> {
     const stored = await this.store.list();
     const onDisk = new Set(stored.map((metadata) => metadata.threadId));

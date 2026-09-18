@@ -113,19 +113,23 @@ test("the idle clock measures use, not lookups", async () => {
   // Reading the clock must not reset it, or the reaper would never fire.
   await new Promise((resolve) => setTimeout(resolve, 40));
   assert.ok(runtime.idleForMs() > first, "the clock advances on its own");
-  const before = runtime.idleForMs();
 
   /*
    * A use resets it. Asserted through `pageTargets`, which is the path the live
-   * pane and the tab list take, and which touches without needing a connection
-   * to succeed: the stamp is applied before the attach is attempted, so a turn
-   * whose browser momentarily refuses is still not reaped out from under itself.
+   * pane and the tab list take, and which stamps the clock before attempting the
+   * attach: so a turn whose browser momentarily refuses is still not reaped out
+   * from under itself.
+   *
+   * The wait is longer than the 300ms attach budget, so the assertion cannot be
+   * satisfied by the failed attach happening to finish quickly. Idle time before
+   * the call exceeds one attach; idle time after it is one attach at most.
    */
+  await new Promise((resolve) => setTimeout(resolve, 900));
+  const before = runtime.idleForMs();
   await runtime.pageTargets().catch(() => undefined);
-  assert.ok(
-    runtime.idleForMs() < before,
-    `a use resets the clock: was ${before}ms, now ${runtime.idleForMs()}ms`,
-  );
+  const after = runtime.idleForMs();
+  assert.ok(after < before, `a use resets the clock: was ${before}ms, now ${after}ms`);
+  assert.ok(after < 500, `the reset is to roughly now, not to the start of the attempt: ${after}ms`);
 });
 
 test("the reaper retires rather than closes, and asks the runtime how idle it is", async () => {
@@ -160,6 +164,38 @@ test("the reaper retires rather than closes, and asks the runtime how idle it is
   await internals.reap(600_000);
   assert.deepEqual(calls, ["retire"], "an idle runtime is retired, never closed");
   assert.equal(browsers.peek("idle-thread"), undefined, "and dropped from the map");
+
+  await browsers.close();
+});
+
+test("a thread with a turn in flight is never reaped, however idle its browser", async () => {
+  /*
+   * The gap the activity clock cannot see. A model can reason for longer than
+   * the idle window and then ask for the tabs it left open, so "the browser has
+   * not been touched" is not the same as "nobody wants it". The app-server
+   * answers the turn question; the reaper asks it before retiring anything.
+   */
+  const browsers = new ThreadBrowsers({
+    cdpUrl: "ws://127.0.0.1:3000",
+    statePathFor: (threadId) => `/tmp/idle-retire-${threadId}.json`,
+    threadIsRunning: (threadId) => threadId === "thinking",
+  });
+
+  const calls: string[] = [];
+  const stub = (threadId: string) => ({
+    idleForMs: () => 10_000_000,
+    retire: async () => { calls.push(`retire:${threadId}`); },
+    close: async () => { calls.push(`close:${threadId}`); },
+  });
+  const internals = browsers as unknown as { runtimes: Map<string, unknown>; reap(idleMs: number): Promise<void> };
+  internals.runtimes.set("thinking", stub("thinking"));
+  internals.runtimes.set("done", stub("done"));
+
+  await internals.reap(600_000);
+
+  assert.deepEqual(calls, ["retire:done"], "only the thread with no turn running is retired");
+  assert.equal(browsers.peek("thinking") !== undefined, true, "the thinking thread keeps its browser");
+  assert.equal(browsers.peek("done"), undefined);
 
   await browsers.close();
 });

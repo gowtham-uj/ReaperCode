@@ -143,10 +143,24 @@ export function createAppServerCore(options: StartAppServerOptions): {
    */
   const flows = new TransitionDb({ path: join(options.workspaceRoot, ".reaper", "browser", "flows.json") });
 
+  /*
+   * The browser owner is created before the manager, and the reaper needs to ask
+   * the manager whether a thread is mid-turn. A closure over a `let` is how the
+   * later assignment is seen: the reaper only runs on its timer, long after this
+   * function has returned and both have been built.
+   */
+  let runningTurns: ReaperThreadManager | undefined;
+
   const threadBrowsers = new ThreadBrowsers({
     cdpUrl: options.browserCdpUrl ?? "ws://127.0.0.1:3000",
     flows,
     ...(options.browserIdleCloseMs !== undefined ? { idleMs: options.browserIdleCloseMs } : {}),
+    /*
+     * A thread with a turn in flight is never reaped, however long its browser
+     * has sat untouched. The activity clock catches a turn that is browsing; this
+     * catches one that is thinking, which is the case the clock cannot see.
+     */
+    threadIsRunning: (threadId) => runningTurns?.isThreadRunning(threadId) === true,
     /*
      * One state file per thread, under the same `.reaper` root everything else
      * uses. The thread id is sanitized because it reaches a filesystem path, and
@@ -189,6 +203,7 @@ export function createAppServerCore(options: StartAppServerOptions): {
       processor?.handleApprovalSettled(request, decision);
     },
   });
+  runningTurns = manager;
   processor = new AppServerMessageProcessor({
     workspaceRoot: options.workspaceRoot,
     manager,
