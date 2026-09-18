@@ -69,6 +69,15 @@ export interface AppContextValue {
   switchThread(id: string): Promise<void>;
   /** Remove a thread, its workspace and its browser pages. */
   deleteThread(id: string): Promise<void>;
+  /**
+   * The model a thread that does not exist yet will start on.
+   *
+   * Held here rather than in the picker because it has to outlive the picker's
+   * own render and be applied by the thread's creation, which happens later, on
+   * the first message.
+   */
+  pendingModel: { provider: string; model: string } | undefined;
+  setPendingModel(choice: { provider: string; model: string }): void;
   queued: QueuedMessage[];
   /** Queue a message. Defaults to `next-step` when no mode is given. */
   sendMessage(text: string, mode?: QueueMode): void;
@@ -183,11 +192,46 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
    * of state would race React's update. `session.createThread` already answers
    * with it, so passing it through costs nothing.
    */
+  /*
+   * A model chosen before the thread exists, applied when it is created.
+   *
+   * The picker on an empty new-thread screen has nothing to write to, so it
+   * reports the choice here and creation applies it. Not persisted and not
+   * keyed to a thread: it describes a thread that has not been made yet, and it
+   * is spent by the creation that uses it.
+   */
+  const [pendingModel, setPendingModelState] = useState<{ provider: string; model: string } | undefined>(undefined);
+  const pendingModelRef = useRef(pendingModel);
+  pendingModelRef.current = pendingModel;
+  const setPendingModel = useCallback((choice: { provider: string; model: string }): void => {
+    pendingModelRef.current = choice;
+    setPendingModelState(choice);
+  }, []);
+
   const createThread = useCallback(async (input: { workspaceRoot?: string; title?: string }): Promise<string> => {
     const id = await session.createThread(input);
+    /*
+     * Applied after creation, through the same RPC the picker uses on a live
+     * thread, so there is one code path for "set this thread's model" rather
+     * than a creation-time copy that could drift from it.
+     *
+     * A failure is reported rather than swallowed, and it does not fail the
+     * thread: the conversation exists and runs on the default, which is better
+     * than refusing to start it over a model preference.
+     */
+    const choice = pendingModelRef.current;
+    if (choice !== undefined && clientRef.current) {
+      try {
+        await clientRef.current.call("thread/model/set", { threadId: id, provider: choice.provider, model: choice.model });
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "The thread started, but its model could not be set");
+      }
+      pendingModelRef.current = undefined;
+      setPendingModelState(undefined);
+    }
     refreshThreads();
     return id;
-  }, [refreshThreads, session]);
+  }, [refreshThreads, session, setError]);
   const switchThread = useCallback(async (id: string): Promise<void> => {
     await session.switchThread(id);
     refreshThreads();
@@ -477,6 +521,8 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
     createThread,
     switchThread,
     deleteThread,
+    pendingModel,
+    setPendingModel,
     queued,
     sendMessage,
     dropQueued,
@@ -486,7 +532,7 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
     transcriptStore, session, client, threadId, thread, turns, activeTurn,
     lastEditedPath, workspaceRevision, connectionLabel, error, approvals, decide, background,
     catalog, settings, threads, threadsLoading, refreshThreads, createThread,
-    switchThread, queued, sendMessage, dropQueued, setQueuedMode, interrupt,
+    switchThread, pendingModel, setPendingModel, queued, sendMessage, dropQueued, setQueuedMode, interrupt,
   ]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

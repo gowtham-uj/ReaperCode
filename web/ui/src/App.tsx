@@ -364,6 +364,14 @@ function WorkspacePage() {
             model={app.thread?.model}
             turnActive={Boolean(app.activeTurn)}
             disabledProviders={app.settings.settings?.disabledProviders}
+            /*
+             * With no thread the choice is held by the app and applied when the
+             * thread is created, so the starting model can be picked on the
+             * empty screen instead of being fixed by whatever the default was.
+             */
+            {...(app.threadId === undefined
+              ? { selected: app.pendingModel, onSelect: app.setPendingModel }
+              : {})}
             onSetup={() => navigate("/settings/providers")}
             onError={(message) => app.setError(message)}
           />

@@ -14,7 +14,7 @@ import {
  * makes the file binary to grep, diff, and most editors. */
 const SEPARATOR = "\u0000";
 
-export function ModelPicker({ catalog, client, threadId, provider, model, turnActive, disabledProviders, onSetup, onError }: {
+export function ModelPicker({ catalog, client, threadId, provider, model, turnActive, disabledProviders, selected, onSelect, onSetup, onError }: {
   catalog: ModelCatalog;
   client: JsonRpcClient | undefined;
   threadId: string | undefined;
@@ -28,6 +28,18 @@ export function ModelPicker({ catalog, client, threadId, provider, model, turnAc
    * settings have not loaded yet, which reads as "nothing disabled".
    */
   disabledProviders?: readonly string[] | undefined;
+  /**
+   * The model a not-yet-created thread will start on.
+   *
+   * With no thread there is nothing to write to yet, so the choice is held by
+   * the caller and applied when the thread is created. Without this the picker
+   * was simply disabled before the first message, which read as "you cannot
+   * choose the model" on the one screen where the thread's starting model is
+   * most naturally decided.
+   */
+  selected?: { provider: string; model: string } | undefined;
+  /** Called instead of the RPC when there is no thread to write the choice to. */
+  onSelect?(choice: { provider: string; model: string }): void;
   onSetup(): void;
   onError(message: string): void;
 }) {
@@ -41,7 +53,17 @@ export function ModelPicker({ catalog, client, threadId, provider, model, turnAc
     () => sendableProviders(catalog.providers, disabledProviders ?? []),
     [catalog.providers, disabledProviders],
   );
-  const current = provider && model ? `${provider}${SEPARATOR}${model}` : "";
+  /*
+   * What this picker is currently set to, from either source.
+   *
+   * A real thread reads its own provider and model. Before there is a thread the
+   * caller's pending choice stands in for them, so a selection made on the empty
+   * screen is shown back immediately rather than appearing to do nothing until
+   * the first message is sent.
+   */
+  const effectiveProvider = threadId ? provider : selected?.provider ?? provider;
+  const effectiveModel = threadId ? model : selected?.model ?? model;
+  const current = effectiveProvider && effectiveModel ? `${effectiveProvider}${SEPARATOR}${effectiveModel}` : "";
   /*
    * A thread with no model is not a thread with no model.
    *
@@ -53,7 +75,7 @@ export function ModelPicker({ catalog, client, threadId, provider, model, turnAc
    * model that will actually answer rather than a client-side guess.
    */
   const fallback = !current ? catalog.defaultSelection : null;
-  const currentLabel = model
+  const currentLabel = effectiveModel
     ?? fallback?.model
     ?? (available.length === 0 ? "Add provider" : "Choose model");
 
@@ -67,9 +89,21 @@ export function ModelPicker({ catalog, client, threadId, provider, model, turnAc
   }, [open]);
 
   const change = async (value: string): Promise<void> => {
-    if (!client || !threadId || !value) return;
+    if (!value) return;
     const [nextProvider, nextModel] = value.split(SEPARATOR);
     if (!nextProvider || !nextModel) return;
+    /*
+     * Before the thread exists there is nothing to write the choice to, so the
+     * caller keeps it and applies it at creation. Checked before the client so a
+     * disconnected empty screen can still be configured, which is exactly when a
+     * user is setting up a first conversation.
+     */
+    if (!threadId) {
+      onSelect?.({ provider: nextProvider, model: nextModel });
+      setOpen(false);
+      return;
+    }
+    if (!client) return;
     setBusy(true);
     try {
       const result = await client.call<{ appliesTo?: string }>("thread/model/set", { threadId, provider: nextProvider, model: nextModel });
@@ -87,7 +121,13 @@ export function ModelPicker({ catalog, client, threadId, provider, model, turnAc
       <button
         className="model-trigger"
         type="button"
-        disabled={busy || (available.length > 0 && !threadId)}
+        /*
+         * Enabled with no thread when the caller can hold the choice. It used to
+         * be disabled whenever `threadId` was absent, which is precisely the
+         * empty new-thread screen, so the starting model could not be chosen at
+         * all until after a message had already been sent on a default.
+         */
+        disabled={busy || (available.length > 0 && !threadId && onSelect === undefined)}
         aria-haspopup={available.length > 0 ? "menu" : undefined}
         aria-expanded={available.length > 0 ? open : undefined}
         aria-controls={open ? id : undefined}
