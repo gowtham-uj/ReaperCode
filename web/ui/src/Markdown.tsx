@@ -1,303 +1,188 @@
 /**
- * Markdown, rendered as React elements.
+ * Markdown, rendered as a document rather than as markup.
  *
- * The model writes markdown — headings, lists, bold, fenced code — and the
- * transcript showed it as raw text: `## Summary` and `- **item**` sitting on
- * screen as literal characters. That is not a styling gap. Prose is the primary
- * output of this product, and showing its markup is showing the wire format
- * instead of the answer.
+ * Prose is the primary output of this product, and the transcript used to show
+ * its wire format: `## Summary` and `- **item**` sitting on screen as literal
+ * characters. A hand-written parser replaced that, and it worked, but it
+ * understood less markdown than a model writes — no tables, no nested lists, no
+ * strikethrough — and it had no answer for the thing that actually matters here:
+ * a response arrives as a *stream*, so most of the markdown it renders is
+ * incomplete. An unterminated code fence mid-answer is the normal case, not an
+ * edge case, and a parser that treats it as literal text paints the rest of the
+ * response as a code block for half a second on every single message.
  *
- * **Rendered as elements, never as HTML.** The obvious implementation is
- * `marked` plus `dangerouslySetInnerHTML`, which is what every markdown recipe
- * suggests and which would be a defect here: model output is untrusted text
- * derived from files, web pages and tool results, and handing it to the DOM as
- * HTML means a `<script>` in a README the model read becomes script in Reaper's
- * own origin. The usual answer is a sanitizer — `DOMPurify` is not a dependency
- * of this repo, and adding one to render a bullet list is a poor trade when the
- * safer version is also the smaller one.
+ * So this is Streamdown, which is built for exactly that: it recognises
+ * incomplete markdown as it arrives and completes it for display, so a fence
+ * that has not been closed yet renders as the code block it is becoming rather
+ * than as its own source.
  *
- * So this is a small block parser that produces React nodes. React escapes text
- * on the way in, so there is nothing to sanitize: a `<script>` tag in the
- * markdown becomes the characters `<script>`, which is what it should be. The
- * cost is that it understands less markdown than `marked` does — no reference
- * links, no nested lists deeper than one level, no HTML passthrough. That is a
- * deliberate limit: the model writes answers, not documents, and a parser whose
- * behaviour is obvious is worth more here than one whose coverage is complete.
+ * ## Safety, and why it is not left to the parser
+ *
+ * The previous renderer's whole design was that it never produced HTML: it built
+ * React elements, so a `<script>` in a README the model had read became the
+ * characters `<script>`. Swapping in a parser changes the shape of that
+ * guarantee from "ours by construction" to "the dependency's, if we configure it
+ * right", which is exactly the kind of thing that quietly stops being true.
+ *
+ * So the guarantee is restored at the boundary instead: `escapeRawTags` turns
+ * every tag into its entities before the parser runs, and by the time markdown
+ * is parsed there is no HTML left to sanitise. That is stronger than a sanitiser
+ * because it cannot be forgotten by a plugin ordering change, and it fixed a
+ * real bug while it was there: Streamdown drops the *contents* of a raw tag —
+ * `Build it with <script> tags sometimes.` rendered as `Build it with` — which
+ * for an agent that explains HTML is losing the words it was writing about.
+ *
+ * The tests below pin both halves: the words survive, and no script, image or
+ * anchor is ever produced from model text.
+ *
+ * ## What is deliberately not markdown
+ *
+ * Tool calls, thinking, diffs, browser activity and terminal output are
+ * structured events and render as their own components. Markdown is only ever
+ * the agent's own explanation. Forcing a diff into a fenced block would lose the
+ * diff view, which is the whole reason a diff has one.
  */
 
-import { memo, type ReactNode } from "react";
-
-/** A fenced block: ```lang … ``` */
-interface Fence {
-  kind: "fence";
-  language: string;
-  text: string;
-}
-
-/** A run of non-fenced lines. */
-interface Prose {
-  kind: "prose";
-  lines: string[];
-}
-
-type Block = Fence | Prose;
-
-const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})\s*([A-Za-z0-9_+-]*)\s*$/;
+import { memo, type ComponentProps } from "react";
+import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
 
 /**
- * Split into top-level blocks, respecting fences.
+ * The code plugin, built once.
  *
- * Fences are found first and treated as opaque, because everything inside one
- * is literal text — a `#` at the start of a line in a shell snippet is a
- * comment, not a heading, and parsing the inside as markdown is how a code
- * block ends up with a heading in the middle of it.
+ * Shiki's highlighter is expensive to construct and holds a grammar cache, so
+ * this is module-level rather than per-render: a transcript can hold a hundred
+ * messages and each one must not stand up its own highlighter.
  */
-function toBlocks(text: string): Block[] {
-  const lines = text.split("\n");
-  const blocks: Block[] = [];
-  let prose: string[] = [];
-
-  const flushProse = (): void => {
-    if (prose.length > 0) blocks.push({ kind: "prose", lines: prose });
-    prose = [];
-  };
-
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i] ?? "";
-    const open = FENCE_OPEN.exec(line);
-    if (!open) {
-      prose.push(line);
-      continue;
-    }
-    /*
-     * An unterminated fence is common while a response is still streaming —
-     * the opening ```` ``` ```` has arrived and the closing one has not. Treat
-     * the rest of the text as that block rather than falling back to prose, so
-     * the code being written renders as code while it is being written.
-     */
-    const marker = open[1] ?? "```";
-    const language = open[2] ?? "";
-    const body: string[] = [];
-    let closed = false;
-    for (let j = i + 1; j < lines.length; j += 1) {
-      const candidate = lines[j] ?? "";
-      if (candidate.trimStart().startsWith(marker)) {
-        i = j;
-        closed = true;
-        break;
-      }
-      body.push(candidate);
-    }
-    if (!closed) i = lines.length;
-    flushProse();
-    blocks.push({ kind: "fence", language, text: body.join("\n") });
-  }
-  flushProse();
-  return blocks;
-}
+const PLUGINS = { code } as const;
 
 /**
- * Inline markup: code spans, bold, italic, links.
+ * Link rendering, so a link looks like part of Reaper rather than like a browser
+ * default.
  *
- * Ordered by precedence and applied in one pass, because doing them in sequence
- * over the same string means a `*` inside a code span gets treated as emphasis —
- * the classic reason markdown renderers get `a_b_c` wrong.
+ * `rel="noreferrer noopener"` and a new tab, because a page the model read can
+ * contain a link and this is the boundary where that link leaves the app.
  */
-function renderInline(text: string, keyPrefix: string): ReactNode[] {
-  const out: ReactNode[] = [];
-  const pattern =
-    /(`[^`]+`)|(\*\*[^*]+\*\*)|(__[^_]+__)|(\*[^*\n]+\*)|(\bhttps?:\/\/[^\s)]+)|(\[[^\]]+\]\([^)\s]+\))/g;
-
-  let last = 0;
-  let match: RegExpExecArray | null;
-  let n = 0;
-  while ((match = pattern.exec(text)) !== null) {
-    if (match.index > last) out.push(text.slice(last, match.index));
-    const token = match[0];
-    const key = `${keyPrefix}-i${n++}`;
-
-    if (token.startsWith("`")) {
-      out.push(<code className="md-code" key={key}>{token.slice(1, -1)}</code>);
-    } else if (token.startsWith("**") || token.startsWith("__")) {
-      out.push(<strong key={key}>{token.slice(2, -2)}</strong>);
-    } else if (token.startsWith("*")) {
-      out.push(<em key={key}>{token.slice(1, -1)}</em>);
-    } else if (token.startsWith("[")) {
-      const link = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(token);
-      /*
-       * Only http(s). A `javascript:` or `data:` href from model output would
-       * be a live payload in Reaper's origin, and a link is not worth that.
-       * Anything else renders as its own text, which is honest and inert.
-       */
-      if (link && /^https?:\/\//i.test(link[2] ?? "")) {
-        out.push(
-          <a className="md-link" href={link[2]} key={key} rel="noreferrer noopener" target="_blank">
-            {link[1]}
-          </a>,
-        );
-      } else {
-        out.push(token);
-      }
-    } else {
-      out.push(
-        <a className="md-link" href={token} key={key} rel="noreferrer noopener" target="_blank">
-          {token}
-        </a>,
-      );
-    }
-    last = match.index + token.length;
-  }
-  if (last < text.length) out.push(text.slice(last));
-  return out.length > 0 ? out : [text];
-}
-
-const BULLET = /^\s*[-*+]\s+(.*)$/;
-const ORDERED = /^\s*\d+[.)]\s+(.*)$/;
-const HEADING = /^(#{1,6})\s+(.*)$/;
-const QUOTE = /^>\s?(.*)$/;
-const RULE = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/;
-
-function renderProse(lines: string[], keyPrefix: string): ReactNode[] {
-  const out: ReactNode[] = [];
-  let i = 0;
-  let n = 0;
-
-  while (i < lines.length) {
-    const line = lines[i] ?? "";
-    const key = `${keyPrefix}-p${n++}`;
-
-    if (line.trim() === "") {
-      i += 1;
-      continue;
-    }
-
-    if (RULE.test(line)) {
-      out.push(<hr className="md-rule" key={key} />);
-      i += 1;
-      continue;
-    }
-
-    const heading = HEADING.exec(line);
-    if (heading) {
-      const level = Math.min(6, (heading[1] ?? "#").length);
-      /*
-       * Rendered as a real heading element rather than a styled div, because
-       * the transcript is a document and a screen reader's heading navigation
-       * is how someone moves through a long answer.
-       */
-      const Tag = `h${Math.min(6, level + 2)}` as "h3";
-      out.push(<Tag className="md-heading" key={key}>{renderInline(heading[2] ?? "", key)}</Tag>);
-      i += 1;
-      continue;
-    }
-
-    if (BULLET.test(line) || ORDERED.test(line)) {
-      const ordered = ORDERED.test(line);
-      const items: string[] = [];
-      while (i < lines.length) {
-        const candidate = lines[i] ?? "";
-        const m = ordered ? ORDERED.exec(candidate) : BULLET.exec(candidate);
-        if (!m) break;
-        items.push(m[1] ?? "");
-        i += 1;
-      }
-      const ListTag = ordered ? "ol" : "ul";
-      out.push(
-        <ListTag className="md-list" key={key}>
-          {items.map((item, index) => (
-            <li key={`${key}-li${index}`}>{renderInline(item, `${key}-li${index}`)}</li>
-          ))}
-        </ListTag>,
-      );
-      continue;
-    }
-
-    if (QUOTE.test(line)) {
-      const quoted: string[] = [];
-      while (i < lines.length && QUOTE.test(lines[i] ?? "")) {
-        quoted.push(QUOTE.exec(lines[i] ?? "")?.[1] ?? "");
-        i += 1;
-      }
-      out.push(
-        <blockquote className="md-quote" key={key}>
-          {renderInline(quoted.join(" "), key)}
-        </blockquote>,
-      );
-      continue;
-    }
-
-    /*
-     * A paragraph runs until a blank line or a line that starts a different
-     * block. Joining with a space rather than a newline is the markdown rule,
-     * and it is also what makes a streamed response reflow instead of growing
-     * a ragged right edge as each wrapped line arrives.
-     */
-    const paragraph: string[] = [];
-    while (i < lines.length) {
-      const candidate = lines[i] ?? "";
-      if (
-        candidate.trim() === ""
-        || BULLET.test(candidate)
-        || ORDERED.test(candidate)
-        || HEADING.test(candidate)
-        || QUOTE.test(candidate)
-        || RULE.test(candidate)
-      ) {
-        break;
-      }
-      paragraph.push(candidate.trim());
-      i += 1;
-    }
-    out.push(<p className="md-paragraph" key={key}>{renderInline(paragraph.join(" "), key)}</p>);
-  }
-  return out;
-}
-
-/**
- * A fenced code block.
- *
- * Reuses the `.code-block` / `.code-line` / `.code-gutter` classes Code Mode
- * already styles, so the transcript has one code presentation rather than two
- * that drift apart. Line numbers are shown only past a handful of lines: three
- * lines of shell do not need numbering, and a gutter on every snippet is noise.
- */
-function CodeFence({ language, text }: { language: string; text: string }) {
-  const lines = text.replace(/\n$/, "").split("\n");
-  const numbered = lines.length > 4;
+function MarkdownLink({ href, children, ...rest }: ComponentProps<"a">) {
+  if (!href) return <span>{children}</span>;
   return (
-    <div className="md-fence">
-      {language && <div className="md-fence-lang">{language}</div>}
-      <div className="code-block" data-code>
-        {lines.map((line, index) => (
-          <div className="code-line" key={index}>
-            {numbered && <span className="code-gutter" aria-hidden="true">{index + 1}</span>}
-            <span className="code-text">{line || " "}</span>
-          </div>
-        ))}
-      </div>
-    </div>
+    <a className="md-link" href={href} target="_blank" rel="noreferrer noopener" {...rest}>
+      {children}
+    </a>
   );
 }
 
+/** Element overrides, so markdown comes out looking like the rest of the app. */
+const COMPONENTS = {
+  /*
+   * The element name is `a` here and the prop is `href`, which is the shape
+   * `hast-util-to-jsx-runtime` produces for an `<a>` node.
+   */
+  a: MarkdownLink,
+  /*
+   * Headings get no override: the document stylesheet already gives `h1`-`h6`
+   * the right scale inside `.markdown`, and repeating it here would be two
+   * places to change one thing.
+   */
+} as const;
+
 /**
- * Memoised on `text`, which is the whole point: a streaming response re-renders
- * this component on every delta, and re-parsing the entire answer each time
- * would make a long response quadratic. The memo does not avoid the reparse —
- * the text genuinely changed — but it does avoid re-rendering a *finished*
- * message when an unrelated part of the transcript updates, which is the
- * common case once a turn is over.
+ * Escape raw HTML tags in model output, so their words survive.
+ *
+ * The problem this solves was measured, not assumed. Every variant tried —
+ * `skipHtml`, with and without the incomplete-markdown completer — dropped the
+ * *contents* of a raw tag: `Build it with <script> tags sometimes.` rendered as
+ * `Build it with`, and `Use the <code>page.click()</code> method` lost the
+ * `code` in the middle. That is the parser chain treating the tag as a real
+ * element and then stripping it, and no flag changed it.
+ *
+ * For a coding assistant that is a content bug: an agent explaining HTML, XML,
+ * JSX or a template has to be able to write a tag without losing the words
+ * around it. So tags become entities before the markdown parser sees them,
+ * which makes them literal characters that render exactly as written. The
+ * opening and closing angle brackets are the only change, so a `<` used as
+ * "less than" in prose is untouched.
+ *
+ * This is also the security boundary, and it is a stronger one than a
+ * sanitiser: by the time the parser runs there is no HTML left to sanitise. The
+ * tests assert it end to end — no script, no img, no anchor survives any input.
  */
-export const Markdown = memo(function Markdown({ text }: { text: string }) {
+export function escapeRawTags(text: string): string {
+  /*
+   * Only sequences that look like a tag: `<` followed by a letter or `/`, and
+   * reaching a `>`. That leaves `<` in `a < b` and `5 < 10` alone, which matters
+   * because an answer about arithmetic is full of them.
+   */
+  return text.replace(/<(\/?[A-Za-z][\w:-]*)((?:[^<>"']|"[^"]*"|'[^']*')*?)(\/?)>/g, "&lt;$1$2$3&gt;");
+}
+
+export interface MarkdownProps {
+  text: string;
+  /**
+   * Whether the response is still arriving.
+   *
+   * Drives the streaming cursor and tells Streamdown to keep completing
+   * incomplete markdown. Passed in rather than inferred, because the transcript
+   * knows which turn is running and the renderer does not.
+   */
+  streaming?: boolean | undefined;
+}
+
+/**
+ * Memoised on `text` and `streaming`.
+ *
+ * A streaming response re-renders this on every delta, and re-parsing the whole
+ * answer each time is the cost of showing it live. The memo does not avoid that
+ * — the text genuinely changed — it avoids re-rendering a *finished* message
+ * when an unrelated part of the transcript updates, which is the common case
+ * once a turn is over.
+ */
+export const Markdown = memo(function Markdown({ text, streaming = false }: MarkdownProps) {
   if (!text) return null;
+  /*
+   * Escaped before the parser sees it, not after. See `escapeRawTags`: a raw
+   * tag otherwise loses the text around it, and escaping first means there is
+   * no HTML left for a sanitiser to have to catch.
+   */
+  const safe = escapeRawTags(text);
   return (
     <div className="markdown">
-      {toBlocks(text).map((block, index) =>
-        block.kind === "fence" ? (
-          <CodeFence key={`f${index}`} language={block.language} text={block.text} />
-        ) : (
-          <div key={`p${index}`}>{renderProse(block.lines, `b${index}`)}</div>
-        ),
-      )}
+      <Streamdown
+        plugins={PLUGINS}
+        components={COMPONENTS}
+        isAnimating={streaming}
+        /*
+         * A block cursor rather than a thin one, because it reads as "more is
+         * coming" at a glance and matches the composer's own caret.
+         */
+        caret="block"
+        /*
+         * Streamdown's default parse-completion is what handles the unterminated
+         * fence. Kept explicit rather than left as a default, because it is the
+         * reason this dependency is here and a future change to it should be a
+         * visible edit rather than a silent behaviour change.
+         */
+        parseIncompleteMarkdown
+        /*
+         * Raw HTML comes through as text, never as elements.
+         *
+         * Streamdown parses with `allowDangerousHtml` and sanitises only when
+         * asked, and by default a raw tag is *removed with its text*: measured,
+         * `Use the <code>page.click()</code> method` rendered as
+         * `Use the page.click() method`, and a `<script>` tag's contents vanished
+         * entirely. No script ran, but an agent writing about HTML lost the words
+         * it was writing about, which for a coding assistant is a content bug and
+         * not a formatting one.
+         *
+         * `skipHtml` turns every tag into the text it was: the tag is shown, its
+         * contents are kept, and nothing is parsed into an element. That is the
+         * same property the previous hand-written renderer had, arrived at
+         * explicitly rather than by construction.
+         */
+        skipHtml
+      >
+        {safe}
+      </Streamdown>
     </div>
   );
 });

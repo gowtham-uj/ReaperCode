@@ -1,0 +1,30 @@
+/*
+ * The Tailwind layer the markdown renderer needs, and nothing else.
+ *
+ * Only `utilities` is included. `base` is Tailwind's preflight, which resets
+ * every element in the document, and `components` is its opinionated component
+ * set; neither belongs in an app that already has its own design system. What
+ * Streamdown needs is the utility classes, and the config scopes all of those to
+ * `.markdown` so they cannot reach the rest of the UI.
+ *
+ * Built into the app bundle by the Vite plugin in `vite.config.ts`.
+ */
+@tailwind utilities;
+
+/*
+ * The streaming caret.
+ *
+ * Streamdown renders its caret as an `::after` on the last child of the
+ * container, using `content: var(--streamdown-caret)`, which it sets inline from
+ * the `caret` prop. Without Tailwind's `content-[var(--streamdown-caret)]`
+ * utility the `::after` never renders, so it is written here instead of relying
+ * on a class the config would have to carry for one pseudo-element.
+ *
+ * The block character Streamdown ships (` ▋`) is what is drawn; this only makes
+ * it inherit the text colour and sit on the baseline rather than above it.
+ */
+.markdown > div > *:last-child::after {
+  content: var(--streamdown-caret, "");
+  color: var(--dsw-alias-label-caption);
+  vertical-align: baseline;
+}

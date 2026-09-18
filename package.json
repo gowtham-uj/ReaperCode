@@ -53,6 +53,7 @@
     "shiki": "^1.29.2",
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3",
+    "tailwindcss": "^3.4.19",
     "three": "^0.184.0",
     "tree-kill": "^1.2.2",
     "tsx": "^4.22.2",
@@ -114,10 +115,12 @@
     "@openrouter/ai-sdk-provider": "2.9.0",
     "@qvac/ai-sdk-provider": "0.3.0",
     "@saladtechnologies-oss/ai-sdk-provider": "0.2.0",
+    "@streamdown/code": "^1.1.1",
     "ai": "6.0.168",
     "ai-gateway-provider": "3.2.0",
     "gitlab-ai-provider": "6.12.1",
     "merge-gateway-ai-sdk-provider": "0.2.0",
+    "streamdown": "^2.6.0",
     "venice-ai-sdk-provider": "2.1.1",
     "watsonx-ai-provider": "2.0.0"
   }

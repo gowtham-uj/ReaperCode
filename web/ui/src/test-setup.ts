@@ -77,3 +77,21 @@ if (typeof HTMLDialogElement !== "undefined" && typeof HTMLDialogElement.prototy
     },
   });
 }
+
+/**
+ * jsdom does not implement `Element.prototype.scrollTo`.
+ *
+ * Streamdown scrolls a code block to its end while a response is still arriving,
+ * so rendering a fenced block mid-stream calls it and throws in jsdom before
+ * anything renders. A real browser always has it, so this restores the
+ * environment to what the app runs in rather than working around a real
+ * absence, and it does nothing: scroll position is not what these tests assert,
+ * and faking a layout jsdom does not have would be worse than a no-op.
+ */
+if (typeof Element !== "undefined" && typeof Element.prototype.scrollTo !== "function") {
+  Object.defineProperty(Element.prototype, "scrollTo", {
+    value: () => undefined,
+    configurable: true,
+    writable: true,
+  });
+}

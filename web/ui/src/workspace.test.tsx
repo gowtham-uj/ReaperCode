@@ -93,7 +93,13 @@ describe("thread workspace controls", () => {
       />,
     );
     expect(screen.getByText("Threads")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: /Second/ }));
+    /*
+     * Not `/Second/`: the row now carries a delete control whose accessible name
+     * is "Delete Second", so a bare name pattern matches two buttons and the
+     * query is ambiguous. The switch control is the one whose name starts with
+     * the thread's own name; the delete control's starts with "Delete".
+     */
+    await user.click(screen.getByRole("button", { name: /^Second\b/ }));
     expect(onSwitch).toHaveBeenCalledWith("thread-b");
   });
 });

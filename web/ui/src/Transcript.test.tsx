@@ -142,8 +142,10 @@ describe("an agent message is rendered as markdown", () => {
       items: [{ type: "agentMessage", id: "m-1", text: "## Summary\n\n- one\n- two", phase: "final_answer" }],
     })]} />);
     const message = document.querySelector(".agent-message");
-    expect(message?.querySelector(".md-heading")?.textContent).toBe("Summary");
-    expect(message?.querySelectorAll(".md-list li")).toHaveLength(2);
+    // The engine is Streamdown now, so the assertions are on the elements it
+    // emits: a heading, and a real list with two items.
+    expect(message?.querySelector("h2")?.textContent).toBe("Summary");
+    expect(message?.querySelectorAll("li")).toHaveLength(2);
     // The literal markup must be gone from what a person reads.
     expect(message?.textContent).not.toContain("##");
     expect(message?.textContent).not.toContain("- one");

@@ -383,12 +383,14 @@ const ItemView = memo(function ItemView({ item, live }: { item: AppThreadItem; l
      *
      * The model writes headings, bullets, bold and fenced code — that is what
      * an answer looks like — and this printed the markup verbatim, so a
-     * `## Summary` arrived on screen as the characters `## Summary`. The
-     * component renders React elements rather than HTML, so model output is
-     * never handed to the DOM as markup; see the note at the top of
-     * `Markdown.tsx` for why that is the safer of the two obvious designs.
+     * `## Summary` arrived on screen as the characters `## Summary`.
+     *
+     * `live` is passed through so a response still arriving renders its
+     * incomplete markdown as what it is becoming: an unterminated code fence
+     * mid-answer is the normal state of a stream, not an edge case. See the note
+     * at the top of `Markdown.tsx`.
      */
-    case "agentMessage": return <div className="agent-message"><Markdown text={item.text} /></div>;
+    case "agentMessage": return <div className="agent-message"><Markdown text={item.text} streaming={live} /></div>;
     case "reasoning": return <Reasoning text={item.content.join("")} live={live} />;
     case "commandExecution": return <CommandView item={item} />;
     case "fileChange": return <FileChangeView item={item} />;

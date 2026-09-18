@@ -381,32 +381,91 @@ code, pre, [data-diff], [data-read], [data-terminal] { font-family: var(--ds-fon
  */
 .agent-message { margin: 7px 0; color: var(--dsw-alias-label-primary); font-size: var(--dsh-content-font-size, 14px); line-height: calc(24px + var(--dsh-content-font-delta, 0px)); overflow-wrap: anywhere; }
 
-/* Markdown, as the transcript renders it. */
+/*
+ * Markdown, as Streamdown renders it.
+ *
+ * Streamdown produces plain semantic HTML — `p`, `ul`, `pre`, `code`, `table` —
+ * inside the `.markdown` wrapper, so these are element rules rather than class
+ * rules. That is the trade the dependency makes: we style the elements it emits
+ * instead of the elements our own parser used to emit, and the markup a reader
+ * gets is the markup markdown says it is.
+ *
+ * Everything here is a token from Reaper's palette, so the transcript follows
+ * the theme rather than arriving with its own. The spacing scale is the one the
+ * rest of the transcript uses: 10px between blocks, 18px above a heading.
+ */
 .markdown > *:first-child { margin-top: 0; }
 .markdown > *:last-child { margin-bottom: 0; }
-.md-paragraph { margin: 0 0 10px; white-space: pre-wrap; }
-.md-heading { margin: 18px 0 7px; color: var(--dsw-alias-label-primary); font-size: 15px; font-weight: 600; line-height: 1.35; }
-.md-heading + .md-paragraph, .md-heading + .md-list { margin-top: 0; }
-.md-list { margin: 0 0 10px; padding-left: 22px; }
-.md-list li { margin: 2px 0; }
-.md-list li::marker { color: var(--dsw-alias-label-caption); }
-.md-quote { margin: 0 0 10px; padding: 2px 0 2px 12px; border-left: 2px solid var(--dsw-alias-border-l3); color: var(--dsw-alias-label-secondary); }
-.md-rule { margin: 14px 0; border: 0; border-top: .5px solid var(--dsw-alias-border-l2); }
-/* Inline code reads as a chip so it is distinguishable from prose at a glance. */
-.md-code { padding: 1px 5px; border-radius: 4px; background: var(--dsw-alias-markdown-code-block); color: var(--dsw-alias-label-secondary); font-family: var(--ds-font-family-code); font-size: .92em; }
+.markdown p { margin: 0 0 10px; }
+.markdown h1, .markdown h2, .markdown h3, .markdown h4, .markdown h5, .markdown h6 {
+  margin: 18px 0 7px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+.markdown h1 { font-size: 17px; }
+.markdown h2 { font-size: 16px; }
+.markdown ul, .markdown ol { margin: 0 0 10px; padding-left: 22px; }
+.markdown li { margin: 2px 0; }
+.markdown li::marker { color: var(--dsw-alias-label-caption); }
+/* Nested lists sit inside their parent item, so they need no extra bottom gap. */
+.markdown li > ul, .markdown li > ol { margin: 2px 0 0; }
+.markdown blockquote {
+  margin: 0 0 10px;
+  padding: 2px 0 2px 12px;
+  border-left: 2px solid var(--dsw-alias-border-l3);
+  color: var(--dsw-alias-label-secondary);
+}
+.markdown hr { margin: 14px 0; border: 0; border-top: .5px solid var(--dsw-alias-border-l2); }
+.markdown strong { font-weight: 600; color: var(--dsw-alias-label-primary); }
+/*
+ * Inline code reads as a chip so it is distinguishable from prose at a glance.
+ * `pre code` is excluded: a fenced block is already bounded by its own
+ * background and a chip inside it would double the border.
+ */
+.markdown :not(pre) > code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--dsw-alias-markdown-code-block);
+  color: var(--dsw-alias-label-secondary);
+  font-family: var(--ds-font-family-code);
+  font-size: .92em;
+}
+.markdown pre {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--dsw-alias-markdown-code-block);
+  overflow-x: auto;
+}
+.markdown pre code { font-family: var(--ds-font-family-code); font-size: 12.5px; line-height: 1.6; }
+/*
+ * Tables get a scroll container rather than wrapping, because a wrapped cell
+ * makes a column comparison unreadable, which is the only reason to use a table.
+ */
+.markdown table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  margin: 0 0 10px;
+  border-collapse: collapse;
+  overflow-x: auto;
+  font-size: 13px;
+}
+.markdown th, .markdown td {
+  padding: 5px 10px;
+  border: .5px solid var(--dsw-alias-border-l2);
+  text-align: left;
+}
+.markdown th { background: var(--dsw-alias-bg-l1); font-weight: 600; color: var(--dsw-alias-label-primary); }
 /* A link is text before it is an accent, so it takes the light variant for the
    same reason the running badge does — at fill strength it measured 4.31:1 on
    the default dark base and 3.76:1 in reaper, both under 4.5:1. */
 .md-link { color: var(--dsw-static-deepseek-300); text-decoration: none; }
 .md-link:hover { text-decoration: underline; }
-
-/*
- * A fenced block. Borrows `.code-block` from the Code Mode stylesheet so the
- * transcript has one code presentation rather than two that drift.
- */
-.md-fence { position: relative; margin: 0 0 10px; }
-.md-fence-lang { position: absolute; top: 6px; right: 10px; color: var(--dsw-alias-label-caption); font-family: var(--ds-font-family-code); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; pointer-events: none; }
-.md-fence .code-block { margin: 0; }
+/* Images the model references are bounded, so one cannot fill the transcript. */
+.markdown img { max-width: 100%; height: auto; border-radius: 8px; }
 .reasoning { color: var(--dsw-alias-label-tertiary); font-size: 13px; }
 /*
  * Thinking, while it is happening.
