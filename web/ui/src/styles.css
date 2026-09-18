@@ -466,6 +466,95 @@ code, pre, [data-diff], [data-read], [data-terminal] { font-family: var(--ds-fon
 .md-link:hover { text-decoration: underline; }
 /* Images the model references are bounded, so one cannot fill the transcript. */
 .markdown img { max-width: 100%; height: auto; border-radius: 8px; }
+
+/*
+ * The code block's own chrome.
+ *
+ * Streamdown lays a code block out as a header, an absolutely-positioned action
+ * bar over the body, and the body itself, and it positions them with Tailwind
+ * utilities that assume its own layout engine. Without those the header and the
+ * buttons stack vertically and the block reads as a column of stray glyphs, which
+ * is what a screenshot of the first working version showed.
+ *
+ * Styled by `data-streamdown` attribute rather than by class: those attributes
+ * are the component's stable public surface, and the utility classes on the same
+ * elements are Tailwind's, which this app only compiles for the utilities
+ * Streamdown actually names.
+ */
+.markdown [data-streamdown="code-block"] {
+  position: relative;
+  margin: 0 0 10px;
+  border: .5px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-markdown-code-block);
+  overflow: hidden;
+}
+.markdown [data-streamdown="code-block-header"] {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 30px;
+  padding: 0 8px 0 10px;
+  border-bottom: .5px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-caption);
+  font-family: var(--ds-font-family-code);
+  font-size: 11px;
+  text-transform: lowercase;
+}
+/*
+ * The action bar floats at the right of the header rather than taking a row of
+ * its own, so a one-line snippet does not pay for a header and a toolbar.
+ *
+ * Positioned on its *wrapper*, which is a `div` Streamdown gives `sticky top-2
+ * -mt-10` to pull the row up over the body. Styling the actions alone left that
+ * wrapper's own layout in place and produced a stray column of icons floating
+ * above the block: a screenshot of the first working version showed exactly that,
+ * which is why the wrapper is neutralised here rather than left to its classes.
+ */
+.markdown [data-streamdown="code-block"] > div:has(> [data-streamdown="code-block-actions"]) {
+  position: absolute;
+  top: 3px;
+  right: 6px;
+  margin: 0;
+  height: auto;
+  z-index: 1;
+  pointer-events: auto;
+}
+.markdown [data-streamdown="code-block-actions"] {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.markdown [data-streamdown="code-block"]:hover [data-streamdown="code-block-actions"],
+.markdown [data-streamdown="code-block-actions"]:focus-within { opacity: 1; }
+.markdown [data-streamdown="code-block-actions"] button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dsw-alias-label-caption);
+  cursor: pointer;
+}
+.markdown [data-streamdown="code-block-actions"] button:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+/* The body is the only scrolling part, so the header stays put. */
+.markdown [data-streamdown="code-block-body"] { margin: 0; padding: 0; border: 0; background: none; }
+.markdown [data-streamdown="code-block-body"] pre {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 0;
+  background: none;
+  overflow-x: auto;
+}
 .reasoning { color: var(--dsw-alias-label-tertiary); font-size: 13px; }
 /*
  * Thinking, while it is happening.
