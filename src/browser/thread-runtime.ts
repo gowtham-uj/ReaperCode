@@ -2330,7 +2330,29 @@ export class ThreadBrowserRuntime {
        * the stale handle, which is what makes "a new page" actually new.
        */
       if (/Target (page|closed)|has been closed|Session closed|page has been closed/i.test((error as Error).message)) {
-        const replaced = await this.replaceClosedPage().catch(() => ({ created: false }) as { page?: Page; created: boolean });
+        /*
+         * Replace the page, and if that cannot be done from the live handles,
+         * re-attach and try again.
+         *
+         * `replaceClosedPage` needs a context to look in, and a page can close
+         * during a transient disconnect, when the handles have already been
+         * dropped. The first version gave up in that case and told the model "the
+         * browser needs re-attaching", which reads as an instruction to act and
+         * describes work this runtime can do itself. Read from a live mission: the
+         * agent lost a step to that sentence, reasoned about whether it was
+         * allowed to re-attach, and continued on the next call, which re-attached
+         * automatically exactly as this now does within the same step.
+         *
+         * `ensureReady` is the same path the next call would have taken, so doing
+         * it here changes nothing about the outcome and only saves the round trip
+         * and the confusion.
+         */
+        let replaced = await this.replaceClosedPage().catch(() => ({ created: false }) as { page?: Page; created: boolean });
+        if (replaced.page === undefined) {
+          replaced = await this.ensureReady()
+            .then(({ page }) => ({ page, created: false }))
+            .catch(() => replaced);
+        }
         return {
           result: undefined,
           receipt: {
@@ -2344,7 +2366,14 @@ export class ThreadBrowserRuntime {
             wholesale: false,
             elapsedMs: Date.now() - stepStarted,
             note: replaced.page === undefined
-              ? `The page was closed and could not be replaced, so the browser needs re-attaching.`
+              ? /*
+                 * Reached only when the re-attach above also failed, so this now
+                 * means what it says: the browser is genuinely unreachable, and
+                 * the next call will try again on its own. Deliberately not
+                 * phrased as an instruction to the model, because re-attaching
+                 * is not something it can do.
+                 */
+                `The page was closed and could not be replaced, because the browser could not be reached. The next browser call will try to re-attach.`
               : replaced.created
                 ? /*
                    * Named as created, because it was, and a page the model did
