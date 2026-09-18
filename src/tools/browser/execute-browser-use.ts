@@ -25,6 +25,7 @@ import type { BrowserUseArgs } from "./browser-use.js";
 import { verifyStep } from "../../browser/verify.js";
 import { looksBlocked } from "../../browser/user-agents.js";
 import { scopePage } from "../../browser/scoped-page.js";
+import { BROWSER_PROGRAM_PARAMS } from "../../browser/remote-page-source.js";
 import {
   BrowserProgramHost,
   type ControlSurface,
@@ -192,18 +193,16 @@ export interface ProgramContext {
 }
 
 /**
- * The parameter names a program can use. Kept in one place so they cannot drift.
+ * The parameter names a program can use.
  *
- * Must stay in step with the names `worker-source.ts` pushes and with
- * `BROWSER_PROGRAM_PARAMS`. A name documented but missing here is
- * "pages is not defined" at runtime, which reads to a model as its own mistake,
- * and that is exactly the drift this list exists to prevent.
+ * Re-exported from the sandbox's own list rather than kept beside it. It used to
+ * be a second copy, with a comment saying the two must stay in step and nothing
+ * making them: `recover` and `capabilities` were added here and not there, so the
+ * tool description told the model to call a name the sandbox never bound, and it
+ * got "recover is not defined" for its trouble. One list, imported, is what the
+ * comment was trying to be.
  */
-const PROGRAM_PARAMS = [
-  "page", "browser", "view", "viewChanges", "screenshot", "pages",
-  "set", "setUserAgent", "setTimezone", "setViewport", "setFullscreen", "setMobile",
-  "blockAds", "bandwidth", "settings", "rotateUserAgent", "downloads", "download", "downloadAfter",
-] as const;
+export const PROGRAM_PARAMS = BROWSER_PROGRAM_PARAMS;
 
 /**
  * The program body as source, ready for whichever runtime will run it.
@@ -479,7 +478,13 @@ function controlSurface(runtime: ThreadBrowserRuntime): ControlSurface {
       recoverable: true,
     }),
     rotateUserAgent: async () => await runtime.rotateUserAgent(),
-    recover: async () => await runtime.recover(),
+    /*
+     * The argument is a page the program may hold, so it is resolved through the
+     * same revive path any Playwright handle takes; a bare call recovers the
+     * active page, which is what a program that did not name one means.
+     */
+    recover: async (target?: unknown) => await runtime.recover(target as never),
+    probeInput: async (target?: unknown) => await runtime.probeInput(target as never),
     downloads: async () =>
       runtime.downloadedFiles.map((file) => ({ name: file.name, bytes: file.bytes, ...(file.url ? { url: file.url } : {}) })),
     download: async (name) => {
@@ -989,6 +994,14 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
   if (health !== undefined) lines.push("", `BROWSER: ${health}`);
   const created = runtime.takePageCreationNote();
   if (created !== undefined) lines.push("", `PAGES: ${created}`);
+  /*
+   * The loop warning, recorded here because this is the first place the outcome
+   * is known. The runtime keeps the history across steps and answers with a
+   * sentence only when the same program has produced the same result three
+   * times, which is where a person would stop and say so.
+   */
+  const loop = runtime.noteStepOutcome(args.code ?? "", outcome);
+  if (loop !== undefined) lines.push("", loop);
 
   return {
     output: lines.join("\n"),

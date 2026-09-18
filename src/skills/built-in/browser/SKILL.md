@@ -193,11 +193,32 @@ causes and they need opposite responses.
    clicks do nothing, typing into a focused field does nothing, Tab never moves
    focus. It is per page, not per browser, and nothing on the page shows it.
 
-For the second, call `recover()`:
+For the second, ask before guessing. `probeInput()` answers it in one call:
 
 ```js
-await recover();  // replaces the page's renderer, then puts it back on the same URL
+const check = await probeInput();          // the active page
+const other = await probeInput(ti);        // or a page handle you hold
+if (!check.delivered) {
+  // The page is not accepting input. Nothing you click or type will land.
+  await recover(ti);                       // replace that page's renderer
+}
 ```
+
+`probeInput` delivers one real mouse event and reports whether the page heard it,
+on the same path a click takes. Use it instead of registering your own listeners
+and clicking to test: that is the same experiment, done in one call rather than
+ten.
+
+Read the answer for what it is. `delivered: false` is real and means input is not
+reaching that page at all. `delivered: true` means the page itself is not why your
+click did nothing — so look at the locator, the element, or which tab you are
+actually driving. (A blocked main thread and a backgrounded tab both still report
+`delivered: true`, because Chrome queues the event either way; neither is the
+failure this detects.)
+
+`recover(target?)` replaces the page's renderer and puts it back on the same URL.
+Pass the page you mean when you are driving one by handle; with no argument it
+recovers the active page.
 
 Logged-in state survives, because cookies live in the browser context rather than
 in the renderer that was replaced. It takes a few seconds.

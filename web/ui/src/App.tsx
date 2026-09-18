@@ -101,6 +101,26 @@ function WorkspacePage() {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [detailsWidth, setDetailsWidth] = useState(520);
   const [draft, setDraft] = useState("");
+  /*
+   * A draft belongs to the thread it was typed in.
+   *
+   * The composer kept its text across a switch, so a sentence written in one
+   * conversation was still sitting in the box after opening another, one Enter
+   * away from being sent to the wrong thread. The draft is cleared when the
+   * thread changes rather than stored per thread: a half-written message is
+   * about the conversation on screen, and keeping invisible copies of it would
+   * make "why is this box empty" as surprising as the original leak.
+   *
+   * Keyed on the thread id and not on the summary object, which changes
+   * identity on every refresh while the thread stays the same.
+   */
+  const draftThreadId = app.threadId;
+  const draftThreadRef = useRef<string | undefined>(draftThreadId);
+  useEffect(() => {
+    if (draftThreadRef.current === draftThreadId) return;
+    draftThreadRef.current = draftThreadId;
+    setDraft("");
+  }, [draftThreadId]);
   const [workbenchMode, setWorkbenchMode] = useState<WorkbenchMode>("files");
   const [threadSettingsOpen, setThreadSettingsOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);

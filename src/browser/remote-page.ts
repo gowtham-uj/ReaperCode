@@ -61,6 +61,16 @@ export interface CallStep {
   method: string;
   /** Arguments, already structurally cloned across the boundary. */
   args: unknown[];
+  /**
+   * Whether the program invoked this as a method.
+   *
+   * `page.url` and `page.url()` arrive identically otherwise, and the host had to
+   * guess from the argument count: a step with none was read as a property. That
+   * is right for a real property and silently wrong for a call to a name that is
+   * not a method — `page.recover()` returned `undefined` rather than failing, so
+   * a control named in the tool description looked present and did nothing.
+   */
+  called?: boolean;
 }
 
 /** What the host sends back for one call. */
@@ -233,8 +243,24 @@ export class RemotePageHost {
      * calls it was allowed to make.
      */
     if (typeof member !== "function") {
-      if (step.args.length > 0) {
-        throw new Error(`${step.method} is not a method on this object`);
+      /*
+       * A call to something that is not a method is refused, whether or not it
+       * was given arguments.
+       *
+       * This only rejected a call with arguments, so `page.recover()` — a
+       * zero-argument call — fell through and answered `undefined`. Measured on a
+       * live mission: the agent called `recover()` because the tool description
+       * tells it to, got `undefined`, and reported "recover isn't a function
+       * returning promise; it's a no-op/undefined" before abandoning the one
+       * control written for the failure it was stuck on. A silent `undefined` for
+       * a name the docs promise is the worst shape a missing binding can take,
+       * because it looks like the control exists and does nothing.
+       */
+      if (step.called === true || step.args.length > 0) {
+        throw new Error(
+          `${step.method} is not a method on this object (it is ${member === undefined ? "undefined" : typeof member}). ` +
+          `Check the tool description for what is in scope.`,
+        );
       }
       return member;
     }
@@ -390,8 +416,33 @@ function readFunctionMarker(value: unknown): { invoked: boolean; source: string 
   return { invoked: kind === "invoke", source: marker.source };
 }
 
+/**
+ * The marker the sandbox uses to send a RegExp.
+ *
+ * Rebuilt with the constructor rather than evaluated, because the source and
+ * flags are data: `new RegExp("secure", "i")` is the same construction the
+ * program itself performed, and it cannot execute anything. Without this the
+ * argument arrived as `{}` and Playwright rejected it with "url parameter should
+ * be string, RegExp, URLPattern or function".
+ */
+function readRegExpMarker(value: unknown): RegExp | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const marker = value as { __reaperRegExp?: unknown; source?: unknown; flags?: unknown };
+  if (marker.__reaperRegExp !== true) return undefined;
+  if (typeof marker.source !== "string") return undefined;
+  try {
+    return new RegExp(marker.source, typeof marker.flags === "string" ? marker.flags : "");
+  } catch {
+    // An invalid pattern is the program's own error and Playwright will report
+    // it far better than a bridge error could.
+    return undefined;
+  }
+}
+
 function reviveArguments(args: unknown[], method: string): unknown[] {
   return args.map((arg) => {
+    const asRegExp = readRegExpMarker(arg);
+    if (asRegExp !== undefined) return asRegExp;
     const marker = readFunctionMarker(arg);
     if (marker === undefined) return reviveArgument(arg);
     /*

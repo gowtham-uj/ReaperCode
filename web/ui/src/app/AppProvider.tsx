@@ -236,7 +236,28 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
     if (threadId) client?.notify("turn/interrupt", { threadId });
   }, [client, threadId]);
 
-  const [queued, setQueued] = useState<QueuedMessage[]>([]);
+  /**
+   * Messages queued for the open thread, and the thread they belong to.
+   *
+   * The queue is per thread, and that is a correctness property rather than a
+   * convenience. It was a single list, so switching threads carried it across: a
+   * message typed while thread A's agent was working would be delivered to
+   * thread B, because the flush effect only ever looked at "is a turn running" and
+   * never at "whose turn". The same leak showed in the composer, whose draft text
+   * stayed on screen after a switch and could be sent to the wrong conversation.
+   *
+   * The owner is stored beside the entries and compared on every read, so a queue
+   * that belongs to another thread is not merely hidden but cannot be delivered:
+   * `flush` skips it, and the effect that drains the queue does not see it.
+   */
+  const [queuedState, setQueuedState] = useState<{ owner: string | undefined; entries: QueuedMessage[] }>({
+    owner: undefined,
+    entries: [],
+  });
+  const queued = threadId === undefined || queuedState.owner === threadId ? queuedState.entries : [];
+  const setQueued = useCallback((update: (entries: QueuedMessage[]) => QueuedMessage[]): void => {
+    setQueuedState((current) => ({ owner: threadIdRef.current, entries: update(current.owner === threadIdRef.current ? current.entries : []) }));
+  }, []);
   const queueSeq = useRef(0);
   const flushing = useRef(false);
   const queuedRef = useRef(queued);

@@ -108,7 +108,15 @@ export interface ControlSurface {
    * discovery the model should not have to make: the failure looks exactly like
    * a broken page, and there is nothing on the page to point at the browser.
    */
-  recover: () => Promise<ControlReport>;
+  recover: (target?: unknown) => Promise<ControlReport>;
+  /**
+   * Whether a page's renderer still accepts input.
+   *
+   * Answers the question a model otherwise spends a dozen calls building
+   * listeners to answer, and answers it definitively: a click delivered through
+   * CDP either reaches the page or does not.
+   */
+  probeInput: (target?: unknown) => Promise<{ delivered: boolean; note: string }>;
   /**
    * What this browser can do, so the model asks rather than experiments.
    *
@@ -146,7 +154,18 @@ export interface ControlReport {
  * a few steps later.
  */
 export class BrowserFacade {
-  constructor(private readonly runtime: ThreadBrowserRuntime) {
+  constructor(
+    private readonly runtime: ThreadBrowserRuntime,
+    /**
+     * Called when the program itself changes the active page.
+     *
+     * This is the only thing allowed to re-pin a program's `page`. The runtime
+     * re-pins its own active page for internal reasons, and following those
+     * silently redirected a running program mid-step: a listener armed on one
+     * page, a click that landed on another, and a counter that read zero.
+     */
+    private readonly onRepin?: (page: Page) => void,
+  ) {
     this.initial = runtime.activePage;
   }
 
@@ -174,7 +193,14 @@ export class BrowserFacade {
 
   /** Open a page in this thread's own context, optionally naming it. */
   async newPage(name?: string): Promise<Page> {
-    return this.scoped(await this.runtime.newPage(name));
+    /*
+     * Re-pins, because opening a tab makes it the active page: the documented
+     * contract is that `page` is the active page, so a program that has just
+     * opened one means the new one by `page`.
+     */
+    const page = this.scoped(await this.runtime.newPage(name));
+    this.onRepin?.(page);
+    return page;
   }
 
   /**
@@ -213,17 +239,19 @@ export class BrowserFacade {
    * that reaches for any of them is right rather than nearly right.
    */
   async setActive(selector: string | number | Page): Promise<Page> {
-    return this.scoped(await this.runtime.setActive(selector));
+    const page = this.scoped(await this.runtime.setActive(selector));
+    this.onRepin?.(page);
+    return page;
   }
 
   /** The same call, spelled the way the skill's examples show it. */
   async page(selector: string | number | Page): Promise<Page> {
-    return this.scoped(await this.runtime.setActive(selector));
+    return await this.setActive(selector);
   }
 
   /** The same call under the name that reads best in a program. */
   async usePage(selector: string | number | Page): Promise<Page> {
-    return this.scoped(await this.runtime.setActive(selector));
+    return await this.setActive(selector);
   }
 
   /** Close a page and forget it, so a name is not left pointing at a corpse. */
@@ -297,19 +325,33 @@ export class BrowserProgramHost {
      * `newPage` outright, which is the guard working exactly as designed and
      * exactly the wrong thing to root a program at.
      */
-    const facade = new BrowserFacade(runtime);
+    let pinned: Page | undefined;
+    const facade = new BrowserFacade(runtime, (next) => { pinned = next; });
     /*
-     * `page` is resolved on every use rather than bound once.
+     * `page` is resolved on every use, but only the *program* may change what it
+     * means.
      *
-     * The bare `page` a program reads must be the *active* page, because
-     * `browser.setActive(name)` is documented to change what it means. Binding
-     * the page object at construction made it the page that existed when the
-     * program started, so a program that switched tabs and then used `page`
-     * drove the tab it had just left: reproduced with
-     * `await browser.setActive('hn'); await page.url()` returning the microsoft
-     * page.
+     * The two failures pull in opposite directions and the fix has to satisfy
+     * both. Binding the page object once at construction was wrong: a program
+     * that called `browser.setActive("hn")` and then used `page` drove the tab it
+     * had just left. So the resolution has to be live.
+     *
+     * Resolving it from the runtime's current active page on every call was the
+     * other extreme, and it is the bug that cost a mission twenty tool calls. The
+     * runtime re-pins its active page for reasons that are none of a program's
+     * business — a handle reset, a page list re-read, a health sweep — and every
+     * one of those silently redirected the program's `page` mid-flight. The
+     * measured shape: a program installed a document listener, clicked, and read
+     * its counter back, and got `0`, because the three calls had gone to two
+     * different pages. The agent concluded the page had stopped accepting input
+     * and spent the rest of the run on that theory.
+     *
+     * So the page is pinned for the life of the program, and `setActive` is the
+     * one thing that re-pins it — which is exactly the contract the skill
+     * documents: `page` is the active page, and the program decides which one
+     * that is.
      */
-    this.inner = new RemotePageHost(() => facade.currentPage() ?? page, {
+    this.inner = new RemotePageHost(() => (pinned ??= facade.currentPage() ?? page), {
       browser: facade,
       /*
        * `pages` roots at the *method*, not at the facade.

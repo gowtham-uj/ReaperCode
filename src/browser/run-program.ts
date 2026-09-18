@@ -153,7 +153,7 @@ export async function runProgram(options: RunProgramOptions): Promise<ProgramOut
             void options.host
               .call(
                 message.handle,
-                message.path.map(([method, ...args]) => ({ method, args })),
+                message.path.map(([method, called, ...args]) => ({ method, args, called: called === 1 })),
               )
               .then((reply) => transport.postMessage({ type: "pageResult", id: message.id, reply }))
               .catch((error: unknown) =>

@@ -21,10 +21,11 @@ import { BROWSER_USE_DESCRIPTION } from "../../../src/tools/browser/browser-use.
 const SKILL_PATH = new URL("../../../src/skills/built-in/browser/SKILL.md", import.meta.url);
 
 test("the tool description names the recovery control and the download calls", () => {
-  assert.match(BROWSER_USE_DESCRIPTION, /recover\(\)/, "recover() must be named, or a stuck model will not know it exists");
+  assert.match(BROWSER_USE_DESCRIPTION, /recover\(target\?\)/, "recover() must be named, or a stuck model will not know it exists");
   assert.match(BROWSER_USE_DESCRIPTION, /downloadAfter/, "the one-call download must be named");
   assert.match(BROWSER_USE_DESCRIPTION, /setInputFiles\(file\.path\)/, "and how to upload what the vault holds");
   assert.match(BROWSER_USE_DESCRIPTION, /capabilities\(\)/, "and the capability query");
+  assert.match(BROWSER_USE_DESCRIPTION, /probeInput\(/, "and the input probe, so a dead page is one call to diagnose");
 });
 
 test("the tool description says a returned value suppresses the page", () => {

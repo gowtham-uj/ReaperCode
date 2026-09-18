@@ -112,6 +112,22 @@ export class ThreadBrowserRuntime {
   private anonymousCount = 0;
 
   /**
+   * The last few steps, so an agent stuck in a loop can be told it is one.
+   *
+   * Measured on a live mission: the agent re-ran the same click-then-wait pair
+   * thirteen consecutive times, each time writing "maybe it was transient", and
+   * then re-ran the whole login-and-controls flow five more times. Every retry
+   * was reasonable in isolation; nothing ever told it that the last one had been
+   * identical, so there was no signal to stop on.
+   *
+   * A fingerprint of the program plus its outcome is enough to see that. Kept to
+   * a handful and compared by exact match, so a genuinely different attempt — a
+   * changed selector, a different wait — breaks the run rather than being
+   * counted against the agent.
+   */
+  private readonly recentSteps: Array<{ fingerprint: string; outcome: string }> = [];
+
+  /**
    * A page name that no other thread in the shared context is using.
    *
    * The counter is per-runtime, and the context is now shared, so two threads
@@ -2480,8 +2496,24 @@ export class ThreadBrowserRuntime {
    *
    * The page is returned to the URL it was on, so the caller can carry on.
    */
-  async recover(): Promise<ControlReport> {
-    const { page } = await this.ensureReady();
+  async recover(target?: Page): Promise<ControlReport> {
+    /*
+     * A target, because the page that stops taking input is usually not the
+     * active one.
+     *
+     * The mission drove a tab it had selected by URL, so `page` meant a
+     * different page entirely; recovering the active page would have replaced
+     * the renderer of a page that was working and left the broken one alone.
+     */
+    const page = target ?? (await this.ensureReady()).page;
+    if (page.isClosed()) {
+      return {
+        applied: [],
+        nextLaunch: [],
+        current: this.currentSettings(),
+        note: "that page is already closed, so there is no renderer to replace.",
+      };
+    }
     const url = page.url();
     if (url.startsWith("about:") || url.length === 0) {
       return {
@@ -2516,6 +2548,102 @@ export class ThreadBrowserRuntime {
         current: this.currentSettings(),
         note: `the renderer could not be replaced: ${(error as Error).message.split("\n")[0]}. The page is at ${page.url()}.`,
       };
+    }
+  }
+
+  /**
+   * Record what a step did, and answer with a warning when it is repeating.
+   *
+   * Called by the tool with the program's source and the outcome it produced.
+   * The fingerprint is the source with whitespace collapsed, so a model that
+   * reformats its own program is not treated as having tried something new, and
+   * the outcome is part of the key, so "the same click that worked" and "the same
+   * click that failed" are different histories.
+   *
+   * Returns a sentence at exactly the point where a person would say it: the
+   * third time the same thing produced the same result. Not the second — a retry
+   * after a transient failure is reasonable — and not the tenth, by which point
+   * the mission has already spent its budget. The message names what has not
+   * changed and what to change, rather than only reporting the count, because
+   * "you have done this three times" is a fact and "nothing about the page has
+   * changed between them" is the reason to act differently.
+   */
+  noteStepOutcome(code: string, outcome: string): string | undefined {
+    const fingerprint = code.replace(/\s+/g, " ").trim();
+    this.recentSteps.push({ fingerprint, outcome });
+    if (this.recentSteps.length > 8) this.recentSteps.shift();
+
+    const repeats = this.recentSteps.filter(
+      (entry) => entry.fingerprint === fingerprint && entry.outcome === outcome,
+    ).length;
+    if (repeats < 3) return undefined;
+    /*
+     * Only warn on the third and then every third, so the sentence stays a
+     * signal rather than becoming a line the model scrolls past.
+     */
+    if (repeats % 3 !== 0) return undefined;
+    return (
+      `LOOP: this is the ${repeats}${ordinalSuffix(repeats)} time the same program has produced ${outcome} on this page. ` +
+      `Retrying it unchanged will keep producing it. Change something: a different locator, ` +
+      `\`probeInput()\` to check whether the page is still accepting input, \`recover()\` if it is not, ` +
+      `or a different route to the goal.`
+    );
+  }
+
+  /**
+   * Whether this page is hearing input at all.
+   *
+   * The question the model had to answer for itself, over thirteen tool calls,
+   * and could not: it registered document-level listeners, clicked, checked the
+   * counter, tried keyboard input and Tab focus, compared coordinates with
+   * `elementFromPoint`, and finally gave up and reported the browser broken.
+   * Every one of those steps was the model rebuilding a probe that belongs here.
+   *
+   * The probe is small: install a listener, deliver one real mouse event through
+   * CDP at a harmless point, and see whether the page heard it.
+   * `Input.dispatchMouseEvent` is the same path a `locator.click()` takes.
+   *
+   * Deliberately not a click on any element: a probe must not change the page it
+   * is asking about. The point is the viewport corner, which no layout puts a
+   * control at, and the listener is removed before returning.
+   *
+   * ## What this does and does not prove
+   *
+   * Measured against the live browser: a page whose main thread is blocked
+   * STILL reports delivered, because Chrome queues the event and dispatches it
+   * when the thread frees up. A backgrounded tab reports delivered. Neither is
+   * the failure mode, and this probe says so honestly rather than pretending to
+   * detect them.
+   *
+   * What it does detect is the case the mission actually hit: the program's
+   * `page` and the click landing on two different tabs, which is a platform bug
+   * fixed in `BrowserProgramHost`, and any state where input is genuinely not
+   * reaching a document at all. A `false` here is real; a `true` means the page
+   * itself is not the reason a click did nothing.
+   */
+  async probeInput(target?: Page): Promise<{ delivered: boolean; note: string }> {
+    const page = target ?? (await this.ensureReady()).page;
+    if (page.isClosed()) return { delivered: false, note: "that page is closed." };
+    try {
+      await page.evaluate("window.__reaperProbe = 0; window.addEventListener('mousedown', () => { window.__reaperProbe += 1; }, true);");
+      /*
+       * A real mouse event at the top-left corner, inside the viewport and over
+       * nothing a page would put a control on.
+       */
+      await page.mouse.move(2, 2);
+      await page.mouse.down();
+      await page.mouse.up();
+      const heard = await page.evaluate("window.__reaperProbe");
+      await page.evaluate("window.removeEventListener('mousedown', () => {}, true);").catch(() => undefined);
+      const delivered = typeof heard === "number" && heard > 0;
+      return {
+        delivered,
+        note: delivered
+          ? "the page received the probe click, so its renderer is accepting input. If an earlier click did nothing, the cause is the locator or the element, not the page."
+          : "the page did NOT receive the probe click, so its renderer has stopped accepting input. Clicks and typing will keep doing nothing on this page. Call recover(target) to replace the renderer, then retry.",
+      };
+    } catch (error) {
+      return { delivered: false, note: `the probe could not run: ${(error as Error).message.split("\n")[0]}` };
     }
   }
 
@@ -2925,6 +3053,18 @@ export class ThreadBrowserRuntime {
  * cannot be answered from the compile directly: an element carrying a locator is
  * one the model can act on, which is what the field means.
  */
+/** "1st", "2nd", "3rd", "4th". */
+function ordinalSuffix(value: number): string {
+  const tens = value % 100;
+  if (tens >= 11 && tens <= 13) return "th";
+  switch (value % 10) {
+    case 1: return "st";
+    case 2: return "nd";
+    case 3: return "rd";
+    default: return "th";
+  }
+}
+
 function statsOf(perceived: PerceptionResult): SnapshotStats {
   /*
    * Counted from the text, because that is what the stub produces and the text

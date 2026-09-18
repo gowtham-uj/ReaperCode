@@ -96,6 +96,25 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
     if (typeof value === 'function') {
       return encodeFunctionArgument(value);
     }
+    /*
+     * A RegExp is sent as its source and flags, not walked as an object.
+     *
+     * Playwright takes a RegExp in a lot of places — \`waitForURL(/secure/)\`,
+     * \`getByText(/total/)\`, \`filter({ hasText: /x/ })\` — and it is the idiomatic
+     * way to write them. The generic object walk below turns one into \`{}\`,
+     * because \`Object.keys(/x/)\` is empty, so the host received an empty object
+     * and Playwright rejected it with "url parameter should be string, RegExp,
+     * URLPattern or function". Measured on a live mission, where the agent hit it
+     * on a login and then avoided regexes for the rest of the run rather than
+     * learn why they failed.
+     *
+     * Rebuilt on the host from the two strings, so nothing is evaluated here: the
+     * source and flags are data, and \`new RegExp(source, flags)\` is the same
+     * construction the program itself performed.
+     */
+    if (value instanceof RegExp) {
+      return { __reaperRegExp: true, source: value.source, flags: value.flags };
+    }
     if (depth > 8) return value;
     if (Array.isArray(value)) {
       const out = [];
@@ -383,10 +402,19 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
         if (property === 'constructor') return undefined;
         if (property === 'apply' || property === 'call' || property === 'bind') return undefined;
         /*
-         * Everything else extends the path. Whether the program meant a call or
-         * a read is decided by the host when it runs the step: a method is
-         * invoked, a property is read, and an index into an array takes the
-         * element.
+         * Everything else extends the path as a *read*, until a call says
+         * otherwise.
+         *
+         * The host cannot tell \`page.url\` from \`page.url()\` on the wire: both
+         * arrive as a step named \`url\` with no arguments. That was harmless while
+         * every real method existed, and it made a missing one silent — measured
+         * on a live mission, the agent called \`page.recover()\` exactly as the tool
+         * description told it to, and got \`undefined\` back instead of an error,
+         * so it concluded "recover isn't a function returning promise; it's a
+         * no-op" and gave up on the one control written for the failure it was
+         * stuck on. The third element below is the \`apply\` trap telling the host
+         * that this step is a call, so a call to something that is not a method
+         * can be refused out loud.
          */
         return makeNode(handle, path.concat([[property, []]]));
       },
@@ -404,7 +432,7 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
          * step is what carries the arguments, and the host reads it as "call
          * this object itself".
          */
-        if (path.length === 0) return makeNode(handle, [['__reaperInvoke', args]]);
+        if (path.length === 0) return makeNode(handle, [['__reaperInvoke', args, true]]);
         const last = path[path.length - 1];
         const head = path.slice(0, -1);
 
@@ -416,7 +444,16 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
          * without crossing the bridge. Every other step is encoded and sent, and
          * a function reaching 'encodeArgument' there is refused.
          */
-        return makeNode(handle, head.concat([[last[0], args]]));
+        /*
+         * \`true\` is the call flag, and it is the whole point of this branch.
+         *
+         * A step is \`[name, args, called]\`. \`get\` builds one with the flag unset,
+         * which is a read; this trap — the only place that knows the program
+         * actually invoked the node — sets it. The host then refuses a call to a
+         * name that is not a method instead of quietly answering \`undefined\`,
+         * which is what turned a documented control into a dead end.
+         */
+        return makeNode(handle, head.concat([[last[0], args, true]]));
       },
       has() {
         return true;
@@ -560,7 +597,12 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
     for (const step of path) {
       const args = [];
       for (const arg of step[1]) args.push(await encodeArgument(arg, 0));
-      encoded.push([step[0], ...args]);
+      /*
+       * \`[name, called, ...args]\`. The flag sits where the host can read it
+       * without guessing from the argument count, which is the same for a call
+       * with no arguments and a property read.
+       */
+      encoded.push([step[0], step[2] === true ? 1 : 0, ...args]);
     }
     const reply = await __pageCall(handle, encoded);
     if (!reply || typeof reply !== 'object') {
@@ -708,4 +750,16 @@ export const BROWSER_PROGRAM_PARAMS = [
   "page", "browser", "view", "viewChanges", "screenshot", "pages",
   "set", "setUserAgent", "setTimezone", "setViewport", "setFullscreen", "setMobile",
   "blockAds", "bandwidth", "settings", "rotateUserAgent", "downloads", "download", "downloadAfter",
+  /*
+   * These two were added to the tool's copy of this list and not to this one, and
+   * nothing compared the two: a live mission called `recover()` because the tool
+   * description tells it to and got "recover is not defined", which reads to a
+   * model as its own mistake. `capabilities()` had the same gap.
+   *
+   * The list exists to prevent exactly this and did not, because the tool kept a
+   * second copy of it. That copy is gone: the tool imports this one, and
+   * documented-controls.test.ts asserts that every control the description
+   * names is present here, so the two cannot drift again without a failing test.
+   */
+  "recover", "probeInput", "capabilities",
 ] as const;
