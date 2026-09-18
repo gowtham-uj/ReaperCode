@@ -296,6 +296,24 @@ export class ThreadBrowserRuntime {
   private closed = false;
 
   /**
+   * When this browser was last driven, which is what "idle" has to mean.
+   *
+   * The idle reaper used to decide from a map of `forThread` lookups, so "idle"
+   * really meant "nobody asked for this thread by id recently". Those are not the
+   * same thing, and the difference cost a mission: the browser tool holds its
+   * runtime object for the length of a turn, so a turn that drives the browser
+   * continuously never looks the thread up again. Measured on an eighty-minute
+   * run, the reaper retired the runtime mid-turn, which closed all twelve of the
+   * thread's pages and left every remaining `browser_use` call reporting "the
+   * browser could not be attached" against a browser that was working perfectly.
+   *
+   * So the clock lives on the runtime and is stamped by every use, which makes a
+   * turn that is driving the browser un-reapable by construction rather than by
+   * timing luck.
+   */
+  private lastActivityAt = Date.now();
+
+  /**
    * The last thing the health sweep did, if it closed a wedged page.
    *
    * Surfaced on the next tool result rather than logged and forgotten. A page
@@ -387,6 +405,17 @@ export class ThreadBrowserRuntime {
    * get an answer, not a state transition.
    */
   async ensureAttached(): Promise<{ browser: Browser; context: BrowserContext }> {
+    /*
+     * A closed runtime refuses before paying for a connect.
+     *
+     * The connect cannot succeed: `attach()` discards whatever it opens when
+     * `closed` is set, so trying is a wasted handshake whose only product is a
+     * confusing error. Saying why costs nothing and is the whole difference
+     * between a model looking for a browser crash and a model that knows the
+     * thread is gone.
+     */
+    if (this.closed) throw new Error(this.attachFailureMessage());
+    this.touch();
     if (this.browser && this.context && !this.browser.isConnected()) this.resetHandles();
     if (!this.browser || !this.context) {
       if (!this.connecting) this.connecting = this.attach().finally(() => { this.connecting = undefined; });
@@ -394,7 +423,7 @@ export class ThreadBrowserRuntime {
     }
     const browser = this.browser;
     const context = this.context;
-    if (!browser || !context) throw new Error("the browser could not be attached");
+    if (!browser || !context) throw new Error(this.attachFailureMessage());
     /*
      * A context with no pages gets one, and that belongs here rather than in the
      * reader that happens to notice.
@@ -438,6 +467,8 @@ export class ThreadBrowserRuntime {
   }
 
   async ensureReady(): Promise<{ browser: Browser; context: BrowserContext; page: Page }> {
+    if (this.closed) throw new Error(this.attachFailureMessage());
+    this.touch();
     if (this.browser && this.context && !this.browser.isConnected()) {
       // Steel restarted or the socket dropped. Drop everything: a stale context
       // is worse than a fresh one, because it looks alive and fails on use.
@@ -449,9 +480,23 @@ export class ThreadBrowserRuntime {
     }
     const browser = this.browser;
     const context = this.context;
-    if (!browser || !context) throw new Error("the browser could not be attached");
+    if (!browser || !context) throw new Error(this.attachFailureMessage());
     const page = await this.resolveActivePage(context);
     return { browser, context, page };
+  }
+
+  /**
+   * Why an attach left us with nothing, said in a way that names the real cause.
+   *
+   * "the browser could not be attached" was read by a live mission as "the
+   * browser has crashed", and it spent its last twenty calls probing for a
+   * crash that had not happened while the actual cause was that the runtime had
+   * been retired. A closed runtime is a state we can name, so it is named.
+   */
+  private attachFailureMessage(): string {
+    return this.closed
+      ? "this thread's browser runtime was closed and cannot re-attach; the thread was deleted or the server is shutting down"
+      : "the browser could not be attached";
   }
 
   private async attach(): Promise<void> {
@@ -689,6 +734,27 @@ export class ThreadBrowserRuntime {
     this.active = undefined;
     this.activeTargetId = undefined;
     this.named.clear();
+  }
+
+  /**
+   * Record that this browser has just been used.
+   *
+   * Called from the two attach choke points and the read paths, which together
+   * cover every way a turn touches the browser. A user's live-view poll counts
+   * too, and should: a pane being watched is a thread somebody cares about.
+   */
+  private touch(): void {
+    this.lastActivityAt = Date.now();
+  }
+
+  /**
+   * How long since this browser was last driven.
+   *
+   * The reaper's question, answered by the thing that actually knows. See
+   * `lastActivityAt` for why the answer cannot come from a map of lookups.
+   */
+  idleForMs(): number {
+    return Date.now() - this.lastActivityAt;
   }
 
   /**
@@ -2951,6 +3017,52 @@ export class ThreadBrowserRuntime {
 
   async close(): Promise<void> {
     /*
+     * Marked first, so an attach still in flight tears its connection down
+     * instead of storing it. See the field's comment: without this the
+     * connection lands after shutdown and keeps the process alive.
+     *
+     * This is the difference between `close` and `retire`, and it is the whole
+     * reason they are two methods. `close` is final: the runtime is being thrown
+     * away by a shutdown or a delete, and nothing will visit it again, so a
+     * connection that lands late must undo itself. `retire` is not final, so it
+     * must leave the runtime able to attach again.
+     */
+    this.closed = true;
+    await this.release();
+  }
+
+  /**
+   * Release this thread's browser without making the runtime unusable.
+   *
+   * What the idle reaper needs, and what `close` was wrongly doing for it. The
+   * reaper deletes the runtime from its map and then closed it, which is correct
+   * for a thread nobody is holding. It is wrong for a thread somebody *is*
+   * holding: the browser tool keeps its runtime object for the length of a
+   * turn, so `closed = true` made that turn's remaining calls fail forever.
+   * Measured on a live eighty-minute mission: the reaper retired the runtime
+   * mid-turn, every subsequent `browser_use` returned "the browser could not be
+   * attached", and a fresh runtime attached to the same browser in three
+   * seconds. The browser was never broken; the runtime the turn held was.
+   *
+   * So retiring frees exactly what closing frees (the pages, the socket, the
+   * saved state) and leaves the runtime able to attach on next use. A turn that
+   * outlives a reap therefore recovers by itself, and the pages it lost are
+   * re-created by `resolveActivePage` on the call after that.
+   *
+   * The pages are still closed, deliberately: this is the mechanism that keeps
+   * the browser from filling with targets. What changes is that losing them is
+   * no longer permanent for the holder.
+   */
+  async retire(): Promise<void> {
+    if (this.closed) return;
+    await this.release();
+  }
+
+  /**
+   * Tear down the live handles, saving state first. Shared by close and retire.
+   */
+  private async release(): Promise<void> {
+    /*
      * Every handle is captured BEFORE anything is cleared.
      *
      * This read `const context = this.context; this.resetHandles(); ... if
@@ -2961,12 +3073,6 @@ export class ThreadBrowserRuntime {
      * assertion hung forever and CI reported a timeout with no failing test to
      * look at.
      */
-    /*
-     * Marked first, so an attach still in flight tears its connection down
-     * instead of storing it. See the field's comment: without this the
-     * connection lands after shutdown and keeps the process alive.
-     */
-    this.closed = true;
     const context = this.context;
     const browser = this.browser;
     /*

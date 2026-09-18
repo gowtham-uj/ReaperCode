@@ -272,15 +272,35 @@ export class ThreadBrowsers {
 
   /** Close the browsers of threads that have not been used for a while. */
   private async reap(idleMs: number): Promise<void> {
-    const cutoff = Date.now() - idleMs;
-    for (const [threadId, usedAt] of this.lastUsed) {
-      if (usedAt > cutoff) continue;
-      this.lastUsed.delete(threadId);
-      const runtime = this.runtimes.get(threadId);
+    /*
+     * Idleness is measured by the runtime, not by the lookup map.
+     *
+     * `lastUsed` records `forThread` calls, and a turn does not make one per
+     * step: the browser tool holds its runtime for the whole turn. So the map
+     * said "idle for ten minutes" about a thread whose browser had been driven a
+     * second earlier. The reaper then retired that runtime out from under the
+     * running turn, which is how a mission lost all twelve of its pages and every
+     * later call reported the browser as unattachable. The runtime's own activity
+     * clock is the honest answer, and it makes a turn that is browsing
+     * un-reapable rather than lucky.
+     */
+    for (const [threadId, runtime] of this.runtimes) {
+      if (runtime.idleForMs() < idleMs) continue;
       this.runtimes.delete(threadId);
-      // A failure here is a browser that is already gone, which is the state
-      // this was trying to reach.
-      await runtime?.close().catch(() => undefined);
+      this.lastUsed.delete(threadId);
+      /*
+       * Retired, not closed. A turn may still be holding this object, and
+       * retiring leaves it able to attach again; closing would poison it
+       * permanently. See `retire` for the measured failure.
+       *
+       * A failure here is a browser that is already gone, which is the state
+       * this was trying to reach.
+       */
+      await runtime.retire().catch(() => undefined);
+    }
+    // Lookups for threads with no runtime no longer need a record.
+    for (const [threadId, usedAt] of this.lastUsed) {
+      if (usedAt <= Date.now() - idleMs && !this.runtimes.has(threadId)) this.lastUsed.delete(threadId);
     }
   }
 
