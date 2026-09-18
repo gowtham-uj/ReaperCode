@@ -85,8 +85,17 @@ const ORPHAN_SWEEP_MS = 5 * 60_000;
 
 export class ThreadBrowsers {
   private readonly runtimes = new Map<string, ThreadBrowserRuntime>();
-  /** When each thread's browser was last used, for the idle reaper. */
-  private readonly lastUsed = new Map<string, number>();
+  /*
+   * There is deliberately no `lastUsed` map here any more.
+   *
+   * There was one, it was written by `forThread`, and the reaper read it. That
+   * indirection was the bug: the map records lookups, and the browser tool does
+   * not look a thread up per step, so it under-reported activity badly enough to
+   * retire a browser out from under a running turn. Idleness now comes from the
+   * runtime's own clock (`idleForMs`), which is stamped by use rather than by
+   * lookup. A map that is written and never read is worse than no map, so the
+   * dead field is gone rather than left for the next reader to trust.
+   */
   private reaper: NodeJS.Timeout | undefined;
   /** Set by `close()`. See `forThread` for why a late request must not attach. */
   private closed = false;
@@ -142,10 +151,7 @@ export class ThreadBrowsers {
    */
   forThread(threadId: string): ThreadBrowserRuntime {
     const existing = this.runtimes.get(threadId);
-    if (existing) {
-      this.lastUsed.set(threadId, Date.now());
-      return existing;
-    }
+    if (existing) return existing;
     /*
      * After shutdown, a request that arrives late gets a runtime that will not
      * attach.
@@ -165,7 +171,6 @@ export class ThreadBrowsers {
     const runtime = this.buildRuntime(threadId);
     if (this.closed) runtime.close().catch(() => undefined);
     this.runtimes.set(threadId, runtime);
-    this.lastUsed.set(threadId, Date.now());
     return runtime;
   }
 
@@ -310,7 +315,6 @@ export class ThreadBrowsers {
        */
       if (this.options.threadIsRunning?.(threadId) === true) continue;
       this.runtimes.delete(threadId);
-      this.lastUsed.delete(threadId);
       /*
        * Retired, not closed. A turn may still be holding this object, and
        * retiring leaves it able to attach again; closing would poison it
@@ -321,10 +325,6 @@ export class ThreadBrowsers {
        */
       await runtime.retire().catch(() => undefined);
     }
-    // Lookups for threads with no runtime no longer need a record.
-    for (const [threadId, usedAt] of this.lastUsed) {
-      if (usedAt <= Date.now() - idleMs && !this.runtimes.has(threadId)) this.lastUsed.delete(threadId);
-    }
   }
 
   /**
@@ -334,7 +334,6 @@ export class ThreadBrowsers {
    * other threads are still using it.
    */
   async closeThread(threadId: string): Promise<void> {
-    this.lastUsed.delete(threadId);
     const runtime = this.runtimes.get(threadId);
     this.runtimes.delete(threadId);
     if (runtime !== undefined) {
@@ -438,7 +437,6 @@ export class ThreadBrowsers {
     this.sweeper = undefined;
     const all = [...this.runtimes.values()];
     this.runtimes.clear();
-    this.lastUsed.clear();
     await Promise.all(all.map((runtime) => runtime.close().catch(() => undefined)));
   }
 }
