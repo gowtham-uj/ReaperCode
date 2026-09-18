@@ -911,7 +911,19 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
    * on how long the model may spend on the one hypothesis it cannot test.
    */
   const attemptedInput = /\.\s*(click|fill|type|press|check|selectOption|tap|hover|setInputFiles)\s*\(/.test(args.code ?? "");
-  if (attemptedInput && receipt.outcome === "NO_CHANGE" && !syntheticAction) {
+  /*
+   * "Nothing happened anywhere" is the condition, and the second half is
+   * load-bearing.
+   *
+   * A program may drive a tab it selected by URL while the receipt describes the
+   * active page. That shape produced `NO_CHANGE` on a step that had in fact
+   * navigated another tab, and firing the breaker there would have told the
+   * model to call `recover()` — sending it to fix a page that was working. With
+   * `otherTabsMoved` the two are distinguishable, and the breaker speaks only
+   * to the case it was written for.
+   */
+  const nothingHappened = receipt.outcome === "NO_CHANGE" && receipt.otherTabsMoved !== true;
+  if (attemptedInput && nothingHappened && !syntheticAction) {
     lines.push(
       "",
       "NOTE: the page did not change at all after that interaction.",

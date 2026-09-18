@@ -82,6 +82,15 @@ export interface StepReceipt {
    * Set only when the two differ, so the ordinary case is unchanged.
    */
   pageLabel?: string;
+  /**
+   * True when a tab other than this receipt's changed during the step.
+   *
+   * Set by the runtime, which compares every page it owns before and after. It
+   * exists so a caller can tell "nothing happened anywhere" from "something
+   * happened on a tab you were not looking at", which are opposite conclusions
+   * and used to arrive as the same receipt.
+   */
+  otherTabsMoved?: boolean;
   /** True when `changes` is the whole outline rather than a delta. */
   wholesale: boolean;
   /** How long the action plus settle took, in milliseconds. */

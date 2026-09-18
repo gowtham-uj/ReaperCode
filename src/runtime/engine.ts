@@ -1963,7 +1963,24 @@ export class RuntimeEngine {
               sessionId: getBoot().state.sessionId,
               traceId: getBoot().state.runId,
               messages: liveConversation,
-              modelResponse: (turn as any).raw ?? turn,
+              /*
+               * The turn itself, with `raw` merged under it rather than preferred
+               * over it.
+               *
+               * This passed `raw ?? turn`, and `raw` always exists — it is built
+               * for every response — so the turn's own `usage` never reached the
+               * reader. `tokenUsageFromResponse` then found no usage and the
+               * caller fell back to a character-based estimate, which is why
+               * every token number the journal recorded was wrong: measured on a
+               * one-call thread, the estimate said 5,442 input tokens where the
+               * provider reported 8, a factor of 680 on a small prompt and 3.7x
+               * on a full mission.
+               *
+               * `...raw` first and `...turn` after, so a field present on both
+               * resolves to the turn's, and `usage` in particular is the
+               * provider's own count rather than a guess.
+               */
+              modelResponse: { ...((turn as any).raw ?? {}), ...(turn as any) },
               softCap,
               trajectoryLogger: this.trajectoryLogger,
             });

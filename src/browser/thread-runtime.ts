@@ -1945,6 +1945,32 @@ export class ThreadBrowserRuntime {
     const startedOn = page;
     const startedUrl = page.url();
     this.activeAtStepStart = page;
+    /*
+     * Every page's URL before the program runs, so the ones it changed can be
+     * named even when none of them is the active page.
+     *
+     * This is the fix for the failure that cost a mission twenty calls. A program
+     * may drive a tab it selected by URL —
+     *
+     *     const ti = pages.find(p => p.url().includes("the-internet..."));
+     *     await ti.goto("/login");
+     *
+     * — and the receipt was rendered from the *active* page, which was a
+     * different tab that had not moved. So the receipt said "the page did not
+     * change" and "URL unchanged", the model concluded its click had done
+     * nothing, and it spent twenty calls investigating a click that had in fact
+     * worked, on a page it was never looking at.
+     *
+     * `pageLabel` above could not catch this: it labels the page the step
+     * captured, and the captured page is the active one by definition. What
+     * catches it is comparing every page before and after, which is cheap (the
+     * thread owns a handful) and is the only way to report work done somewhere
+     * other than where the model happens to be looking.
+     */
+    const urlsBefore = new Map<Page, string>();
+    for (const candidate of this.context?.pages() ?? []) {
+      if (!candidate.isClosed()) urlsBefore.set(candidate, candidate.url());
+    }
     await this.capture(startedOn);
 
     /*
@@ -2033,6 +2059,67 @@ export class ThreadBrowserRuntime {
        * Recapturing there means the next `view` is about the page the model is
        * actually on, and the receipt says the tab changed.
        */
+      /*
+       * Name any of this thread's pages the program moved, other than the one
+       * the receipt is about.
+       *
+       * This is what turns "the page did not change" into "the page did not
+       * change, and the tab you navigated did: it is now at /login". Without it
+       * a program that acts on a tab it selected by URL gets a receipt about a
+       * different tab, and the agent has no way to tell a working click from a
+       * dead one. Prepared here and appended to whichever note the branches
+       * below produce, because every one of them needs it.
+       */
+      const movedElsewhere: string[] = [];
+      for (const candidate of this.context?.pages() ?? []) {
+        if (candidate.isClosed()) continue;
+        const before = urlsBefore.get(candidate);
+        if (before === undefined) continue;
+        const after = candidate.url();
+        if (after === before) continue;
+        const name = [...this.named.values()].find((entry) => entry.page === candidate)?.name;
+        movedElsewhere.push(`${name ?? "an unnamed tab"} (${before} -> ${after})`);
+      }
+      if (movedElsewhere.length > 0) {
+        receipt.otherTabsMoved = true;
+        /*
+         * The page the step actually acted on becomes what a follow-up read
+         * describes.
+         *
+         * `lastCapturedPage` is what the tool renders its `PAGE:` block from,
+         * and it was set to the page the transaction captured — the active one.
+         * So a program that drove a named tab got a receipt about that tab's
+         * *identity* in its note and the active page's *contents* in the block
+         * below it, which is the contradiction the mission spent twenty calls
+         * on. Pointing the capture at the tab that moved means the block shows
+         * what changed, which is what the model was asking for.
+         */
+        for (const candidate of this.context?.pages() ?? []) {
+          if (candidate.isClosed()) continue;
+          const before = urlsBefore.get(candidate);
+          if (before !== undefined && candidate.url() !== before) {
+            /*
+             * The pointer only. The capture below is the tool's own read, from
+             * `lastCapturedPage()`, so it reads this page fresh rather than
+             * diffing against a snapshot taken here.
+             */
+            this.rememberCapturedPage(candidate);
+            break;
+          }
+        }
+      }
+      if (movedElsewhere.length > 0 && receipt.urlAfter === receipt.urlBefore) {
+        /*
+         * Only when the receipt's own page did not move. If it did, the receipt
+         * already describes a navigation and adding a second one would read as a
+         * contradiction rather than as extra information.
+         */
+        receipt.note =
+          `${receipt.note} ` +
+          `Other tabs this thread owns changed during the step even though this one did not: ` +
+          `${movedElsewhere.join("; ")}. The program acted through a page handle rather than the active page.`;
+      }
+
       const endedOn = (await this.ensureReady()).page;
       const movedTabs = endedOn !== startedOn && !endedOn.isClosed();
       if (movedTabs) await this.capture(endedOn);
@@ -2073,12 +2160,22 @@ export class ThreadBrowserRuntime {
         const tabNote =
           `The step finished on a different tab: it started at ${startedUrl} and is now at ${endedOn.url()}. ` +
           `The lines above are that page, not a diff of the one you were on.`;
+        /*
+         * The receipt's own note is kept when it carries something the tab
+         * sentence does not. A failure's message is the obvious case, and the
+         * "other tabs changed" line is the same kind of fact: dropping either
+         * would take away the only sentence explaining what the step actually
+         * did. Only a bare success note is replaced, because then the tab change
+         * *is* the story and the old line ("the page changed without
+         * navigating") is describing a page the model is no longer on.
+         */
         const failed = receipt.outcome !== "SUCCESS" && receipt.outcome !== "NO_CHANGE";
+        const keepOwnNote = failed || movedElsewhere.length > 0;
         return {
           result: result as T | undefined,
           receipt: {
             ...receipt,
-            note: failed ? `${receipt.note} ${tabNote}` : tabNote,
+            note: keepOwnNote ? `${receipt.note} ${tabNote}` : tabNote,
           },
         };
       }
