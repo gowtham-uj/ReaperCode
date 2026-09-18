@@ -16,6 +16,7 @@ export function DeepSeekComposer({
   modelControl,
   effortControl,
   contextControl,
+  sendModeControl,
   onChange,
   onSubmit,
   onStop,
@@ -27,6 +28,12 @@ export function DeepSeekComposer({
   modelControl?: ReactNode;
   effortControl?: ReactNode;
   contextControl?: ReactNode;
+  /**
+   * How the message about to be sent should be delivered, while the agent is
+   * working. It sits against the primary button rather than in the tools row
+   * because it modifies the send, not the model or its reasoning.
+   */
+  sendModeControl?: ReactNode;
   onChange(value: string): void;
   onSubmit(): void;
   onStop(): void;
@@ -77,6 +84,7 @@ export function DeepSeekComposer({
           </div>
           <div className="dsh-inputbar-trailing">
             {contextControl}
+            {sendModeControl}
             <button
               type="button"
               className="dsh-inputbar-primary"

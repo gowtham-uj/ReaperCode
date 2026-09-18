@@ -9,6 +9,7 @@ import { ModelPicker } from "./ModelPicker.jsx";
 import { useModelMetadata } from "./models.js";
 import { PlanChecklist } from "./PlanChecklist.jsx";
 import { PolicyEditor } from "./PolicyEditor.jsx";
+import { QueueModePicker, type QueueMode } from "./QueueModePicker.jsx";
 import { AppProvider, BFF_HTTP, useApp } from "./app/AppProvider.jsx";
 import { AppearanceSettings, ProvidersSettings, ModelsSettings, PermissionsSettings, SettingsLayout } from "./Settings.jsx";
 import { ThreadList, threadLabel, threadWorkspaceLabel } from "./ThreadList.jsx";
@@ -102,6 +103,17 @@ function WorkspacePage() {
   const [detailsWidth, setDetailsWidth] = useState(520);
   const [draft, setDraft] = useState("");
   /*
+   * How the next message is delivered while the agent works.
+   *
+   * Held here, not on the queued card, because the choice has to be made before
+   * the message is queued. A `next-step` entry is steered at the agent's next
+   * tool boundary, so a card came back already delivered and its mode radios
+   * disabled: a reader who wanted "after the agent finishes" had no way to say
+   * so. It is per thread for the same reason the draft is, so a mode chosen for
+   * one conversation is not silently in force in another.
+   */
+  const [queueMode, setQueueMode] = useState<QueueMode>("next-step");
+  /*
    * A draft belongs to the thread it was typed in.
    *
    * The composer kept its text across a switch, so a sentence written in one
@@ -120,6 +132,9 @@ function WorkspacePage() {
     if (draftThreadRef.current === draftThreadId) return;
     draftThreadRef.current = draftThreadId;
     setDraft("");
+    // The delivery mode is a preference about the message being written, so it
+    // resets with the draft rather than following the reader across threads.
+    setQueueMode("next-step");
   }, [draftThreadId]);
   const [workbenchMode, setWorkbenchMode] = useState<WorkbenchMode>("files");
   const [threadSettingsOpen, setThreadSettingsOpen] = useState(false);
@@ -253,7 +268,14 @@ function WorkspacePage() {
       setDraft("");
       return;
     }
-    app.sendMessage(draft);
+    /*
+     * The mode is read here rather than passed from the picker's own click so
+     * that Enter and the send button honour the same choice. When no turn is
+     * running the picker is unmounted and the mode is irrelevant: the message is
+     * sent immediately either way, and `flushOne` treats an idle thread as
+     * "start a turn" regardless.
+     */
+    app.sendMessage(draft, app.activeTurn ? queueMode : "next-step");
     setDraft("");
   };
 
@@ -357,6 +379,14 @@ function WorkspacePage() {
           />
         )}
         contextControl={<ContextMeter usage={app.thread?.tokenUsage} />}
+        sendModeControl={(
+          <QueueModePicker
+            mode={queueMode}
+            running={Boolean(app.activeTurn)}
+            disabled={app.session.status !== "open"}
+            onMode={setQueueMode}
+          />
+        )}
       />
     </>
   );

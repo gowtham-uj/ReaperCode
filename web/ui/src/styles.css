@@ -1911,6 +1911,31 @@ body[data-ds-reaper-theme] { --syntax-keyword: #dc82bb; }
 .dsh-inputbar-card .model-note { display: none; }
 .dsh-inputbar-card .context-meter-bar { width: 34px; }
 
+/*
+ * The delivery-mode picker in the composer's trailing group.
+ *
+ * It shares the effort trigger's geometry so the row stays even, but it is
+ * anchored to the right edge like the other trailing controls, not the left
+ * like the model and effort triggers in the tools group. The menu therefore
+ * needs its own anchor rule: a right-anchored menu here would still be correct,
+ * but it must clear the composer card rather than sit inside it.
+ */
+.queue-mode-picker { flex: none; }
+.queue-mode-trigger { height: 30px; }
+.queue-mode-trigger[data-mode="after-turn"] {
+  color: var(--dsw-alias-state-business-primary);
+}
+.dsh-inputbar-card .queue-mode-menu {
+  top: auto;
+  right: 0;
+  left: auto;
+  bottom: calc(100% + 16px);
+}
+@media (max-width: 760px) {
+  /* The trailing group is tight on a phone; the short label is enough. */
+  .queue-mode-trigger { padding-inline: 6px; }
+}
+
 @media (max-width: 760px) {
   .dsh-hero-root { padding-inline: 8px; }
   .dsh-hero-headline { grid-template-columns: 28px auto; font-size: 20px; line-height: 28px; }
