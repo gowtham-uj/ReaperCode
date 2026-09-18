@@ -296,6 +296,25 @@ export class ThreadBrowserRuntime {
   private closed = false;
 
   /**
+   * Bumped every time the live handles are released.
+   *
+   * An attach is asynchronous and nothing awaits it: the live pane resolves a
+   * thread, which starts a connection, and a reap can land while that connection
+   * is still being built. `close()` covers its own case by setting `closed`
+   * first, and `attach()` throws away a connection that lands under that flag.
+   * Retirement cannot use the same flag, because it has to leave the runtime able
+   * to attach again, so staleness is tracked with a number: an attach records the
+   * generation it started under, and a connection that comes back to a different
+   * one is stale and must not be stored.
+   *
+   * Without this, a connection landing after a reap would be re-armed on a
+   * runtime the reaper has already dropped from its map, so nothing would ever
+   * close it: the same leaked-socket class as the `close()` bug, reached by a
+   * narrower path.
+   */
+  private generation = 0;
+
+  /**
    * When this browser was last driven, which is what "idle" has to mean.
    *
    * The idle reaper used to decide from a map of `forThread` lookups, so "idle"
@@ -517,6 +536,12 @@ export class ThreadBrowserRuntime {
     assertSteelManagedEndpoint(this.options.cdpUrl);
     await assertNotRawChrome(this.options.cdpUrl);
     /*
+     * The generation this connect belongs to. Captured before the first await so
+     * a release that lands mid-connect is visible when the connection arrives,
+     * even though the two only differ by a number.
+     */
+    const startedAt = this.generation;
+    /*
      * Attach, and recover from a wedged page if the handshake fails.
      *
      * `connectOverCDP` attaches to every target and waits for each one, so a
@@ -553,7 +578,17 @@ export class ThreadBrowserRuntime {
      * that asked for it. Returning without setting the handles leaves the
      * runtime in the same closed state it was in.
      */
-    if (this.closed) {
+    /*
+     * Either final or superseded: both mean this connection is stale.
+     *
+     * `closed` is a shutdown or a delete, which nothing will undo. A changed
+     * generation is a retirement, which happened while the connect was in
+     * flight: the reaper has already forgotten this runtime, so a connection
+     * stored here would never be closed by anyone and would hold a socket for
+     * the life of the process. Discarding it is what makes retirement safe to
+     * race against an in-flight attach.
+     */
+    if (this.closed || this.generation !== startedAt) {
       await browser.close().catch(() => undefined);
       return;
     }
@@ -602,9 +637,11 @@ export class ThreadBrowserRuntime {
     }
     /*
      * Checked again after the context is built, because `loadState` and
-     * `newContext` both await and `close()` can land in between.
+     * `newContext` both await and a release can land in between. Same two
+     * conditions as the first check: a close is final, a changed generation is a
+     * retirement, and both mean this connection belongs to nobody.
      */
-    if (this.closed) {
+    if (this.closed || this.generation !== startedAt) {
       await context.close().catch(() => undefined);
       await browser.close().catch(() => undefined);
       return;
@@ -3062,6 +3099,13 @@ export class ThreadBrowserRuntime {
    * Tear down the live handles, saving state first. Shared by close and retire.
    */
   private async release(): Promise<void> {
+    /*
+     * Bumped before the first await, so an attach that is in flight right now
+     * sees the change when its connection arrives and discards it. Doing this
+     * after the teardown below would leave a window in which a connection could
+     * be stored on a runtime already dropped from the reaper's map.
+     */
+    this.generation += 1;
     /*
      * Every handle is captured BEFORE anything is cleared.
      *

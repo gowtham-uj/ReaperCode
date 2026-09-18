@@ -200,6 +200,36 @@ test("a thread with a turn in flight is never reaped, however idle its browser",
   await browsers.close();
 });
 
+test("a connect that lands after a retire is discarded, not stored", async () => {
+  /*
+   * The race the generation counter exists for. `attach()` is asynchronous and
+   * nothing awaits it, so a reap can land while a connection is being built. The
+   * connection then belongs to a runtime the reaper has already dropped from its
+   * map, and storing it would leak a socket nobody will ever close: the same
+   * class as the `close()` bug, by a narrower path.
+   *
+   * Checked through the two flags the connect path reads, since the connect
+   * itself needs a browser. A release must move the generation, and a close must
+   * set the final flag; either one alone is what makes a late connection stale.
+   */
+  const retired = offlineRuntime("g1");
+  const beforeRetire = (retired as unknown as { generation: number }).generation;
+  await retired.retire();
+  assert.ok(
+    (retired as unknown as { generation: number }).generation > beforeRetire,
+    "retiring bumps the generation, so an in-flight attach can tell it is stale",
+  );
+
+  const closed = offlineRuntime("g2");
+  const beforeClose = (closed as unknown as { generation: number }).generation;
+  await closed.close();
+  assert.ok(
+    (closed as unknown as { generation: number }).generation > beforeClose,
+    "closing bumps it too, and also sets the final flag",
+  );
+  assert.equal((closed as unknown as { closed: boolean }).closed, true);
+});
+
 test("retiring twice is safe, and leaves the runtime detached rather than dead", async () => {
   /*
    * A reap can land on a runtime a previous reap already retired, and a second
