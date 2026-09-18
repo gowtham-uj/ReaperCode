@@ -340,7 +340,23 @@ export class AppServerMessageProcessor {
         if (params.subscribe) {
           replay = await this.subscribeConnection(connection, params.threadId, params.afterSequence);
         }
-        const turns = await this.snapshotTurns(params.threadId);
+        const allTurns = await this.snapshotTurns(params.threadId);
+        /*
+         * The newest turns, and an honest count of what was left behind.
+         *
+         * Resuming a thread is the interaction that has to feel instant, and it
+         * was the slowest: the whole history came back before the UI could render
+         * the part a reader is looking at, which is the end. A long mission
+         * thread is hundreds of turns carrying full accessibility snapshots, so
+         * the wait scaled with how long the conversation had been running rather
+         * than with what was being shown.
+         *
+         * Sending a tail and saying there is more is not the same as truncating.
+         * The elision is explicit (`hasOlderTurns`) and the rest is one paginated
+         * call away, which is the distinction that keeps this honest: a client
+         * that ignored the flag would show a thread that looks shorter than it is.
+         */
+        const turns = allTurns.slice(Math.max(0, allTurns.length - params.turnsLimit));
         const planTodo = await this.snapshotPlanTodo(params.threadId);
         return {
           thread: projectThread(thread.metadata, turns),
@@ -350,6 +366,9 @@ export class AppServerMessageProcessor {
           cwd: thread.metadata.workspaceRoot,
           approvalPolicy: thread.metadata.permissionMode,
           initialTurnsPage: turns,
+          /** True when turns were withheld, so a client knows to offer the rest. */
+          hasOlderTurns: turns.length < allTurns.length,
+          totalTurnCount: allTurns.length,
           ...planTodo,
           ...(replay ? { replay } : {}),
         };

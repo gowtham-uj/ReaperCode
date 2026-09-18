@@ -101,6 +101,27 @@ export class ReaperThreadManager {
       const target = join(root, entry.name);
       if (livePaths.has(resolve(target))) continue;
       /*
+       * A directory holding a conversation is never deleted by this pass.
+       *
+       * This is the guard for a failure that really happened: a thread's record
+       * survived on disk while its workspace was gone, so the sidebar showed a
+       * conversation whose every turn had been destroyed and which could never be
+       * opened again. Deleting a conversation is the worst outcome available
+       * here, and it is irreversible, while leaving one directory behind costs
+       * disk and nothing else.
+       *
+       * The session journal is what makes a directory a conversation rather than
+       * scratch. Its presence means a thread read or wrote turns in this
+       * workspace, so whatever the record says, there is something here worth
+       * keeping, and a sweep whose whole job is housekeeping has no business
+       * being the thing that loses it. If a record was genuinely deleted then
+       * `deleteThread` already removed the workspace by name, so this does not
+       * resurrect anything a user asked to remove.
+       */
+      const sessions = join(target, ".reaper", "sessions");
+      const held = await readdir(sessions).catch(() => [] as string[]);
+      if (held.length > 0) continue;
+      /*
        * Only remove a directory that is certainly ours.
        *
        * Two shapes qualify. An empty one is the scaffolding `createThreadWorkspace`
@@ -206,7 +227,41 @@ export class ReaperThreadManager {
       }
       byId.set(thread.threadId, thread.metadata);
     }
-    return [...byId.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    /*
+     * A thread whose own workspace was destroyed is not listed.
+     *
+     * This is the other half of the zombie failure: the record survived on disk
+     * while its workspace, and with it the whole conversation, was destroyed. The
+     * sidebar showed it, clicking it opened nothing, and there was no way to
+     * remove it because every action failed the same way. A row that cannot be
+     * opened is worse than a missing row: a missing row is honest, and this one
+     * asks the reader to keep trying.
+     *
+     * Scoped to a workspace the app minted, and the scope is the safety property.
+     * An app-managed path under our own root is one we created and would have
+     * kept, so its absence means the thread is genuinely gone. A workspace the
+     * user chose is left alone however it looks: `/work`, a repository, a path
+     * they typed. Reporting those on the strength of a `stat` would hide a
+     * conversation over a missing mount, a renamed checkout, or a typo, and
+     * hiding somebody's work is worse than showing a row that needs one more
+     * attempt.
+     */
+    const alive: ThreadMetadata[] = [];
+    for (const metadata of byId.values()) {
+      const root = metadata.workspaceRoot;
+      if (root === undefined || root.length === 0) {
+        alive.push(metadata);
+        continue;
+      }
+      if (!isAppManagedWorkspace(root)) {
+        alive.push(metadata);
+        continue;
+      }
+      const present = await stat(root).then(() => true).catch(() => false);
+      if (present) alive.push(metadata);
+      else this.threads.delete(metadata.threadId);
+    }
+    return alive.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
   async readThread(threadId: string): Promise<ThreadReadResult> {

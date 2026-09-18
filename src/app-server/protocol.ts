@@ -55,6 +55,21 @@ export const ThreadResumeParamsSchema = z.object({
   threadId: ThreadIdSchema,
   afterSequence: NonNegativeSequenceSchema.default(0),
   subscribe: z.boolean().default(true),
+  /**
+   * How many of the most recent turns to return with the resume.
+   *
+   * Bounded on purpose, and the bound is the fix for a measured slowness: this
+   * call used to answer with the thread's entire history, so opening a long
+   * conversation transferred every turn and every tool output before the UI
+   * could paint anything. A mission thread is hundreds of turns of browser
+   * snapshots, and the client waited for all of it to render the part it was
+   * about to look at: the newest.
+   *
+   * The default is the number a reader sees at once plus a screen of scroll
+   * back. Older turns are not lost, they are not sent: `hasOlderTurns` says they
+   * exist and `thread/turns/list` walks back to them a page at a time.
+   */
+  turnsLimit: z.number().int().min(1).max(200).default(30),
 }).strict();
 
 export const ThreadIdParamsSchema = z.object({ threadId: ThreadIdSchema }).strict();

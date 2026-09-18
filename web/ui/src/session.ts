@@ -17,12 +17,17 @@ export interface SessionHandlers {
 }
 
 /**
- * Both `thread/start` and `thread/resume` answer with the full thread — the
- * only place the app learns a thread's model — and optionally a replay cursor.
+ * Both `thread/start` and `thread/resume` answer with the thread's metadata — the
+ * only place the app learns its model — plus a page of its most recent turns and
+ * optionally a replay cursor.
+ *
+ * `hasOlderTurns` says the page was bounded. It is the one field that keeps a
+ * partial load from reading as a short conversation.
  */
 interface ResumeResult {
   thread?: { id?: string };
   replay?: { truncated?: boolean };
+  hasOlderTurns?: boolean;
 }
 
 export interface Session {
@@ -34,6 +39,16 @@ export interface Session {
   retryNow(): void;
   createThread(input?: { workspaceRoot?: string; title?: string }): Promise<string>;
   switchThread(id: string): Promise<void>;
+  /**
+   * Pull in the turns older than the ones already held.
+   *
+   * The counterpart to a bounded resume. Returns what it did so a caller can
+   * stop offering the control once the thread's start is reached, rather than
+   * presenting a button that does nothing.
+   */
+  loadOlderTurns(): Promise<{ loaded: number; exhausted: boolean }>;
+  /** True once the initial page was bounded, i.e. there is older history. */
+  hasOlderTurns: boolean;
   /** Forget the open thread, leaving no thread selected. */
   clearThread(): void;
   close(): void;
@@ -87,23 +102,77 @@ export function useSession(url: string, store: TranscriptStore, handlers: Sessio
     for (const [method, params] of held) apply(method, params);
   }, [apply]);
 
-  const backfill = useCallback(async (active: JsonRpcClient, id: string): Promise<void> => {
-    let cursor: string | undefined;
-    for (let page = 0; page < 100; page += 1) {
-      const result = await active.call<{ data?: unknown[]; nextCursor?: unknown }>("thread/turns/list", {
-        threadId: id,
-        limit: 100,
-        ...(cursor ? { cursor } : {}),
-      });
-      const turns = (result.data ?? []).filter(
-        (raw): raw is Record<string, unknown> => Boolean(raw) && typeof raw === "object",
-      );
-      if (turns.length > 0) {
-        store.hydrate(hydrateFromTurns(store.snapshot(), id, turns));
-      }
-      if (typeof result.nextCursor !== "string" || !result.nextCursor) return;
-      cursor = result.nextCursor;
+  /*
+   * How many turns a page of history is, and it is deliberately larger than the
+   * initial one. A reader who asks for older history is scrolling back, so they
+   * will keep going for a while: fetching 30 at a time would spend a round trip
+   * per flick of the wheel. The initial page is small because it is on the
+   * critical path; these are not.
+   */
+  const HISTORY_PAGE = 100;
+
+  /**
+   * Walk back through a thread's history one page per call.
+   *
+   * This replaced an eager loop that fetched up to 10,000 turns on open. Nothing
+   * asked for them: the turns a reader looks at are the newest, and a thread's
+   * older turns are only wanted when someone scrolls up to find them. Paying for
+   * the whole history to render the current turn is what made opening a long
+   * conversation slow, and the cost grew with the conversation's length while the
+   * visible work stayed constant.
+   *
+   * The cursor lives in a ref rather than state because it is bookkeeping for the
+   * next call, not something the UI renders. It is cleared whenever the thread
+   * changes, so a page fetched for one thread can never be folded into another.
+   */
+  const olderCursorRef = useRef<string | undefined>(undefined);
+  const exhaustedRef = useRef(false);
+  const [hasOlderTurns, setHasOlderTurns] = useState(false);
+
+  /**
+   * Forget the paging position, because the thread it belonged to is gone.
+   *
+   * A stale cursor would fold one thread's turns into another's, which is the
+   * same class of leak as the composer draft and the queue: state that outlives
+   * the conversation it was about.
+   */
+  const resetHistoryWindow = useCallback((): void => {
+    olderCursorRef.current = undefined;
+    exhaustedRef.current = false;
+    setHasOlderTurns(false);
+  }, []);
+
+  const loadOlderTurns = useCallback(async (): Promise<{ loaded: number; exhausted: boolean }> => {
+    const active = clientRef.current;
+    const id = threadIdRef.current;
+    if (!active || !id) return { loaded: 0, exhausted: true };
+    if (exhaustedRef.current) return { loaded: 0, exhausted: true };
+    /*
+     * `sortDirection: "desc"` and the cursor walk the thread backwards from the
+     * newest turn, which is what makes the first page the turns immediately
+     * before the ones already on screen. Ascending order would page from the
+     * thread's start, so "load older" would fetch the oldest turns in the
+     * conversation rather than the ones adjacent to what the reader is looking
+     * at.
+     */
+    const result = await active.call<{ data?: unknown[]; nextCursor?: unknown }>("thread/turns/list", {
+      threadId: id,
+      limit: HISTORY_PAGE,
+      sortDirection: "desc",
+      ...(olderCursorRef.current ? { cursor: olderCursorRef.current } : {}),
+    });
+    const turns = (result.data ?? []).filter(
+      (raw): raw is Record<string, unknown> => Boolean(raw) && typeof raw === "object",
+    );
+    if (turns.length > 0) {
+      store.hydrate(hydrateFromTurns(store.snapshot(), id, turns));
     }
+    const cursor = typeof result.nextCursor === "string" && result.nextCursor.length > 0
+      ? result.nextCursor
+      : undefined;
+    olderCursorRef.current = cursor;
+    if (cursor === undefined) exhaustedRef.current = true;
+    return { loaded: turns.length, exhausted: cursor === undefined };
   }, [store]);
 
   const startFresh = useCallback(async (
@@ -131,6 +200,7 @@ export function useSession(url: string, store: TranscriptStore, handlers: Sessio
       bufferRef.current = [];
       setCatchingUp(true);
       try {
+        resetHistoryWindow();
         const resumed = await active.call<ResumeResult>("thread/resume", {
           threadId: remembered,
           subscribe: true,
@@ -139,9 +209,17 @@ export function useSession(url: string, store: TranscriptStore, handlers: Sessio
         store.seedThread(resumed.thread ?? {});
         setThreadId(remembered);
         rememberThread(remembered);
+        setHasOlderTurns(resumed.hasOlderTurns === true);
+        /*
+         * A truncated replay is the one case that still pages eagerly, and it is
+         * a different problem from the one this changed: a replay buffer carries
+         * the events since a cursor, so a gap there means the client's view has
+         * genuinely outrun what it holds. That is a correctness repair, not a
+         * history browse, so it is worth the round trips.
+         */
         if (resumed.replay?.truncated) {
           setRecovered(true);
-          await backfill(active, remembered);
+          await loadOlderTurns();
         }
         return;
       } catch {
@@ -258,8 +336,27 @@ export function useSession(url: string, store: TranscriptStore, handlers: Sessio
     bufferRef.current = [];
     setCatchingUp(true);
     setRecovered(false);
+    /*
+     * The store is cleared before the fetch, so the previous conversation cannot
+     * be mistaken for this one while it loads, and the paging position is
+     * cleared with it.
+     */
     store.hydrate({});
+    resetHistoryWindow();
     try {
+      /*
+       * One call, and it returns the newest turns rather than all of them.
+       *
+       * This is the whole of the speed change: opening a thread used to transfer
+       * its entire history before anything could be drawn, so the wait grew with
+       * the conversation while the visible work stayed the same. The server now
+       * answers with a bounded tail and says whether more exists, and the rest
+       * arrives only if the reader scrolls back to want it.
+       *
+       * `afterSequence: 0` is still right here: the replay buffer is empty for a
+       * freshly opened thread, so the events it needs are all of them, and that
+       * stream is separate from the turn history.
+       */
       const resumed = await active.call<ResumeResult>("thread/resume", {
         threadId: id,
         subscribe: true,
@@ -268,15 +365,16 @@ export function useSession(url: string, store: TranscriptStore, handlers: Sessio
       store.seedThread(resumed.thread ?? {});
       setThreadId(id);
       rememberThread(id);
+      setHasOlderTurns(resumed.hasOlderTurns === true);
       if (resumed.replay?.truncated) {
         setRecovered(true);
-        await backfill(active, id);
+        await loadOlderTurns();
       }
     } finally {
       drain();
       setCatchingUp(false);
     }
-  }, [backfill, drain, setThreadId, store]);
+  }, [drain, loadOlderTurns, resetHistoryWindow, setThreadId, store]);
 
   /**
    * Drop the open thread without opening another.
@@ -299,11 +397,13 @@ export function useSession(url: string, store: TranscriptStore, handlers: Sessio
     client,
     catchingUp,
     recovered,
+    hasOlderTurns,
+    loadOlderTurns,
     retryNow,
     createThread,
     switchThread,
     close,
-  }), [status, threadId, client, catchingUp, recovered, retryNow, createThread, switchThread, close]);
+  }), [status, threadId, client, catchingUp, recovered, hasOlderTurns, loadOlderTurns, retryNow, createThread, switchThread, close]);
 }
 
 function readRememberedThread(): string | undefined {
