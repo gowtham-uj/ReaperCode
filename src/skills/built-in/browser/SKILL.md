@@ -327,6 +327,27 @@ Prefer names to indices. `browser.setActive(1)` breaks the moment a page closes,
 which is the reason pages are named at all: a model that opens a tab, works
 elsewhere and comes back has no way to say which one it meant by position.
 
+### A handle and the active page are different, and the receipt says which moved
+
+A program that drives a handle does not change what the bare `page` means. So when
+you act on a tab you found by URL, the receipt is about *that* tab, not about
+`page`:
+
+```js
+const tabs = await browser.pages();
+const ti = tabs.find(async (p) => (await p.url()).includes("the-internet"));
+await ti.goto("/login");   // the receipt describes the-internet, not the active tab
+```
+
+Read the note. When the step moved a tab other than the active one, the receipt
+says so by name and URL, and the page shown below it is that tab. That is not a
+warning to act on; it is telling you where your own work landed.
+
+The failure this prevents is specific and expensive: acting through a handle,
+reading a receipt about a different tab, and concluding the click did nothing.
+If a step reports `NO_CHANGE` and says other tabs changed, your action worked —
+look at the tab it names rather than repeating the click.
+
 ## Downloads and uploads
 
 A download is handled for you. You do not need `waitForEvent("download")`,
