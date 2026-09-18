@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdir,  readFile,  writeFile } from "node:fs/promises";
 import path from "node:path";
+import { homedir } from "node:os";
 
 
 import { parseReaperConfig, type ReaperConfig } from "../config/model-config.js";
@@ -110,6 +111,15 @@ import { detectSemanticFailureText, type SemanticFailureSignal } from "../verify
 import { createVerificationSummary } from "../verify/summary.js";
 import { bootPhase0Runtime, type Phase0BootstrapResult } from "./bootstrap.js";
 import { prepareRuntimeContent, type ContentPrepResult } from "./content-prep.js";
+/*
+ * The pinned-skill path, imported here because this is where the prompt is
+ * built. `content-prep` resolves the same pins for its own use, and that
+ * resolution reaches the model only through a renderer nothing calls; the
+ * delivery is what was missing, so it lives at the prompt.
+ */
+import { packagedSkills } from "../context/packaged-skills.js";
+import { discoverSkills } from "../context/skills.js";
+import { readPinnedSkills, resolvePinnedSkills } from "../context/pinned-skills.js";
 import { renderContextCockpit, stripCockpitFromMessages, containsCockpitMarker, COCKPIT_OPEN, COCKPIT_CLOSE, CURRENT_REQUEST_MESSAGE_NAME, type CockpitInput } from "./context-cockpit.js";
 import { MAIN_AGENT_SYSTEM_PROMPT_TEXT } from "./system-prompt.js";
 import { classifyReadFileTrust, markTrust } from "../context/trust.js";
@@ -962,6 +972,31 @@ export class RuntimeEngine {
     const systemPrompt = this.input.systemPromptSuffix
       ? `${systemPromptPrefix}\n\n# Thread instructions\n${this.input.systemPromptSuffix}`
       : systemPromptPrefix;
+    /*
+     * The skills the user has pinned, delivered as part of the prompt.
+     *
+     * They were computed every run and delivered nowhere. `content-prep` merges
+     * the packaged skills with the workspace walk, resolves the pins, and reads
+     * each body off disk, and the only consumer of that work was
+     * `renderContextCockpit` — reachable from `insertCockpitIntoConversation`,
+     * which has no callers and returns early unless an environment flag is set.
+     * So a pin was a real, correctly-stored preference whose effect was nothing:
+     * the machine pins `browser` and `codemode`, and a run that needed the
+     * browser skill got it only if the model happened to call `activate_skill`
+     * with the exact name, which nothing had told it to do.
+     *
+     * Appended after the thread's instructions and computed once per run, which
+     * is what keeps the cache prefix intact: the common prefix is unchanged, and
+     * a pinned body is the same bytes for every call in the run.
+     *
+     * `codemode` is delivered with the same care as any other pin and no more:
+     * the routing sentence for it lives in the main prompt, and this carries the
+     * detail when the user has asked for it to always be available.
+     */
+    const pinnedBlocks = this.pinnedSkillBlocks();
+    const withSkills = pinnedBlocks.length > 0
+      ? `${systemPrompt}\n\n# Always-on skills\n${pinnedBlocks.join("\n\n")}`
+      : systemPrompt;
     return runWithCleanupScope(runContext.runDir, () =>
       runWithModelCallLogContext(
         { workspaceRoot: this.input.workspaceRoot, runId: runContext.runId },
@@ -974,7 +1009,7 @@ export class RuntimeEngine {
             source: "runtime",
             callId: runContext.runId,
             promptPreview: String(initialRequest.payload?.prompt ?? "").slice(0, 500),
-            system: systemPrompt,
+            system: withSkills,
           },
           async () => {
             await emitRuntimeEvent(this.input.eventSink, {
@@ -983,7 +1018,7 @@ export class RuntimeEngine {
               sessionId: runContext.sessionId,
             });
             try {
-              const result = await this.runInner({ startedAt, initialRequest, runContext, systemPromptPrefix: systemPrompt });
+              const result = await this.runInner({ startedAt, initialRequest, runContext, systemPromptPrefix: withSkills });
               // Surface the verification verdict before the turn closes, so the
               // panel already has the classification by the time the transcript
               // marks the turn done. `verified` is the trust-relevant bit:
@@ -1045,6 +1080,39 @@ export class RuntimeEngine {
        */
       this.input.onRunFault ? { onFault: this.input.onRunFault } : {},
     );
+  }
+
+  /**
+   * The bodies of the skills the user pinned, ready to append to the prompt.
+   *
+   * `pinnedSkills` is a user setting, and until now it did nothing: the pins were
+   * resolved every run and handed to a renderer whose insertion point had been
+   * removed. A user who pinned `browser` had a correctly-stored preference and no
+   * behavioural change, which is the worst kind of broken setting — it looks
+   * applied.
+   *
+   * Deliberately not the whole skill inventory. Pinned means always available,
+   * and a body is delivered only when the user asked for that; everything else
+   * stays reachable through `activate_skill`, which is what keeps a run's prompt
+   * from growing with the catalogue. A skill marked `disableModelInvocation` is
+   * skipped by `resolvePinnedSkills` itself, so a pin cannot override it.
+   *
+   * Best effort: a skill whose body cannot be read is skipped rather than failing
+   * the run, because a prompt is not the place to discover a filesystem problem.
+   */
+  private pinnedSkillBlocks(): string[] {
+    try {
+      const available = [
+        ...packagedSkills(),
+        ...discoverSkills(this.input.workspaceRoot),
+      ];
+      const pinned = resolvePinnedSkills(readPinnedSkills(this.input.userHome ?? homedir()), available);
+      return pinned.map((skill) =>
+        `<<<SKILL: ${skill.name}>>>\n${skill.body.trim()}\n<<<END_SKILL>>>`,
+      );
+    } catch {
+      return [];
+    }
   }
 
   private async runInner(params: {

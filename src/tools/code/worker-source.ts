@@ -697,8 +697,28 @@ async function main() {
      * saw one argument that was an array of one, resolved nothing, and rendered
      * the page.
      */
+    /*
+     * The frame shape is \`[name, called, ...args]\`, identical to a Playwright
+     * call, and the call flag is what makes it so.
+     *
+     * This sent \`[name, ...args]\` while the host destructured
+     * \`[method, called, ...args]\`, so a helper's first argument was read as the
+     * call flag and its remaining arguments slid one position left. The result
+     * looked like the model misusing the API rather than like a wire bug:
+     * \`setUserAgent('UA-X')\` arrived as an empty argument list and reported
+     * that a non-empty string was empty, \`setViewport(1024, 768)\` arrived as
+     * \`(768, undefined)\` and reported NaN, and \`bandwidth({...})\` arrived
+     * holding nothing. Calling the helper with and without arguments gave
+     * byte-identical errors, which is what made it diagnosable from outside.
+     *
+     * The zero-argument helpers worked throughout and that is the tell: they
+     * dispatched correctly and their missing flag was indistinguishable from an
+     * absent argument, so the shape mismatch only showed where an argument
+     * existed to be lost.
+     */
     const view = async (name, args) => {
-      const reply = await callPage(-1, [[name, ...(Array.isArray(args) ? args : [args])]]);
+      const list = Array.isArray(args) ? args : [args];
+      const reply = await callPage(-1, [[name, 1, ...list]]);
       if (reply && reply.kind === 'error') {
         const error = new Error(reply.message || 'the page call failed');
         if (reply.name) error.name = reply.name;
