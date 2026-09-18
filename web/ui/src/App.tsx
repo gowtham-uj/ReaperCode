@@ -513,7 +513,7 @@ function WorkspacePage() {
                   <Transcript turns={app.turns} {...(app.activeTurn ? { activeTurnId: app.activeTurn.id } : {})} />
                   {app.queued.map((entry) => <QueuedMessage key={entry.id} entry={entry} onCancel={() => app.dropQueued(entry.id)} onMode={(mode) => app.setQueuedMode(entry.id, mode)} />)}
                   {app.approvals.map((request) => <ApprovalVisibility key={request.approvalId} onVisibilityChange={setApprovalVisible}><ApprovalCard request={request} onDecide={app.decide} /></ApprovalVisibility>)}
-                  {app.activeTurn && <WorkingIndicator turn={app.activeTurn} />}
+                  {app.activeTurn && <WorkingIndicator turn={app.activeTurn} connected={app.session.status === "open"} />}
                 </div>
                 <div className="dsh-composer-seat" data-composer-seat>
                   {/*
@@ -645,7 +645,7 @@ function EmptyHero({ connected }: { connected: boolean }) {
  * which is why a trailing tool call still counts as working: the agent waiting
  * on a shell command has not answered yet.
  */
-function WorkingIndicator({ turn }: { turn: AppTurn }) {
+function WorkingIndicator({ turn, connected }: { turn: AppTurn; connected: boolean }) {
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
     const started = Date.now();
@@ -676,6 +676,26 @@ function WorkingIndicator({ turn }: { turn: AppTurn }) {
 
   const isRunning = turn.status === "inProgress";
   if (!isRunning) return null;
+
+  /*
+   * A turn that is only known to be running is not the same as one that is
+   * running. `turn.status` is the last thing this client heard, and it does not
+   * change when the connection drops: an app-server that died mid-turn leaves
+   * `inProgress` sitting in the store, and the indicator went on saying "Reaper
+   * is working" for as long as the tab stayed open. Measured during a real
+   * crash: the server was gone for over an hour while this line counted up.
+   *
+   * With no connection the honest statement is that the state is unknown, so it
+   * says that instead, and the elapsed counter is dropped because it measures how
+   * long the client has been waiting, which is no longer evidence of anything.
+   */
+  if (!connected) {
+    return (
+      <div className="turn-status" data-disconnected role="status" aria-live="polite">
+        Waiting for the server to reconnect… <span className="turn-elapsed">the agent's progress is unknown until it does</span>
+      </div>
+    );
+  }
 
   return (
     <div className="turn-status" role="status" aria-live="polite">
