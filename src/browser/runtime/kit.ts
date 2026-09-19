@@ -295,10 +295,17 @@ export class BrowserRuntimeKit {
     this.ledger.record({ kind: "observation.made", level, chars, ...(actionId !== undefined ? { actionId } : {}) });
   }
 
-  /** Record a model call's token usage, so the ledger owns the totals. */
-  modelCall(inputTokens: number, outputTokens: number): void {
-    this.ledger.record({ kind: "model.call", inputTokens, outputTokens });
-  }
+  /*
+   * There is deliberately no `modelCall` here.
+   *
+   * There was one, and nothing called it, which made it the hazard this
+   * codebase keeps hitting: a door that looks wired because it exists. The
+   * ledger still holds the event kind and still folds it, so a host that knows
+   * the token counts can record one directly with
+   * `kit.ledger.record({ kind: "model.call", ... })` and the metric becomes
+   * real. What this class will not do is offer a method that pretends the
+   * browser layer knows something only the model layer knows.
+   */
 
   /**
    * Run the verifier against the live page.

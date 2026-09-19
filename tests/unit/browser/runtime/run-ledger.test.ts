@@ -55,3 +55,29 @@ test("events carry a monotonic sequence, so order survives identical timestamps"
   const second = ledger.record({ kind: "action.finished", actionId: "a1", status: "success", durationMs: 1 });
   assert.ok(second.seq > first.seq);
 });
+
+test("a token line appears only when a call was recorded, never as a zero", () => {
+  /*
+   * The browser layer does not know what the model was sent: that is core's
+   * business, and this layer must stay extractable, so nothing in it records a
+   * `model.call`. An unconditional line therefore read `TOKENS: 0 in / 0 out` on
+   * every run, whatever the run cost.
+   *
+   * That is the same shape as the bug the ledger replaced. A summary reporting
+   * `failure_count: 0` for fourteen failures was not wrong because a counter
+   * mis-incremented; it was wrong because the number came from somewhere that
+   * did not know. A zero meaning "nobody told me" is worse than no line, because
+   * it reads as a cheap run.
+   */
+  const ledger = new RunLedger();
+  ledger.record({ kind: "mission.started" });
+  ledger.record({ kind: "action.finished", actionId: "a1", status: "success", durationMs: 5 });
+  assert.doesNotMatch(ledger.render(), /TOKENS/, "no call was recorded, so there is no token line to print");
+
+  /*
+   * And the fold is live: a host that does know can record one and the number
+   * becomes real rather than staying at zero.
+   */
+  ledger.record({ kind: "model.call", inputTokens: 1_200, outputTokens: 340 });
+  assert.match(ledger.render(), /TOKENS: 1200 in \/ 340 out/);
+});

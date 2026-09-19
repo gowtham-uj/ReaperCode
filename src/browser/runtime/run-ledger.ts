@@ -259,7 +259,26 @@ export class RunLedger {
       `PAGES: ${m.pagesCreated} created (${m.popups} from a click), ${m.pagesClosed} closed`,
       `ARTIFACTS: ${m.downloads} (${m.downloadBytes} bytes)`,
       `OBSERVATIONS: ${m.observations} (${m.observationChars} chars)`,
-      `TOKENS: ${m.inputTokens} in / ${m.outputTokens} out`,
+      /*
+       * Token counts, printed only when something recorded one.
+       *
+       * The browser layer cannot know what the model was sent: that is core's
+       * business, and this layer is deliberately extractable, so it must not
+       * reach into the model layer to find out. Nothing in this directory
+       * records a `model.call`, which means an unconditional line would read
+       * `TOKENS: 0 in / 0 out` on every run, whatever the run cost.
+       *
+       * That is the same shape as the bug the ledger replaced. A summary that
+       * said `failure_count: 0` for a run with fourteen failures was not wrong
+       * because a counter mis-incremented; it was wrong because the number came
+       * from somewhere that did not know. A zero that means "nobody told me" is
+       * worse than no line, because it reads as a cheap run.
+       *
+       * So the fold stays (a host that does know can record `model.call` and the
+       * number becomes real), and the line appears only when a call has been
+       * recorded.
+       */
+      ...(m.inputTokens > 0 || m.outputTokens > 0 ? [`TOKENS: ${m.inputTokens} in / ${m.outputTokens} out`] : []),
       `ELAPSED: ${Math.round(m.totalMs / 1000)}s`,
     ];
     if (kinds.length > 0) lines.push(`FAILURES: ${kinds}`);
