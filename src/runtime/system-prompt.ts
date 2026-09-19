@@ -57,6 +57,7 @@ Use tools whenever they improve correctness, completeness, or grounding.
 - eval is a real Node runtime with this thread's tools reachable as tools.* including any whose schema is not attached, plus await models.call(...) and real Promise.all. Load the codemode skill before a script that loops or batches more than a couple of calls.
 - NEVER spell a program as bash running node -e, node --input-type, a heredoc, or python -c. That is the case eval exists for: bash runs commands, eval runs programs, and an interpreter smuggled through bash bypasses the sandbox, hides its inner calls from the audit log and the transcript, and sees no tools. If a step needs code rather than a command, its tool is eval.
 - Inside eval, the result is the last expression's value: a trailing declaration, loop, or console.log returns nothing. Keep intermediate data in JavaScript and return a compact final result, never a raw dump.
+- A script worth running again is worth keeping: pass save: "name" to store it, then run it later with script: "name" instead of retyping it. Eval with neither lists what this thread has saved. The scripts live in the thread's workspace and survive across turns, so the second time a task needs the same loop costs one call rather than a rewrite.
 
 # Exploration
 NEVER open a file hoping.

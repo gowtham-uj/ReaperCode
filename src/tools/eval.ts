@@ -214,6 +214,14 @@ export const EVAL_TOOL_DESCRIPTION =
    * made in.
    */
   "Use eval when one step needs what a single call cannot express: the same operation over many items, a loop or fan-out, filtering or aggregating a large result down to a small answer, or dependent steps that chain with no reasoning needed between them. Load the `codemode` skill first for the return semantics and worked examples.\n" +
+  /*
+   * Saving, stated as a thing the model should do rather than a capability it
+   * has. The feature is useless if it is only documented: a model that writes a
+   * good script and does not know it can keep it will write it again next time,
+   * which is the cost this exists to remove. So the routing sentence names the
+   * moment to save, not the parameter that saves.
+   */
+  "Keep a script worth running again with `save: \"name\"`, and run it later with `script: \"name\"` instead of retyping it. Call eval with neither to list what this thread has saved. Scripts live in the thread's workspace and survive across turns, so a loop that finally worked on a paginated page is one you write once.\n" +
   "Do not use eval for a single ordinary operation: creating or editing a file, reading one file, listing a directory, searching, running a build, a test, or a git command. Call that tool directly — same round trips, clearer transcript.\n" +
   "Do not use eval when you need to see a result before deciding the next step. Call the tool and look.\n" +
   /*

@@ -29,6 +29,7 @@ import { MAIN_AGENT_SYSTEM_PROMPT_TEXT } from "../../../src/runtime/system-promp
 import { CORE_TOOL_NAMES } from "../../../src/tools/registry.js";
 
 const SKILL_PATH = new URL("../../../src/skills/built-in/codemode/SKILL.md", import.meta.url);
+const SKILL_PATH_CM = SKILL_PATH;
 
 test("eval is a core tool, so its schema ships without a discovery step", () => {
   /*
@@ -122,4 +123,30 @@ test("the skill documents the routing in detail", async () => {
   assert.match(skill, /When eval is the right tool/, "the skill must have a routing section");
   assert.match(skill, /When it is not/, "and the counter-case");
   assert.match(skill, /same call repeated over a list|for. loop/i, "and name the loop shape concretely");
+});
+
+test("the model is told it can save a script and run it later", async () => {
+  /*
+   * A feature the model does not know about is a feature it does not use, and
+   * saving is exactly that shape: it existed, worked, and was documented only in
+   * the schema, where a model reading a routing decision looks last.
+   *
+   * Three surfaces, because they are read at different moments: the prompt while
+   * deciding whether a task is script-shaped at all, the description while
+   * weighing this particular call, and the skill while writing the script.
+   */
+  assert.match(EVAL_TOOL_DESCRIPTION, /save: "name"/, "the description must show how to save");
+  assert.match(EVAL_TOOL_DESCRIPTION, /script: "name"/, "and how to run one back");
+  assert.match(EVAL_TOOL_DESCRIPTION, /list what this thread has saved/, "and how to see what exists");
+
+  assert.match(
+    MAIN_AGENT_SYSTEM_PROMPT_TEXT,
+    /save: "name"/,
+    "the prompt must name saving, or a model will write the same script twice",
+  );
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT_TEXT, /script: "name"/, "and how to re-run one");
+
+  const skill = await readFile(SKILL_PATH_CM, "utf8");
+  assert.match(skill, /## Keeping a script/, "the skill must have a section for it");
+  assert.match(skill, /save: "count-todos"/, "with a worked example");
 });

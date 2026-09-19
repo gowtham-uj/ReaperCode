@@ -111,6 +111,34 @@ trip either way, and the direct call is easier to read, approve, and audit.
 If you need to *look* at the result before deciding what to do next, call the
 tool directly and look.
 
+## Keeping a script
+
+A program you had to get right is worth keeping, and eval can store it for you.
+
+```js
+// Write it and keep it, in one call.
+{ code: "const rows = await tools.grep_search({ pattern: 'TODO', path: 'src' }); return rows.matches.length;",
+  save: "count-todos" }
+
+// Later, in any turn of this thread: no code at all.
+{ script: "count-todos" }
+
+// What have I kept?
+{ }   // -> savedScripts: [{ name, bytes }]
+```
+
+The name may use letters, digits, dot, dash and underscore. Saving over an
+existing name replaces it, so a script you are improving keeps its name.
+
+Scripts live in the thread's own workspace (`.reaper/scripts/`), so they survive
+across turns and restarts and you can read one with an ordinary file tool when
+you want to edit it rather than rewrite it. They are per thread: a script saved
+in one conversation is not visible in another.
+
+Save when you have written something you would otherwise write again: a loop
+that finally matched a page's real structure, a reduction over many files, a
+call sequence with fiddly argument shapes. Do not save a one-liner.
+
 ## Errors are values you can handle
 
 A rejected tool call throws an `Error` with `code`, `message`, and `toolName`
