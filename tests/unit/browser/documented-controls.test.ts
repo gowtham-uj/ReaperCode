@@ -28,6 +28,60 @@ test("the tool description names the recovery control and the download calls", (
   assert.match(BROWSER_USE_DESCRIPTION, /probeInput\(/, "and the input probe, so a dead page is one call to diagnose");
 });
 
+test("the tool description names the transactional surface", () => {
+  /*
+   * The same rule as the test above, applied to the calls added later.
+   *
+   * A model does not reach for a call it has not heard of, and every one of
+   * these replaces work the measured mission did by hand and badly: deciding
+   * whether an element could be clicked, reading a form's constraints, waiting a
+   * fixed number of seconds, catching a download, opening a popup. The cost of
+   * not naming them is not that the tool is broken; it is that the expensive
+   * behaviour they were written to prevent comes straight back.
+   */
+  assert.match(BROWSER_USE_DESCRIPTION, /tx\(\{name\}/, "tx() must be named, or the receipt shape is never used");
+  assert.match(BROWSER_USE_DESCRIPTION, /inspect\(target\)/, "inspect() is the zero-area fix and must be named");
+  assert.match(BROWSER_USE_DESCRIPTION, /inspectForm\(\)/, "and the form reader");
+  assert.match(BROWSER_USE_DESCRIPTION, /waitForChange\(\{/, "and the replacement for a fixed sleep");
+  assert.match(BROWSER_USE_DESCRIPTION, /download\(\{trigger\}\)/, "and the arm-before-trigger download");
+  assert.match(BROWSER_USE_DESCRIPTION, /expectPopup\(page, trigger\)/, "and the popup with provenance");
+  assert.match(BROWSER_USE_DESCRIPTION, /state\.fact\(/, "and the mission memory");
+});
+
+test("every control the description names is one the sandbox actually binds", async () => {
+  /*
+   * The check the surface-binding test does for `BROWSER_PROGRAM_PARAMS`, done
+   * for the prose.
+   *
+   * The three lists that can drift are the tool description, the sandbox's
+   * returned object, and the host's dispatch. `recover`, `probeInput` and
+   * `capabilities` each drifted in all three at once and the model got
+   * "recover is not defined" for a call the description told it to make. The
+   * other test compares the list against the surface; this one compares the
+   * *description* against the surface, which is the half a reader would assume
+   * was covered and was not.
+   */
+  const sandbox = await readFile(new URL("../../../src/browser/remote-page-source.ts", import.meta.url), "utf8");
+  const listed = new Set(
+    [...sandbox.slice(sandbox.indexOf("BROWSER_PROGRAM_PARAMS")).matchAll(/"(\w+)"/g)].map((match) => match[1]!),
+  );
+  /*
+   * The helpers the description names by call form. Playwright's own methods
+   * (`setInputFiles`, `getByRole`, `evaluate`) are deliberately not in the list:
+   * they come from the page, not from this surface.
+   */
+  const named = [
+    "tx", "inspect", "inspectForm", "waitForChange", "download", "downloadAfter",
+    "expectPopup", "state", "metrics", "capabilities", "probeInput", "recover",
+  ];
+  for (const name of named) {
+    assert.ok(
+      listed.has(name),
+      `the description names ${name}() but the sandbox does not bind it, so a model that follows the documentation gets "not defined"`,
+    );
+  }
+});
+
 test("the tool description says a returned value suppresses the page", () => {
   // The single biggest token cost was the page being appended after a program
   // that had already answered. A model that does not know this will ask for the
