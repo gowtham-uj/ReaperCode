@@ -52,6 +52,7 @@ import type { ControlReport } from "./browser-program.js";
 import { countOutline, PageObserver, type PageContentMeta, type PageViewOptions, type SnapshotStats } from "./page-view.js";
 import { runStep, type SettleOptions, type StepReceipt } from "./transaction.js";
 import type { TransitionDb } from "./transition-db.js";
+import { BrowserRuntimeKit } from "./runtime/kit.js";
 
 export interface ThreadRuntimeOptions {
   /** The thread this browser belongs to, for naming and logging. */
@@ -178,6 +179,17 @@ export class ThreadBrowserRuntime {
    */
   private readonly control: BrowserControlRegistry | undefined;
 
+  /**
+   * The transactional machinery: registry, ledger, health, recovery, artifacts,
+   * mission state, verifier.
+   *
+   * Public and readonly, because the sandbox surface and the tool reach it
+   * directly. Constructed before the vault so the vault can be handed to the
+   * artifact manager, and with the runtime's own primitives injected rather than
+   * imported, so the kit stays testable without a browser.
+   */
+  readonly kit: BrowserRuntimeKit;
+
   constructor(private readonly options: ThreadRuntimeOptions) {
     this.flows = options.flows;
     this.control = options.control;
@@ -214,6 +226,22 @@ export class ThreadBrowserRuntime {
         ? join(dirname(options.statePath), basename(options.statePath, ".json"), "downloads")
         : undefined;
     this.downloads = vaultRoot === undefined ? undefined : new DownloadVault(vaultRoot);
+
+    /*
+     * The kit, assembled after the vault because it needs it, and given the
+     * runtime's own primitives so it never holds a page of its own.
+     *
+     * The injected `recover`, `probeInput` and `outline` are bound methods rather
+     * than free functions: they are the runtime's, they use the runtime's
+     * connection, and the kit must not be able to reach around them.
+     */
+    this.kit = new BrowserRuntimeKit({
+      threadId: options.threadId,
+      ...(this.downloads !== undefined ? { vault: this.downloads } : {}),
+      recover: (page) => this.recover(page),
+      probeInput: (page) => this.probeInput(page),
+      outline: async (page) => (await this.perceive(page)).text,
+    });
   }
 
   /** This runtime's thread id, for lease lookups. */
@@ -750,7 +778,22 @@ export class ThreadBrowserRuntime {
          * because `owns` had already recorded the right owner and the claim was
          * idempotent, which is exactly how a latent bug survives its own tests.
          */
-        if (opener !== null && await this.owns(opener)) await this.claimOwn(page).catch(() => undefined);
+        if (opener !== null && await this.owns(opener)) {
+          await this.claimOwn(page).catch(() => undefined);
+          /*
+           * Registered as a popup, because that is what this listener *is*.
+           *
+           * The kit infers `popup` from a running action when it has to, but this
+           * path knows exactly: the page has an opener this thread owns, which is
+           * what `window.open` and a `target=_blank` click produce and what
+           * `context.newPage()` cannot. Recording it here is what lets a
+           * benchmark ask "did a click open this" and get a true answer rather
+           * than an inference from timing.
+           */
+          const name = this.anonymousName();
+          this.named.set(name, { name, page, openedAt: Date.now() });
+          this.kit.registerPage(name, page, { creationType: "popup", parent: opener });
+        }
         page.once("close", () => this.notifyPagesChanged());
         this.notifyPagesChanged();
       })();
@@ -799,6 +842,21 @@ export class ThreadBrowserRuntime {
 
     await this.restorePages(context).catch(() => undefined);
     await this.restoreNames(context).catch(() => undefined);
+
+    /*
+     * Every page this thread already had is registered, once.
+     *
+     * This is after the restore rather than before, because the restore is what
+     * puts the pages back and a page registered before it exists would be an
+     * entry pointing at nothing. The creation type is `restored`, which is what
+     * it is: nobody clicked to make these this time, and recording them as
+     * popups would let a reconnected thread pass a provenance check it never
+     * performed.
+     */
+    for (const entry of this.named.values()) {
+      if (entry.page.isClosed()) continue;
+      this.kit.registerPage(entry.name, entry.page, { creationType: "restored" });
+    }
 
     /*
      * IndexedDB, restored after the pages are open.
@@ -1038,10 +1096,46 @@ export class ThreadBrowserRuntime {
     await this.applyControls(page).catch(() => undefined);
     const name = this.anonymousName();
     this.named.set(name, { name, page, openedAt: Date.now() });
+    /*
+     * Registered in the shared registry too, so a model can address the tab this
+     * runtime made to keep a call possible. Registered as `newPage` because that
+     * is what happened: the runtime asked for it, not a click.
+     */
+    this.kit.registerPage(name, page, { creationType: "newPage" });
     this.active = page;
     this.activeTargetId = await targetIdOf(page).catch(() => undefined);
     recordTargetId(page, this.activeTargetId);
     return { page, created: true };
+  }
+
+  /**
+   * Take ownership of a page this thread's own click produced.
+   *
+   * The popup listener is the usual path, but a program that armed its own wait
+   * through `expectPopup` has the page in hand before the listener's `async`
+   * body has run, and it needs the page registered as a popup with the parent
+   * named. Doing it here rather than relying on the race is what makes
+   * `expectPopup`'s provenance deterministic: whichever of the two paths gets
+   * there first, the creation type is `popup` and the opener is recorded.
+   */
+  async adoptPopup(page: Page, parent: Page | undefined): Promise<void> {
+    if (page.isClosed()) return;
+    await this.claimOwn(page).catch(() => undefined);
+    this.watchDownload(page);
+    const known = [...this.named.values()].some((entry) => entry.page === page);
+    const name = known ? [...this.named.values()].find((entry) => entry.page === page)!.name : this.anonymousName();
+    if (!known) this.named.set(name, { name, page, openedAt: Date.now() });
+    if (parent !== undefined) {
+      /*
+       * `popup` explicitly, and the parent is the page the trigger ran on. The
+       * listener may register it too, and `register` is idempotent by page, so
+       * the second call rebinds the same entry rather than minting a second id.
+       */
+      this.kit.registerPage(name, page, { creationType: "popup", parent });
+    } else {
+      this.kit.registerPage(name, page, { creationType: "popup" });
+    }
+    this.notifyPagesChanged();
   }
 
   /** Open a page, optionally naming it. Returns the RAW handle, for the runtime. */
@@ -1051,6 +1145,16 @@ export class ThreadBrowserRuntime {
     await this.claimOwn(page);
     const resolvedName = name ?? this.anonymousName();
     this.named.set(resolvedName, { name: resolvedName, page, openedAt: Date.now() });
+    /*
+     * A page the program asked for, which is a `newPage` and never a popup.
+     *
+     * `registerPage` would otherwise infer `popup` whenever an action is
+     * running, and a program that calls `browser.newPage()` in the middle of a
+     * step would be recorded as having had a click open it. The creation type is
+     * stated here rather than inferred, because this is the one path that knows
+     * for certain.
+     */
+    this.kit.registerPage(resolvedName, page, { creationType: "newPage" });
     this.active = page;
     /*
      * Pin to the new page's target id immediately. Without this the first call

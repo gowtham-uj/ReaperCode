@@ -223,7 +223,21 @@ test("a page the model closes is replaced, and the next step continues", { skip 
 
   const closed = await executeBrowserUse(rt, { code: `await page.close(); "done"`, observe: "none" } as never, metadata);
   assert.equal(closed.outcome, "SUCCESS", closed.output);
-  assert.match(closed.output, /new page is open/, "the model must be told it can continue");
+  /*
+   * Asserted on what the model is told rather than on the phrase that said it.
+   *
+   * This pinned `/new page is open/`, and commit 559d646b3 replaced that sentence
+   * with a better one ("one was opened for you at about:blank; nothing else was
+   * touched") without updating this assertion. The test has been red since, and
+   * it was red for the right reason about the wrong thing: the behaviour never
+   * broke, the wording moved. A check whose subject is a literal sentence is a
+   * check that fails whenever somebody improves the sentence.
+   *
+   * What matters is the property the test's own comment names: the model is told
+   * a usable page exists and that it may continue. Both halves are asserted.
+   */
+  assert.match(closed.output, /opened/i, "the model must be told a page is available");
+  assert.match(closed.output, /about:blank|at http/i, "and where that page is, so the next step knows what it is driving");
 
   // And the next call genuinely works, without the model doing anything special.
   const next = await executeBrowserUse(

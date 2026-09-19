@@ -340,6 +340,23 @@ export class RemotePageHost {
     return held;
   }
 
+  /**
+   * Hand a live object to the program, as a handle it can call.
+   *
+   * Public because the observation helpers can *produce* a live object, which
+   * they could not when they only answered with data. `expectPopup` is the case
+   * that forced it: the popup is a Page, the program needs to call Playwright on
+   * it, and every other thing the program holds arrived through this table. A
+   * page returned as a plain object would be a description of a tab rather than
+   * a tab, which is the difference this surface exists to avoid.
+   *
+   * Returns undefined when the table is full, so a caller can answer with a real
+   * error rather than a handle that resolves to nothing.
+   */
+  intern(value: unknown): number | undefined {
+    return this.remember(value);
+  }
+
   /** Store a live object and return its handle, or undefined when the table is full. */
   private remember(value: unknown): number | undefined {
     for (const [id, held] of this.handles) {

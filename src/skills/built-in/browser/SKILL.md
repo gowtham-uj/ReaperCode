@@ -65,6 +65,43 @@ await page.getByRole("button", { name: "Apply" }).click();
 await viewChanges();                // a form appeared
 ```
 
+## `tx`: the loop as one call, with the receipt built in
+
+The three steps above are the loop, and `tx` does them for you: it brackets a
+body, measures what changed around it, and answers with a short receipt instead
+of the page.
+
+```js
+return await tx({ name: "submit registration" }, async ({ page }) => {
+  await page.getByRole("button", { name: "Register" }).click();
+  return { heading: await page.locator("h1").textContent() };
+});
+```
+
+What comes back is a receipt, not a page:
+
+```
+TX a7 SUCCESS "submit registration"
+  page p5 "parabank": https://parabank.parasoft.com/parabank/register.htm
+  changed: navigated
+  842ms (0ms waiting)
+  result: {"heading":"Welcome"}
+```
+
+Four facts, a few hundred tokens, and none of them is a guess. Use it when a
+step has a name you would give it anyway, and reach for bare Playwright when it
+does not.
+
+The body's `page` is the transaction's page. Name one with `page: "parabank"` and
+the body drives that tab, whatever else is active.
+
+```js
+await tx({ page: "cart", name: "apply coupon" }, async ({ page }) => {
+  await page.getByLabel("Coupon").fill(code);
+  await page.getByRole("button", { name: "Apply" }).click();
+});
+```
+
 ## What you get back
 
 `view()` and `viewChanges()` return YAML-shaped text, the page as an
@@ -183,17 +220,40 @@ thread's workspace. It takes a moment and it is far cheaper than the experiment.
 ## When an action does nothing
 
 A click that succeeds but dispatches no event, and a click that missed its
-target, look identical from a receipt: `NO_CHANGE`, no error. There are two
-causes and they need opposite responses.
+target, look identical from a receipt: `NO_CHANGE`, no error. There are three
+causes and they need different responses.
 
 1. **The locator was wrong.** Read the element back once and check it is the one
    you meant.
-2. **The page stopped accepting input.** A renderer can reach a state where it
+2. **The element cannot be acted on.** It is there, and Playwright will not click
+   it: zero-width, covered by a banner, disabled, detached on every re-render.
+3. **The page stopped accepting input.** A renderer can reach a state where it
    renders, answers reads and navigates, but silently drops every trusted event:
    clicks do nothing, typing into a focused field does nothing, Tab never moves
    focus. It is per page, not per browser, and nothing on the page shows it.
 
-For the second, ask before guessing. `probeInput()` answers it in one call:
+**Ask before guessing, and ask in this order.** `inspect()` answers the second in
+one cheap call, using Playwright's own readiness checks without clicking:
+
+```js
+const report = await inspect(page.getByText("Delete"));
+// INSPECT getByText("Delete")
+//   matches: 1
+//   box: 0x40 at (814, 392)
+//   actionable: no
+//   ZERO_AREA: The element has a 0x40 box, so nothing can be hit inside it.
+//   next: Click a child or an adjacent element that has a real box...
+//   children with a real box, any of which can be clicked:
+//     <svg> "" 16x16
+```
+
+A zero-width delete link is the most common shape of this, and the answer is
+almost always the icon inside it. `inspect` lists those children with their
+boxes, so you can write the locator without another look. Pass the verb you mean
+when it is not a click: `inspect(target, "fill")`, `"check"` or `"hover"`.
+
+If it says `actionable: yes` and the click still did nothing, the problem is the
+third cause. `probeInput()` answers that one in a single call:
 
 ```js
 const check = await probeInput();          // the active page
@@ -277,6 +337,54 @@ const form = page.locator("form").first();
 return await form.ariaSnapshot({ mode: "ai" });   // real Playwright, no wrapper
 ```
 
+### A form that rejects your value
+
+Do not try a second value. Ask the form why:
+
+```js
+return await inspectForm();
+// FORM: 8 fields, 1 currently invalid
+//   customer.username [text] (required, max 20) INVALID: tooLong
+//       Please shorten this text to 20 characters or fewer.
+//       current value is 31 characters
+```
+
+The answer is in the markup already and the browser has computed it: `required`,
+`maxlength`, `minlength`, `pattern`, and the live validity flags. Read it before
+filling, and the rejection does not happen.
+
+```js
+const form = await inspectForm();
+if (form.invalid.length > 0) { /* fix these before submitting */ }
+```
+
+When the browser reports nothing wrong and the server still refuses, the reason
+is server-side and no client read can see it. Then, and only then, probe
+deliberately rather than randomly: three values of increasing length, each tried
+once. If all three are refused, stop and report the constraint you found; a
+fourth guess is a step not spent on the job.
+
+### Waiting, without a guess
+
+`waitForTimeout(3000)` is the most expensive line you can write. It is a guess
+about how long something takes, and it is wrong in both directions at once: too
+short on a slow run, and paid in full on every step of a long task.
+
+Wait for the condition instead.
+
+```js
+await page.getByRole("button", { name: "Search" }).click();
+await waitForChange();                            // whatever the click caused
+
+await waitForChange({ urlIncludes: "/results" }); // or a specific thing
+await waitForChange({ textPresent: "No matches" });
+await waitForChange({ timeoutMs: 8000 });         // when the budget needs raising
+```
+
+Playwright's own waits are the other half of this: `expect(locator).toBeVisible()`,
+`page.waitForURL(...)`, `page.waitForSelector(...)`, `page.waitForEvent("popup")`.
+All of them return the moment the condition holds rather than at a number.
+
 ## One program, many actions
 
 You are writing a program, so put the whole sequence in one call. This is real
@@ -331,6 +439,35 @@ await page.url();                                // the bare `page` is the cart 
 await browser.closePage(cart);                   // and this one closes only it
 ```
 
+Every page carries a stable id as well as a name, and both address it:
+
+```js
+const parabank = await browser.page("parabank");
+const same = await browser.page("p5");           // the id, which never changes
+```
+
+Do not search for a tab you already have. `browser.pages()` followed by a loop
+that matches on URL is a round trip per tab to re-derive something the runtime
+knows, and it is the single largest source of wasted calls in a long mission.
+Ask for the name or the id instead, and ask once.
+
+### Opening a page the page opens
+
+A task that asks for a popup is asking for a *click* that opened one. Opening a
+tab yourself with `context.newPage()` produces a tab without the click, and a
+verifier can tell the difference.
+
+```js
+const popup = await expectPopup(page, async (page) => {
+  await page.getByRole("link", { name: "Click Here" }).click();
+});
+await popup.url();                               // a real page, drive it normally
+```
+
+The listener is armed before your trigger runs, which is the order Playwright
+requires and the order that is easy to get wrong by hand: the event fires during
+the click, so a wait attached afterwards has already missed it.
+
 `page` is always the *active* page, so it follows `browser.setActive` and
 `browser.newPage`. A handle you keep names one specific page and stays with it,
 which is how you come back to a tab you left:
@@ -375,13 +512,28 @@ A download is handled for you. You do not need `waitForEvent("download")`,
 `saveAs`, a path, or any filesystem code: when you click a link that downloads a
 file, the tool catches it and saves it into this thread's own folder.
 
-Use `downloadAfter` when you want the file in the same step:
+Two calls do it, and `download` is the one to prefer: it arms the wait before
+your trigger runs, which is the order Playwright requires and the order a hand
+written version gets wrong.
 
 ```js
-// Click the thing AND get the file back, in one call.
-const invoice = await downloadAfter(page.getByRole("link", { name: "Download Invoice" }));
-// { name: "invoice.txt", path: "/…/downloads/invoice.txt", bytes: 66 }
+// The wait is armed, your click runs, the file comes back.
+const invoice = await download({
+  trigger: async (page) => { await page.getByRole("link", { name: "Download Invoice" }).click(); },
+});
+// { name: "invoice.txt", path: "/…/.reaper/downloads/invoice.txt", bytes: 66, sha256: "…" }
 ```
+
+`downloadAfter(target)` does the same thing when the trigger is a single click:
+
+```js
+const invoice = await downloadAfter(page.getByRole("link", { name: "Download Invoice" }));
+```
+
+Either way the path is inside this thread's workspace and is what an upload
+input takes. Nothing about the browser's temporary directory is exposed, and
+`download.path()` is not the supported way to find a file: it fails outright
+against a remote browser, which is the browser you are on.
 
 Or check for it later with `downloads()` and `download(name)`:
 
@@ -411,6 +563,33 @@ Measured: a model spent twenty minutes on one invoice this way, trying each of
 them in turn, while the page it kept re-examining had worked the whole time. One
 retry is reasonable if the click may genuinely have missed. After that, say the
 download failed and finish the task another way.
+
+## Remembering what you found, for a long task
+
+A long task outlives your context. The transcript gets trimmed, and a value you
+read at step 12 is gone by step 180 unless it is written down somewhere that is
+not the transcript. That is what `state` is.
+
+```js
+await state.fact("playwright_version", "1.63.0", "read from the npm page");
+await state.derive("run_code", "PW-1.63.0-2015", "playwright_version, mdn_year");
+
+await state.subtask("collect versions");        // declare, with no status
+await state.subtask("collect versions", "done");
+await state.subtask("register account", "pending", ["collect versions"]);
+
+await state.artifact("invoice", invoice.path, invoice.bytes);
+return await state.get();                       // everything, as text and as data
+```
+
+A fact carries the evidence that produced it, and `state.get()` returns the whole
+object every turn, so you never reconstruct a value you already read. `state.ready()`
+answers "what can I do now" as a fold over the declared dependencies rather than a
+question you reason about.
+
+`"verified"` is not a status you can set. Record a subtask as `"done"` and the
+runtime's verifier decides whether it is verified; marking your own work verified
+is the thing this whole mechanism exists to prevent.
 
 ## Changing how the browser presents itself
 
@@ -508,6 +687,21 @@ what to do — retrying with a launch call will not help.
   navigation that changed everything.
 - `await view(locator)` — one region, for when the page is large.
 - `await viewChanges()` — the delta. The one you want after an action.
+- `await tx({name}, body)` — a step with its receipt built in: status, change
+  flags, timing, and your body's value. Preferred over a bare program when the
+  step has a name.
+- `await inspect(target, verb?)` — can this element be acted on, and if not, why
+  and what to click instead. One cheap call before a click you are unsure of.
+- `await inspectForm(form?)` — every field's constraints and validity, so a
+  rejected value is explained rather than guessed at.
+- `await waitForChange({...})` — wait for the page to change instead of for a
+  number. The replacement for `waitForTimeout`.
+- `await download({trigger})` — arm, trigger, collect, in one call.
+- `await expectPopup(page, trigger)` — a click that opens a tab, with provenance.
+- `await state.get()` / `.fact()` / `.subtask()` / `.ready()` — long-task memory
+  that survives context trimming.
+- `await metrics()` — calls, failures, retries, downloads, tokens for this
+  thread's browsing so far.
 - `await screenshot()` — an image, when the outline cannot describe it.
 - `await browser.save()` — write cookies now, mid-script.
 - The script's return value comes back as data, so `return await view()` gives
@@ -516,8 +710,9 @@ what to do — retrying with a launch call will not help.
 ## Failures worth knowing
 
 - **The click did nothing.** `viewChanges()` says `(no change)` or `URL
-  unchanged`. The element was probably not the one you meant, or something
-  covered it. Look again with `view()`.
+  unchanged`. Call `inspect(target)` before anything else: it names the reason
+  (zero area, covered, disabled, detached) and, for the two that have a
+  mechanical fix, gives you the element to use instead.
 - **The outline is empty.** The site is probably all divs. Escalate to
   `screenshot()`.
 - **A locator matches several elements.** Playwright refuses rather than picking

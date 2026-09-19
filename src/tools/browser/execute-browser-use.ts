@@ -27,6 +27,8 @@ import { looksBlocked } from "../../browser/user-agents.js";
 import { scopePage } from "../../browser/scoped-page.js";
 import { BROWSER_PROGRAM_PARAMS } from "../../browser/remote-page-source.js";
 import { collectUnannounced } from "../../browser/downloads.js";
+import { transactionalSurface } from "../../browser/runtime/control-extras.js";
+import { inspectProgram, renderPolicyReport } from "../../browser/runtime/policy-guard.js";
 import {
   BrowserProgramHost,
   type ControlSurface,
@@ -368,7 +370,7 @@ function browserSurface(runtime: ThreadBrowserRuntime): BrowserSurface {
  * always means. Passing a `Page` scopes it, which is how a program looks at one
  * region without a selector.
  */
-function observeSurface(runtime: ThreadBrowserRuntime): ObserveSurface {
+function observeSurface(runtime: ThreadBrowserRuntime, intern: (value: unknown) => number | undefined): ObserveSurface {
   return {
     view: async (target?: Page) => (await runtime.view(target ? { page: target } : {})).text,
     viewChanges: () => runtime.viewChanges().text,
@@ -384,7 +386,7 @@ function observeSurface(runtime: ThreadBrowserRuntime): ObserveSurface {
        */
       return `data:image/png;base64,${buffer.toString("base64")}`;
     },
-    control: controlSurface(runtime),
+    control: controlSurface(runtime, intern),
   };
 }
 
@@ -398,7 +400,7 @@ function observeSurface(runtime: ThreadBrowserRuntime): ObserveSurface {
  * than silently coerced to `NaN`, because a program that asked for something
  * impossible should hear about it.
  */
-function controlSurface(runtime: ThreadBrowserRuntime): ControlSurface {
+function controlSurface(runtime: ThreadBrowserRuntime, intern: (value: unknown) => number | undefined): ControlSurface {
   const requireString = (value: string, name: string): string => {
     if (typeof value !== "string" || value.trim().length === 0) {
       throw new Error(`${name} must be a non-empty string`);
@@ -516,6 +518,17 @@ function controlSurface(runtime: ThreadBrowserRuntime): ControlSurface {
      */
     recover: async (target?: unknown) => await runtime.recover(target as never),
     probeInput: async (target?: unknown) => await runtime.probeInput(target as never),
+    /*
+     * The transactional half, which needs a live page, the registry and the
+     * ledger together.
+     *
+     * It is built in its own module and spread here rather than inlined, because
+     * the two halves have nothing in common and this function is already long.
+     * The `intern` callback is what lets `expectPopup` hand a real Page back to
+     * the program: the bridge owns the handle table, so the helper that produces
+     * a new live object has to be able to add one.
+     */
+    ...transactionalSurface(runtime, intern),
     downloads: async () =>
       runtime.downloadedFiles.map((file) => ({ name: file.name, bytes: file.bytes, ...(file.url ? { url: file.url } : {}) })),
     download: async (name) => {
@@ -736,6 +749,26 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
     };
   }
 
+  /*
+   * The policy, checked against the source before anything is compiled or run.
+   *
+   * Before, not after, and that is the whole point: a rule enforced once the
+   * program has fetched the file has already been broken. The check is static
+   * and syntactic, which is the right strength for this: it catches the model
+   * reaching for a shortcut it has used before, not a deliberate evasion, and a
+   * deliberate evasion produces a run that fails verification anyway.
+   */
+  const policy = args.policy ?? "none";
+  const policyReport = inspectProgram(args.code, policy);
+  if (!policyReport.allowed) {
+    return {
+      output: `${renderPolicyReport(policyReport)}\n\nNothing ran, and the page is unchanged. Do this through the page instead.`,
+      outcome: "PRECONDITION_FAILED",
+      isError: true,
+      rev: runtime.observer.revision,
+    };
+  }
+
   let programSource: string;
   try {
     /*
@@ -773,7 +806,15 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
   let receipt: StepReceipt;
   let result: unknown;
   try {
-    const observe = observeSurface(runtime);
+    /*
+     * The observe surface needs the handle table, and the handle table is the
+     * host's, and the host is constructed with the observe surface. The cycle is
+     * broken with a mutable reference that is filled in on the next line: the
+     * `intern` callback is only ever invoked while a program is running, which is
+     * strictly after the host exists. Nothing races it.
+     */
+    let hostRef: BrowserProgramHost | undefined;
+    const observe = observeSurface(runtime, (value) => hostRef?.intern(value));
     const active = await runtime.ensureReady();
     /*
      * The program drives the SCOPED page, and it drives it from inside the
@@ -799,6 +840,7 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
      * makes starts from this object.
      */
     const programHost = new BrowserProgramHost(runtime, scopePage(active.page, runtime.threadId), observe);
+    hostRef = programHost;
     const stepped = await runtime.step(
       async () => {
         const ran = await runProgram({
@@ -881,6 +923,27 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
   }
 
   const lines = [renderReceipt(receipt)];
+
+  /*
+   * Fixed sleeps, named where the model can act on them.
+   *
+   * A warning rather than a refusal. There are real cases where a short wait is
+   * correct code, and the value here is that a model which wrote
+   * `waitForTimeout(3000)` learns what to write instead in the same turn. A
+   * build error would cost it a turn and it would reach for an evaluated sleep
+   * next, which is the same guess behind a worse door.
+   */
+  for (const warning of runtime.kit.sleepWarnings(args.code)) lines.push("", `SLOW: ${warning}`);
+
+  /*
+   * The mission's memory, when the program has recorded anything.
+   *
+   * Printed after the receipt rather than before it, because the receipt is the
+   * answer to what just happened and this is context. Absent entirely for a
+   * program that recorded nothing, so a short step pays nothing for it.
+   */
+  const mission = runtime.kit.mission.render();
+  if (mission.length > 0) lines.push("", mission);
 
   /*
    * The checks, when there is something to check against or something to report.

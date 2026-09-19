@@ -126,6 +126,116 @@ export interface ControlSurface {
    * try to discover by acting, which is the expensive way.
    */
   capabilities: () => Promise<Record<string, unknown>>;
+
+  /*
+   * The transactional surface, below.
+   *
+   * These are the calls that replace work the model was doing by hand. Each one
+   * exists because a measured run did the same thing repeatedly and badly:
+   * deciding whether an element could be clicked, reading a form's constraints,
+   * waiting for a change, catching a download, asking a page to open a popup.
+   *
+   * ## The arm/run/collect split, and why it is not avoidable
+   *
+   * Three of these take a *body*: a transaction, a download trigger, a popup
+   * trigger. A function cannot cross the bridge, and that is the boundary the
+   * sandbox is built on: the host used to rebuild functions from source with an
+   * eval, which is an escape in the app-server process, and the fix was to stop.
+   *
+   * So a body always runs where it was written. The runtime supplies the halves
+   * that need a live page, and the sandbox stitches them together, which is
+   * exactly how `downloadAfter` already works. The names below are those halves:
+   *
+   *   txBegin / txEnd          bracket a body, so the runtime can diff the page
+   *   armDownload / collectDownload
+   *   armPopup / collectPopup
+   *
+   * The ergonomic single calls (`browser.tx(...)`, `browser.download(...)`) are
+   * built from them in `remote-page-source.ts`, in the sandbox, where the body
+   * is. That is not an implementation detail leaking: it is the only arrangement
+   * that keeps a program's functions on the program's side of the wall.
+   */
+
+  /**
+   * Open a transaction and record the page's state before the body runs.
+   *
+   * Returns a token the matching `txEnd` needs, and the receipt's first half.
+   */
+  txBegin: (options: Record<string, unknown>) => Promise<unknown>;
+
+  /**
+   * Close a transaction and answer with the receipt.
+   *
+   * The receipt carries the status, the URL transition, the change flags and the
+   * body's value, rather than the page. That is what keeps a step's answer to a
+   * few hundred tokens instead of a full accessibility tree.
+   */
+  txEnd: (
+    token: string,
+    outcome: { ok: boolean; value?: unknown; error?: { name: string; message: string }; sleeps?: string[] },
+  ) => Promise<unknown>;
+
+  /**
+   * Ask whether an element can be acted on, before acting on it.
+   *
+   * Runs Playwright's own actionability trial, which checks visibility,
+   * stability, enabled state and pointer-event receipt without clicking. On
+   * failure it reports the classified reason and, for the two failures that have
+   * a mechanical fix, the evidence for it.
+   */
+  inspect: (target: unknown, action?: string) => Promise<unknown>;
+
+  /**
+   * Read a form's constraints, so a value is chosen rather than guessed.
+   *
+   * Answers from the markup and the Constraint Validation API: `required`,
+   * `maxlength`, `pattern`, and the live `ValidityState` with the browser's own
+   * explanation.
+   */
+  inspectForm: (form?: unknown) => Promise<unknown>;
+
+  /**
+   * Wait until the page changes, or until a condition holds.
+   *
+   * The replacement for `waitForTimeout`. Given no argument it waits for any
+   * change; given an expectation it waits for that specific one.
+   */
+  waitForChange: (options: Record<string, unknown>) => Promise<unknown>;
+
+  /** Start listening for a download, before the trigger runs. */
+  armDownload: (timeoutMs?: number) => Promise<unknown>;
+
+  /** Wait for an armed download and store it inside the workspace. */
+  collectDownload: (token: string) => Promise<unknown>;
+
+  /**
+   * Start listening for a popup on a page, before the trigger runs.
+   *
+   * The alternative is `context.newPage()`, which produces a tab and not a
+   * popup, and which a task that asked for a click will correctly refuse.
+   */
+  armPopup: (page: unknown, timeoutMs?: number) => Promise<unknown>;
+
+  /** Wait for an armed popup, register it with provenance, and return it. */
+  collectPopup: (token: string) => Promise<unknown>;
+
+  /**
+   * What this mission knows, outside the conversation.
+   *
+   * Facts carry their evidence, subtasks carry their state, and the object
+   * survives compaction because it is not in the transcript.
+   */
+  state: {
+    get: () => Promise<unknown>;
+    fact: (name: string, value: string, evidence?: string) => Promise<unknown>;
+    derive: (name: string, value: string, from?: string) => Promise<unknown>;
+    subtask: (title: string, status?: string, requires?: string[]) => Promise<unknown>;
+    ready: () => Promise<unknown>;
+    artifact: (name: string, path: string, bytes?: number) => Promise<unknown>;
+  };
+
+  /** The browsing metrics, folded from the event ledger. */
+  metrics: () => Promise<unknown>;
 }
 
 /**
@@ -372,6 +482,20 @@ export class BrowserProgramHost {
   }
 
   /**
+   * Put a live object into the handle table, and answer with its handle.
+   *
+   * The single door for an object the sandbox should be able to call Playwright
+   * on but which the host produced rather than the program. `expectPopup` is the
+   * case: Playwright hands the host a Page and the program needs to drive it.
+   *
+   * Returns undefined when the table is full, which the caller must answer with
+   * a real error rather than a handle that resolves to nothing.
+   */
+  intern(value: unknown): number | undefined {
+    return this.inner.intern(value);
+  }
+
+  /**
    * Answer one call frame.
    *
    * A handle of -1 is not a Playwright call but a call to an observation helper,
@@ -483,6 +607,59 @@ export class BrowserProgramHost {
           return { kind: "value", value: await this.observe.control.probeInput(target) };
         case "capabilities":
           return { kind: "value", value: await this.observe.control.capabilities() };
+        /*
+         * The transactional calls. Each is answered by the runtime through the
+         * control surface, because each needs a real page and the runtime's own
+         * primitives, neither of which the sandbox holds.
+         */
+        case "txBegin":
+          return { kind: "value", value: await this.observe.control.txBegin(asRecord(args[0])) };
+        case "txEnd":
+          return {
+            kind: "value",
+            value: await this.observe.control.txEnd(
+              String(args[0] ?? ""),
+              asRecord(args[1]) as { ok: boolean; value?: unknown; error?: { name: string; message: string } },
+            ),
+          };
+        case "inspect":
+          return { kind: "value", value: await this.observe.control.inspect(args[0], args[1] as string | undefined) };
+        case "inspectForm":
+          return { kind: "value", value: await this.observe.control.inspectForm(args[0]) };
+        case "waitForChange":
+          return { kind: "value", value: await this.observe.control.waitForChange(asRecord(args[0])) };
+        case "armDownload":
+          return { kind: "value", value: await this.observe.control.armDownload(args[0] as number | undefined) };
+        case "collectDownload":
+          return { kind: "value", value: await this.observe.control.collectDownload(String(args[0] ?? "")) };
+        case "armPopup":
+          return { kind: "value", value: await this.observe.control.armPopup(args[0], args[1] as number | undefined) };
+        case "collectPopup":
+          return { kind: "value", value: await this.observe.control.collectPopup(String(args[0] ?? "")) };
+        case "stateGet":
+          return { kind: "value", value: await this.observe.control.state.get() };
+        case "stateFact":
+          return { kind: "value", value: await this.observe.control.state.fact(String(args[0] ?? ""), String(args[1] ?? ""), args[2] as string | undefined) };
+        case "stateDerive":
+          return { kind: "value", value: await this.observe.control.state.derive(String(args[0] ?? ""), String(args[1] ?? ""), args[2] as string | undefined) };
+        case "stateSubtask":
+          return {
+            kind: "value",
+            value: await this.observe.control.state.subtask(
+              String(args[0] ?? ""),
+              args[1] as string | undefined,
+              Array.isArray(args[2]) ? (args[2] as string[]) : undefined,
+            ),
+          };
+        case "stateReady":
+          return { kind: "value", value: await this.observe.control.state.ready() };
+        case "stateArtifact":
+          return {
+            kind: "value",
+            value: await this.observe.control.state.artifact(String(args[0] ?? ""), String(args[1] ?? ""), Number(args[2] ?? 0)),
+          };
+        case "metrics":
+          return { kind: "value", value: await this.observe.control.metrics() };
         default:
           /*
            * A screenshot is the only helper that returns an image, and an

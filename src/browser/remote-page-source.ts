@@ -737,6 +737,199 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
   }
 
   /*
+   * The transactional calls, assembled here because their bodies run here.
+   *
+   * The host cannot receive a function: that is the boundary this whole file
+   * exists to hold, and the eval-in-the-app-server escape it replaced is why.
+   * So a call that takes a body is split into the halves the host can do, and
+   * the body is stitched between them on this side, where it was written.
+   *
+   *   const r = await tx({name: "sign in"}, async ({page}) => { ... });
+   *
+   *     txBegin        the host records the page state
+   *     body()         runs here, against the same proxies as everything else
+   *     txEnd          the host diffs and answers with a receipt
+   *
+   * The same shape for download and expectPopup, which are both "arm a wait,
+   * run the trigger, collect". It is one pattern three times rather than three
+   * designs, and every one of them is a shape a model writing bare Playwright
+   * would have had to get right by hand.
+   */
+
+  /**
+   * Run a body as a transaction, and answer with the receipt.
+   *
+   * The body is given the page it should work on, which is the resolved target
+   * rather than the bare global, so a transaction aimed at a named tab cannot
+   * drift onto the active one mid-body.
+   */
+  async function tx(options, body) {
+    const settings = options || {};
+    if (typeof body !== 'function') {
+      throw new Error('tx needs a body function: await tx({name: "..."}, async ({page}) => { ... })');
+    }
+    const begun = await callHelper('txBegin', [settings]);
+    const handle = begun && begun.pageHandle !== undefined ? begun.pageHandle : undefined;
+    /*
+     * The body's page is a node rooted at the handle the host resolved, so the
+     * body's Playwright calls replay against the tab the transaction named.
+     */
+    const bodyPage = handle !== undefined ? makeNode(handle, []) : page;
+    let outcome;
+    try {
+      const value = await body({ page: bodyPage, browser: browser, pages: pages });
+      outcome = { ok: true, value: value };
+    } catch (error) {
+      outcome = {
+        ok: false,
+        error: { name: (error && error.name) || 'Error', message: (error && error.message) || String(error) },
+      };
+    }
+    /*
+     * The sleeps the body contains are reported by the host, not parsed here.
+     *
+     * The host has the program source and this side does not, so the warning
+     * about a fixed wait is attached where the code is available. See the tool.
+     */
+    return callHelper('txEnd', [begun.token, outcome]);
+  }
+
+  /**
+   * Inspect a target before acting on it.
+   *
+   * Answers whether Playwright's own actionability checks pass, and when they
+   * fail, which one failed and what to do about it. The fix for a zero-width
+   * delete button, in one call instead of a click, a thirty-second wait and a
+   * manual DOM inspection.
+   */
+  async function inspect(target, action) {
+    return callHelper('inspect', [target, action]);
+  }
+
+  /** Read a form's constraints, so a value is chosen rather than guessed. */
+  async function inspectForm(form) {
+    return callHelper('inspectForm', [form]);
+  }
+
+  /**
+   * Wait until the page changes, rather than for a fixed time.
+   *
+   * \`await waitForChange()\` after a click is what \`waitForTimeout(3000)\` was
+   * trying to be: it returns as soon as something actually happened and gives up
+   * at the budget rather than at a guessed number.
+   */
+  async function waitForChange(options) {
+    return callHelper('waitForChange', [options || {}]);
+  }
+
+  /**
+   * Trigger a download and get the file, in one call.
+   *
+   * The arm happens before the trigger, which is the order Playwright requires
+   * and the order that is easy to get wrong. Written out it is:
+   *
+   *   const file = await download({ trigger: async (page) => {
+   *     await page.getByText("Download Invoice").click();
+   *   }});
+   *   // { name, path, bytes, sha256 }
+   *
+   * The returned path is inside this thread's workspace and is what
+   * \`setInputFiles\` takes. Nothing about the browser's temporary directory is
+   * exposed, because a model told about two paths will eventually use the wrong
+   * one.
+   */
+  async function download(options) {
+    const settings = options || {};
+    const trigger = settings.trigger;
+    if (typeof trigger !== 'function') {
+      throw new Error(
+        'download needs a trigger function: await download({ trigger: async (page) => { await page.getByText("Invoice").click(); } })',
+      );
+    }
+    const token = await callHelper('armDownload', [settings.timeoutMs]);
+    /*
+     * The trigger runs here, and its own failure is not swallowed.
+     *
+     * A trigger that throws means the click never happened, so waiting for the
+     * download would spend the whole budget on an event no action was going to
+     * cause. The armed wait is still collected, because the click may have
+     * landed before the throw, and its timeout bounds the wasted time.
+     */
+    let triggerError;
+    try {
+      await trigger(page);
+    } catch (error) {
+      triggerError = error;
+    }
+    const file = await callHelper('collectDownload', [token]);
+    if (triggerError !== undefined && file === undefined) throw triggerError;
+    if (file === undefined || file === null) {
+      throw new Error(
+        'the trigger ran but no download arrived. If the page needs a click to start one, check the element with inspect() first; ' +
+        'if the file is fetched by script rather than offered for download, the site does not support downloading it.',
+      );
+    }
+    return file;
+  }
+
+  /**
+   * Run a trigger and catch the page it opens.
+   *
+   * What a task means by "open the new window": a click that produces a tab. The
+   * alternative a model reaches for, \`context.newPage()\`, produces a tab without
+   * the click, and a task that asked for the interaction will correctly refuse
+   * it. This is the call that gets the provenance right by construction.
+   *
+   *   const popup = await expectPopup(page, async (page) => {
+   *     await page.getByText("Click Here").click();
+   *   });
+   */
+  async function expectPopup(target, trigger, options) {
+    if (typeof trigger !== 'function') {
+      throw new Error('expectPopup needs a trigger function: await expectPopup(page, async (page) => { await page.click("a"); })');
+    }
+    const settings = options || {};
+    const token = await callHelper('armPopup', [target, settings.timeoutMs]);
+    let triggerError;
+    try {
+      await trigger(target === undefined ? page : target);
+    } catch (error) {
+      triggerError = error;
+    }
+    const popup = await callHelper('collectPopup', [token]);
+    if (triggerError !== undefined && (popup === undefined || popup === null)) throw triggerError;
+    if (popup === undefined || popup === null) {
+      throw new Error(
+        'the trigger ran but no new page opened. If the link opens in the same tab, use page.goto() or click it directly; ' +
+        'if it is a link with target=_blank, waitForEvent("popup") must be armed before the click, which this call does for you.',
+      );
+    }
+    return popup;
+  }
+
+  /**
+   * The mission's state, as calls rather than as an object.
+   *
+   * Split into named helpers rather than exposed as one mutable object, because
+   * every write has to reach the host: the state lives there so it survives
+   * compaction, and an object mutated here would be a copy that vanished with
+   * the program.
+   */
+  const state = {
+    get: () => callHelper('stateGet', []),
+    fact: (name, value, evidence) => callHelper('stateFact', [name, value, evidence]),
+    derive: (name, value, from) => callHelper('stateDerive', [name, value, from]),
+    subtask: (title, status, requires) => callHelper('stateSubtask', [title, status, requires]),
+    ready: () => callHelper('stateReady', []),
+    artifact: (name, path, bytes) => callHelper('stateArtifact', [name, path, bytes]),
+  };
+
+  /** The browsing metrics: calls, failures, retries, downloads, tokens. */
+  async function metrics() {
+    return callHelper('metrics', []);
+  }
+
+  /*
    * The surface, and every name here must also appear in the returned object.
    *
    * Written as one object literal and returned directly, rather than assembled
@@ -770,6 +963,19 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
     recover,
     probeInput,
     capabilities,
+    /*
+     * The transactional surface.
+     *
+     * \`tx\`, \`download\` and \`expectPopup\` take a body, so each is stitched here
+     * from the arm/run/collect halves the host answers. The rest need no body.
+     */
+    tx,
+    inspect,
+    inspectForm,
+    waitForChange,
+    expectPopup,
+    state,
+    metrics,
   };
 }
 
@@ -800,4 +1006,14 @@ export const BROWSER_PROGRAM_PARAMS = [
    * names is present here, so the two cannot drift again without a failing test.
    */
   "recover", "probeInput", "capabilities",
+  /*
+   * The transactional surface.
+   *
+   * `tx` is the one to reach for: it brackets a body, diffs the page around it,
+   * and answers with a receipt rather than the page. `inspect` answers whether an
+   * element can be acted on before it is acted on, which is the whole fix for the
+   * zero-width delete button. `waitForChange` replaces the fixed sleep.
+   * `expectPopup` gets a popup's provenance right by construction.
+   */
+  "tx", "inspect", "inspectForm", "waitForChange", "expectPopup", "state", "metrics",
 ] as const;

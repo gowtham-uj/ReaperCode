@@ -65,6 +65,21 @@ export const BrowserUseArgsSchema = z
       .describe(
         "What to show of the page. Omit it and `auto` decides: the whole page when you did not send code, and after a program it sends the page only when the program did not already answer the question — a program that returned a value, succeeded, and changed little enough gets no page appended. Use `full` to force the page anyway, `changes` for just the delta, `none` to suppress it.",
       ),
+    /**
+     * Machine-enforced browsing rules, for a task that measures how it is done.
+     *
+     * Off by default. A benchmark that asks the agent to work through the
+     * interface cannot rely on a sentence in the prompt: the model is a hundred
+     * thousand tokens past it by the time a shortcut is available, and the
+     * shortcut is right there. Measured, `fetch`ing a file the task asked to be
+     * downloaded, and `context.newPage()` where the task asked for a click.
+     */
+    policy: z
+      .enum(["none", "ui-only"])
+      .optional()
+      .describe(
+        'Set to "ui-only" when the task requires the work be done through the page: it refuses a program that fetches over HTTP, opens a tab directly, or writes a file the browser did not produce. Leave unset for ordinary browsing.',
+      ),
     /** Scope the look to one region, which is what keeps a huge page small. */
     selector: z
       .string()
@@ -153,6 +168,23 @@ export type BrowserUseArgs = z.infer<typeof BrowserUseArgsSchema>;
 export const BROWSER_USE_DESCRIPTION =
   "Drive the browser with Playwright code, which runs in the same sandbox `eval` uses. The page is already open, already logged in, and already connected: `page` is bound, so write Playwright directly and never launch or connect to a browser. " +
   "In scope: `page` (the thread's own page), `browser` (open, switch and close pages: `browser.newPage(name)`, `browser.pages()`, `browser.setActive(name)`, `browser.closePage(p)`), `view()`, `viewChanges()`, `screenshot()`, and `pages()`. " +
+  /*
+   * The transactional surface, named in the description because a call a model
+   * has not heard of is a call it will not make. These are the ones that replace
+   * work the measured mission did by hand and badly: deciding whether an element
+   * could be clicked, reading a form's constraints, waiting a fixed number of
+   * seconds, catching a download, opening a popup. Each is one line here and a
+   * page in the browser skill, which is loaded when the model is actually
+   * browsing.
+   */
+  "Five calls do most of the work, and each replaces a thing that is easy to get wrong by hand. " +
+  "`tx({name}, async ({page}) => {...})` runs a body and answers with a receipt (status, what changed, timing, your return value) instead of dumping the page: prefer it over a bare program when the step has a name you would give it anyway. " +
+  "`inspect(target)` answers whether an element can actually be acted on before you act on it, using Playwright's own readiness checks without clicking, and when it cannot it names the reason and the child that can: call it on any click that did nothing rather than investigating by hand. " +
+  "`inspectForm()` reads the fields' constraints and validity, so a rejected value is explained instead of guessed at. " +
+  "`waitForChange({urlIncludes?|textPresent?})` waits for the page to change rather than for a fixed number of seconds. " +
+  "`download({trigger})` and `expectPopup(page, trigger)` arm the wait before running your trigger, which is the order Playwright requires and the order a hand-written version gets wrong. " +
+  "`state.fact(name, value, evidence)` records something you found so it survives context trimming, and `state.ready()` says what your declared subtasks allow next. " +
+  "Prefer these to re-deriving them: they exist because a previous run spent its steps rebuilding them, and `inspect` before a click is cheaper than a thirty second timeout after one. " +
   "You can also change how the browser presents itself, live and without restarting it: `setUserAgent(ua)`, `setTimezone(tz)`, `setViewport(w, h)`, `setFullscreen(bool)`, `blockAds(bool)`, `bandwidth({ blockImages, blockMedia, blockStylesheets, blockHosts, blockUrlPatterns })`, `set({...})` to change several at once, `settings()` to read what is in force, and `rotateUserAgent()` to switch to a different one. Use `bandwidth({ blockImages: true })` when you are reading rather than looking: the page loads far faster and `view()` does not show images anyway. A page that refuses you is reported as a BLOCKED: line and the user agent rotates by itself; retry once and then change approach rather than fighting it. " +
   "Downloads are handled for you: click a download link and the file is caught and saved into this thread's workspace. `downloadAfter(target)` clicks and returns the file ({ name, path, bytes }), `downloads()` lists what you have, `download(name)` resolves one, and `setInputFiles(file.path)` uploads it. Do not write your own download handling with fetch and writeFile: the vault is what survives across steps, tabs and restarts. " +
   "`capabilities()` answers what this browser can do rather than making you find out by trying: call it before spending steps working out whether downloads, trusted input or a setting is available. " +
