@@ -26,6 +26,7 @@ import { verifyStep } from "../../browser/verify.js";
 import { looksBlocked } from "../../browser/user-agents.js";
 import { scopePage } from "../../browser/scoped-page.js";
 import { BROWSER_PROGRAM_PARAMS } from "../../browser/remote-page-source.js";
+import { collectUnannounced } from "../../browser/downloads.js";
 import {
   BrowserProgramHost,
   type ControlSurface,
@@ -464,19 +465,49 @@ function controlSurface(runtime: ThreadBrowserRuntime): ControlSurface {
      * genuinely changes: downloads depend on whether the command was accepted on
      * this connection, and `attached` depends on the connection being up.
      */
-    capabilities: async () => ({
-      attached: runtime.isAttached(),
-      downloads: runtime.downloadsAreEnabled,
-      /** Trusted input is available; `recover()` is the fix when a page ignores it. */
-      trustedInput: true,
-      /** Settings that take effect on the live page. */
-      liveSettings: ["userAgent", "timezone", "viewport", "fullscreen", "mobile", "blockAds", "bandwidth"],
-      /** Settings that apply only when the browser next starts. */
-      nextLaunchSettings: ["proxy", "userPreferences"],
-      /** Files persist in this thread's workspace and can be uploaded later. */
-      downloadVault: runtime.downloadsAreEnabled,
-      recoverable: true,
-    }),
+    capabilities: async () => {
+      /*
+       * The one call that answers "will this work here", which is what the model
+       * needed and did not have.
+       *
+       * A mission spent twenty minutes on a single invoice because the only way
+       * to learn that downloads were unavailable was to attempt one and read a
+       * message about the page. Asking first is one call, and the answer is
+       * specific enough to change what the model does next: `downloads: false`
+       * with `downloadNote` naming the cause means the upload phase cannot work,
+       * which is a fact to report rather than a bug to debug.
+       *
+       * `downloadNote` is the browser's own words, recorded at attach time rather
+       * than reconstructed from a later failure, because that is where the cause
+       * is knowable.
+       */
+      const note = runtime.takeDownloadNote();
+      const downloads = runtime.downloadsAreEnabled;
+      return {
+        attached: runtime.isAttached(),
+        downloads,
+        /** Trusted input is available; `recover()` is the fix when a page ignores it. */
+        trustedInput: true,
+        /** Settings that take effect on the live page. */
+        liveSettings: ["userAgent", "timezone", "viewport", "fullscreen", "mobile", "blockAds", "bandwidth"],
+        /** Settings that apply only when the browser next starts. */
+        nextLaunchSettings: ["proxy", "userPreferences"],
+        /** Files persist in this thread's workspace and can be uploaded later. */
+        downloadVault: downloads,
+        /**
+         * Where a downloaded file goes, so the model can read it without asking.
+         *
+         * Inside the thread's own workspace, which is the sandbox root, so a file
+         * tool and an upload can both reach it. Named here rather than discovered
+         * because the discovery is what costs a model its time: a file whose
+         * location is unknown is a file it searches the filesystem for.
+         */
+        ...(downloads ? { downloadVaultPath: runtime.downloadVault.path } : {}),
+        /** Why downloads are off, when they are off. Absent when they work. */
+        ...(!downloads && note !== undefined ? { downloadNote: note } : {}),
+        recoverable: true,
+      };
+    },
     rotateUserAgent: async () => await runtime.rotateUserAgent(),
     /*
      * The argument is a page the program may hold, so it is resolved through the
@@ -578,26 +609,71 @@ function controlSurface(runtime: ThreadBrowserRuntime): ControlSurface {
       for (let i = 0; i < (arrived ? 60 : 5) && runtime.downloadedFiles.length === before; i++) {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
-      const file = runtime.downloadedFiles[runtime.downloadedFiles.length - 1];
+      /*
+       * The directory is checked as well as the event, and this is what makes a
+       * download work when the notification does not arrive.
+       *
+       * The event is Playwright's, and it depends on this process owning the
+       * browser's download configuration. Steel sets that at launch with its own
+       * directory, so a client re-setting it is racing the platform. When the race
+       * is lost the file still lands on disk and nothing announces it: measured on
+       * a live mission, the vault went empty while the browser had written the
+       * file, and the model spent twenty minutes proving the page was fine when
+       * the page always was.
+       *
+       * Reading the directory is the fix because the file's presence is the fact
+       * that matters, and it is observable without the event.
+       */
+      const unannounced = await collectUnannounced(runtime.downloadVault, runtime.downloadedFiles).catch(() => []);
+      void unannounced;
+      let file = runtime.downloadedFiles[runtime.downloadedFiles.length - 1];
       if (file === undefined) {
         /*
-         * The refusal names the two causes that are actually distinguishable
-         * from here, because they need opposite responses. A browser that never
-         * accepted the download command will never produce a file however many
-         * times the click is retried, and telling the model to "check the
-         * control" would send it round the loop the mission already ran: ten
-         * tool calls clicking a link that was never the problem.
+         * Nothing arrived, so the cause is stated rather than guessed at. The
+         * three cases need different responses and only one of them is about the
+         * page:
+         *
+         *   - the browser refused the download command: nothing about this page
+         *     can be fixed by trying again, and the model must stop.
+         *   - the command was accepted and no file came: the click or a dialog on
+         *     the page is the likely cause, which is the only case worth a retry.
+         *
+         * The first case used to be reported as the second, which is what sent a
+         * model round a twenty-minute loop of page inspection.
          */
+        const note = runtime.takeDownloadNote();
         throw new Error(
           runtime.downloadsAreEnabled
-            ? "no download started. The click landed but the page produced no file: check that it hit a real download control, " +
-              "and that the page does not want a dialog answered first."
-            : "downloads are not enabled on this browser, so the click could not produce a file. " +
-              "This is a fault in the browser connection rather than in the page: report it, and use download() to " +
-              "check the vault in case the file is already there from an earlier step.",
+            ? /*
+               * The command was accepted, so the page is the remaining suspect.
+               * A `note` here means the handler recorded a copy failure, which is
+               * a different problem and worth saying so: the browser downloaded
+               * the file and this process could not keep it.
+               */
+              `no file reached the vault. ${
+                note ?? "The click landed but the page produced no download: check that it hit a real download control, and that the page does not want a dialog answered first."
+              }`
+            : `downloads are not enabled on this browser, so clicking cannot produce a file, and no amount of retrying on the page will change that. ` +
+              `${note ?? "The browser did not accept the download configuration."} ` +
+              "Report this rather than investigating the page; use download() to check the vault in case a file is already there.",
         );
       }
-      return { name: file.name, path: file.path, bytes: file.bytes };
+      /*
+       * Where it landed, and that the model can read it.
+       *
+       * The path is inside the thread's own workspace, which is the sandbox root,
+       * so `file_view` and `setInputFiles` can both reach it. Saying so is not
+       * decoration: a model that does not know a file's location will search for
+       * it, and the search is what turns one download into twenty minutes of
+       * work. The vault path is stated relative to the workspace, because that is
+       * how every other path in this tool is expressed.
+       */
+      return {
+        name: file.name,
+        path: file.path,
+        bytes: file.bytes,
+        note: `saved to this thread's download vault and readable from a program or a file tool at ${file.path}`,
+      };
     },
   };
 }

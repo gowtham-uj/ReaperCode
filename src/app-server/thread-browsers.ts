@@ -89,6 +89,15 @@ export interface ThreadBrowsersOptions {
    * thread manager and threads come and go after that.
    */
   liveThreadIds?: (() => Promise<ReadonlySet<string>>) | undefined;
+  /**
+   * Where a thread's files live, which is also its sandbox root.
+   *
+   * The download vault goes inside it, because a downloaded file has to be
+   * readable by the model to be uploaded somewhere else, and the workspace is the
+   * only directory the sandbox mounts. Synchronous deliberately: it is called
+   * from a constructor, and the manager holds the record already.
+   */
+  workspaceFor?: ((threadId: string) => string | undefined) | undefined;
 }
 
 const DEFAULT_IDLE_MS = 10 * 60_000;
@@ -189,10 +198,20 @@ export class ThreadBrowsers {
 
   /** Construct one thread's runtime. Split out so `forThread` stays readable. */
   private buildRuntime(threadId: string): ThreadBrowserRuntime {
+    /*
+     * The workspace is resolved synchronously from an already-loaded record.
+     *
+     * Needed here rather than later because the download vault lives inside it:
+     * a file the runtime keeps has to be readable by the model, and the workspace
+     * is the only directory both can see. `workspaceFor` answers from the thread
+     * map the manager already holds, so this stays a plain constructor.
+     */
+    const workspace = this.options.workspaceFor?.(threadId);
     const runtime = new ThreadBrowserRuntime({
       threadId,
       cdpUrl: this.options.cdpUrl,
       ...(this.options.statePathFor ? { statePath: this.options.statePathFor(threadId) } : {}),
+      ...(workspace !== undefined ? { workspaceRoot: workspace } : {}),
       ...(this.options.flows ? { flows: this.options.flows } : {}),
       // One registry for the whole server, so the HTTP handler that takes
       // control and the browser tool that must respect it read one record.

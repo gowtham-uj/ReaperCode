@@ -46,6 +46,11 @@ export interface VaultFile {
 export class DownloadVault {
   constructor(private readonly directory: string) {}
 
+  /** Where the files are, so a caller can tell the model where to look. */
+  get path(): string {
+    return this.directory;
+  }
+
   /** Make sure the directory exists, and answer with it. */
   async ensure(): Promise<string> {
     await mkdir(this.directory, { recursive: true });
@@ -66,7 +71,38 @@ export class DownloadVault {
     const suggested = download.suggestedFilename() || "download";
     const name = await this.uniqueName(sanitize(suggested));
     const target = join(this.directory, name);
-    await download.saveAs(target);
+    /*
+     * `saveAs` is allowed to fail, and the fallback is what makes a download
+     * survive the failure.
+     *
+     * It copies out of the browser's temporary directory, which Playwright
+     * creates per connection under `/tmp`. When that directory is not reachable
+     * the copy fails with ENOENT and the file is lost even though the browser
+     * downloaded it successfully. Measured: the event fired, `saveAs` threw, and
+     * the error was swallowed, so the vault looked empty and a model spent
+     * twenty minutes on a page that had worked.
+     *
+     * `download.path()` answers with the same path `saveAs` uses, so it is not a
+     * second attempt at the same thing; it is the diagnostic that makes the
+     * failure legible. The copy is retried through it once, because a transient
+     * problem is possible, and the error is rethrown with both paths named when
+     * it fails again. Swallowing it was the bug.
+     */
+    try {
+      await download.saveAs(target);
+    } catch (first) {
+      const source = await download.path().catch(() => undefined);
+      const retry = source === undefined ? undefined : await download.saveAs(target).then(() => true, () => false);
+      if (retry !== true) {
+        throw new Error(
+          `the browser downloaded "${suggested}" but it could not be copied into this thread's vault. ` +
+          `${(first as Error).message.split("\n")[0]}. ` +
+          (source === undefined
+            ? "The browser did not report a source path either."
+            : `The browser had it at ${source}, which this process could not read; the vault is ${this.directory}.`),
+        );
+      }
+    }
     const info = await stat(target).catch(() => undefined);
     const failure = await download.failure().catch(() => null);
     if (failure !== null) {
@@ -137,11 +173,57 @@ function sanitize(name: string): string {
  * Returns the accumulated files, so a caller can report what a program produced
  * without a second lookup.
  */
-export function watchDownloads(page: Page, vault: DownloadVault, collected: VaultFile[]): void {
+export function watchDownloads(
+  page: Page,
+  vault: DownloadVault,
+  collected: VaultFile[],
+  onFailure?: (error: Error) => void,
+): void {
   page.on("download", (download) => {
     void vault
       .accept(download)
       .then((file) => { collected.push(file); })
-      .catch(() => undefined);
+      /*
+       * Reported rather than dropped, and this is half of the twenty-minute bug.
+       *
+       * The event fired, the copy failed, and the failure went nowhere: the
+       * caller saw an empty vault and a click that appeared to do nothing, which
+       * is indistinguishable from a click that hit the wrong element. Passing the
+       * reason up is what lets `downloadAfter` say "the copy failed, here is
+       * where the browser had it" instead of sending the model back to inspect a
+       * page that was never the problem.
+       */
+      .catch((error: unknown) => {
+        onFailure?.(error instanceof Error ? error : new Error(String(error)));
+      });
   });
+}
+
+/**
+ * Find files in the vault that nothing has claimed yet.
+ *
+ * The event is not the only way a file arrives, and treating it as the only way
+ * is what cost a live mission twenty minutes. `page.on("download")` is
+ * Playwright's notification, and it depends on this process owning the browser
+ * configuration: Steel sets `Browser.setDownloadBehavior` at launch with its own
+ * directory, and a client that re-sets it is racing that. When the race is lost
+ * the file still lands, Chrome still names it, and nothing tells us.
+ *
+ * So the directory is the source of truth and the event is the fast path. A file
+ * present in the vault that is not in `collected` was written by the browser and
+ * never announced, and adding it is what turns "no download started" into "here
+ * is your file" in exactly the case where the model would otherwise have to
+ * guess.
+ *
+ * `allowAndName` names files by their GUID, so an unannounced file has a name no
+ * person would recognise. It is kept under that name rather than renamed: the
+ * path is what an upload needs, and inventing a friendlier name would be a guess
+ * about which file it is.
+ */
+export async function collectUnannounced(vault: DownloadVault, collected: VaultFile[]): Promise<VaultFile[]> {
+  const known = new Set(collected.map((file) => file.path));
+  const found = await vault.list().catch(() => [] as VaultFile[]);
+  const fresh = found.filter((file) => !known.has(file.path) && file.bytes > 0);
+  for (const file of fresh) collected.push(file);
+  return fresh;
 }

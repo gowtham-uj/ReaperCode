@@ -70,6 +70,24 @@ export interface ThreadRuntimeOptions {
    */
   statePath?: string | undefined;
   /**
+   * The thread's workspace, which is also its sandbox root.
+   *
+   * Where downloads are kept, and the reason is that the file has to be
+   * reachable twice over: by the runtime, which copies it, and by the model,
+   * which reads it to upload it. The workspace is the one directory both can
+   * see, so a download kept anywhere else is a file the agent cannot use.
+   *
+   * Measured before this existed: Playwright wrote downloads to
+   * `/tmp/playwright-artifacts-<random>/`, a directory created per connection
+   * and outside the sandbox bind, so `download.saveAs` failed with ENOENT every
+   * time. The failure was swallowed by a `.catch`, the vault stayed empty, and
+   * the model spent twenty minutes proving a working page was broken.
+   *
+   * Absent falls back to the state directory, which keeps a test that does not
+   * care about downloads working without a workspace.
+   */
+  workspaceRoot?: string | undefined;
+  /**
    * The learned site graph, when one is shared.
    *
    * Owned by the app-server rather than by a thread, because a site's shape is
@@ -176,9 +194,26 @@ export class ThreadBrowserRuntime {
      * places per thread under the workspace, so this follows whatever layout the
      * caller chose rather than inventing a second one.
      */
-    this.downloads = options.statePath
-      ? new DownloadVault(join(dirname(options.statePath), basename(options.statePath, ".json"), "downloads"))
-      : undefined;
+    /*
+     * Inside the workspace, at `.reaper/downloads`.
+     *
+     * Two things must be able to reach a downloaded file: this runtime, which
+     * copies it out of the browser's temporary directory, and the model, which
+     * reads it later to upload it somewhere else. The workspace is the only
+     * directory both can see, because it is the sandbox's root bind.
+     *
+     * It used to live beside the browser state under `.reaper/browser/`, which
+     * the runtime could reach and the sandbox could not: the file was copied
+     * somewhere the agent could never read, so a cross-site upload was
+     * impossible even when the download succeeded. The `.reaper` prefix keeps it
+     * out of the way of the user's own files while leaving it readable.
+     */
+    const vaultRoot = options.workspaceRoot
+      ? join(options.workspaceRoot, ".reaper", "downloads")
+      : options.statePath
+        ? join(dirname(options.statePath), basename(options.statePath, ".json"), "downloads")
+        : undefined;
+    this.downloads = vaultRoot === undefined ? undefined : new DownloadVault(vaultRoot);
   }
 
   /** This runtime's thread id, for lease lookups. */
@@ -218,7 +253,10 @@ export class ThreadBrowserRuntime {
   private async enableDownloads(browser: Browser, context: BrowserContext): Promise<void> {
     if (!this.downloads) return;
     const directory = await this.downloads.ensure().catch(() => undefined);
-    if (directory === undefined) return;
+    if (directory === undefined) {
+      this.downloadNote = "the download vault directory could not be created, so downloads will not be kept";
+      return;
+    }
     try {
       /*
        * A page-level session, because `Browser.setDownloadBehavior` is accepted
@@ -228,7 +266,10 @@ export class ThreadBrowserRuntime {
        * change what it does.
        */
       const page = context.pages().find((candidate) => !candidate.isClosed());
-      if (page === undefined) return;
+      if (page === undefined) {
+        this.downloadNote = "there was no page to send the download configuration on, so downloads are not being kept";
+        return;
+      }
       const session = await context.newCDPSession(page);
       await session.send("Browser.setDownloadBehavior", {
         behavior: "allowAndName",
@@ -237,10 +278,57 @@ export class ThreadBrowserRuntime {
       });
       await session.detach().catch(() => undefined);
       this.downloadsEnabled = true;
-    } catch {
-      /* Reported later, by the wait that times out, with a message about the file. */
+      this.downloadNote = undefined;
+    } catch (error) {
+      /*
+       * Recorded rather than swallowed, and this is the whole of why a model
+       * spent twenty minutes on one invoice.
+       *
+       * The failure used to be discarded here with a note saying it would be
+       * reported later by the wait that times out. It was not: `downloadAfter`
+       * reported "the click landed but the page produced no file", which is one
+       * of two causes and the less likely one. So a model read a message about
+       * the page, checked the page repeatedly, tried raw `waitForEvent`, tried
+       * `goto` on the download URL, and searched the filesystem from a shell,
+       * none of which could ever have helped, because the cause was that this
+       * command failed at attach time.
+       *
+       * The message now carries the browser's own words, which is the one fact
+       * that distinguishes "the browser refused the command" from "the click hit
+       * the wrong element".
+       */
+      this.downloadNote =
+        `downloads could not be enabled on this browser, so a click that starts one will not produce a file. ` +
+        `The browser said: ${(error as Error).message.split("\n")[0]}`;
     }
     void browser;
+  }
+
+  /**
+   * Why downloads are unavailable, when they are.
+   *
+   * Read by the tool and put in front of the model on any step that involved a
+   * download, so the cause is stated where it is known rather than guessed at
+   * from the page.
+   */
+  private downloadNote: string | undefined;
+
+  /** The recorded cause, if downloads could not be enabled. */
+  takeDownloadNote(): string | undefined {
+    return this.downloadNote;
+  }
+
+  /**
+   * The vault itself, so a caller can look for a file the event never announced.
+   *
+   * A download can land without Playwright reporting it, because the event
+   * depends on this process owning the browser's download configuration and
+   * Steel also sets one. Exposing the directory lets the caller ask the only
+   * question that matters: is the file there.
+   */
+  get downloadVault(): DownloadVault {
+    if (!this.downloads) throw new Error("this thread has no download vault");
+    return this.downloads;
   }
 
   /** True when the browser accepted the download command on this connection. */
@@ -1228,7 +1316,18 @@ export class ThreadBrowserRuntime {
   /** Attach the download handler to one page, once. */
   private watchDownload(page: Page): void {
     if (!this.downloads) return;
-    watchDownloads(page, this.downloads, this.downloadedFiles);
+    watchDownloads(page, this.downloads, this.downloadedFiles, (error) => {
+      /*
+       * Kept so the next download call can report it.
+       *
+       * The handler is asynchronous and nothing is waiting on it when it runs,
+       * so the failure has nowhere to go at the moment it happens. Storing it
+       * means the call that triggered the download finds out why, which is the
+       * whole difference between "the click produced no file" and "the browser
+       * downloaded it and this process could not read it".
+       */
+      this.downloadNote = error.message;
+    });
   }
 
   /**

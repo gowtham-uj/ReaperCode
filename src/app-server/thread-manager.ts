@@ -233,6 +233,18 @@ export class ReaperThreadManager {
     return new Set(stored.map((metadata) => metadata.threadId));
   }
 
+  /**
+   * Where a thread's files live, from memory.
+   *
+   * Synchronous because the browser runtime asks during construction: the
+   * download vault lives inside the workspace, so the value is needed before the
+   * object exists. Only a resident thread is asked about, and a thread with no
+   * record yet gets `undefined`, which the vault treats as "no workspace".
+   */
+  workspaceFor(threadId: string): string | undefined {
+    return this.threads.get(threadId)?.metadata.workspaceRoot;
+  }
+
   async listThreads(): Promise<ThreadMetadata[]> {
     const stored = await this.store.list();
     const onDisk = new Set(stored.map((metadata) => metadata.threadId));
