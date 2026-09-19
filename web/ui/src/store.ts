@@ -3,6 +3,7 @@ import { useSyncExternalStore } from "react";
 import {
   applyNotification,
   emptyThreads,
+  replaceTurns,
   seedThread,
   type AppThread,
   type ThreadsState,
@@ -23,6 +24,16 @@ export interface TranscriptStore {
   ingest(method: string, params: Record<string, unknown>): void;
   hydrate(next: ThreadsState): void;
   seedThread(raw: Record<string, unknown>): void;
+  /**
+   * Replace a thread's turns with the authoritative page from a resume.
+   *
+   * Distinct from `seedThread`, which merges the reply's metadata and leaves the
+   * turn list alone. The resume carries both, and for a long time only the
+   * metadata half was read: `initialTurnsPage` arrived, was typed, and was
+   * dropped, so the transcript rendered whatever the replay stream delivered. A
+   * 101-turn mission showed four turns in the UI.
+   */
+  replaceTurns(threadId: string, turns: Array<Record<string, unknown>>): void;
   snapshot(): ThreadsState;
   getSnapshot(): ThreadsState;
   subscribe(listener: Listener): () => void;
@@ -65,6 +76,20 @@ export function createTranscriptStore(
     // and a reply nests the thread under `thread` with its id inside.
     seedThread(raw) {
       const next = seedThread(current, raw);
+      if (next === current) return;
+      current = next;
+      publish();
+    },
+    replaceTurns(threadId, turns) {
+      /*
+       * The server's page is authoritative, so this replaces rather than merges.
+       *
+       * A merge would be wrong in the direction that matters: a turn the server
+       * no longer has — from a thread that was compacted, or a replay the client
+       * built from stale events — would survive as a ghost. The page is what the
+       * thread is.
+       */
+      const next = replaceTurns(current, threadId, turns);
       if (next === current) return;
       current = next;
       publish();

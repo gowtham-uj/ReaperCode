@@ -28,6 +28,19 @@ interface ResumeResult {
   thread?: { id?: string };
   replay?: { truncated?: boolean };
   hasOlderTurns?: boolean;
+  /**
+   * The thread's newest turns, which is the transcript's actual content.
+   *
+   * This was fetched on every resume and read by nothing. `seedThread` folds the
+   * reply's `thread` object in, and `mergeThreadMetadata` handles metadata only,
+   * so the turns arrived, were parsed, and were dropped. The transcript then
+   * rendered whatever the replay stream happened to deliver.
+   *
+   * That was survivable while resume replayed every event, and the bounded resume
+   * made it visible: a live mission's journal held 101 turns and the UI showed 4,
+   * because only the replayed ones had anywhere to come from.
+   */
+  initialTurnsPage?: Array<Record<string, unknown>>;
 }
 
 export interface Session {
@@ -207,6 +220,19 @@ export function useSession(url: string, store: TranscriptStore, handlers: Sessio
           afterSequence: store.snapshot()[remembered]?.latestSequence ?? 0,
         });
         store.seedThread(resumed.thread ?? {});
+        /*
+         * The page fills in a fresh load, and only a fresh load.
+         *
+         * `attach` also runs on a reconnect, where the store already holds the
+         * turns the reader has — possibly including older ones they paged in. The
+         * server's page is the newest thirty, so replacing there would throw away
+         * history the reader had deliberately loaded. An empty store is the case
+         * that needs the page: a reload, or a first visit to a remembered thread,
+         * where the replay stream alone was leaving the transcript short.
+         */
+        if (Array.isArray(resumed.initialTurnsPage) && (store.thread(remembered)?.turns.length ?? 0) === 0) {
+          store.replaceTurns(remembered, resumed.initialTurnsPage);
+        }
         setThreadId(remembered);
         rememberThread(remembered);
         setHasOlderTurns(resumed.hasOlderTurns === true);
@@ -363,6 +389,22 @@ export function useSession(url: string, store: TranscriptStore, handlers: Sessio
         afterSequence: 0,
       });
       store.seedThread(resumed.thread ?? {});
+      /*
+       * The turns the resume actually carried, which is the transcript.
+       *
+       * Without this the page was fetched and discarded: `seedThread` merges the
+       * reply's metadata only, so the turn list came from the replay stream
+       * alone. That was survivable while a resume replayed every event, and the
+       * bounded resume made it plain: a completed mission's journal held 101
+       * turns and the UI rendered 4, because only the replayed ones had anywhere
+       * to come from.
+       *
+       * Replaced rather than merged, because the server's page is what the thread
+       * is: a merge would keep a ghost of any turn the server no longer has.
+       */
+      if (Array.isArray(resumed.initialTurnsPage)) {
+        store.replaceTurns(id, resumed.initialTurnsPage);
+      }
       setThreadId(id);
       rememberThread(id);
       setHasOlderTurns(resumed.hasOlderTurns === true);
