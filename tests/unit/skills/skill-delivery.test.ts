@@ -23,6 +23,7 @@
  * this shipped broken.
  */
 import { test } from "node:test";
+import { readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
 
 import { packagedSkills } from "../../../src/context/packaged-skills.js";
@@ -78,4 +79,43 @@ test("a skill marked model-invocation-disabled is never delivered automatically"
   const disabled = { name: "secret", description: "x", filePath: "/dev/null", disableModelInvocation: true };
   const resolved = resolvePinnedSkills(["secret"], [disabled as never]);
   assert.deepEqual(resolved, [], "a pin must not override disableModelInvocation");
+});
+
+test("the contract: metadata for every skill, bodies only for pinned ones", async () => {
+  /*
+   * The delivery rule, stated as one assertion so a future change cannot quietly
+   * invert it.
+   *
+   *   - The system prompt carries the NAME AND DESCRIPTION of every skill this
+   *     run may load. That is what tells a model the skill exists, and without it
+   *     the only route is guessing a name for `activate_skill` or finding the file
+   *     on disk, which is what a live mission did.
+   *   - A PINNED skill also carries its BODY, because pinning means "always
+   *     loaded". This is why the model could quote the browser skill's own
+   *     wording without ever calling `activate_skill`.
+   *   - An unpinned skill carries only its metadata; its body arrives through
+   *     `activate_skill` when the task matches.
+   *
+   * The test is written against the two blocks the engine composes, so it fails
+   * if the catalogue loses a skill or a body leaks into it.
+   */
+  const engine = await readFile(new URL("../../../src/runtime/engine.ts", import.meta.url), "utf8");
+
+  // The catalogue is built from every available skill, with an empty query so it
+  // is stable rather than turn-dependent.
+  assert.match(engine, /formatSkillsForPrompt\(available, "", available\.length\)/,
+    "the catalogue must list every skill, not a ranked subset that changes each turn");
+
+  // The bodies come only from the pins.
+  assert.match(engine, /resolvePinnedSkills\(readPinnedSkills/, "bodies come from the user's pins");
+  assert.match(engine, /# Always-on skills/, "and are labelled as always-on");
+  assert.match(engine, /# Available skills/, "while the metadata list is labelled as available, not loaded");
+
+  /*
+   * And the split is real: the catalogue call does not read bodies, and the pin
+   * resolver is the only thing that does. If a body were included in the
+   * catalogue, every skill's full text would ship on every request.
+   */
+  const catalogueCall = engine.slice(engine.indexOf("private skillCatalogue"), engine.indexOf("private pinnedSkillBlocks"));
+  assert.doesNotMatch(catalogueCall, /readSkillBody|\.body/, "the catalogue must not carry skill bodies");
 });
