@@ -428,6 +428,23 @@ function isLocatorFailure(kind: string): boolean {
   ].includes(kind);
 }
 
+/**
+ * The failures a page that has stopped accepting input produces.
+ *
+ * A renderer that silently drops events makes a click return without
+ * dispatching, so the step's effect is absent and the receipt says NO_CHANGE or
+ * times out waiting for something the click would have caused. Those two shapes
+ * are what this checks against: probing on a form rejection or a missing
+ * element would be a CDP round trip for a cause the page cannot have.
+ *
+ * Deliberately not `NO_CHANGE` on its own. A click that lands on nothing is the
+ * ordinary case of this, but the check is driven by the failure taxonomy because
+ * a NO_CHANGE with no failure has already been through the return-value
+ * reasoning in the transaction, and a live-mission probe for a page that is
+ * simply quiet would be noise.
+ */
+const INPUT_CONSISTENT_FAILURES = new Set(["ACTION_TIMEOUT", "NOT_RECEIVING_EVENTS", "ZERO_AREA", "UNKNOWN"]);
+
 function observeSurface(runtime: ThreadBrowserRuntime, intern: (value: unknown) => number | undefined): ObserveSurface {
   return {
     view: async (target?: Page) => (await runtime.view(target ? { page: target } : {})).text,
@@ -862,6 +879,39 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
     };
   }
 
+  /*
+   * A program that already failed in this page state is refused, not re-run.
+   *
+   * The measured failure: thirteen consecutive identical clicks, each written
+   * believing the failure was transient, with nothing ever telling the model the
+   * previous twelve had been the same call. The refusal is reported with the
+   * original failure, so the model gets the diagnosis it already earned rather
+   * than a new wait that ends the same way.
+   *
+   * Checked after the policy and before the compile, so a refused program costs
+   * nothing to reject. A genuinely different program, or the same program after
+   * the page moved, is a different fingerprint and runs normally.
+   */
+  const repeat = runtime.kit.refusesRepeat(args.code, runtime.observer.revision);
+  if (repeat !== undefined) {
+    return {
+      output:
+        `OUTCOME: REPEATED_FAILURE\n\n` +
+        renderFailure({
+          ...repeat,
+          kind: repeat.kind,
+          diagnostic: `${repeat.diagnostic} You already ran this exact program on this page state and it failed the same way.`,
+          retryable: false,
+          recommendedNext:
+            "Change something before retrying: a different locator, inspect() on the target, waitForChange(), or a different route to the goal.",
+        }) +
+        `\n\nNothing ran and the page is unchanged.`,
+      outcome: "PRECONDITION_FAILED",
+      isError: true,
+      rev: runtime.observer.revision,
+    };
+  }
+
   let programSource: string;
   try {
     /*
@@ -996,6 +1046,20 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
       durationMs: receipt.elapsedMs,
       ...(receipt.failure !== undefined ? { failureKind: receipt.failure.kind } : {}),
     });
+    /*
+     * A structural failure is remembered against the program and the revision,
+     * so the next identical attempt is refused. Only the kinds repeating cannot
+     * fix: a timeout or a detached element may genuinely work next time, and
+     * refusing those would be the runtime overruling a correct retry.
+     */
+    if (receipt.failure !== undefined && !receipt.failure.retryable) {
+      runtime.kit.rememberFailure(args.code, runtime.observer.revision, {
+        kind: receipt.failure.kind as never,
+        diagnostic: receipt.failure.diagnostic,
+        retryable: false,
+        ...(receipt.failure.recommendedNext !== undefined ? { recommendedNext: receipt.failure.recommendedNext } : {}),
+      });
+    }
   } catch (error) {
     /*
      * A throw here is a throw from the *harness*, not from the model's program:
@@ -1055,6 +1119,27 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
   }
 
   const lines = [renderReceipt(receipt)];
+
+  /*
+   * A step whose failure is consistent with a dead page gets the page checked.
+   *
+   * `probeInput` and `recover` are exactly the primitives the model kept
+   * rebuilding by hand, and the runtime can run them itself because neither
+   * re-runs the program: replacing a renderer changes the page, not the work, so
+   * there is no way for this to double-submit a form.
+   *
+   * Run only for the failure kinds a dead renderer actually produces. A form
+   * rejection, a missing element or a policy refusal has nothing to do with
+   * input delivery, and probing on those would be a CDP round trip per failure
+   * for no reason.
+   */
+  if (receipt.failure !== undefined && INPUT_CONSISTENT_FAILURES.has(receipt.failure.kind)) {
+    const about = runtime.lastCapturedPage();
+    if (about !== undefined && !about.isClosed()) {
+      const health = await runtime.kit.ensureHealthy(about).catch(() => ({ recovered: false, note: undefined }));
+      if (health.recovered && health.note !== undefined) lines.push("", `RECOVERED: ${health.note}`);
+    }
+  }
 
   /*
    * A locator failure gets the neighbourhood, not the page.

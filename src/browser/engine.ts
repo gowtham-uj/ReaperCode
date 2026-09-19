@@ -100,10 +100,34 @@ export interface PerceiveOptions {
  * acted on.
  */
 export async function perceive(page: Page, options: PerceiveOptions = {}): Promise<PerceptionResult> {
-  const text = await page.ariaSnapshot({
-    mode: "ai",
-    ...(options.depth !== undefined ? { depth: options.depth } : {}),
-  });
+  /*
+   * `ariaSnapshotJSON` when the installed Playwright has it, `ariaSnapshot`
+   * otherwise.
+   *
+   * Same representation, two serialisations, and the JSON one is what Playwright
+   * 1.63 added for exactly this use: its `mode: "ai"` is the machine-oriented
+   * form and it carries element geometry alongside the tree. The geometry is the
+   * part worth having on the fallback path, because a zero-area element is
+   * invisible in the text form and obvious in the boxed one.
+   *
+   * The degradation is a real path and not a formality: this is the rung that
+   * has to work when everything cleverer has failed, so it cannot be the rung
+   * that needs a newer dependency.
+   */
+  const target = page as unknown as { ariaSnapshotJSON?: (options: Record<string, unknown>) => Promise<unknown> };
+  let text: string;
+  if (typeof target.ariaSnapshotJSON === "function") {
+    const json = await target.ariaSnapshotJSON({
+      mode: "ai",
+      ...(options.depth !== undefined ? { depth: options.depth } : {}),
+    });
+    text = typeof json === "string" ? json : JSON.stringify(json);
+  } else {
+    text = await page.ariaSnapshot({
+      mode: "ai",
+      ...(options.depth !== undefined ? { depth: options.depth } : {}),
+    });
+  }
 
   return {
     text,

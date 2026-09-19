@@ -51,11 +51,25 @@ async function runtime(): Promise<ThreadBrowserRuntime> {
 
 const metadata = { runId: "test", artifactDir: "/tmp", toolCallId: "call-tx" };
 
-/** Open a fixture page and run a program against it, the way the tool does. */
+/**
+ * Open a fixture page and run a program against it, the way the tool does.
+ *
+ * The page is named and re-pinned on every call, which is not ceremony: the
+ * runtime is shared across the whole file, and a test that ran `setActive` or
+ * `browser.newPage()` leaves the bare `page` pointing somewhere else. That made
+ * three tests fail for a reason that had nothing to do with what they assert,
+ * discovered one at a time.
+ *
+ * Naming it here rather than in each test is the same fix applied once. A
+ * program that names its page is also the shape the surface now encourages, so
+ * this is testing the intended usage rather than working around a limitation.
+ */
 async function use(path: string, code: string, extra: Record<string, unknown> = {}) {
   const rt = await runtime();
-  const { page } = await rt.ensureReady();
+  const name = `use-${path.replace(/[^a-z0-9]/gi, "")}`;
+  const page = rt.kit.registry.find(name)?.page ?? (await rt.newPage(name));
   await page.goto(`${site!.origin}${path}`, { waitUntil: "domcontentloaded" });
+  await rt.setActive(name);
   await rt.view();
   return executeBrowserUse(rt, { code, ...extra } as never, metadata);
 }
@@ -302,12 +316,24 @@ test("state records a fact that survives to the next call", { skip }, async () =
    * The property that matters: the fact lives on the host, not in the program.
    * A second, separate program reads it back, which is what a trimmed transcript
    * cannot do.
+   *
+   * The program names its own page, so it does not depend on which tab another
+   * test left active. `state` is per-thread rather than per-page, so this is not
+   * required for correctness, but a test that passes or fails on the shared
+   * runtime's active page is a test that will fail for the wrong reason.
    */
-  const first = await use("/basic", `await state.fact("answer", "42", "a9"); return "recorded";`);
+  const rt = await runtime();
+  const own = await rt.newPage("state-check");
+  await own.goto(`${site!.origin}/basic`, { waitUntil: "domcontentloaded" });
+
+  const first = await executeBrowserUse(
+    rt,
+    { code: `const p = await browser.page("state-check"); await state.fact("answer", "42", "a9"); return "recorded";`, observe: "none" } as never,
+    metadata,
+  );
   assert.equal(first.outcome, "SUCCESS", first.output);
 
-  const rt = await runtime();
-  const second = await executeBrowserUse(rt, { code: `return (await state.get()).facts;` } as never, metadata);
+  const second = await executeBrowserUse(rt, { code: `return (await state.get()).facts;`, observe: "none" } as never, metadata);
   assert.match(second.output, /answer/, "the fact is still there on the next call");
   assert.match(second.output, /42/, "with its value");
 });
@@ -383,6 +409,49 @@ test("a declared artifact is not evidence, and only a real download satisfies ei
   assert.match(provenance.output, /download event/, provenance.output);
 });
 
+test("the same failing program is refused the second time, rather than re-run", { skip }, async () => {
+  /*
+   * The measured loop: thirteen consecutive identical clicks, each written
+   * believing the failure was transient. Nothing told the model the previous
+   * twelve had been the same call on the same page in the same state.
+   */
+  const rt = await runtime();
+  const own = await rt.newPage("repeat");
+  await own.goto(`${site!.origin}/basic`, { waitUntil: "domcontentloaded" });
+  await rt.view();
+
+  const code = `await page.getByRole("button", { name: "Does Not Exist At All" }).click({ timeout: 600 }); "done";`;
+  const first = await executeBrowserUse(rt, { code, observe: "none" } as never, metadata);
+  assert.equal(first.outcome, "POSTCONDITION_FAILED", first.output);
+
+  const second = await executeBrowserUse(rt, { code, observe: "none" } as never, metadata);
+  assert.equal(second.outcome, "PRECONDITION_FAILED", `the repeat must be refused: ${second.output}`);
+  assert.match(second.output, /REPEATED_FAILURE/, second.output);
+  assert.match(second.output, /Nothing ran/, "and it must not have run");
+});
+
+test("the same program after the page moved is allowed, because the state changed", { skip }, async () => {
+  /*
+   * The other half of the rule, and the reason the fingerprint carries a
+   * revision: refusing a correct retry would be the runtime overruling the
+   * model. A program that failed before a navigation is a new attempt after one.
+   */
+  const rt = await runtime();
+  const own = await rt.newPage("moved");
+  await own.goto(`${site!.origin}/basic`, { waitUntil: "domcontentloaded" });
+  await rt.view();
+
+  const code = `await page.getByRole("button", { name: "Gone For Now" }).click({ timeout: 500 }); "done";`;
+  await executeBrowserUse(rt, { code, observe: "none" } as never, metadata);
+  /* The page moves, so the same program is a different attempt. */
+  await own.goto(`${site!.origin}/hidden`, { waitUntil: "domcontentloaded" });
+  await rt.view();
+
+  const again = await executeBrowserUse(rt, { code, observe: "none" } as never, metadata);
+  assert.notEqual(again.outcome, "PRECONDITION_FAILED", `a moved page must not refuse the retry: ${again.output}`);
+  assert.doesNotMatch(again.output, /REPEATED_FAILURE/);
+});
+
 test("metrics are folded from the ledger and count the failure", { skip }, async () => {
   const rt = await runtime();
 
@@ -395,11 +464,21 @@ test("metrics are folded from the ledger and count the failure", { skip }, async
    */
   const own = await rt.newPage("metrics");
   await own.goto(`${site!.origin}/basic`, { waitUntil: "domcontentloaded" });
-
+  /*
+   * The program names its page rather than using the bare `page`.
+   *
+   * Beyond test ordering, this is the shape the surface now encourages: a tab is
+   * addressed by name or id, so a step cannot drift onto whatever happens to be
+   * active. Using the bare global here made this test depend on what eighteen
+   * previous tests had left the runtime pointing at.
+   */
   const before = rt.kit.ledger.metrics().browserCalls;
   await executeBrowserUse(
     rt,
-    { code: `await page.getByRole("button", { name: "Does Not Exist" }).click({ timeout: 500 }); "done";`, observe: "none" } as never,
+    {
+      code: `const p = await browser.page("metrics"); await p.getByRole("button", { name: "Does Not Exist" }).click({ timeout: 500 }); "done";`,
+      observe: "none",
+    } as never,
     metadata,
   );
 

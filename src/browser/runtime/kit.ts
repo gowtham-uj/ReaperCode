@@ -24,7 +24,7 @@ import type { Page } from "playwright";
 import type { DownloadVault } from "../downloads.js";
 import { ArtifactManager, type Artifact } from "./artifact-manager.js";
 import { inspectLocator, type ActionInspection } from "./inspect.js";
-import { classifyFailure } from "./failure.js";
+import { classifyFailure, type BrowserFailure } from "./failure.js";
 import { inspectForm, probeValues, type FieldDiagnostics } from "./form-diagnostics.js";
 import { HealthMonitor } from "./health-monitor.js";
 import { LocatorHealer, localContext } from "./locator-healer.js";
@@ -206,31 +206,76 @@ export class BrowserRuntimeKit {
   }
 
   /**
-   * Run a program and report it as a transaction.
+   * Whether a page's renderer needs replacing, and replace it.
    *
-   * Wraps the action in the recovery controller, records the attempt in the
-   * ledger, and returns a receipt. The caller supplies the change detection
-   * because only the runtime can compare its own pages.
+   * The automated half of point 8: `probeInput()` and `recover()` are the right
+   * primitives and the model should not have to discover them. Measured, a page
+   * that had stopped accepting input cost thirty trace blocks of the model
+   * proving the page's own JavaScript was fine, because nothing told it that a
+   * renderer can silently stop dispatching.
+   *
+   * Safe to run automatically for a specific reason: it does not re-run the
+   * program. Replacing a renderer changes the page, not the work, so a step that
+   * failed cannot be double-submitted by this. Re-running the model's program
+   * would be a different matter and is deliberately not done: see the note on
+   * `recoveryAttempt` below.
    */
-  async transaction<T>(input: {
-    actionKey: string;
-    actionId: string;
-    intent?: string | undefined;
-    revision?: number | undefined;
-    page: Page;
-    run: () => Promise<T>;
-    /** Whether anything changed, computed by the runtime around `run`. */
-    changed?: (() => boolean) | undefined;
-  }): Promise<ReturnType<RecoveryController["attempt"]>> {
-    const started = Date.now();
-    const outcome = await this.recovery.attempt(input.run, {
-      page: input.page,
-      actionKey: input.actionKey,
-      ...(input.intent !== undefined ? { intent: input.intent } : {}),
-      ...(input.revision !== undefined ? { revision: input.revision } : {}),
-    });
-    void started;
-    return outcome;
+  async ensureHealthy(page: Page): Promise<{ recovered: boolean; note?: string }> {
+    if (page.isClosed()) return { recovered: false };
+    const health = this.health.of(page);
+    if (health.crashed) {
+      await this.deps.recover(page).catch(() => undefined);
+      this.health.reset(page);
+      this.ledger.record({ kind: "recovery.performed", pageId: this.registry.idOf(page) ?? "unknown", attempt: 1 });
+      return {
+        recovered: true,
+        note: "this page's renderer had crashed, so it has been replaced and reloaded. Retry your step on the fresh page.",
+      };
+    }
+    /*
+     * A crash is knowable from the events the monitor already watches. A page
+     * that has merely stopped *dispatching* is not: it renders, answers reads
+     * and navigates, and the only way to know is to deliver an event and see.
+     * That check is one CDP mouse event at a harmless point, so it costs a
+     * request rather than a trace, and it is worth making on the pages where the
+     * failure is consistent with it.
+     */
+    const probe = await this.deps.probeInput(page).catch(() => ({ delivered: true, note: "" }));
+    if (probe.delivered) return { recovered: false };
+    await this.deps.recover(page).catch(() => undefined);
+    this.health.reset(page);
+    this.ledger.record({ kind: "recovery.performed", pageId: this.registry.idOf(page) ?? "unknown", attempt: 1 });
+    return {
+      recovered: true,
+      note:
+        "this page had stopped accepting input, so its renderer has been replaced and it has been put back on the same URL. " +
+        "Nothing was clicked and nothing was resubmitted: retry your step on the fresh page.",
+    };
+  }
+
+  /**
+   * Whether this exact program has already failed on this page state.
+   *
+   * The valuable half of the retry controller, and the half that is safe to run
+   * automatically. Auto-retrying a model program is not: the runtime cannot see
+   * what the program did, and re-running one that submitted a form is exactly
+   * the double-submit a retry policy must never cause. What it *can* do is
+   * refuse to run the same thing again, which is the measured failure this
+   * addresses: thirteen consecutive identical clicks, each written believing the
+   * failure was transient, with nothing ever telling the model the previous
+   * twelve had been the same call on the same page in the same state.
+   *
+   * The comparison is by program and page revision, so a genuinely different
+   * attempt, or the same attempt after the page moved, is a different action and
+   * is allowed.
+   */
+  refusesRepeat(actionKey: string, revision: number): BrowserFailure | undefined {
+    return this.recovery.previousFailure(actionKey, revision);
+  }
+
+  /** Remember that this program failed this way, for `refusesRepeat`. */
+  rememberFailure(actionKey: string, revision: number, failure: BrowserFailure): void {
+    this.recovery.remember(actionKey, revision, failure);
   }
 
   /**

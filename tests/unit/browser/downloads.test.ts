@@ -63,6 +63,48 @@ test("two files with the same name do not overwrite each other", async () => {
   assert.equal(names.length, 2, `both files must exist, got ${names.join(",")}`);
 });
 
+test("two listeners on one download produce one file, not an ENOENT", async () => {
+  /*
+   * The flake this pins, and it was measured rather than imagined.
+   *
+   * Two things watch for downloads on a page: the `page.on("download")` handler
+   * that keeps anything a program's click produced, and the armed
+   * `waitForEvent("download")` that `download()` uses. Both fire for the same
+   * event and both used to call `saveAs`, so whichever lost the race found the
+   * browser's temporary file already consumed:
+   *
+   *   download.saveAs: ENOENT: no such file or directory, copyfile
+   *
+   * It presented as a flake (the same integration test passed twice and failed
+   * once in three runs), because which of the two got there first depends on
+   * timing. A test cannot pin a race by running it, so what is asserted here is
+   * the property that removes it: accepting the same Download twice copies it
+   * once and answers the same file both times.
+   */
+  const vault = await vaultAt();
+  let copies = 0;
+  const fake = {
+    suggestedFilename: () => "invoice.txt",
+    saveAs: async (target: string) => {
+      copies += 1;
+      /*
+       * The second call fails the way Playwright's does when the temporary file
+       * is gone, so a regression is a failure here rather than a silent second
+       * file with a numeric suffix.
+       */
+      if (copies > 1) throw new Error("ENOENT: copyfile failed");
+      await writeFile(target, "invoice bytes");
+    },
+    failure: async () => null,
+    url: () => "https://example.com/invoice",
+  };
+
+  const [first, second] = await Promise.all([vault.accept(fake as never), vault.accept(fake as never)]);
+  assert.equal(copies, 1, "the file must be copied exactly once");
+  assert.equal(first.path, second.path, "and both callers must get the same file");
+  assert.equal((await vault.list()).length, 1, "the vault holds one file, not two");
+});
+
 test("a file the browser wrote without announcing it is still found", async () => {
   /*
    * The twenty-minute bug, in one test.

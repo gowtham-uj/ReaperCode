@@ -112,6 +112,11 @@ const RETRY_POLICY: Record<BrowserFailureKind, { retry: boolean; recover: boolea
   UNKNOWN: { retry: false, recover: false, probe: false },
 };
 
+/** The identity of one attempt: the page state and the program. */
+function fingerprintOf(actionKey: string, revision: number): string {
+  return `r${revision}::${actionKey.slice(0, 300)}`;
+}
+
 export class RecoveryController {
   /**
    * Attempts that already failed, keyed by fingerprint.
@@ -198,7 +203,7 @@ export class RecoveryController {
           ...failure,
           ...(recovered ? { recommendedNext: "The page's renderer was replaced; try the next step on the fresh page." } : {}),
         };
-        this.remember(fingerprint, finalFailure);
+        this.store(fingerprint, finalFailure);
         return { error: lastError, failure: finalFailure, attempts, recovered };
       }
 
@@ -228,7 +233,7 @@ export class RecoveryController {
      * a resolved outcome into an exception.
      */
     const failure = classifyFailure(lastError);
-    this.remember(fingerprint, failure);
+    this.store(fingerprint, failure);
     return { error: lastError, failure, attempts, recovered };
   }
 
@@ -241,10 +246,35 @@ export class RecoveryController {
    * same call.
    */
   private fingerprint(options: AttemptOptions): string {
-    return `r${options.revision ?? 0}::${options.actionKey.slice(0, 300)}`;
+    return fingerprintOf(options.actionKey, options.revision ?? 0);
   }
 
-  private remember(fingerprint: string, failure: BrowserFailure): void {
+  /**
+   * The failure this exact program already produced in this page state.
+   *
+   * Exposed separately from `attempt` so a caller that runs model code itself,
+   * rather than handing it here to be retried, can still refuse a repeat. That
+   * is the tool's case: it cannot let `attempt` re-run a program, because the
+   * program may have submitted something, but refusing to run the same failing
+   * thing again is both safe and the thing that stops the loop.
+   */
+  previousFailure(actionKey: string, revision: number): BrowserFailure | undefined {
+    return this.failed.get(fingerprintOf(actionKey, revision));
+  }
+
+  /** Remember a failure against its fingerprint, for `previousFailure`. */
+  remember(actionKey: string, revision: number, failure: BrowserFailure): void {
+    this.store(fingerprintOf(actionKey, revision), failure);
+  }
+
+  /**
+   * The one write to the failure table.
+   *
+   * Private, and the public `remember` above is the way in with the parts rather
+   * than the fingerprint: two callers computing their own key is how a table
+   * ends up with entries nothing can look up.
+   */
+  private store(fingerprint: string, failure: BrowserFailure): void {
     /*
      * Only failures that repeating cannot fix are remembered.
      *

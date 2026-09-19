@@ -26,7 +26,6 @@ import type { ThreadBrowserRuntime } from "../thread-runtime.js";
 import { renderArtifact } from "./artifact-manager.js";
 import { renderFormDiagnostics } from "./form-diagnostics.js";
 import { renderInspection } from "./inspect.js";
-import { inspectProgram } from "./policy-guard.js";
 import { buildReceipt, diffPages, renderTransaction, type TransactionStatus } from "./transaction.js";
 
 /** How many open transactions or arms one thread may have at once. */

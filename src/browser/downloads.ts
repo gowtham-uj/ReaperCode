@@ -67,6 +67,46 @@ export class DownloadVault {
    * would be worse than a surprising name.
    */
   async accept(download: Download): Promise<VaultFile> {
+    /*
+     * One download, one copy, however many listeners are watching.
+     *
+     * This is not tidiness. Two things watch for downloads on a page: the
+     * `page.on("download")` handler that captures anything a program's click
+     * produces, and the armed `waitForEvent("download")` that `download()` uses
+     * to return the file in the same call. Both fire for the same event, both
+     * called `saveAs`, and the second one found the browser's temporary file
+     * already gone:
+     *
+     *   download.saveAs: ENOENT: no such file or directory, copyfile
+     *   '/tmp/playwright-artifacts-S0Ux9z/a872b61a-...' -> '.../invoice.txt'
+     *
+     * Measured as a flake rather than a failure, which is what made it worth
+     * chasing: the same test passed twice and failed once across three runs,
+     * because whether the second copy wins the race depends on timing. The
+     * download itself always worked, which is the worst shape a bug like this
+     * takes.
+     *
+     * The promise is cached rather than a completed flag, so two concurrent
+     * callers await the same copy instead of one of them starting a second.
+     */
+    const claimed = this.claimed.get(download);
+    if (claimed !== undefined) return await claimed;
+    const work = this.copy(download);
+    this.claimed.set(download, work);
+    return await work;
+  }
+
+  /**
+   * Downloads already being copied, by the object Playwright gave us.
+   *
+   * A WeakMap keyed on the `Download` itself, because that is the identity two
+   * listeners share: they are handed the same object by the same event, so
+   * reference equality is exact and needs no id to be invented.
+   */
+  private readonly claimed = new WeakMap<Download, Promise<VaultFile>>();
+
+  /** The copy itself, once per download. */
+  private async copy(download: Download): Promise<VaultFile> {
     await this.ensure();
     const suggested = download.suggestedFilename() || "download";
     const name = await this.uniqueName(sanitize(suggested));
@@ -182,7 +222,17 @@ export function watchDownloads(
   page.on("download", (download) => {
     void vault
       .accept(download)
-      .then((file) => { collected.push(file); })
+      .then((file) => {
+        /*
+         * Pushed once, by path. Two listeners now reach the same file: this
+         * page-level watcher, which exists so a download nobody armed is still
+         * kept, and the artifact manager's armed wait, which exists so
+         * `download()` can return the file in the same call. The vault collapses
+         * them into one copy; this collapses them into one entry, so a program
+         * that lists the vault does not see the same invoice twice.
+         */
+        if (!collected.some((existing) => existing.path === file.path)) collected.push(file);
+      })
       /*
        * Reported rather than dropped, and this is half of the twenty-minute bug.
        *

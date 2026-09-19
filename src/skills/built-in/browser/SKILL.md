@@ -755,3 +755,14 @@ what to do — retrying with a launch call will not help.
 - **The page navigated and the old handles are stale.** This is normal;
   Playwright re-resolves locators, so keep using role-and-name locators rather
   than element handles you captured earlier.
+- **`REPEATED_FAILURE`.** You sent a program that already failed in this exact
+  page state, and it was refused rather than run again. This is not the tool
+  being difficult: the identical call will fail the identical way, and the
+  refusal saves you the wait. Change something real before retrying, and note
+  that the same program after a navigation *is* a new attempt and runs normally.
+- **A `FAILURE:` line in a receipt.** It classifies what went wrong and says
+  whether repeating is worth it. Read it before deciding to retry: `retryable:
+  no` means a second attempt will produce the same answer.
+- **`RECOVERED:` in a receipt.** The page had stopped accepting input or had
+  crashed, and its renderer has been replaced for you. Nothing was clicked and
+  nothing was resubmitted. Retry your step on the fresh page.
