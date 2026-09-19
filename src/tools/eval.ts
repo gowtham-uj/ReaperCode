@@ -34,6 +34,7 @@
 import { z } from "zod";
 
 import { runInSession } from "./code/session.js";
+import { listScripts, readScript, saveScript, type SavedScript } from "./code/script-store.js";
 import { DEFAULT_CODE_RUNTIME_LIMITS } from "./code/types.js";
 import type {
   CodeOutputChunk,
@@ -87,8 +88,9 @@ export const EvalArgsSchema = z
     code: z
       .string()
       .min(1)
+      .optional()
       .describe(
-        "JavaScript to run. The value of the last expression is the result — no return statement needed, and `await` works at the top level. End with the value: a trailing declaration, loop, or `console.log` produces no result even when the work succeeded.",
+        "JavaScript to run. The value of the last expression is the result — no return statement needed, and `await` works at the top level. End with the value: a trailing declaration, loop, or `console.log` produces no result even when the work succeeded. Omit it when running a saved script by name.",
       ),
     timeout_ms: z
       .number()
@@ -99,8 +101,61 @@ export const EvalArgsSchema = z
       .describe(
         `How long this script may run, in milliseconds. Defaults to ${EVAL_DEFAULT_TIMEOUT_MS} (2 minutes); maximum ${EVAL_MAX_TIMEOUT_MS}. Raise it when the script waits on something slow — a model call, a build, a long network fetch.`,
       ),
+    /*
+     * Saving and re-running, which is what turns a throwaway program into a tool.
+     *
+     * A model that writes a script worth keeping had nowhere to put it: the code
+     * lived in one tool call and the next call started from nothing. So a loop
+     * that got a page right had to be written again next time, and the model paid
+     * to rediscover it.
+     *
+     * Both are optional and neither is implied. `save` writes the script this
+     * call runs and still runs it, so "save and run" is one call rather than two.
+     * `script` runs one already saved, which is why `code` became optional: a
+     * caller that names a script has nothing to pass.
+     */
+    save: z
+      .string()
+      .min(1)
+      .max(120)
+      .regex(/^[A-Za-z0-9._-]+$/, "a script name may use letters, digits, dot, dash and underscore only")
+      .optional()
+      .describe(
+        "Save this program under this name, then run it. Names are per thread and are listed by `eval` with no arguments. Use it when a script is worth running again rather than retyping.",
+      ),
+    script: z
+      .string()
+      .min(1)
+      .max(120)
+      .optional()
+      .describe(
+        "Run a previously saved script by name instead of passing code. Pair with no `code`. Scripts are per thread and survive across turns.",
+      ),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    /*
+     * At most one source of the program.
+     *
+     * Zero is a valid call and a useful one: it lists the thread's saved scripts,
+     * which is how a model finds the name to pass to `script` without being told
+     * what exists. More than one is refused rather than resolved, because a call
+     * carrying both would have to pick one and a model that wrote code while
+     * naming a script would never learn which of the two ran.
+     */
+    if (value.code !== undefined && value.script !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "eval takes `code` or `script`, not both: name a saved script to run it, or pass code to run it",
+      });
+    }
+    if (value.save !== undefined && value.script !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "eval cannot rename a saved script: pass `code` with `save` to write one, or `script` to run one",
+      });
+    }
+  });
 
 export type EvalArgs = z.infer<typeof EvalArgsSchema>;
 
@@ -228,9 +283,66 @@ export interface ExecuteEvalOptions {
  * successful result with an error inside it.
  */
 export async function evaluateScript(options: ExecuteEvalOptions): Promise<Record<string, unknown> | undefined> {
+  /*
+   * Resolve the program before the runtime starts, because a save that failed or
+   * a name that does not exist should be answered with the list of what does
+   * exist rather than with a sandbox that ran nothing.
+   *
+   * `workspace` is the thread's own directory, so the scripts are per thread by
+   * construction: two conversations cannot see each other's, which is the same
+   * isolation the browser pages and the session journal have.
+   */
+  const workspace = options.workspace;
+  if (options.args.save !== undefined && options.args.code !== undefined && workspace !== undefined) {
+    try {
+      await saveScript(workspace, options.args.save, options.args.code);
+    } catch (error) {
+      return shapeEvalFailure(`the script could not be saved: ${(error as Error).message}`, options.args.timeout_ms);
+    }
+  }
+
+  let source = options.args.code;
+  let ranSaved: string | undefined;
+  if (options.args.script !== undefined) {
+    if (workspace === undefined) {
+      return shapeEvalFailure("saved scripts need a thread workspace, and this run has none", options.args.timeout_ms);
+    }
+    const saved = await readScript(workspace, options.args.script);
+    if (saved === undefined) {
+      const names = (await listScripts(workspace)).map((entry) => entry.name);
+      return shapeEvalFailure(
+        names.length === 0
+          ? `no script named "${options.args.script}", and this thread has none saved yet. Pass \`save\` with \`code\` to create one.`
+          : `no script named "${options.args.script}". Saved here: ${names.join(", ")}.`,
+        options.args.timeout_ms,
+      );
+    }
+    source = saved.code;
+    ranSaved = options.args.script;
+  }
+
+  /*
+   * No program at all is a listing, not an error.
+   *
+   * This is how a model finds the names to pass to `script` without being told
+   * what exists. Answered through the ordinary result channel so it reads like
+   * any other eval output rather than as a refusal.
+   */
+  if (source === undefined) {
+    const saved = workspace === undefined ? [] : await listScripts(workspace);
+    return {
+      status: "completed",
+      ...(ranSaved !== undefined ? { script: ranSaved } : {}),
+      savedScripts: saved.map((entry) => ({ name: entry.name, bytes: entry.bytes })),
+      note: saved.length === 0
+        ? "no scripts saved for this thread yet. Pass `save` alongside `code` to keep a program for later."
+        : `${saved.length} saved script(s). Run one with \`script: "<name>"\`.`,
+    };
+  }
+
   try {
     const session = await runInSession(options.runId, {
-      source: options.args.code,
+      source,
       tools: catalogueFor(options.host, options.disabledTools),
       host: options.host,
       ...(options.workspace ? { workspace: options.workspace } : {}),
@@ -337,6 +449,26 @@ function shapeOutput(result: CodeRuntimeResult, surfaceChanged: boolean): Record
    */
   if (result.status === "completed") output.value = result.value;
   return output;
+}
+
+/**
+ * A failure that happened before any program ran.
+ *
+ * Shaped like an ordinary eval result rather than thrown, because the model has
+ * a next move in every case: a missing script comes with the names that do
+ * exist, and a name it cannot use comes with the rule. Throwing would strip the
+ * list and leave it guessing, which is the failure mode this file exists to
+ * avoid — a failed script is a successful eval call.
+ */
+function shapeEvalFailure(message: string, timeoutMs: number | undefined): Record<string, unknown> {
+  return {
+    status: "failed",
+    durationMs: 0,
+    toolCallCount: 0,
+    toolCalls: [],
+    error: { name: "ScriptStoreError", message },
+    ...(timeoutMs !== undefined ? { requestedTimeoutMs: timeoutMs } : {}),
+  };
 }
 
 function describeFailure(result: CodeRuntimeResult): Record<string, unknown> {

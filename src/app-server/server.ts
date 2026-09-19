@@ -162,6 +162,13 @@ export function createAppServerCore(options: StartAppServerOptions): {
      */
     threadIsRunning: (threadId) => runningTurns?.isThreadRunning(threadId) === true,
     /*
+     * Which threads still exist, so the orphan sweep can tell a real ownership
+     * claim from a file a deleted thread left behind. Without this the sweep
+     * does not run, which is the safe direction: a stale file used to count as a
+     * claim, and the pages it named were never closed.
+     */
+    liveThreadIds: async () => await (runningTurns?.liveThreadIds() ?? new Set<string>()),
+    /*
      * One state file per thread, under the same `.reaper` root everything else
      * uses. The thread id is sanitized because it reaches a filesystem path, and
      * an id is not trusted to be a safe path segment.

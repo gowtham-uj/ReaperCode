@@ -216,6 +216,23 @@ export class ReaperThreadManager {
     return this.threads.get(threadId)?.isRunning === true;
   }
 
+  /**
+   * The ids of the threads that still exist, from the records on disk.
+   *
+   * Disk rather than the in-memory map, because the sweep's question is about
+   * ownership files that outlive a process: after a restart the map is empty
+   * while the records are not, and a sweep that trusted the map would treat
+   * every surviving thread's pages as orphans and close them.
+   *
+   * This is the answer the orphan sweep needs to tell a real claim from litter,
+   * and the reason it is a method here rather than a field somewhere is that the
+   * record store is the only thing that knows.
+   */
+  async liveThreadIds(): Promise<ReadonlySet<string>> {
+    const stored = await this.store.list();
+    return new Set(stored.map((metadata) => metadata.threadId));
+  }
+
   async listThreads(): Promise<ThreadMetadata[]> {
     const stored = await this.store.list();
     const onDisk = new Set(stored.map((metadata) => metadata.threadId));

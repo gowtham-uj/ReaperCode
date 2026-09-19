@@ -76,6 +76,19 @@ export interface ThreadBrowsersOptions {
    * running", which is the right default for a test that has no turns.
    */
   threadIsRunning?: ((threadId: string) => boolean) | undefined;
+  /**
+   * The ids of the threads that currently exist.
+   *
+   * The orphan sweep needs this to tell an ownership file that is a real claim
+   * from one a deleted thread left behind. Without it the sweep does not run:
+   * treating every file as a claim is the bug this exists to fix, and the sweep
+   * is the only thing that closes pages, so an unanswerable question stops it
+   * rather than making it guess.
+   *
+   * A function rather than a list because the browser owner is built before the
+   * thread manager and threads come and go after that.
+   */
+  liveThreadIds?: (() => Promise<ReadonlySet<string>>) | undefined;
 }
 
 const DEFAULT_IDLE_MS = 10 * 60_000;
@@ -254,7 +267,26 @@ export class ThreadBrowsers {
    */
   async sweepOrphans(): Promise<OrphanSweepResult | undefined> {
     if (this.closed) return undefined;
-    const owned = await readOwnedTargetIds(this.workspaceRoot).catch(() => undefined);
+    /*
+     * Only the threads that still exist own anything.
+     *
+     * An ownership file left by a deleted thread used to count as a claim, so
+     * its pages were never closed and the browser accumulated them until an
+     * attach was slow enough to look like a hang. Measured: a `drop-test` file
+     * outlived its thread record and made every page it named permanently immune
+     * to this sweep.
+     *
+     * With no provider, nothing is live and nothing is owned, which stops the
+     * sweep rather than letting it act on stale files. That is the safe
+     * direction: this pass is the only thing that closes pages, and closing one
+     * a live thread is using is worse than leaving one behind. A caller that
+     * wants the sweep to run supplies the ids.
+     */
+    const live = this.options.liveThreadIds;
+    if (!live) return undefined;
+    const liveIds = await live().catch(() => undefined);
+    if (liveIds === undefined) return undefined;
+    const owned = await readOwnedTargetIds(this.workspaceRoot, liveIds).catch(() => undefined);
     if (owned === undefined) return undefined;
     /*
      * Only attach when there are ownership records to check against. A workspace

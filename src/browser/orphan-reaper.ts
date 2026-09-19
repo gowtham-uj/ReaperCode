@@ -46,7 +46,7 @@ import type { Browser } from "playwright";
 const BROWSER_STATE_DIR = join(".reaper", "browser");
 
 /**
- * Every target id any thread has recorded, from the state directory.
+ * Every target id a **live** thread has recorded, from the state directory.
  *
  * Read from disk rather than from the live registry on purpose. The registry is
  * process-local and empty after a restart, which is precisely the case that
@@ -56,13 +56,51 @@ const BROWSER_STATE_DIR = join(".reaper", "browser");
  * corrupt record must not stop the reaper from clearing everything else, and a
  * thread whose record is unreadable is one whose pages will be closed as
  * orphans, which is the same outcome as the record never having existed.
+ *
+ * ## Why "live" is in that sentence
+ *
+ * It was not, and the omission defeated the pass it belongs to. Every
+ * `.pages-owner.json` was read, including the ones left by threads that had
+ * been deleted, so a dead thread's pages counted as owned and were never
+ * closed. Measured on this machine: a `drop-test` ownership file outlived its
+ * thread record, and every page it named was permanently immune to the sweep.
+ * The browser accumulated them across runs until an attach was slow enough to
+ * look like a hang, which is the failure this whole module exists to prevent.
+ *
+ * The caller supplies the live ids because it is the only side that knows them:
+ * this function reads disk, and the question "which threads still exist" is
+ * answered by the thread records. A file whose thread is gone is not an
+ * ownership claim, it is litter, and treating it as a claim is what kept the
+ * pages open.
+ *
+ * The signature makes that mandatory rather than optional. An optional
+ * `liveThreadIds` would default to "everything is live", which is the behaviour
+ * being fixed, and a caller that forgot it would silently restore the bug.
  */
-export async function readOwnedTargetIds(workspaceRoot: string): Promise<Set<string>> {
+export async function readOwnedTargetIds(
+  workspaceRoot: string,
+  liveThreadIds: ReadonlySet<string>,
+): Promise<Set<string>> {
   const owned = new Set<string>();
   const dir = join(workspaceRoot, BROWSER_STATE_DIR);
   const names = await readdir(dir).catch(() => [] as string[]);
   for (const name of names) {
     if (!name.endsWith(".pages-owner.json")) continue;
+    /*
+     * `<threadId>.json.pages-owner.json`, and the `.json` infix is stripped when
+     * it is there.
+     *
+     * The real file is `<statePath>.pages-owner.json` and `statePath` already
+     * ends in `.json`, so the infix is present in production. Tests and any
+     * hand-written file use `<name>.pages-owner.json` directly, and requiring the
+     * infix would silently ignore those, which is the same class of bug as
+     * reading dead files: a record that exists and is not seen. Both are
+     * accepted, and the longer suffix wins so a thread id ending in `.json` is
+     * still parsed correctly.
+     */
+    const withoutSuffix = name.slice(0, -".pages-owner.json".length);
+    const threadId = withoutSuffix.endsWith(".json") ? withoutSuffix.slice(0, -".json".length) : withoutSuffix;
+    if (!liveThreadIds.has(threadId)) continue;
     try {
       const parsed = JSON.parse(await readFile(join(dir, name), "utf8")) as { targetIds?: unknown };
       if (Array.isArray(parsed.targetIds)) {
