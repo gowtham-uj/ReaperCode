@@ -142,6 +142,46 @@ test("inspectForm reads a constrained field's limits before a value is guessed",
   assert.match(result.output, /max 20|maxlength|20/, "the constraint is reported");
 });
 
+test("a click that cannot land explains itself, and names the child that can", { skip }, async () => {
+  /*
+   * The gap this closes, measured across three missions: `inspect()` was called
+   * zero times, and the same run burned two thirty-second timeouts on a
+   * zero-width delete button while the receipt said
+   *
+   *   FAILURE: NOT_VISIBLE
+   *   next: Reveal it first (open the menu, expand the section)
+   *
+   * which is advice you cannot follow. The element is not hidden; it is zero
+   * sized, and there is nothing to reveal. The transaction cannot tell those
+   * apart because the classification happens where the geometry is gone, so the
+   * trial is run here, where the locator can be rebuilt from the program.
+   *
+   * What matters is that the model is told the *right* thing and the thing to
+   * click instead, without having to know a diagnostic exists.
+   */
+  const result = await use(
+    "/zero-area",
+    `await page.getByTestId("zero-delete").click({ timeout: 2500 }); "done";`,
+  );
+
+  assert.equal(result.outcome, "POSTCONDITION_FAILED", result.output);
+  assert.match(result.output, /WHY:/, "the reason must be printed, not just the failure kind");
+  assert.match(result.output, /ZERO_AREA/, "and it must be the accurate one, not NOT_VISIBLE");
+  assert.match(result.output, /children with a real box/, "with something the model can click instead");
+  assert.match(result.output, /<svg>/, "naming the actual child");
+});
+
+test("a step with no failure does not pay for the diagnostic", { skip }, async () => {
+  /*
+   * The other half. Running a CDP trial on every step would cost a round trip
+   * per call for a question nobody asked, which is the kind of overhead the
+   * whole runtime exists to remove.
+   */
+  const result = await use("/basic", `await page.getByRole("button", { name: "Continue" }).click(); "ok";`);
+  assert.equal(result.outcome, "SUCCESS", result.output);
+  assert.doesNotMatch(result.output, /WHY:/, "a clean step must not carry a diagnostic");
+});
+
 test("a fixed sleep is called out with what to wait for instead", { skip }, async () => {
   const result = await use("/basic", `await page.waitForTimeout(2000); "slept"`);
   assert.equal(result.outcome, "SUCCESS", result.output);

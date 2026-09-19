@@ -8,6 +8,19 @@ export interface Skill {
   description: string;
   filePath: string;
   disableModelInvocation: boolean;
+  /**
+   * When a model should load this, in the skill's own words.
+   *
+   * Declared in every built-in skill's manifest and, until now, dropped on the
+   * floor: the catalogue rendered only `name` and `description`, so the one line
+   * that says *when* to activate was the line that never reached the model. The
+   * browser skill's own `whenToUse` says "Before any browser_use call", and a
+   * model that never reads it has a reason to skip the skill rather than a
+   * reason to load it.
+   *
+   * Measured: `activate_skill` fired zero times across three full missions.
+   */
+  whenToUse?: string;
   verified?: boolean;
   importance?: number;
   tags?: string[];
@@ -75,6 +88,14 @@ function loadSkillFromFile(filePath: string): Skill | null {
       description,
       filePath,
       disableModelInvocation: frontmatter["disable-model-invocation"] === "true" || (frontmatter["disable-model-invocation"] as any) === true,
+      /*
+       * The same field the packaged path carries, read from frontmatter here.
+       * Both spellings, because a skill author writing YAML naturally reaches
+       * for one and the manifests in this repo use the other.
+       */
+      ...(frontmatter["when_to_use"] ?? frontmatter["whenToUse"]
+        ? { whenToUse: String(frontmatter["when_to_use"] ?? frontmatter["whenToUse"]).trim() }
+        : {}),
       ...(frontmatter.verified === "true" ? { verified: true } : {}),
       ...(frontmatter.importance && Number.isFinite(Number(frontmatter.importance)) ? { importance: Number(frontmatter.importance) } : {}),
       ...(frontmatter.tags ? { tags: frontmatter.tags.split(",").map((item) => item.trim()).filter(Boolean) } : {}),
@@ -147,6 +168,18 @@ export function formatSkillsForPrompt(skills: Skill[], query = "", limit = 10): 
     lines.push("  <skill>");
     lines.push(`    <name>${skill.name}</name>`);
     lines.push(`    <description>${skill.description}</description>`);
+    /*
+     * When to load it, which is the field that turns a description into a
+     * reason. A description says what a skill is; this says when the model
+     * should stop and read it, and a model deciding whether to spend a call on
+     * `activate_skill` needs the second.
+     *
+     * Omitted when a skill has none rather than rendered empty, because an empty
+     * element reads as a field that is there and says nothing.
+     */
+    if (skill.whenToUse !== undefined && skill.whenToUse.trim().length > 0) {
+      lines.push(`    <when_to_use>${skill.whenToUse.trim()}</when_to_use>`);
+    }
     lines.push("  </skill>");
   }
 

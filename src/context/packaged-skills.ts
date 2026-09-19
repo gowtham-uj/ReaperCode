@@ -72,6 +72,17 @@ export function packagedSkills(): Skill[] {
         description: record.manifest.description,
         filePath: record.sourcePath,
         disableModelInvocation: false,
+        /*
+         * The manifest's `whenToUse`, carried across the bridge.
+         *
+         * This is the missing hop, and it is the whole reason `activate_skill`
+         * never fired: every built-in skill declares when it should be loaded
+         * ("Before any browser_use call", for the browser skill), the manifest
+         * parsing read it, and this mapping did not copy it. The catalogue then
+         * rendered name and description alone, so the model had a list of skills
+         * it could load and no line saying when.
+         */
+        ...(record.manifest.whenToUse ? { whenToUse: record.manifest.whenToUse } : {}),
         ...(record.manifest.triggers ? { tags: record.manifest.triggers } : {}),
       }));
   } catch {

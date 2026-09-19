@@ -31,6 +31,7 @@ import { collectUnannounced } from "../../browser/downloads.js";
 import { transactionalSurface } from "../../browser/runtime/control-extras.js";
 import { inspectProgram, renderPolicyReport } from "../../browser/runtime/policy-guard.js";
 import { renderVerification } from "../../browser/runtime/verifier.js";
+import { renderInspection } from "../../browser/runtime/inspect.js";
 import { classifyFailure, renderFailure } from "../../browser/runtime/failure.js";
 import {
   BrowserProgramHost,
@@ -444,6 +445,110 @@ function isLocatorFailure(kind: string): boolean {
  * simply quiet would be noise.
  */
 const INPUT_CONSISTENT_FAILURES = new Set(["ACTION_TIMEOUT", "NOT_RECEIVING_EVENTS", "ZERO_AREA", "UNKNOWN"]);
+
+/**
+ * Re-test an element that would not respond, and say why when that is knowable.
+ *
+ * Returns an empty string when the trial adds nothing: either the locator cannot
+ * be rebuilt from the program, or the element passes the trial and the cause is
+ * somewhere else (input delivery, which the health check covers).
+ */
+async function clarifyUnclickable(runtime: ThreadBrowserRuntime, page: Page, code: string | undefined): Promise<string> {
+  if (code === undefined) return "";
+  const target = rebuildLocator(page, lastLocatorCallIn(code));
+  if (target === undefined) return "";
+  const { inspectLocator } = await import("../../browser/runtime/inspect.js");
+  const inspection = await inspectLocator(page, target).catch(() => undefined);
+  if (inspection === undefined || inspection.actionable) return "";
+  /*
+   * `renderInspection` already prints the children that have a real box, which
+   * is the answer for a zero-area element. Prefixed so it reads as the reason
+   * the click failed rather than as an unrelated observation.
+   */
+  return `WHY: this is why the click could not land.\n${inspection.failure?.kind ?? "blocked"}: ${inspection.failure?.diagnostic ?? ""}\n${renderInspection(inspection)}`;
+}
+
+/**
+ * The last locator expression a program built, as `method(args)` text.
+ *
+ * The last one, because the failure is on the action that came last and that
+ * action is chained to the locator just above it. Best effort by design: a
+ * locator built from a variable returns undefined and nothing is printed, which
+ * is better than naming an element the model did not mean.
+ */
+function lastLocatorCallIn(code: string): string | undefined {
+  let best: { at: number; text: string } | undefined;
+  for (const method of ["getByRole", "getByTestId", "getByText", "getByLabel", "getByPlaceholder", "getByTitle", "getByAltText", "locator"]) {
+    const pattern = new RegExp(`\\b${method}\\((?:[^()]|\\([^()]*\\))*\\)`, "g");
+    for (const match of code.matchAll(pattern)) {
+      if (match.index === undefined) continue;
+      if (best === undefined || match.index > best.at) best = { at: match.index, text: match[0] };
+    }
+  }
+  return best?.text;
+}
+
+/**
+ * Turn `getByTestId("x")` back into a real Locator, using the page's own methods.
+ *
+ * Parsed rather than evaluated, and that is the whole reason this is safe. The
+ * program is model-written, and running it a second time to recover a locator
+ * would run its side effects twice. Nothing here is executed: the text is matched
+ * against a fixed shape, the strings inside it are unquoted as data, and the
+ * result is built by calling Playwright directly.
+ *
+ * Only the forms a locator is actually written in are accepted, and anything
+ * else returns undefined. A locator this cannot read costs the model one
+ * diagnostic block; a locator this read wrongly would cost it a wrong element,
+ * which is the failure the whole revision scheme exists to prevent.
+ */
+function rebuildLocator(page: Page, call: string | undefined): ReturnType<Page["locator"]> | undefined {
+  if (call === undefined) return undefined;
+  const parsed = /^(getBy[A-Za-z]+|locator)\((.*)\)$/s.exec(call.trim());
+  if (parsed === null) return undefined;
+  const method = parsed[1]!;
+  const args = parsed[2]!;
+
+  /* One string literal, optionally followed by `{ name: "..." }`. */
+  const literal = /^("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')(?:\s*,\s*\{\s*name:\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')\s*\})?$/.exec(args.trim());
+  if (literal === null) return undefined;
+  const first = unquote(literal[1]!);
+  const name = literal[2] !== undefined ? unquote(literal[2]) : undefined;
+
+  switch (method) {
+    case "getByTestId":
+      return page.getByTestId(first);
+    case "getByText":
+      return page.getByText(first);
+    case "getByLabel":
+      return page.getByLabel(first);
+    case "getByPlaceholder":
+      return page.getByPlaceholder(first);
+    case "getByTitle":
+      return page.getByTitle(first);
+    case "getByAltText":
+      return page.getByAltText(first);
+    case "locator":
+      return page.locator(first);
+    case "getByRole":
+      /*
+       * A role with no name is legal and common. With one, the name is passed as
+       * the exact string it was written as, never as a pattern: a model that
+       * wrote a literal meant that element.
+       */
+      return name !== undefined
+        ? page.getByRole(first as Parameters<Page["getByRole"]>[0], { name })
+        : page.getByRole(first as Parameters<Page["getByRole"]>[0]);
+    default:
+      return undefined;
+  }
+}
+
+/** The text inside a JS string literal, with the escapes a locator uses. */
+function unquote(literal: string): string {
+  const body = literal.slice(1, -1);
+  return body.replace(/\\(.)/g, "$1");
+}
 
 function observeSurface(runtime: ThreadBrowserRuntime, intern: (value: unknown) => number | undefined): ObserveSurface {
   return {
@@ -942,7 +1047,24 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
    * Recorded now rather than read back afterwards, because by then the page has
    * moved and the "from" state is gone.
    */
-  const urlAtStart = (await runtime.ensureReady().catch(() => undefined))?.page.url();
+  const readyAtStart = await runtime.ensureReady().catch(() => undefined);
+  const urlAtStart = readyAtStart?.page.url();
+  /*
+   * The page this step is about, held for the diagnostics below.
+   *
+   * `lastCapturedPage()` is NOT this, and the difference is a real bug that
+   * showed up the moment a diagnostic depended on it. That ref is set by the
+   * step's own label callback, and the callback runs only on the success path:
+   * a *failed* step returns before it, so the ref still holds whatever the last
+   * successful step captured.
+   *
+   * Measured: a click that timed out on `/zero-area` was diagnosed against a
+   * page another test had left active, and the answer was `matches: 0` for a
+   * locator that matches one element on the page the step actually used. Every
+   * diagnostic that reaches for "the page the step was about" had this wrong on
+   * exactly the steps diagnostics exist for.
+   */
+  const stepPage = readyAtStart?.page;
   const stateBefore = signatureOf(urlAtStart, args.expect);
 
   let outcome: StepReceipt["outcome"];
@@ -1134,7 +1256,7 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
    * for no reason.
    */
   if (receipt.failure !== undefined && INPUT_CONSISTENT_FAILURES.has(receipt.failure.kind)) {
-    const about = runtime.lastCapturedPage();
+    const about = stepPage;
     if (about !== undefined && !about.isClosed()) {
       const health = await runtime.kit.ensureHealthy(about).catch(() => ({ recovered: false, note: undefined }));
       if (health.recovered && health.note !== undefined) lines.push("", `RECOVERED: ${health.note}`);
@@ -1155,8 +1277,46 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
    * locator, a crash, a policy refusal: none of those are helped by a list of
    * nearby elements, and adding one would make the receipt longer for nothing.
    */
+  /*
+   * A claim that could not be clicked is re-tested with its geometry read.
+   *
+   * `NOT_VISIBLE` is the one classification the transaction cannot finish on its
+   * own, and the shortfall is not cosmetic. It is reported both for an element
+   * hidden by CSS and for one whose box is zero-sized, and the two want opposite
+   * responses: a hidden element should be revealed, and a zero-area one cannot
+   * be, because there is nothing to reveal. The advice printed for it ("reveal
+   * it first") is therefore wrong half the time, and it was wrong for the
+   * measured case, a delete button sized to nothing with a clickable icon
+   * inside.
+   *
+   * The transaction has the error and no locator; `inspect()` has the trial and
+   * the geometry, and distinguishing those two is precisely what it does. So the
+   * trial runs here, against the locator rebuilt from the program's own source,
+   * and when it can say more than the classifier could, it replaces the advice
+   * rather than adding to it.
+   *
+   * The same run of a mission never called `inspect()` once. A check the model
+   * does not reach for is one the runtime should make.
+   */
+  if (receipt.failure?.kind === "NOT_VISIBLE" || receipt.failure?.kind === "ACTION_TIMEOUT") {
+    /*
+     * The step's page, falling back to the active one.
+     *
+     * `lastCapturedPage()` is set by the step's own labelling callback, so it is
+     * the right answer when it exists. The fallback is for the case where the
+     * step never labelled one, which is not hypothetical: a program that fails
+     * before touching an element leaves the ref unset, and that is exactly the
+     * failure this block exists to explain.
+     */
+    const about = stepPage;
+    if (about !== undefined && !about.isClosed()) {
+      const better = await clarifyUnclickable(runtime, about, args.code).catch(() => "");
+      if (better.length > 0) lines.push("", better);
+    }
+  }
+
   if (receipt.failure !== undefined && isLocatorFailure(receipt.failure.kind) && receipt.failure.target !== undefined) {
-    const about = runtime.lastCapturedPage();
+    const about = stepPage;
     if (about !== undefined && !about.isClosed()) {
       const context = await runtime.kit.context(about, { text: receipt.failure.target }).catch(() => "");
       if (context.length > 0) lines.push("", context);
