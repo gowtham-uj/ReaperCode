@@ -1571,6 +1571,30 @@ export class ThreadBrowserRuntime {
     for (const entry of saved?.pages ?? []) {
       if (typeof entry.url !== "string" || typeof entry.name !== "string") continue;
       if (entry.name.length === 0 || this.named.has(entry.name)) continue;
+      /*
+       * The registry already knows this name, and it is the better answer.
+       *
+       * The registry is handed the names as pages are created, so it holds them
+       * from the moment of creation; this map is rebuilt from a state file by
+       * matching URLs, which fails whenever a page is not at the URL it was saved
+       * at. That happens on every reconnect: a page mid-navigation is at
+       * `about:blank`, or a site redirected it, and the exact compare below
+       * finds nothing.
+       *
+       * The two maps then disagree, and a live mission caught it: the `TABS`
+       * listing showed `p5 "ui-testing"` while `await p.pageName` on that very
+       * page returned undefined, so the agent spent two thinking blocks working
+       * out which of its own tabs it was looking at. The registry's id survived
+       * the reconnect because the id is transferred by name; the runtime's map
+       * did not because it matches by URL. So the registry is consulted first and
+       * this map is filled from it, which makes one of them the source and the
+       * other a follower rather than two answers to one question.
+       */
+      const registered = this.kit.registry.find(entry.name);
+      if (registered !== undefined && !registered.page.isClosed()) {
+        this.named.set(entry.name, { name: entry.name, page: registered.page, openedAt: registered.openedAt });
+        continue;
+      }
       const match = context.pages().find((page) => !page.isClosed() && page.url() === entry.url);
       if (match && ![...this.named.values()].some((existing) => existing.page === match)) {
         this.named.set(entry.name, { name: entry.name, page: match, openedAt: Date.now() });
