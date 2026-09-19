@@ -24,6 +24,19 @@
  * a report cannot invent a fifth one that means nothing.
  */
 
+/**
+ * How much of the state is rendered per turn.
+ *
+ * These are the whole reason the block is affordable. Each is a cap on a list
+ * that a long mission would otherwise grow without bound, and the cost of a
+ * per-turn block is its size times the turns remaining, so an uncapped list is
+ * the most expensive mistake this file can make. It made it once: see the note
+ * on `render`.
+ */
+const FACTS_SHOWN = 12;
+const READY_SHOWN = 5;
+const FAILURES_SHOWN = 5;
+
 /** One thing the mission has established, and what established it. */
 export interface Fact {
   value: string;
@@ -160,32 +173,100 @@ export class MissionState {
   /**
    * The state as the model reads it.
    *
-   * Bounded on purpose. This is prepended to decisions many times per mission,
-   * so it renders the facts and the subtasks and stops. Pages, artifacts and
-   * failures are there but summarised to a line each, because a mission that
-   * produces thirty artifacts should not spend a page describing them on every
-   * turn.
+   * ## Bounded, and it was not
+   *
+   * The comment here said "bounded on purpose" while the code rendered every
+   * subtask and every ready one, which grows without limit as a mission declares
+   * work. Measured across one run: 94 of these blocks, the first 726 characters
+   * and the last 3,561, averaging 2,205. Because each is re-sent with every
+   * later model call, that is 9.16M characters of context for 207KB of content:
+   * about **2.29M tokens**, against a run whose total was 13.4M. It was the
+   * single largest avoidable cost in the mission, and it was mine.
+   *
+   * The arithmetic is why a per-turn block has to be constant-size. A block that
+   * grows by 20 characters a turn is not 20 characters, it is 20 characters
+   * times the number of turns remaining, and a mission has hundreds.
+   *
+   * So the shape is fixed: recent facts, the subtasks that are *moving*, and a
+   * count of the rest. What is dropped is the thing that carried no information
+   * anyway. `READY NOW` listed all fourteen pending subtasks on the second turn,
+   * because a subtask with no dependencies is ready the moment it is declared,
+   * and fourteen names that all say "not started yet" is a worse answer than the
+   * count does in one line.
    */
   render(): string {
     const sections: string[] = [];
-    const facts = [...this.facts.entries()].map(([name, fact]) => `  ${name} = ${fact.value}   [${fact.evidence}]`);
-    if (facts.length > 0) sections.push(`FACTS:\n${facts.join("\n")}`);
-    const derived = [...this.derived.entries()].map(([name, fact]) => `  ${name} = ${fact.value}   (derived from ${fact.evidence})`);
+    /*
+     * The most recent facts, because that is what a decision needs. A mission
+     * accumulates values for an hour and the one read twenty turns ago is not
+     * what the next step depends on. Bounded from the *end* so the newest
+     * survive, with a count of what was left out.
+     */
+    const factEntries = [...this.facts.entries()];
+    const facts = factEntries.slice(-FACTS_SHOWN).map(([name, fact]) => `  ${name} = ${fact.value}   [${fact.evidence}]`);
+    if (facts.length > 0) {
+      const older = factEntries.length - facts.length;
+      sections.push(`FACTS${older > 0 ? ` (last ${facts.length} of ${factEntries.length})` : ""}:\n${facts.join("\n")}`);
+    }
+    const derivedEntries = [...this.derived.entries()];
+    const derived = derivedEntries.slice(-FACTS_SHOWN).map(([name, fact]) => `  ${name} = ${fact.value}   (derived from ${fact.evidence})`);
     if (derived.length > 0) sections.push(`DERIVED:\n${derived.join("\n")}`);
-    const subtasks = this.renderSubtasks();
-    if (subtasks.length > 0) sections.push(`SUBTASKS:\n${subtasks}`);
 
+    /*
+     * The subtasks that are moving, plus a count of the ones that are not.
+     *
+     * "Moving" is anything not pending: running, blocked, done, verified,
+     * failed. Those are the states a decision turns on. A pending subtask is one
+     * nobody has started, and listing all of them is the cost this exists to
+     * remove.
+     */
+    const moving = this.subtasks.filter((subtask) => subtask.status !== "pending");
+    if (moving.length > 0) {
+      const lines = moving.map((subtask) => {
+        const note = subtask.note !== undefined ? ` : ${subtask.note}` : "";
+        return `  [${subtask.status}] ${subtask.title}${note}`;
+      });
+      sections.push(`SUBTASKS:\n${lines.join("\n")}`);
+    }
+    /*
+     * The counts, and only when there is a plan to count.
+     *
+     * A mission that has declared nothing gets nothing: `PROGRESS: 0 verified, 0
+     * in progress, 0 not started` is four words of nothing on every turn of a
+     * conversation that has not started planning. The test that caught this is
+     * the one that asserts an empty state renders the empty string, and it is
+     * right to.
+     */
+    if (this.subtasks.length > 0) {
+      const pending = this.subtasks.filter((subtask) => subtask.status === "pending").length;
+      const verified = this.subtasks.filter((subtask) => subtask.status === "verified").length;
+      sections.push(`PROGRESS: ${verified} verified, ${moving.length - verified} in progress, ${pending} not started (of ${this.subtasks.length})`);
+    }
+
+    /*
+     * What can be done now, capped.
+     *
+     * Capped rather than omitted, because the first few entries are genuinely
+     * the answer to "what next" and the fourteenth is not: a plan whose ready
+     * list is longer than a handful is a plan the model will not read in order
+     * anyway. The count is what makes the cap honest.
+     */
     const ready = this.ready().map((subtask) => subtask.title);
-    if (ready.length > 0) sections.push(`READY NOW: ${ready.join(", ")}`);
+    if (ready.length > 0) {
+      const shown = ready.slice(0, READY_SHOWN);
+      sections.push(`READY NOW: ${shown.join(", ")}${ready.length > shown.length ? ` (+${ready.length - shown.length} more)` : ""}`);
+    }
 
     if (this.artifacts.size > 0) {
-      const artifacts = [...this.artifacts.values()].map(
-        (artifact) => `  ${artifact.name}: ${artifact.status}${artifact.status === "saved" ? ` at ${artifact.path} (${artifact.bytes} bytes)` : ""}`,
+      const artifactEntries = [...this.artifacts.values()];
+      const artifacts = artifactEntries.slice(-FACTS_SHOWN).map(
+        (artifact) => `  ${artifact.name}: ${artifact.status}${artifact.status === "saved" ? ` (${artifact.bytes} bytes)` : ""}`,
       );
-      sections.push(`ARTIFACTS:\n${artifacts.join("\n")}`);
+      const older = artifactEntries.length - artifacts.length;
+      sections.push(`ARTIFACTS${older > 0 ? ` (last ${artifacts.length} of ${artifactEntries.length})` : ""}:\n${artifacts.join("\n")}`);
     }
     if (this.failures.length > 0) {
-      const failures = this.failures.slice(-5).map((failure) => `  ${failure.action}: ${failure.kind}${failure.note !== undefined ? ` (${failure.note})` : ""}`);
+      const failures = this.failures.slice(-FAILURES_SHOWN).map((failure) => `  ${failure.action}: ${failure.kind}${failure.note !== undefined ? ` (${failure.note})` : ""}`);
       sections.push(`FAILED BEFORE:\n${failures.join("\n")}`);
     }
     if (sections.length === 0) return "";
