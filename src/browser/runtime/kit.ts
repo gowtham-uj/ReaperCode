@@ -297,9 +297,9 @@ export class BrowserRuntimeKit {
   }
 
   /** Start listening before a click, so a download is not missed. */
-  armDownload(page: Page, timeoutMs?: number): string {
+  async armDownload(page: Page, timeoutMs?: number): Promise<string> {
     if (this.artifacts === undefined) throw new Error("this thread has no download vault, so downloads cannot be captured");
-    return this.artifacts.arm(page, timeoutMs);
+    return await this.artifacts.arm(page, timeoutMs);
   }
 
   /** Wait for an armed download and store it. */

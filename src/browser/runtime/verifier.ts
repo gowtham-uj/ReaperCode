@@ -56,8 +56,15 @@ export type Requirement =
   | { kind: "artifactFromAction"; name: string }
   /** A page exists whose URL matches, and it was opened by a click. */
   | { kind: "popup"; pattern: string }
-  /** A fact the mission recorded. */
-  | { kind: "fact"; name: string; value?: string }
+  /**
+   * A fact the mission recorded, optionally with the value it must have.
+   *
+   * `value` is `string | undefined` rather than optional because the tool's
+   * schema produces it that way and an exact-optional type would refuse the
+   * object the parser hands over. `undefined` means "recorded, whatever it
+   * says", which is the useful reading of a requirement with no value.
+   */
+  | { kind: "fact"; name: string; value?: string | undefined }
   /** A subtask reached `verified`. */
   | { kind: "subtask"; title: string }
   /** No failed action of this kind was recorded after the requirement was set. */

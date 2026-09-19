@@ -299,6 +299,77 @@ export const TORTURE_PAGES: TorturePage[] = [
     expectPresent: ["#late"],
     expectAbsent: [],
   },
+  {
+    path: "/zero-area",
+    title: "Zero-area control",
+    why:
+      "a link sized to nothing with a clickable icon inside it is how every real page writes a delete button, and clicking the wrapper waits thirty seconds and fails while clicking the icon works",
+    html: page(
+      "Zero area",
+      `<h1>Zero area</h1>
+       <ul>
+         <li><span id="row-label">First row</span>
+           <a href="#" id="zero-delete" data-testid="zero-delete" style="display:inline-block;width:0;height:0;overflow:hidden">
+             <svg width="16" height="16" viewBox="0 0 16 16" data-testid="zero-delete-icon"><path d="M2 2 L14 14 M14 2 L2 14" stroke="black"/></svg>
+           </a>
+         </li>
+       </ul>
+       <p id="zero-result">nothing deleted yet</p>`,
+      `document.getElementById('zero-delete-icon')?.addEventListener('click', (event) => {
+         event.preventDefault();
+         document.getElementById('zero-result').textContent = 'deleted';
+       });`,
+    ),
+    expectPresent: ["#zero-delete", "#row-label"],
+    expectAbsent: [],
+  },
+  {
+    path: "/form-limits",
+    title: "Constrained form",
+    why:
+      "a field whose maxlength is the whole reason a submission was rejected, which a model otherwise discovers by trying another value",
+    html: page(
+      "Constrained form",
+      `<h1>Register</h1>
+       <form id="reg">
+         <label for="reg-user">Username</label>
+         <input id="reg-user" name="username" required maxlength="20">
+         <label for="reg-email">Email</label>
+         <input id="reg-email" name="email" type="email" required>
+         <button id="reg-submit">Register</button>
+       </form>`,
+    ),
+    expectPresent: ["#reg-user", "#reg-email", "#reg-submit"],
+    expectAbsent: [],
+  },
+  {
+    path: "/download",
+    title: "Download",
+    why:
+      "a real download is the only thing that can prove the vault, the ledger's provenance record and the arm-before-trigger ordering actually work",
+    html: page(
+      "Download",
+      `<h1>Download</h1>
+       <a id="invoice-link" href="/download/invoice.txt" download="invoice.txt">Download Invoice</a>
+       <a id="missing-link" href="/download/never.txt" download="never.txt">Download Missing</a>
+       <p id="download-result">no download started</p>`,
+    ),
+    expectPresent: ["#invoice-link", "#download-result"],
+    expectAbsent: [],
+  },
+  {
+    path: "/popup-link",
+    title: "Popup link",
+    why:
+      "a target=_blank link is the only thing that distinguishes a tab a click opened from one a program asked for, which is the provenance a verifier checks",
+    html: page(
+      "Popup link",
+      `<h1>Popup</h1>
+       <a id="popup-link" href="/basic" target="_blank">Open New Window</a>`,
+    ),
+    expectPresent: ["#popup-link"],
+    expectAbsent: [],
+  },
 ];
 
 /** Render one page's HTML, or 404. */
@@ -321,6 +392,23 @@ export interface RunningTortureSite {
 export async function startTortureSite(): Promise<RunningTortureSite> {
   const server: Server = createServer((request: IncomingMessage, response: ServerResponse) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    /*
+     * The download route, which is the only way to prove the vault end to end.
+     *
+     * Served as an attachment so Chrome raises a real download event rather than
+     * rendering the file, which is what makes `download`'s arm-before-trigger
+     * ordering testable: an inline response would be a navigation and no event
+     * would ever fire.
+     */
+    if (url.pathname === "/download/invoice.txt") {
+      response.writeHead(200, {
+        "content-type": "text/plain; charset=utf-8",
+        "content-disposition": 'attachment; filename="invoice.txt"',
+        "cache-control": "no-store",
+      });
+      response.end("invoice 4711: 66 bytes\n");
+      return;
+    }
     const found = route(url.pathname);
     if (!found) {
       response.writeHead(404, { "content-type": "text/html; charset=utf-8" });

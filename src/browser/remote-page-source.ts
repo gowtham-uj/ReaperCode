@@ -47,6 +47,24 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
   const promise = Promise.resolve();
 
   /*
+   * The three roots, as nodes, defined once.
+   *
+   * They used to be built inline in the returned object literal, which meant the
+   * helpers had no way to reach them: the body of a \`download()\` trigger is
+   * called from this scope, so \`page\` inside it was a free variable and threw
+   * "page is not defined" while the program's own top level had one. The same
+   * call worked at the top level and failed one frame down, which is the
+   * confusing part rather than the bug.
+   *
+   * Bound here so every helper, body and returned property refers to the same
+   * node. \`makeNode\` is lazy, so this costs three proxies rather than three
+   * round trips.
+   */
+  const rootPage = makeNode(__pageRoot.page, []);
+  const rootBrowser = makeNode(__pageRoot.browser, []);
+  const rootPages = makeNode(__pageRoot.pages, []);
+
+  /*
    * Turn an argument into something that can cross the boundary.
    *
    * Nodes become handles. Plain data is copied. Functions are refused, and that
@@ -774,10 +792,25 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
      * The body's page is a node rooted at the handle the host resolved, so the
      * body's Playwright calls replay against the tab the transaction named.
      */
-    const bodyPage = handle !== undefined ? makeNode(handle, []) : page;
+    const bodyPage = handle !== undefined ? makeNode(handle, []) : rootPage;
     let outcome;
     try {
-      const value = await body({ page: bodyPage, browser: browser, pages: pages });
+      /*
+       * Only \`page\` is passed, and that is not an omission.
+       *
+       * The body is written in the program's scope, where \`browser\`, \`pages\` and
+       * the rest are injected as globals by the worker. This function is a
+       * different scope and has no such bindings, so passing them here threw
+       * "browser is not defined" the moment a body destructured it. Measured,
+       * and it reads as the model's own mistake, which is the worst way for it
+       * to present.
+       *
+       * What the body cannot get for itself is the transaction's page, because
+       * that is the whole point of naming one. So that is the only thing passed,
+       * and everything else the body reaches for resolves in its own scope as it
+       * always would.
+       */
+      const value = await body({ page: bodyPage });
       outcome = { ok: true, value: value };
     } catch (error) {
       outcome = {
@@ -846,7 +879,9 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
         'download needs a trigger function: await download({ trigger: async (page) => { await page.getByText("Invoice").click(); } })',
       );
     }
-    const token = await callHelper('armDownload', [settings.timeoutMs]);
+    /* \`armed.token\`, for the same reason as \`expectPopup\`: see the note there. */
+    const armedDownload = await callHelper('armDownload', [settings.timeoutMs]);
+    const token = armedDownload && typeof armedDownload === 'object' ? armedDownload.token : armedDownload;
     /*
      * The trigger runs here, and its own failure is not swallowed.
      *
@@ -857,7 +892,7 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
      */
     let triggerError;
     try {
-      await trigger(page);
+      await trigger(rootPage);
     } catch (error) {
       triggerError = error;
     }
@@ -889,7 +924,18 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
       throw new Error('expectPopup needs a trigger function: await expectPopup(page, async (page) => { await page.click("a"); })');
     }
     const settings = options || {};
-    const token = await callHelper('armPopup', [target, settings.timeoutMs]);
+    /*
+     * \`armed.token\`, not \`armed\`.
+     *
+     * The host answers an arm with \`{ token }\`, and passing the whole object to
+     * collect stringified it to "[object Object]", so the lookup missed every
+     * time and a popup that had genuinely opened was reported as never having
+     * appeared. The failure is the worst shape there is: the action worked, the
+     * answer said it did not, and the message blamed the thing that had just
+     * succeeded.
+     */
+    const armed = await callHelper('armPopup', [target, settings.timeoutMs]);
+    const token = armed && typeof armed === 'object' ? armed.token : armed;
     let triggerError;
     try {
       await trigger(target === undefined ? page : target);
@@ -903,6 +949,24 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
         'the trigger ran but no new page opened. If the link opens in the same tab, use page.goto() or click it directly; ' +
         'if it is a link with target=_blank, waitForEvent("popup") must be armed before the click, which this call does for you.',
       );
+    }
+    /*
+     * The reply is a handle, and a handle is only useful as a node.
+     *
+     * The helpers return their answer as plain data, and \`run()\` is what turns a
+     * \`__reaperNode\` marker back into something a program can call Playwright on.
+     * A helper that produces a *live object* therefore has to do that step
+     * itself, or the program receives \`{ handle: 3, url: "..." }\` and
+     * \`popup.url()\` fails with "popup.url is not a function" while the popup is
+     * open and perfectly usable.
+     *
+     * Measured exactly that way, after the token bug above was fixed: the
+     * page opened, the wait caught it, and the answer still could not be driven.
+     */
+    if (popup && typeof popup === 'object' && typeof popup.handle === 'number') {
+      const node = makeNode(popup.handle, []);
+      node.__reaperPageId = popup.pageId;
+      return node;
     }
     return popup;
   }
@@ -941,9 +1005,9 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
    * loudly instead of silently becoming \`undefined\` in a model's program.
    */
   return {
-    page: makeNode(__pageRoot.page, []),
-    browser: makeNode(__pageRoot.browser, []),
-    pages: makeNode(__pageRoot.pages, []),
+    page: rootPage,
+    browser: rootBrowser,
+    pages: rootPages,
     view: (...args) => callHelper('view', args),
     viewChanges: () => callHelper('viewChanges', []),
     screenshot: (...args) => callHelper('screenshot', args),

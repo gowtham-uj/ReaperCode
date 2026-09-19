@@ -53,6 +53,7 @@ import { countOutline, PageObserver, type PageContentMeta, type PageViewOptions,
 import { runStep, type SettleOptions, type StepReceipt } from "./transaction.js";
 import type { TransitionDb } from "./transition-db.js";
 import { BrowserRuntimeKit } from "./runtime/kit.js";
+import { observeScoped } from "./runtime/observe-ladder.js";
 
 export interface ThreadRuntimeOptions {
   /** The thread this browser belongs to, for naming and logging. */
@@ -1779,13 +1780,42 @@ export class ThreadBrowserRuntime {
       return selector;
     }
     if (typeof selector === "string") {
+      /*
+       * The registry answers first, so a page can be addressed by its id.
+       *
+       * `browser.page("p5")` is the stable handle, and it is the point of the
+       * registry: a model that has seen `p5` in a listing can come back to it
+       * without searching the page list for a URL it half remembers. The named
+       * map is consulted after, because a name is the human label and an id is
+       * the handle, and both must work.
+       */
+      const registered = this.kit.registry.find(selector);
+      if (registered !== undefined && !registered.page.isClosed()) {
+        this.active = registered.page;
+        this.activeTargetId = await targetIdOf(registered.page).catch(() => undefined);
+        /*
+         * The runtime's own name map is kept in step, because the rest of the
+         * runtime still reads it and two maps that disagree about a name is the
+         * drift this codebase keeps paying for.
+         */
+        this.named.set(registered.name, {
+          name: registered.name,
+          page: registered.page,
+          openedAt: registered.openedAt,
+        });
+        this.notifyPagesChanged();
+        return registered.page;
+      }
       const entry = this.named.get(selector);
       if (entry && !entry.page.isClosed()) {
         this.active = entry.page;
         this.activeTargetId = await targetIdOf(entry.page).catch(() => undefined);
         return entry.page;
       }
-      throw new Error(`no open page named "${selector}". Open pages: ${[...this.named.keys()].join(", ") || "(none)"}`);
+      const known = this.kit.registry.live().map((candidate) => `${candidate.id} "${candidate.name}"`);
+      throw new Error(
+        `no open page named "${selector}". Open pages: ${known.length > 0 ? known.join(", ") : [...this.named.keys()].join(", ") || "(none)"}`,
+      );
     }
     const live = context.pages().filter((p) => !p.isClosed());
     const page = live[selector];
@@ -1865,6 +1895,19 @@ export class ThreadBrowserRuntime {
    * state here (the previous compile, for stable section and element ids across
    * revisions) and the call sites should not have to change when it lands.
    */
+  /**
+   * Read a page through the ladder, with the stub as the last rung.
+   *
+   * The ladder is Playwright's own API at every level: `ariaSnapshotJSON` in
+   * `mode: "ai"` for a scoped read and for the whole page. The stub underneath
+   * is `ariaSnapshot`, which is the same representation as text, and it is what
+   * answers on a Playwright older than 1.63 or when the JSON form throws.
+   *
+   * Whole-page reads go through the ladder rather than straight to the stub so
+   * the observation is recorded with its size. That number is what turns "the
+   * context grew" from an observation into a measurement, and it is one line
+   * here against an afternoon of reading a trace.
+   */
   private async perceive(target: Page): Promise<PerceptionResult> {
     const perceived = await perceive(target, {
       context: {
@@ -1873,6 +1916,16 @@ export class ThreadBrowserRuntime {
       },
     });
     this.lastWasFallback = perceived.usedFallback;
+    /*
+     * Recorded with its size, so the observation cost is a measurement rather
+     * than an impression.
+     *
+     * The stub is rung 4 of the ladder: the whole page, in Playwright's own
+     * representation. It is the only rung this path uses today, and it is
+     * recorded as level 4 so that a scoped read arriving later is comparable
+     * against it rather than needing a new metric.
+     */
+    this.kit.observed(4, perceived.text.length);
     return perceived;
   }
 
@@ -1971,10 +2024,21 @@ export class ThreadBrowserRuntime {
      */
     const region = scoped ?? (options.selector ? page.locator(options.selector).first() : undefined);
     if (region !== undefined) {
-      const snapshot = await region.ariaSnapshot({
-        mode: "ai",
+      /*
+       * A scoped read goes through the ladder, which prefers `ariaSnapshotJSON`
+       * with geometry when the installed Playwright has it and degrades to
+       * `ariaSnapshot` when it does not.
+       *
+       * The geometry is the part that earns this: a scoped read is usually
+       * asking about a region the model is about to act in, and a zero-area
+       * element inside that region is invisible in the text form and obvious in
+       * the boxed one.
+       */
+      const observation = await observeScoped(page, {
+        locator: region,
         ...(options.depth ? { depth: options.depth } : {}),
       });
+      const snapshot = observation.text;
       // A scoped look replaces what the observer is holding, so a later diff is
       // against what the model actually saw rather than the whole page it did not.
       this.observer.capture({ url: page.url(), title: await page.title().catch(() => ""), snapshot });

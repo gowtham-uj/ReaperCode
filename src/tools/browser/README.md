@@ -88,13 +88,41 @@ The four files involved are `transform.ts` (pure string work, no dependencies),
 `worker-source.ts` (the worker program). A new home needs all four, or a
 replacement for the three that are not pure.
 
+## The runtime directory
+
+`src/browser/runtime/` is the transactional layer: the failure taxonomy, the
+page registry, the ledger, the verifier, the artifact manager, the recovery
+controller and the rest. It sits inside `src/browser/` rather than beside it
+because it needs the runtime's own primitives, and the boundary check treats
+every file under `src/browser/` as the same layer.
+
+The pieces are independent of Playwright except where they take a `Page`, which
+is deliberate: each is testable without a browser, and the kit (`kit.ts`) is what
+gives them a live one. Nothing in the directory reaches into core.
+
 ## Checking this stays true
 
+The check is a test, not a command, because the command form had two holes.
+
 ```
-grep -h 'from "\.\./' src/browser/*.ts | grep -oP 'from "\K[^"]+' | sort -u
-grep -h 'from "\.\./\.\./' src/tools/browser/*.ts | grep -oP 'from "\K[^"]+' | sort -u
+npx tsx --test tests/unit/browser/extraction-boundary.test.ts
 ```
 
-The first should print only `../tools/code/...`. The second only
-`../../browser/...`. A new line in either output that is not one of those is a
-new coupling, and it is worth asking whether it belongs.
+It resolves every import to the module it reaches and asserts on the layer, so a
+file in a subdirectory is covered and a specifier is judged by where it lands
+rather than by which words appear in it. Three edges are allowed and each is
+asserted to still exist:
+
+| from | to | why |
+|---|---|---|
+| `src/browser/` | `src/tools/code/` | the sandbox the model's program runs in |
+| `src/tools/browser/` | `src/browser/` | the thing it drives |
+| `src/tools/browser/` | `src/tools/code/` | the program transform, shared with `eval` |
+
+The third was found by the check rather than designed, and it is recorded rather
+than tolerated. The flat grep versions this replaced missed it entirely, because
+it only looked at `../../` specifiers.
+
+`tests/unit/browser/raw-source-backticks.test.ts` guards a different structural
+property: a bare backtick inside one of the `String.raw` source strings, which
+has broken this build four times.

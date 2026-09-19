@@ -20,6 +20,7 @@ import type { Page } from "playwright";
 import type { ThreadBrowserRuntime } from "../../browser/thread-runtime.js";
 import { BrowserControlPausedError, BrowserLeaseStaleError } from "../../browser/control-lease.js";
 import { renderReceipt, type StepReceipt } from "../../browser/transaction.js";
+import { renderTransaction } from "../../browser/runtime/transaction.js";
 import { serializeBrowserResult } from "../../browser/serialize.js";
 import type { BrowserUseArgs } from "./browser-use.js";
 import { verifyStep } from "../../browser/verify.js";
@@ -29,6 +30,8 @@ import { BROWSER_PROGRAM_PARAMS } from "../../browser/remote-page-source.js";
 import { collectUnannounced } from "../../browser/downloads.js";
 import { transactionalSurface } from "../../browser/runtime/control-extras.js";
 import { inspectProgram, renderPolicyReport } from "../../browser/runtime/policy-guard.js";
+import { renderVerification } from "../../browser/runtime/verifier.js";
+import { classifyFailure, renderFailure } from "../../browser/runtime/failure.js";
 import {
   BrowserProgramHost,
   type ControlSurface,
@@ -370,6 +373,61 @@ function browserSurface(runtime: ThreadBrowserRuntime): BrowserSurface {
  * always means. Passing a `Page` scopes it, which is how a program looks at one
  * region without a selector.
  */
+/**
+ * The rendered form of a transaction result, when that is what this is.
+ *
+ * A `tx` call answers with `{ receipt, text }`, and `text` is already the
+ * compact rendering. A model that wrote `return await tx(...)` therefore has the
+ * good answer in hand and the tool was printing the JSON wrapper around it
+ * instead, which is the same information at three times the size.
+ *
+ * Structural rather than by class, because the value crossed the sandbox
+ * boundary and arrived as plain data: the prototype is gone by the time it gets
+ * here.
+ */
+function transactionTextOf(value: unknown): string | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate["text"] === "string" && typeof candidate["receipt"] === "object" && candidate["receipt"] !== null) {
+    return candidate["text"];
+  }
+  /*
+   * A receipt on its own, without the wrapper. `buildReceipt` produces exactly
+   * these keys, and a program that returned the receipt directly gets the same
+   * treatment.
+   */
+  if (
+    typeof candidate["actionId"] === "string" &&
+    typeof candidate["status"] === "string" &&
+    typeof candidate["page"] === "object" &&
+    typeof candidate["change"] === "object" &&
+    typeof candidate["timing"] === "object"
+  ) {
+    return renderTransaction(value as Parameters<typeof renderTransaction>[0]);
+  }
+  return undefined;
+}
+
+/**
+ * The failures whose fix is a different locator, or a different element.
+ *
+ * A closed set rather than a catch-all, so the local-context block appears on
+ * the receipts it can help and nowhere else. A crash, a navigation timeout and a
+ * server rejection all have nothing to do with which element was named.
+ */
+function isLocatorFailure(kind: string): boolean {
+  return [
+    "LOCATOR_NOT_FOUND",
+    "LOCATOR_AMBIGUOUS",
+    "ZERO_AREA",
+    "NOT_VISIBLE",
+    "NOT_RECEIVING_EVENTS",
+    "DETACHED",
+    "NOT_ENABLED",
+    "NOT_EDITABLE",
+  ].includes(kind);
+}
+
 function observeSurface(runtime: ThreadBrowserRuntime, intern: (value: unknown) => number | undefined): ObserveSurface {
   return {
     view: async (target?: Page) => (await runtime.view(target ? { page: target } : {})).text,
@@ -706,6 +764,25 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
    * understand. Looking is not a lesser operation than acting; writing Playwright
    * against a page you have not seen is how an agent clicks the wrong thing.
    */
+  /*
+   * A finish request, answered before anything else.
+   *
+   * It is checked against the ledger and the live page rather than against
+   * anything the model said, and a failure returns the missing conditions with
+   * the mission still running. `completed_verified` is the only state that means
+   * done; there is deliberately no way to be finished without passing.
+   */
+  if (args.finish !== undefined) {
+    const page = runtime.activePage;
+    const outcome = await runtime.kit.check(args.finish, page);
+    return {
+      output: renderVerification(outcome),
+      outcome: outcome.passed ? "SUCCESS" : "POSTCONDITION_FAILED",
+      isError: !outcome.passed,
+      rev: runtime.observer.revision,
+    };
+  }
+
   if (args.code === undefined || args.code.trim().length === 0) {
     const view = await runtime.view({ ...(args.selector !== undefined ? { selector: args.selector } : {}) });
     /*
@@ -737,10 +814,26 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
      */
     const health = runtime.takeHealthNote();
     const created = runtime.takePageCreationNote();
+    /*
+     * The thread's pages, with the handles that address them.
+     *
+     * This is the change that removes the largest measured waste in a long
+     * mission: fifty-two calls that existed only to find a tab the model had
+     * already found. `browser.pages()` returns objects, so a model that wanted
+     * "the parabank tab" had to fetch every tab and match on its URL, every
+     * time, because nothing carried the answer forward.
+     *
+     * Printed only when there is more than one page. A single-tab session
+     * already knows which tab it is on, and a list of one on every look is
+     * tokens spent on nothing.
+     */
+    const pages = runtime.kit.registry.live();
+    const listing = pages.length > 1 ? await runtime.kit.registry.render(runtime.activePage) : "";
     return {
       output:
         `${view.text}\n\n[${stats.lines} lines, ${stats.chars} chars, ${stats.elements} elements]` +
         `\n(REV ${runtime.observer.revision} - pass expected_revision with your next program)` +
+        (listing.length > 0 ? `\n\n${listing}` : "") +
         (flows.length > 0 ? `\n\n${flows.join("\n")}` : "") +
         (health !== undefined ? `\n\nBROWSER: ${health}` : "") +
         (created !== undefined ? `\n\nPAGES: ${created}` : ""),
@@ -805,6 +898,20 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
   let outcome: StepReceipt["outcome"];
   let receipt: StepReceipt;
   let result: unknown;
+  /*
+   * The step is an action, and it is recorded as one before the program runs.
+   *
+   * This is what gives a bare program the identity that provenance needs. Without
+   * it, `download()` inside a plain program stored its artifact with no
+   * `triggeredBy`, so a `finish` check for `artifactFromAction` could never pass
+   * outside a `tx`: the file arrived, the ledger recorded the event, and nothing
+   * tied it to the click that caused it.
+   *
+   * It also puts the step in the metrics, which the ledger now owns: a bare
+   * program is a browser call like any other and was previously invisible to the
+   * counts.
+   */
+  const stepActionId = runtime.kit.beginAction(args.intent);
   try {
     /*
      * The observe surface needs the handle table, and the handle table is the
@@ -877,6 +984,18 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
     receipt = stepped.receipt;
     result = stepped.result;
     outcome = receipt.outcome;
+    /*
+     * Closed with the outcome the receipt reports, so the ledger's failure
+     * counts and the receipt cannot disagree. `NO_CHANGE` is a success here: the
+     * program ran cleanly and the page did not move, which is a fact about the
+     * page rather than a failed action.
+     */
+    runtime.kit.endAction({
+      actionId: stepActionId,
+      status: receipt.outcome === "SUCCESS" || receipt.outcome === "NO_CHANGE" ? "success" : "failed",
+      durationMs: receipt.elapsedMs,
+      ...(receipt.failure !== undefined ? { failureKind: receipt.failure.kind } : {}),
+    });
   } catch (error) {
     /*
      * A throw here is a throw from the *harness*, not from the model's program:
@@ -908,6 +1027,19 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
       };
     }
     const message = (error as Error).message.split("\n")[0] ?? "unknown error";
+    /*
+     * The action is closed on this path too.
+     *
+     * A throw from the harness leaves the action open in the ledger, which makes
+     * every later metric wrong by one and leaves a fingerprint that never
+     * resolves. `blocked` rather than `failed` because neither the page nor the
+     * program was at fault: the runtime could not observe the step.
+     */
+    runtime.kit.endAction({
+      actionId: stepActionId,
+      status: "blocked",
+      durationMs: 0,
+    });
     const closed = /closed|Target page, context or browser has been closed|disconnected/i.test(message);
     return {
       output:
@@ -923,6 +1055,28 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
   }
 
   const lines = [renderReceipt(receipt)];
+
+  /*
+   * A locator failure gets the neighbourhood, not the page.
+   *
+   * The model derived the locator that broke from the page it had, so handing it
+   * the page again hands back the same information that produced the wrong
+   * answer, at forty thousand characters. What it does not have is which
+   * elements are near where it was looking, what they are called, and which of
+   * them can actually be clicked. That is what this adds, and it is bounded to
+   * eight candidates.
+   *
+   * Only for the failures where the target is the problem. A timeout with a good
+   * locator, a crash, a policy refusal: none of those are helped by a list of
+   * nearby elements, and adding one would make the receipt longer for nothing.
+   */
+  if (receipt.failure !== undefined && isLocatorFailure(receipt.failure.kind) && receipt.failure.target !== undefined) {
+    const about = runtime.lastCapturedPage();
+    if (about !== undefined && !about.isClosed()) {
+      const context = await runtime.kit.context(about, { text: receipt.failure.target }).catch(() => "");
+      if (context.length > 0) lines.push("", context);
+    }
+  }
 
   /*
    * Fixed sleeps, named where the model can act on them.
@@ -968,9 +1122,28 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
    * returned `Page` or a huge array cannot blow the context.
    */
   if (result !== undefined) {
-    const serialized = serializeBrowserResult(result);
-    lines.push("", "RETURNED:", typeof serialized.value === "string" ? serialized.value : JSON.stringify(serialized.value));
-    if (serialized.truncated) lines.push("(truncated)");
+    /*
+     * A transaction's result is rendered as a receipt, not as JSON.
+     *
+     * `return await tx(...)` is the shape the tool's description recommends, and
+     * the point of it is that the answer is a few hundred tokens of prose. It
+     * was arriving as a JSON blob with the receipt inside it, which is the same
+     * size as the object and harder to read, so the compact form was being
+     * thrown away at the last step.
+     *
+     * The detection is structural: the fields a transaction returned are the
+     * fields this checks for. A program that returns an unrelated object with a
+     * `status` and a `note` is not misrenderable, because the shape it would
+     * need to collide is six specific keys.
+     */
+    const asReceipt = transactionTextOf(result);
+    if (asReceipt !== undefined) {
+      lines.push("", asReceipt);
+    } else {
+      const serialized = serializeBrowserResult(result);
+      lines.push("", "RETURNED:", typeof serialized.value === "string" ? serialized.value : JSON.stringify(serialized.value));
+      if (serialized.truncated) lines.push("(truncated)");
+    }
   }
 
   /*

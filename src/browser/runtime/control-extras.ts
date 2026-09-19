@@ -331,7 +331,7 @@ export function transactionalSurface(runtime: ThreadBrowserRuntime, intern: (val
     armDownload: async (timeoutMs?: number): Promise<Record<string, unknown>> => {
       sweep();
       const page = (await runtime.ensureReady()).page;
-      const token = kit.armDownload(page, typeof timeoutMs === "number" ? timeoutMs : 30_000);
+      const token = await kit.armDownload(page, typeof timeoutMs === "number" ? timeoutMs : 30_000);
       return { token };
     },
 
@@ -445,9 +445,23 @@ export function transactionalSurface(runtime: ThreadBrowserRuntime, intern: (val
         ready: kit.mission.ready().map((subtask) => subtask.title),
         text: kit.mission.render(),
       }),
+      /**
+       * Track a file in the mission's own record.
+       *
+       * This is a note, not evidence, and the distinction is load-bearing: the
+       * verifier reads the *ledger*, which only a real save writes to, so a
+       * program that declares a file it never downloaded satisfies no
+       * requirement. That matters because the alternative is a model passing an
+       * artifact check by asserting the artifact exists, which is the same
+       * failure as a program marking its own subtask verified.
+       *
+       * It is still worth having: a mission that moves a file between sites
+       * wants to know which file it is carrying, and the record is what appears
+       * in the state the model reads each turn.
+       */
       artifact: async (name: string, path: string, bytes?: number): Promise<Record<string, unknown>> => {
         kit.mission.artifacts.set(name, { name, path, bytes: bytes ?? 0, status: "saved" });
-        return { recorded: name, path };
+        return { recorded: name, path, note: "noted in the mission record; this is not evidence that a download happened" };
       },
     },
 

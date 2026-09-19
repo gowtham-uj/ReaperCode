@@ -25,6 +25,7 @@
 
 import type { Page } from "playwright";
 
+import { classifyFailure } from "./runtime/failure.js";
 import type { PageObserver } from "./page-view.js";
 
 /**
@@ -102,6 +103,25 @@ export interface StepReceipt {
    * later, and neither wants to parse a status code.
    */
   note: string;
+  /**
+   * The classified reason an action failed, when one did.
+   *
+   * Playwright's message says "Timeout 30000ms exceeded" whether the element
+   * never existed, existed and was covered, existed and was disabled, or
+   * detached mid-click. Those four want four different next actions, and a model
+   * reading the message has to infer which one it is from a call log. This is
+   * the taxonomy instead: a kind, whether repeating is worth it, and what to do
+   * when it is not.
+   *
+   * Absent on a success, so a happy path pays nothing for it.
+   */
+  failure?: {
+    kind: string;
+    diagnostic: string;
+    retryable: boolean;
+    recommendedNext?: string;
+    target?: string;
+  };
 }
 
 /**
@@ -285,6 +305,22 @@ export async function runStep(
     void after;
     await captureInto(options, page, observer);
     const changes = observer.viewChanges();
+    /*
+     * Classified rather than forwarded.
+     *
+     * The message is kept as the note, because it is frequently the most
+     * specific thing available and a model may recognise it. What is added is
+     * the verdict: which of the twenty known failures this is, whether doing it
+     * again is reasonable, and what to do instead. A model that reads only the
+     * note is no worse off than before; a model that reads the failure stops
+     * guessing.
+     *
+     * No geometry is passed, so a hidden element classifies as NOT_VISIBLE
+     * rather than ZERO_AREA. That is the honest answer here: this path has an
+     * error and no locator, and geometry is only available where the caller
+     * still holds the target, which is `inspect()`.
+     */
+    const failure = classifyFailure(error);
     return {
       result: undefined,
       receipt: {
@@ -298,6 +334,13 @@ export async function runStep(
         wholesale: changes.full,
         elapsedMs: Date.now() - started,
         note: `The action failed: ${(error as Error).message.split("\n")[0] ?? "unknown error"}. The page as it stands now is below.`,
+        failure: {
+          kind: failure.kind,
+          diagnostic: failure.diagnostic,
+          retryable: failure.retryable,
+          ...(failure.recommendedNext !== undefined ? { recommendedNext: failure.recommendedNext } : {}),
+          ...(failure.target !== undefined ? { target: failure.target } : {}),
+        },
       },
     };
   }
@@ -411,6 +454,21 @@ export function renderReceipt(receipt: StepReceipt): string {
    * applying a named tab's diff to the tab it happens to be looking at.
    */
   if (receipt.pageLabel !== undefined) lines.push(`PAGE: ${receipt.pageLabel}`);
+  /*
+   * The classified failure, before the note.
+   *
+   * The note is Playwright's own sentence, which is a call log compressed to one
+   * line and is frequently about waiting rather than about the element. The
+   * failure names the mechanism and the next action, and it is what a model
+   * should decide on. Placed above the note so a model that reads the first
+   * three lines of a receipt gets the useful one.
+   */
+  if (receipt.failure !== undefined) {
+    lines.push(`FAILURE: ${receipt.failure.kind}${receipt.failure.target !== undefined ? ` at ${receipt.failure.target}` : ""}`);
+    lines.push(`  ${receipt.failure.diagnostic}`);
+    lines.push(`  retryable: ${receipt.failure.retryable ? "yes" : "no"}`);
+    if (receipt.failure.recommendedNext !== undefined) lines.push(`  next: ${receipt.failure.recommendedNext}`);
+  }
   if (receipt.changes.length > 0) lines.push("", receipt.changes);
   lines.push("", receipt.note);
   return lines.join("\n");

@@ -555,14 +555,45 @@ uploaded on another site a hundred steps later. Do not build your own download
 handling with `fetch` and `writeFile`: the vault is the supported path, and it is
 what makes the cross-site transfer work after a restart.
 
-If `downloadAfter` returns no file, **stop and report it**. Do not investigate:
-not with `waitForEvent`, not with `goto` on the download URL, not by searching
-the filesystem from a shell. Those are all attempts to work around the tool, and
-they cannot help, because the failure is in the tool rather than in the page.
-Measured: a model spent twenty minutes on one invoice this way, trying each of
-them in turn, while the page it kept re-examining had worked the whole time. One
-retry is reasonable if the click may genuinely have missed. After that, say the
-download failed and finish the task another way.
+If the trigger runs and no file arrives, the call says so and gives up at its own
+budget. **Stop and report it.** Do not investigate: not with `waitForEvent`, not
+with `goto` on the download URL, not with `fetch` inside `evaluate`, not by
+searching the filesystem from a shell. Those are all attempts to work around the
+tool, and the last two are also how a task that measured the interaction gets
+failed: a file that arrived by `fetch` proves nothing about whether the page
+offers one. Measured: a model spent twenty minutes on one invoice this way, while
+the page it kept re-examining had worked the whole time. One retry is reasonable
+if the click may genuinely have missed. After that, say the download failed and
+finish the task another way.
+
+## Saying the task is done
+
+Saying so is a request, and the request is checked. When you believe the task is
+finished, send a `finish` list instead of another program, naming the conditions
+that make it done:
+
+```json
+{ "finish": [
+  { "kind": "url", "pattern": "/parabank/overview" },
+  { "kind": "artifactFromAction", "name": "invoice.txt" }
+] }
+```
+
+Each condition is checked against what actually happened, not against what you
+recorded. A failure comes back with the ones that are not met and the task keeps
+going, which is the point: being told the two things you have not done is worth
+more than being believed.
+
+`artifactFromAction` and `popup` check *provenance*, and they are the two that
+matter when a task says "download the invoice" rather than "get the invoice":
+
+- a file that exists is not a file that was downloaded
+- a tab is not a popup unless a click opened it
+
+Neither is satisfied by recording something with `state.artifact()`, because your
+own record is not evidence. If a task requires the interaction, make the
+interaction happen with `download({trigger})` and `expectPopup(page, trigger)`,
+and the check passes on its own.
 
 ## Remembering what you found, for a long task
 
@@ -578,7 +609,6 @@ await state.subtask("collect versions");        // declare, with no status
 await state.subtask("collect versions", "done");
 await state.subtask("register account", "pending", ["collect versions"]);
 
-await state.artifact("invoice", invoice.path, invoice.bytes);
 return await state.get();                       // everything, as text and as data
 ```
 
@@ -590,6 +620,11 @@ question you reason about.
 `"verified"` is not a status you can set. Record a subtask as `"done"` and the
 runtime's verifier decides whether it is verified; marking your own work verified
 is the thing this whole mechanism exists to prevent.
+
+`state.artifact(name, path, bytes)` records a file you are carrying so it appears
+in the state you read each turn. It is a note, not evidence: only a real save
+writes to the ledger, so it does not satisfy a `finish` condition. Use
+`download({trigger})` when a file is supposed to arrive from the page.
 
 ## Changing how the browser presents itself
 

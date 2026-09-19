@@ -69,6 +69,24 @@ interface Armed {
   pending: Promise<Download>;
   /** Set when the collect timed out or the trigger failed, so the wait can be dropped. */
   settled: boolean;
+  /**
+   * The vault's contents when the wait was armed.
+   *
+   * This is what makes provenance survive a dropped event. Playwright's
+   * `download` event depends on this process owning the browser's download
+   * configuration, and Steel sets that at launch, so a client racing it can lose
+   * the notification while the file still lands (the same race
+   * `collectUnannounced` documents). Without this, that race turned a real
+   * download into an unattributed file: measured, the same test passed and then
+   * failed on consecutive runs with no code change between them.
+   *
+   * A file that was not in the vault when the wait was armed, and is there when
+   * it is collected, is a file this trigger caused. That is provenance the
+   * runtime can attest to from its own observation rather than from a
+   * notification it may not have received.
+   */
+  known: Set<string>;
+  armedAt: number;
 }
 
 /**
@@ -97,10 +115,16 @@ export class ArtifactManager {
    * armed wait that nobody collects resolves to a rejection nobody reads, which
    * is why the catch is attached immediately.
    */
-  arm(page: Page, timeoutMs = 30_000): string {
+  async arm(page: Page, timeoutMs = 30_000): Promise<string> {
     const token = `d${++this.counter}`;
+    /*
+     * The vault is read before the trigger can run, and awaited for that reason:
+     * arm and trigger are separate calls from the program's side, and a
+     * non-awaited read would race the click it is supposed to bracket.
+     */
+    const known = new Set((await this.vault.list().catch(() => [])).map((file) => file.path));
     const pending = page.waitForEvent("download", { timeout: timeoutMs });
-    const record: Armed = { page, pending, settled: false };
+    const record: Armed = { page, pending, settled: false, known, armedAt: Date.now() };
     pending.catch(() => {
       record.settled = true;
     });
@@ -140,9 +164,22 @@ export class ArtifactManager {
     record.settled = true;
 
     if (announced === undefined) {
+      /*
+       * No event. The vault decides, and a file that arrived since the wait was
+       * armed counts as announced.
+       *
+       * `announced` means "this trigger produced this file", which is the claim
+       * provenance rests on, and the runtime is in a position to know that
+       * without Playwright's notification: it recorded what the vault held
+       * before the trigger ran and what it holds after. A dropped event is a
+       * fact about the CDP race, not about whether the download happened, and
+       * treating the two as one made a real download look like a file that
+       * happened to be lying around.
+       */
       const found = await this.newestUnclaimed();
       if (found === undefined) return undefined;
-      return await this.finish(found, false, options);
+      const causedByThisArm = !record.known.has(found.path);
+      return await this.finish(found, causedByThisArm, options);
     }
 
     const stored = await this.vault.accept(announced);

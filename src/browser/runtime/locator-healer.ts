@@ -153,14 +153,32 @@ function siteOf(url: string): string {
  * information that produced the wrong answer. What it needs is the neighbourhood
  * of where the element should be: what is around it, what its siblings are
  * called, and which of the candidates has a real box.
+ *
+ * ## What it searches for
+ *
+ * The hint is whatever the failure managed to name, which is usually a role and
+ * a name (`getByRole("button", { name: "Delete" })`) or a CSS path. Both are
+ * reduced to the words in them, because the point is to find candidates rather
+ * than to re-run the same query: a search for the exact broken selector would
+ * find exactly what the broken selector found, which is the failure.
  */
 export async function localContext(page: Page, hint: { text?: string; role?: string; name?: string }): Promise<string> {
   const raw = await page
     .evaluate((search: { text?: string; role?: string; name?: string }) => {
-      const needle = (search.text ?? search.name ?? "").toLowerCase();
-      if (needle.length === 0) return [];
+      /*
+       * The words, not the selector. `getByRole("button", { name: "Delete" })`
+       * becomes ["button", "delete"], and both are matched against an element's
+       * role and its text. A word that is a CSS operator or a tag name is kept,
+       * because "button" is a useful filter and ">" is not.
+       */
+      const source = `${search.text ?? ""} ${search.name ?? ""} ${search.role ?? ""}`;
+      const words = source
+        .split(/[^A-Za-z0-9_-]+/)
+        .map((word) => word.trim().toLowerCase())
+        .filter((word) => word.length >= 3 && !["getby", "role", "button", "locator", "first", "nth", "hastext"].includes(word));
+      if (words.length === 0) return [];
       const out: Array<{ tag: string; role: string; name: string; box: string; text: string }> = [];
-      const nodes = Array.from(document.querySelectorAll("button, a, input, [role], li, span, td"));
+      const nodes = Array.from(document.querySelectorAll("button, a, input, select, textarea, [role], li, span, td, svg"));
       for (const node of nodes) {
         const label = (
           node.getAttribute("aria-label") ??
@@ -170,7 +188,8 @@ export async function localContext(page: Page, hint: { text?: string; role?: str
         )
           .trim()
           .toLowerCase();
-        if (label.length === 0 || !label.includes(needle)) continue;
+        const matches = words.some((word) => label.includes(word));
+        if (!matches) continue;
         const rect = node.getBoundingClientRect();
         out.push({
           tag: node.tagName.toLowerCase(),
@@ -186,6 +205,14 @@ export async function localContext(page: Page, hint: { text?: string; role?: str
     .catch(() => [] as Array<{ tag: string; role: string; name: string; box: string; text: string }>);
 
   if (raw.length === 0) return "LOCAL CONTEXT: nothing on the page matches that description.";
-  const lines = raw.map((entry) => `  <${entry.tag}${entry.role ? ` role=${entry.role}` : ""}> box ${entry.box} "${entry.text}"`);
+  /*
+   * A zero-area candidate is called out, because it is the reason a locator that
+   * "matches" still cannot be clicked and it is the one thing a model reading a
+   * list of elements cannot tell from the text.
+   */
+  const lines = raw.map((entry) => {
+    const dead = entry.box === "0x0" || entry.box.startsWith("0x") || entry.box.endsWith("x0");
+    return `  <${entry.tag}${entry.role ? ` role=${entry.role}` : ""}> box ${entry.box}${dead ? " (ZERO AREA, not clickable)" : ""} "${entry.text}"`;
+  });
   return `LOCAL CONTEXT: ${raw.length} candidates near where you were looking\n${lines.join("\n")}`;
 }

@@ -144,6 +144,37 @@ export const BrowserUseArgsSchema = z
       .max(BROWSER_USE_MAX_TIMEOUT_MS)
       .optional()
       .describe(`How long the program may run. Defaults to ${BROWSER_USE_DEFAULT_TIMEOUT_MS}ms.`),
+    /**
+     * Ask to finish, and let the runtime check the mission is actually done.
+     *
+     * A model that says "mission complete" has said nothing a runtime can
+     * verify, and a benchmark built on the agent's own confidence measures the
+     * confidence rather than the work. So finishing is a request, and the
+     * requirements are checked against evidence: the page's state, the files
+     * that were saved, and in benchmark mode the interactions that produced
+     * them.
+     *
+     * A failed check returns what is missing and the mission continues, which is
+     * the whole value: the model is told the two things it has not done instead
+     * of being believed.
+     */
+    finish: z
+      .array(
+        z.union([
+          z.object({ kind: z.literal("url"), pattern: z.string() }).strict(),
+          z.object({ kind: z.literal("text"), value: z.string() }).strict(),
+          z.object({ kind: z.literal("artifact"), name: z.string() }).strict(),
+          z.object({ kind: z.literal("artifactFromAction"), name: z.string() }).strict(),
+          z.object({ kind: z.literal("popup"), pattern: z.string() }).strict(),
+          z.object({ kind: z.literal("fact"), name: z.string(), value: z.string().optional() }).strict(),
+          z.object({ kind: z.literal("subtask"), title: z.string() }).strict(),
+          z.object({ kind: z.literal("noFailure"), failureKind: z.string() }).strict(),
+        ]),
+      )
+      .optional()
+      .describe(
+        "Send this to request the mission be finished, with the conditions that make it done, e.g. [{kind:'url',pattern:'/dashboard'}, {kind:'artifactFromAction',name:'invoice.txt'}]. Each is checked against what actually happened and the reply says which are not met. `artifactFromAction` and `popup` check provenance: a file that exists is not a file that was downloaded, and a tab is not a popup unless a click opened it.",
+      ),
   })
   .strict();
 
