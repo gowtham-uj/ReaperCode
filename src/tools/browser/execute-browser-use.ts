@@ -1302,6 +1302,32 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
   }
 
   /*
+   * The thread's pages, on the code path too.
+   *
+   * This was written for the look-only branch and left there, so a model that
+   * always sends a program never saw it. Measured on a run of 101 programs:
+   * `PAGES:` reached the model **zero** times, while 18 of its 104 thinking
+   * blocks were spent working out which tab it was on. The answer was written on
+   * every turn and shown on none of them.
+   *
+   * The names and ids are the whole point of the registry: a model that can read
+   * `p3 "github"` addresses that tab instead of fetching the list and matching on
+   * a URL it half remembers. That work was the largest single category of
+   * reasoning in the run, and it was avoidable.
+   *
+   * Costed rather than assumed, because adding a block to every turn is exactly
+   * what made the previous run 19% more expensive: twelve lines is about 700
+   * characters, which over a hundred turns is roughly 18K tokens against a 13.4M
+   * total. Printed only when there is more than one page, and only when the
+   * model did not already ask for the page list itself.
+   */
+  const livePages = runtime.kit.registry.live();
+  if (livePages.length > 1 && !/\bbrowser\.pages\(\)/.test(args.code ?? "")) {
+    const listing = await runtime.kit.registry.render(runtime.activePage).catch(() => "");
+    if (listing.length > 0) lines.push("", listing);
+  }
+
+  /*
    * A page that refused us is named, and the user agent is rotated.
    *
    * This is the "rotate when one is blocked" behaviour, and the retry is left to

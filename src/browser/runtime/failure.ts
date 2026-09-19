@@ -34,6 +34,19 @@
  * the world; every one below is reachable.
  */
 export type BrowserFailureKind =
+  /*
+   * The runtime's own refusals, which are not Playwright errors at all.
+   *
+   * These fell through to `UNKNOWN` with "look at the page and try a different
+   * approach", which is useless advice for a mistake the runtime named
+   * precisely. Measured on a mission: ten receipts that said `FAILURE: UNKNOWN`
+   * for errors whose own messages were exact (`no open page named "p8"`,
+   * `subtask status must be one of ...`). The model was told to look at the page
+   * when the answer was in the sentence it had just read.
+   */
+  | "PAGE_NOT_FOUND"
+  | "INVALID_ARGUMENT"
+  | "MISSING_AWAIT"
   | "LOCATOR_NOT_FOUND"
   | "LOCATOR_AMBIGUOUS"
   | "NOT_VISIBLE"
@@ -111,6 +124,56 @@ export function classifyFailure(
       diagnostic: "The page's renderer process crashed.",
       retryable: false,
       recommendedNext: "Call recover() to replace the renderer, then reload the page.",
+    };
+  }
+
+  /*
+   * The runtime's own errors, checked before Playwright's.
+   *
+   * These are the sentences this codebase writes, and they are exact: they name
+   * the page, the argument, or the missing await. Falling through to UNKNOWN
+   * threw that away and replaced it with "look at the page", which on a mission
+   * is what ten receipts did.
+   */
+  if (/no open page named|does not resolve to a page|that page is closed/.test(lower)) {
+    return {
+      kind: "PAGE_NOT_FOUND",
+      ...(target !== undefined ? { target } : {}),
+      diagnostic: "The page this program named is not open, so there was nothing to drive.",
+      retryable: false,
+      recommendedNext: "List the open pages and use a name or id from that list; `browser.pages()` shows them with their names.",
+    };
+  }
+  /*
+   * Either shape of the missing-await mistake: the sandbox's own sentence
+   * ("returns a Promise, so its result needs `await`") or JavaScript's own
+   * "x is not a function" when something calls a method on a promise. The second
+   * needs the word "await" or "promise" alongside it, because "is not a
+   * function" on its own is a hundred different mistakes and guessing at this
+   * one would mislabel them.
+   */
+  if (/returns a promise.*needs .?await|needs .?await/i.test(message) || (/is not a function/.test(lower) && /await|promise/i.test(message))) {
+    /*
+     * The missing-await trap, which now explains itself in the sandbox. This
+     * branch catches the same mistake reaching here through another path, and
+     * keeps the classification honest rather than reporting UNKNOWN for a
+     * mistake with a known cause and a known fix.
+     */
+    return {
+      kind: "MISSING_AWAIT",
+      ...(target !== undefined ? { target } : {}),
+      diagnostic: "A method was called on something that is a Promise, which usually means a missing `await`.",
+      retryable: false,
+      recommendedNext: "Add the `await`: `const x = await list.find(async (p) => ...)` and then call the method on `x`.",
+    };
+  }
+  if (/must be one of|is required|expected a|needs a |takes the/.test(lower)) {
+    return {
+      kind: "INVALID_ARGUMENT",
+      ...(target !== undefined ? { target } : {}),
+      diagnostic: message,
+      retryable: false,
+      recommendedNext: "Call it with the shape the message names. The page is fine; only the argument was wrong.",
     };
   }
 

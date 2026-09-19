@@ -109,6 +109,14 @@ const RETRY_POLICY: Record<BrowserFailureKind, { retry: boolean; recover: boolea
   FORM_VALIDATION: { retry: false, recover: false, probe: false },
   SERVER_REJECTION: { retry: false, recover: false, probe: false },
   POLICY_VIOLATION: { retry: false, recover: false, probe: false },
+  /*
+   * The runtime's own refusals. None is retryable, and that is the point: a page
+   * that is not open does not open by being asked again, and an argument that is
+   * the wrong shape is not fixed by time.
+   */
+  PAGE_NOT_FOUND: { retry: false, recover: false, probe: false },
+  INVALID_ARGUMENT: { retry: false, recover: false, probe: false },
+  MISSING_AWAIT: { retry: false, recover: false, probe: false },
   UNKNOWN: { retry: false, recover: false, probe: false },
 };
 

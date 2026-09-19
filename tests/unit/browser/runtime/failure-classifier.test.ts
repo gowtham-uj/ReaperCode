@@ -64,6 +64,31 @@ test("a detached element is the one plain retry that is worth making", () => {
   assert.equal(failure.retryable, true);
 });
 
+test("the runtime's own refusals are classified, not reported as UNKNOWN", () => {
+  /*
+   * Measured on a mission: ten receipts said `FAILURE: UNKNOWN / next: Look at
+   * the page and try a different approach` for errors whose own messages were
+   * exact. The classifier handled Playwright's errors and fell through on this
+   * codebase's, which threw away the one sentence that named the cause.
+   *
+   * Each of these is a real message from a real run.
+   */
+  const notFound = classifyFailure(new Error('no open page named "p8". Open pages: p15 "github", p20 "playwright-docs"'));
+  assert.equal(notFound.kind, "PAGE_NOT_FOUND");
+  assert.equal(notFound.retryable, false);
+  assert.match(notFound.recommendedNext ?? "", /browser\.pages\(\)|name or id/);
+
+  const arg = classifyFailure(new Error('subtask status must be one of pending, running, blocked, done, verified, failed, got "dome"'));
+  assert.equal(arg.kind, "INVALID_ARGUMENT");
+  assert.equal(arg.retryable, false);
+
+  const awaitTrap = classifyFailure(
+    new Error("`find` with an async callback returns a Promise, so its result needs `await`"),
+  );
+  assert.equal(awaitTrap.kind, "MISSING_AWAIT");
+  assert.match(awaitTrap.recommendedNext ?? "", /await/);
+});
+
 test("the rendered failure is small, and names a next action", () => {
   const failure = classifyFailure(notFound("locator.fill: Timeout 30000ms exceeded"));
   const text = renderFailure(failure);
