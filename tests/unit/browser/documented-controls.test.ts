@@ -40,6 +40,16 @@ test("the skill documents the same controls", async () => {
   const skill = await readFile(SKILL_PATH, "utf8");
   assert.match(skill, /`recover\(\)`/, "the skill must document recover()");
   assert.match(skill, /downloadAfter/, "and the download path");
+  /*
+   * The stop rule for a download, which is what a twenty-minute failure needed.
+   *
+   * The model's own workarounds were all reasonable in isolation and all futile,
+   * because the failure was in the tool and not in the page. Naming them is what
+   * turns "try harder" into "report it", and it has to be in the skill because
+   * that is what the model reads while it is browsing.
+   */
+  assert.match(skill, /stop and report it/i, "the skill must say to stop rather than work around a download failure");
+  assert.match(skill, /waitForEvent/, "and name the workarounds that do not help");
   assert.match(skill, /capabilities\(\)/, "and the capability query");
   assert.match(skill, /## Downloads and uploads/, "and have a section for the vault");
 });

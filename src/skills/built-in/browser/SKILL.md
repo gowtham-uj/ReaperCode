@@ -403,6 +403,15 @@ uploaded on another site a hundred steps later. Do not build your own download
 handling with `fetch` and `writeFile`: the vault is the supported path, and it is
 what makes the cross-site transfer work after a restart.
 
+If `downloadAfter` returns no file, **stop and report it**. Do not investigate:
+not with `waitForEvent`, not with `goto` on the download URL, not by searching
+the filesystem from a shell. Those are all attempts to work around the tool, and
+they cannot help, because the failure is in the tool rather than in the page.
+Measured: a model spent twenty minutes on one invoice this way, trying each of
+them in turn, while the page it kept re-examining had worked the whole time. One
+retry is reasonable if the click may genuinely have missed. After that, say the
+download failed and finish the task another way.
+
 ## Changing how the browser presents itself
 
 You can change the browser's own settings, and you should when a site treats you
