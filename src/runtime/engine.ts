@@ -118,7 +118,7 @@ import { prepareRuntimeContent, type ContentPrepResult } from "./content-prep.js
  * delivery is what was missing, so it lives at the prompt.
  */
 import { packagedSkills } from "../context/packaged-skills.js";
-import { discoverSkills } from "../context/skills.js";
+import { discoverSkills, formatSkillsForPrompt } from "../context/skills.js";
 import { readPinnedSkills, resolvePinnedSkills } from "../context/pinned-skills.js";
 import { renderContextCockpit, stripCockpitFromMessages, containsCockpitMarker, COCKPIT_OPEN, COCKPIT_CLOSE, CURRENT_REQUEST_MESSAGE_NAME, type CockpitInput } from "./context-cockpit.js";
 import { MAIN_AGENT_SYSTEM_PROMPT_TEXT } from "./system-prompt.js";
@@ -993,9 +993,29 @@ export class RuntimeEngine {
      * the routing sentence for it lives in the main prompt, and this carries the
      * detail when the user has asked for it to always be available.
      */
+    /*
+     * The skill catalogue, then the pinned bodies.
+     *
+     * Both were computed every run and delivered nowhere, which is why a model
+     * discovered the browser skill by finding the file itself: nothing had ever
+     * told it the skill existed. `formatSkillsForPrompt` builds exactly the
+     * name-and-description list it needs to decide, and its only consumer was a
+     * renderer with no callers, so `activate_skill` was reachable by name only
+     * for a model that already knew the name.
+     *
+     * The catalogue is names and descriptions, which is small; the bodies are the
+     * expensive part and only the pinned ones are included. That split is what
+     * makes "every skill is discoverable" affordable: a model sees the whole menu
+     * and pays only for what the user asked to always be loaded.
+     */
+    const catalogue = this.skillCatalogue();
     const pinnedBlocks = this.pinnedSkillBlocks();
-    const withSkills = pinnedBlocks.length > 0
-      ? `${systemPrompt}\n\n# Always-on skills\n${pinnedBlocks.join("\n\n")}`
+    const skillSections = [
+      catalogue.length > 0 ? `# Available skills\n${catalogue}` : "",
+      pinnedBlocks.length > 0 ? `# Always-on skills\n${pinnedBlocks.join("\n\n")}` : "",
+    ].filter((section) => section.length > 0);
+    const withSkills = skillSections.length > 0
+      ? `${systemPrompt}\n\n${skillSections.join("\n\n")}`
       : systemPrompt;
     return runWithCleanupScope(runContext.runDir, () =>
       runWithModelCallLogContext(
@@ -1083,19 +1103,68 @@ export class RuntimeEngine {
   }
 
   /**
+   * How much pinned-skill text may go into the prompt, in characters.
+   *
+   * A budget rather than no limit, because this text is in the system prompt and
+   * therefore in every request of the run. The two skills pinned on this machine
+   * are 36,500 characters together, about 9,000 tokens per call; the same two
+   * plus a few more a user might add would keep growing with nothing to stop it.
+   * Prompt caching absorbs most of the cost, but a cache miss re-reads the whole
+   * prefix, so an unbounded prefix is unbounded latency on every miss.
+   *
+   * Deliberately larger than the 16,000 the removed cockpit renderer used. That
+   * number predates the built-in browser skill, which is 21,700 characters on its
+   * own, so it would have truncated the default pin set rather than protecting
+   * it. This is sized to hold the built-ins with room for one more.
+   */
+  private static readonly PINNED_SKILL_BUDGET = 48_000;
+
+  /**
+   * Every skill this run may load, as names and descriptions.
+   *
+   * This is the list that answers "what skills exist". Without it a model has no
+   * way to know, and the only route left is `activate_skill` with a name it
+   * guessed, or finding the file on disk and reading it, which is what a live
+   * mission did with the browser skill: it discovered `src/skills/built-in/
+   * browser/SKILL.md` by exploring and loaded it by hand, while the skill was
+   * already pinned always-on and supposed to be delivered.
+   *
+   * Produced by the same `formatSkillsForPrompt` the pipeline already built, so
+   * the ranking, the `disableModelInvocation` filter and the prompt-injection
+   * envelope are the existing ones rather than a second implementation.
+   *
+   * The query is deliberately empty. Ranking against the turn's prompt would
+   * show a different subset each turn, which makes the list unreliable to a model
+   * that read it once and expects it to be stable, and it would hide a skill
+   * exactly when a model went looking for something it did not already know it
+   * wanted.
+   */
+  private skillCatalogue(): string {
+    try {
+      const available = [
+        ...packagedSkills(),
+        ...discoverSkills(this.input.workspaceRoot),
+      ];
+      return formatSkillsForPrompt(available, "", available.length).trim();
+    } catch {
+      return "";
+    }
+  }
+
+  /**
    * The bodies of the skills the user pinned, ready to append to the prompt.
    *
    * `pinnedSkills` is a user setting, and until now it did nothing: the pins were
    * resolved every run and handed to a renderer whose insertion point had been
-   * removed. A user who pinned `browser` had a correctly-stored preference and no
-   * behavioural change, which is the worst kind of broken setting — it looks
-   * applied.
+   * removed in an earlier refactor. A user who pinned `browser` had a
+   * correctly-stored preference and no behavioural change, which is the worst kind
+   * of broken setting — it looks applied.
    *
-   * Deliberately not the whole skill inventory. Pinned means always available,
-   * and a body is delivered only when the user asked for that; everything else
-   * stays reachable through `activate_skill`, which is what keeps a run's prompt
-   * from growing with the catalogue. A skill marked `disableModelInvocation` is
-   * skipped by `resolvePinnedSkills` itself, so a pin cannot override it.
+   * Deliberately not the whole skill inventory. Pinned means always available, and
+   * a body is delivered only when the user asked for that; everything else stays
+   * reachable through `activate_skill`, which is what keeps a run's prompt from
+   * growing with the catalogue. A skill marked `disableModelInvocation` is skipped
+   * by `resolvePinnedSkills` itself, so a pin cannot override it.
    *
    * Best effort: a skill whose body cannot be read is skipped rather than failing
    * the run, because a prompt is not the place to discover a filesystem problem.
@@ -1107,9 +1176,36 @@ export class RuntimeEngine {
         ...discoverSkills(this.input.workspaceRoot),
       ];
       const pinned = resolvePinnedSkills(readPinnedSkills(this.input.userHome ?? homedir()), available);
-      return pinned.map((skill) =>
-        `<<<SKILL: ${skill.name}>>>\n${skill.body.trim()}\n<<<END_SKILL>>>`,
-      );
+
+      const blocks: string[] = [];
+      let used = 0;
+      const dropped: string[] = [];
+      for (const skill of pinned) {
+        const block = `<<<SKILL: ${skill.name}>>>\n${skill.body.trim()}\n<<<END_SKILL>>>`;
+        if (used + block.length > RuntimeEngine.PINNED_SKILL_BUDGET) {
+          dropped.push(skill.name);
+          continue;
+        }
+        used += block.length;
+        blocks.push(block);
+      }
+      /*
+       * A skill left out is named, never silently missing.
+       *
+       * This is the same rule as the truncated tool list: a partial delivery that
+       * reads as complete is worse than a smaller one that says what it left
+       * behind. A model that believes it has the whole browser skill and has
+       * actually got two thirds of it will follow instructions it cannot see,
+       * which is worse than knowing the skill is not loaded.
+       */
+      if (dropped.length > 0) {
+        blocks.push(
+          `<<<PINNED_SKILLS_NOT_LOADED>>>\n` +
+          `These pinned skills did not fit the prompt budget of ${RuntimeEngine.PINNED_SKILL_BUDGET} characters and are NOT loaded: ` +
+          `${dropped.join(", ")}. Load one deliberately with activate_skill when the task needs it.\n<<<END_PINNED_SKILLS_NOT_LOADED>>>`,
+        );
+      }
+      return blocks;
     } catch {
       return [];
     }
