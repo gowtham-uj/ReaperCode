@@ -130,6 +130,37 @@ export class PageRegistry {
         return entry;
       }
     }
+    /*
+     * A name that comes back gets its old id back.
+     *
+     * This is the reconnect case, and it was a real failure before it was a rule.
+     * A reconnect replaces every `Page` object: the runtime re-attaches, the old
+     * handles are dead, and the thread's tabs are restored as new objects under
+     * the same names. Minting fresh ids for them meant the model's `p8` silently
+     * stopped resolving, and a measured run hit exactly that:
+     *
+     *   no open page named "p8". Open pages: p15 "github", p20 "playwright-docs"
+     *
+     * The model had done nothing wrong. It was holding the handle the runtime had
+     * given it, and the runtime had moved the handle over the reconnect, which is
+     * precisely what a handle must not do. The id counter keeps climbing, so the
+     * old id is not reused by a *different* page; what happens here is that the
+     * entry for that name is transferred to the new object.
+     *
+     * Matched by name rather than by URL, because the name is the identity the
+     * model chose and a restore can land on a different URL (a form that
+     * redirected, a page that remembered where it was).
+     */
+    const stale = this.byName.get(name);
+    if (stale !== undefined) {
+      this.byId.delete(stale.id);
+      stale.page = page;
+      stale.openedAt = Date.now();
+      if (options.creationType !== undefined) stale.creationType = options.creationType;
+      this.byId.set(stale.id, stale);
+      return stale;
+    }
+
     this.counter += 1;
     const parentId = options.parent !== undefined ? this.idOf(options.parent) : undefined;
     /*

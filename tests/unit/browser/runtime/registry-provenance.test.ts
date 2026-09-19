@@ -84,6 +84,49 @@ test("a closed page is forgotten so a name does not point at a corpse", () => {
   assert.equal(registry.live().length, 0);
 });
 
+test("a page that comes back after a reconnect keeps its id", () => {
+  /*
+   * The failure this pins, read out of a live mission's journal:
+   *
+   *   no open page named "p8". Open pages: p15 "github", p20 "playwright-docs"
+   *
+   * A reconnect replaces every `Page` object: the runtime re-attaches, the old
+   * handles are dead, and the thread's tabs are restored as new objects under the
+   * same names. Minting fresh ids for them meant the handle the runtime had given
+   * the model stopped resolving, and the model had done nothing wrong.
+   *
+   * A handle that moves under its holder is worse than no handle: the model
+   * either fails (this case) or, if the counter had wrapped, would act on a
+   * different tab while every number it was shown looked right.
+   */
+  const registry = new PageRegistry();
+  const before = fakePage();
+  const entry = registry.register("parabank", before);
+  assert.equal(entry.id, "p1");
+
+  /* The reconnect: same name, new object, old one closed. */
+  const replacement = fakePage();
+  const after = registry.register("parabank", replacement);
+  assert.equal(after.id, "p1", "the id must survive, or the model is holding a dead handle");
+  assert.equal(after.page, replacement, "and the entry must point at the live page");
+  assert.equal(registry.find("p1")?.page, replacement, "so an id lookup finds the new object");
+  assert.equal(registry.find("parabank")?.page, replacement, "and so does a name lookup");
+});
+
+test("a new page after a reconnect does not steal an old id", () => {
+  /*
+   * The other half, and the reason the counter never resets. A page that is
+   * genuinely new must get a genuinely new id, so an id the model remembers can
+   * never resolve to a tab it has never seen.
+   */
+  const registry = new PageRegistry();
+  registry.register("parabank", fakePage());
+  registry.register("parabank", fakePage());
+  const fresh = registry.register("newcomer", fakePage());
+  assert.equal(fresh.id, "p2", "the newcomer gets the next id, not one that was in use");
+  assert.equal(registry.find("p1")?.name, "parabank");
+});
+
 test("the rendered list names both handles, so the model stops re-deriving them", async () => {
   const registry = new PageRegistry();
   const page = fakePage();
