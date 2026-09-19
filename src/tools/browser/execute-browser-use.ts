@@ -1478,11 +1478,25 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
    * Costed rather than assumed, because adding a block to every turn is exactly
    * what made the previous run 19% more expensive: twelve lines is about 700
    * characters, which over a hundred turns is roughly 18K tokens against a 13.4M
-   * total. Printed only when there is more than one page, and only when the
-   * model did not already ask for the page list itself.
+   * total. Printed only when there is more than one page.
+   *
+   * ## The suppression that was wrong
+   *
+   * This first skipped the block when the program called `browser.pages()`,
+   * on the theory that the model had just fetched the list and did not need it
+   * printed too. That is backwards, and a live run showed it immediately: a model
+   * opening ten sites calls `browser.pages()` in *every* program, because that is
+   * the only way it knows how to find a tab. The condition was therefore always
+   * true, the block never printed once in five programs, and the fix was inert
+   * while looking correct.
+   *
+   * A program that lists pages is the program that most needs the names and ids,
+   * because it is the one doing the finding. Nothing suppresses it now; the
+   * `> 1` test is the only condition, and that is about relevance rather than
+   * about what the model just did.
    */
   const livePages = runtime.kit.registry.live();
-  if (livePages.length > 1 && !/\bbrowser\.pages\(\)/.test(args.code ?? "")) {
+  if (livePages.length > 1) {
     const listing = await runtime.kit.registry.render(runtime.activePage).catch(() => "");
     if (listing.length > 0) lines.push("", listing);
   }
