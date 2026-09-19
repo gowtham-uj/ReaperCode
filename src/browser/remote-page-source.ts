@@ -185,6 +185,49 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
    * identity. The wrapper is a Proxy rather than a subclass so Array.isArray
    * and length stay true, which matters because a model checks both.
    */
+  /*
+   * A promise that says what to do with it when a method is called on it.
+   *
+   * The failure this prevents, read from a live mission's journal:
+   *
+   *   const blank = all.find(async (p) => (await p.url()) === "about:blank");
+   *   await blank.goto(url);
+   *   -> FAILURE: UNKNOWN  blank.goto is not a function
+   *
+   * Every word of that message is true and none of it is the reason. The reason
+   * is a missing \`await\` on the line above, and the model spent turns rewriting
+   * the surrounding code instead of adding one word. The skill documents the
+   * rule; the error did not, and the error is what the model reads when it is
+   * stuck.
+   *
+   * So the promise is wrapped in a proxy that forwards \`then\`, \`catch\` and
+   * \`finally\` to the real promise, so \`await\` and \`.then()\` behave exactly as
+   * before, and answers any *other* property with a throw that names the cause.
+   * A method that does not exist on a promise is the only thing this changes,
+   * and the only thing it can change is a mistake.
+   */
+  function explainUnawaited(promise, method) {
+    return new Proxy(promise, {
+      get(target, property) {
+        /*
+         * The three the language needs. Forwarded bound to the target, because
+         * \`await\` calls \`.then\` on whatever it is given and a broken \`then\`
+         * would turn this from a helpful error into no error at all.
+         */
+        if (property === 'then' || property === 'catch' || property === 'finally') {
+          return target[property].bind(target);
+        }
+        if (property === 'constructor' || typeof property === 'symbol') return target[property];
+        if (property in target) return target[property];
+        throw new TypeError(
+          '\`' + method + '\` with an async callback returns a Promise, so its result needs \`await\`: ' +
+          '\`const x = await list.' + method + '(async (p) => ...)\`. Then \`x.' + String(property) + '(...)\` works. ' +
+          'The "' + String(property) + ' is not a function" message means the await is missing, not that the method is wrong.',
+        );
+      },
+    });
+  }
+
   function decodeArray(value, depth) {
     const decoded = value.map((item) => decodeValue(item, depth + 1));
     /*
@@ -289,7 +332,25 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
               if (typeof callback !== 'function') return target[property](callback);
               const collected = collect(callback);
               if (!collected.async) return finish(property, collected.raw, undefined, false);
-              return collectAsync(callback, collected).then((raw) => finish(property, raw, undefined, false));
+              /*
+               * An async callback makes the call a promise, and the promise
+               * carries a note about what to do with it.
+               *
+               * The note is attached to the returned promise because that is
+               * where the mistake lands. A model writes
+               *
+               *   const blank = all.find(async (p) => (await p.url()) === "about:blank");
+               *   await blank.goto(url);
+               *
+               * and gets \`blank.goto is not a function\`, which names the symptom
+               * and nothing else. Read from a live mission, where the agent then
+               * spent turns rewriting the surrounding code rather than adding the
+               * one word. A promise can carry a property like anything else, so
+               * the fix is a sentence on the promise itself, which costs nothing
+               * and is exactly what the model needed to read.
+               */
+              const pending = collectAsync(callback, collected).then((raw) => finish(property, raw, undefined, false));
+              return explainUnawaited(pending, property);
             };
           case 'reduce':
           case 'reduceRight':

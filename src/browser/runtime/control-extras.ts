@@ -421,21 +421,32 @@ export function transactionalSurface(runtime: ThreadBrowserRuntime, intern: (val
           const created = kit.mission.declareSubtask(title, requires ?? []);
           return { subtask: created.title, status: created.status, requires: created.requires };
         }
-        const known = ["pending", "running", "blocked", "done", "verified", "failed"];
-        if (!known.includes(status)) throw new Error(`subtask status must be one of ${known.join(", ")}, got "${status}"`);
         /*
-         * `verified` is not a status a program may set.
+         * The statuses a program may set, which is all of them but one.
          *
-         * It is the verifier's word, and a model that could set it would be
-         * marking its own homework, which is the exact failure the state machine
-         * exists to prevent. A program asking to verify gets the instruction to
-         * request a finish instead.
+         * `verified` is deliberately absent, and the message for setting it is
+         * separate from the message for a typo. The first version listed
+         * `verified` among the valid values and then refused it, so a model that
+         * tried it read "must be one of pending, running, blocked, done,
+         * verified, failed" and concluded the call was broken rather than
+         * forbidden. Read from a live mission's journal, where the agent hit
+         * exactly that and moved on without understanding why.
          */
+        const known = ["pending", "running", "blocked", "done", "failed"];
         if (status === "verified") {
           throw new Error(
             "a program cannot mark its own subtask verified. Record it as `done` and request the mission be finished; " +
             "the verifier decides whether it is verified.",
           );
+        }
+        /*
+         * A typo, which is a different mistake with a different fix. Checked
+         * after `verified` so the two never share a message: one is forbidden
+         * and one is misspelled, and telling a model "that is not allowed" when
+         * it wrote `dome` sends it looking for a rule that does not exist.
+         */
+        if (!known.includes(status)) {
+          throw new Error(`"${status}" is not a subtask status. Use one of: ${known.join(", ")}.`);
         }
         kit.mission.setSubtask(title, status as never);
         return { subtask: title, status };
