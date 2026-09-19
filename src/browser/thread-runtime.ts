@@ -222,86 +222,61 @@ export class ThreadBrowserRuntime {
   }
 
   /**
-   * Turn on downloads for the connected browser, which CDP does not do by itself.
+   * Prepare the download vault, and deliberately leave the browser alone.
    *
-   * This is the root cause of every download the tool could not do, and it was
-   * invisible because nothing errored: a link with
-   * `Content-Disposition: attachment` simply produced no `download` event, so
-   * `downloadAfter` waited its 30s and the vault stayed empty. Measured: a plain
-   * attachment link on a fresh page fired no event, with raw Playwright, outside
-   * this codebase entirely.
+   * The name is historical. This method used to send
+   * `Browser.setDownloadBehavior` on the theory that CDP does not enable
+   * downloads by itself; the measurement is in the body below, and it says the
+   * opposite: sending that command is what broke every download, in both
+   * spellings. Playwright already handles a download over CDP, so the work here
+   * is creating the directory the file will be copied into.
    *
-   * Read out of Playwright's own source, which is where the mechanism is:
-   * `CRBrowserContext.initialize()` sends `Browser.setDownloadBehavior` for a
-   * context it was asked to CREATE, and it skips the command entirely when
-   * `acceptDownloads` is `"internal-browser-default"`. Over `connectOverCDP` the
-   * default context already exists, so it is never created by Playwright and the
-   * command is never sent. The browser is left in its own default, which is to
-   * hand the file to whatever the download directory setting says, with no event
-   * and no path this process can reach.
-   *
-   * So it is sent here. `allowAndName` is what Playwright itself uses for
-   * `acceptDownloads: "accept"` and it is the behaviour the vault needs: Chrome
-   * keeps the file and names it by its GUID, the `download` event fires with a
-   * path, and the vault copies it somewhere stable. `eventsEnabled` is what makes
-   * the event fire at all.
-   *
-   * Best effort. A browser that refuses the command still browses; it just
-   * cannot download, which is reported by `downloadAfter` when it times out
-   * rather than here, where nothing is waiting for a file yet.
+   * Kept as one method rather than folded into the constructor because it is
+   * awaited on the attach path, where a filesystem failure can be recorded
+   * against the connection that will need it.
    */
   private async enableDownloads(browser: Browser, context: BrowserContext): Promise<void> {
     if (!this.downloads) return;
+    /*
+     * The vault is created, and the browser is left alone.
+     *
+     * This method used to send `Browser.setDownloadBehavior`, on the theory that
+     * CDP does not enable downloads by itself. It does, and sending the command
+     * is what broke every download the tool attempted. Both spellings were
+     * measured against the live browser:
+     *
+     *   with downloadPath: our dir  -> the command returns, and every later
+     *                                  `download.saveAs` fails with ENOENT,
+     *                                  because Playwright's bookkeeping still
+     *                                  points at the artifact directory it owns
+     *                                  while Chrome wrote the file where we said
+     *   without downloadPath        -> the command never returns at all, and the
+     *                                  attach that sent it hangs forever
+     *   not sent at all             -> the event fires and `saveAs` succeeds
+     *
+     * The third row is what this method now does. Playwright already handles
+     * downloads over CDP: the browser was launched with its own download
+     * configuration, the `download` event arrives, and `path()` and `saveAs()`
+     * both work against the artifact directory Playwright manages. Nothing here
+     * needed to enable anything.
+     *
+     * The file still ends up in the thread's workspace, which is what the model
+     * needs: `DownloadVault.accept` copies it there from the page's download
+     * handler. Copying is the mechanism, and it is the only one that works.
+     *
+     * So the vault's directory is created and the connection is not touched. A
+     * directory that cannot be made is still worth reporting, because that is a
+     * failure this process can see and the model cannot.
+     */
     const directory = await this.downloads.ensure().catch(() => undefined);
     if (directory === undefined) {
       this.downloadNote = "the download vault directory could not be created, so downloads will not be kept";
       return;
     }
-    try {
-      /*
-       * A page-level session, because `Browser.setDownloadBehavior` is accepted
-       * on any session of the connection and the browser object exposes no
-       * session of its own. The first page is enough: the command is
-       * browser-scoped, not page-scoped, so where it is sent from does not
-       * change what it does.
-       */
-      const page = context.pages().find((candidate) => !candidate.isClosed());
-      if (page === undefined) {
-        this.downloadNote = "there was no page to send the download configuration on, so downloads are not being kept";
-        return;
-      }
-      const session = await context.newCDPSession(page);
-      await session.send("Browser.setDownloadBehavior", {
-        behavior: "allowAndName",
-        downloadPath: directory,
-        eventsEnabled: true,
-      });
-      await session.detach().catch(() => undefined);
-      this.downloadsEnabled = true;
-      this.downloadNote = undefined;
-    } catch (error) {
-      /*
-       * Recorded rather than swallowed, and this is the whole of why a model
-       * spent twenty minutes on one invoice.
-       *
-       * The failure used to be discarded here with a note saying it would be
-       * reported later by the wait that times out. It was not: `downloadAfter`
-       * reported "the click landed but the page produced no file", which is one
-       * of two causes and the less likely one. So a model read a message about
-       * the page, checked the page repeatedly, tried raw `waitForEvent`, tried
-       * `goto` on the download URL, and searched the filesystem from a shell,
-       * none of which could ever have helped, because the cause was that this
-       * command failed at attach time.
-       *
-       * The message now carries the browser's own words, which is the one fact
-       * that distinguishes "the browser refused the command" from "the click hit
-       * the wrong element".
-       */
-      this.downloadNote =
-        `downloads could not be enabled on this browser, so a click that starts one will not produce a file. ` +
-        `The browser said: ${(error as Error).message.split("\n")[0]}`;
-    }
+    this.downloadsEnabled = true;
+    this.downloadNote = undefined;
     void browser;
+    void context;
   }
 
   /**
