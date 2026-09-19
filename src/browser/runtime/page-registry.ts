@@ -268,7 +268,20 @@ export class PageRegistry {
    */
   async render(active: Page | undefined): Promise<string> {
     const live = this.live();
-    if (live.length === 0) return "PAGES: (none open)";
+    /*
+     * `TABS:` rather than `PAGES:`, and the distinction is not cosmetic.
+     *
+     * `PAGES:` is already the prefix the runtime uses for the note that explains
+     * a page appearing or disappearing ("This thread had no pages left, so a
+     * blank page was opened"). Two different things under one prefix is how a
+     * model learns to skip a heading rather than read it, and the checked-in
+     * output of a real run shows exactly the collision.
+     *
+     * `TABS` is also the word a model reaches for when it means this: the
+     * thinking traces of all three runs say "tab" and never "page" when they are
+     * talking about the list.
+     */
+    if (live.length === 0) return "TABS: (none open)";
     const lines: string[] = [];
     for (const entry of live) {
       const url = entry.page.url();
@@ -276,6 +289,14 @@ export class PageRegistry {
       const origin = entry.openedBy !== undefined ? `  opened by ${entry.openedBy}` : "";
       lines.push(`${marker} ${entry.id} "${entry.name}" ${url}${origin}`);
     }
-    return `PAGES:\n${lines.join("\n")}`;
+    /*
+     * The id first, the name second, and the active one starred.
+     *
+     * The id is the stable handle and the name is the human label, and both are
+     * printed because a model that has seen `p5` in a listing should be able to
+     * come back to it, while a model reading its own plan will more often say
+     * "parabank".
+     */
+    return `TABS:\n${lines.join("\n")}`;
   }
 }
