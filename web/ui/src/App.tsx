@@ -518,6 +518,47 @@ function WorkspacePage() {
                     live for the turn that is running and collapse it for every
                     turn that is finished.
                   */}
+                  {/*
+                    Older history, on request.
+
+                    A thread's resume carries only its newest turns, which is what
+                    makes opening a long conversation fast: the transcript used to
+                    wait for the whole history before it could paint, so the wait
+                    grew with the conversation while the visible work stayed the
+                    same.
+
+                    The control is what keeps that bounded load honest. Without it
+                    the older turns would be unreachable, and a thread would look
+                    shorter than it is, which is worse than a slow one. The scroll
+                    position is held across the load because prepending content
+                    above the viewport otherwise throws the reader to the top of
+                    the thread they were reading.
+                  */}
+                  {app.session.hasOlderTurns && (
+                    <div className="transcript-earlier">
+                      <button
+                        type="button"
+                        className="load-earlier"
+                        onClick={() => {
+                          const scroller = transcriptRef.current;
+                          const before = scroller ? scroller.scrollHeight - scroller.scrollTop : 0;
+                          void app.session.loadOlderTurns().then(() => {
+                            /*
+                             * Restored after React has painted the new turns, so
+                             * the measurement includes them. A microtask would run
+                             * before the DOM update and the position would snap.
+                             */
+                            requestAnimationFrame(() => {
+                              const element = transcriptRef.current;
+                              if (element) element.scrollTop = element.scrollHeight - before;
+                            });
+                          });
+                        }}
+                      >
+                        Load earlier messages
+                      </button>
+                    </div>
+                  )}
                   <Transcript turns={app.turns} {...(app.activeTurn ? { activeTurnId: app.activeTurn.id } : {})} />
                   {app.queued.map((entry) => <QueuedMessage key={entry.id} entry={entry} onCancel={() => app.dropQueued(entry.id)} onMode={(mode) => app.setQueuedMode(entry.id, mode)} />)}
                   {app.approvals.map((request) => <ApprovalVisibility key={request.approvalId} onVisibilityChange={setApprovalVisible}><ApprovalCard request={request} onDecide={app.decide} /></ApprovalVisibility>)}

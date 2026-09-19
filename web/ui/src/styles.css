@@ -212,6 +212,22 @@ code, pre, [data-diff], [data-read], [data-terminal] { font-family: var(--ds-fon
 .conversation-scroll { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
 .chat-column { display: flex; flex: 1 0 auto; flex-direction: column; width: 100%; max-width: var(--dsh-chat-content-width); min-height: 0; margin: 0 auto; padding: 24px 16px 32px; }
 .recovery-banner { margin: 0; padding: 7px 18px; border-bottom: .5px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-state-warn-tertiary); color: var(--dsw-alias-state-warn-label); font-size: 12px; }
+
+/*
+ * "Load earlier messages", at the top of the transcript.
+ *
+ * Centred and low-contrast on purpose: it sits above the conversation and is
+ * only relevant to a reader who has scrolled to the very beginning, so it must
+ * be findable without competing with the messages. It is a real button rather
+ * than a scroll-triggered auto-load because silently fetching more while
+ * somebody scrolls makes every scroll a network request, and because a reader
+ * who has reached the top is usually looking for the control rather than through
+ * it.
+ */
+.transcript-earlier { display: flex; justify-content: center; padding: 4px 0 12px; }
+.load-earlier { padding: 5px 14px; border: .5px solid var(--dsw-alias-border-l2); border-radius: 999px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 12px; cursor: pointer; }
+.load-earlier:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.load-earlier:disabled { opacity: .6; cursor: default; }
 .chat-error { margin: 8px 0; padding: 9px 12px; border-radius: 9px; background: var(--dsw-alias-interactive-bg-hover-danger); color: var(--dsw-alias-state-error-primary); font-size: 13px; }
 .turn { padding: 4px 0; }
 /*

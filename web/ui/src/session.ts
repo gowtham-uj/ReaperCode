@@ -388,7 +388,17 @@ export function useSession(url: string, store: TranscriptStore, handlers: Sessio
     forgetThread();
     setThreadId(undefined);
     store.hydrate({});
-  }, [setThreadId, store]);
+    /*
+     * The paging cursor is cleared with the thread.
+     *
+     * It is a position in one conversation. Left behind, the next thread opened
+     * would page from a cursor that means nothing in it, so "load earlier" would
+     * fetch a slice of somebody else's history or nothing at all. Same rule as
+     * the composer draft and the queue: state about a conversation does not
+     * outlive it.
+     */
+    resetHistoryWindow();
+  }, [resetHistoryWindow, setThreadId, store]);
 
   return useMemo(() => ({
     status,
@@ -403,7 +413,7 @@ export function useSession(url: string, store: TranscriptStore, handlers: Sessio
     createThread,
     switchThread,
     close,
-  }), [status, threadId, client, catchingUp, recovered, hasOlderTurns, loadOlderTurns, retryNow, createThread, switchThread, close]);
+  }), [status, threadId, client, catchingUp, recovered, hasOlderTurns, loadOlderTurns, retryNow, createThread, switchThread, clearThread, close]);
 }
 
 function readRememberedThread(): string | undefined {
