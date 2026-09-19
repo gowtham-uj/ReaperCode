@@ -169,6 +169,22 @@ export function createAppServerCore(options: StartAppServerOptions): {
      */
     liveThreadIds: async () => await (runningTurns?.liveThreadIds() ?? new Set<string>()),
     /*
+     * Where a thread's files live, which is where its download vault goes.
+     *
+     * This line is the whole feature. The runtime was given a `workspaceRoot`
+     * option, the manager grew a `workspaceFor` method, and neither was connected:
+     * `workspaceFor` stayed undefined, the runtime fell back to deriving the vault
+     * from its state path, and every download landed outside the sandbox. A
+     * mission confirmed it by failing to copy an invoice into
+     * `.reaper/browser/<id>/downloads/`, the old path, while the code that would
+     * have put it in the workspace sat unused one file away.
+     *
+     * The failure was silent because the fallback is a valid path: the vault
+     * existed, downloads were "enabled", and only the model could not read the
+     * file. That is why there is a wiring test now rather than a comment.
+     */
+    workspaceFor: (threadId) => runningTurns?.workspaceFor(threadId),
+    /*
      * One state file per thread, under the same `.reaper` root everything else
      * uses. The thread id is sanitized because it reaches a filesystem path, and
      * an id is not trusted to be a safe path segment.
