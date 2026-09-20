@@ -1,6 +1,8 @@
 # ReaperCode
 
-![Reaper](docs/screenshots/brand.png)
+<p align="center">
+  <img src="docs/readme/reapercode-brand.svg" alt="ReaperCode" width="100%" />
+</p>
 
 ReaperCode is a coding agent for long software engineering tasks. Give it a repository and a task. It can inspect files, edit code, run commands, call tools, and keep working until the model returns a final answer.
 
