@@ -80,6 +80,13 @@ export interface PerceiveOptions {
   depth?: number | undefined;
   /** The character budget. Unused by the stub, which does not trim. */
   maxChars?: number | undefined;
+  /**
+   * How long the snapshot may take before it is reported as unreadable.
+   *
+   * Explicit so a wedged page costs seconds rather than the context default's
+   * thirty, which the model paid on every call while it was trapped.
+   */
+  timeoutMs?: number | undefined;
 }
 
 /**
@@ -128,10 +135,68 @@ export async function perceive(page: Page, options: PerceiveOptions = {}): Promi
    * ancestor's accessible name, so a page that looks complete stops being
    * actionable.
    */
-  const text = await page.ariaSnapshot({
-    mode: "ai",
-    ...(options.depth !== undefined ? { depth: options.depth } : {}),
-  });
+  /*
+   * Bounded, and it must not throw for a reason the page caused.
+   *
+   * ## The deadlock this fixes, measured
+   *
+   * A page stuck in `document.readyState === "loading"` with no `<body>` (a
+   * response that stalled mid-stream) makes `ariaSnapshot` wait for a tree that
+   * will never exist. Every mode and every timeout hung; `title()`, `evaluate()`
+   * and `locator()` all answered in milliseconds, so the page was otherwise alive.
+   *
+   * Because this had no catch and the tool's look path has no try around it, the
+   * hang threw out of the tool, so *no program ran*, so the active page never
+   * changed, so every later call hit the same page. The model was permanently
+   * trapped, and its own transcript shows it working that out correctly over
+   * seventy calls: the only repair it had was to run code, and every call
+   * snapshotted the page before the code.
+   *
+   * The contract at the top of this file already said "nothing throws for a reason
+   * the page caused". A snapshot timeout is exactly that, so it is answered here
+   * with a result that says what happened. The model then gets a readable answer
+   * and, crucially, code still runs, so it can reload or close the page itself.
+   *
+   * The timeout is explicit rather than inherited from the context's 30s default,
+   * so a wedged page costs seconds per call instead of half a minute. Fifteen
+   * seconds is far above a healthy page: the collector measured 359ms on a heavy
+   * news site, and the largest fixture page snapshots in well under a second.
+   */
+  const timeout = options.timeoutMs ?? 15_000;
+  let text: string;
+  try {
+    text = await page.ariaSnapshot({
+      mode: "ai",
+      timeout,
+      ...(options.depth !== undefined ? { depth: options.depth } : {}),
+    });
+  } catch (error) {
+    const message = (error as Error).message.split("\n")[0] ?? "the snapshot failed";
+    /*
+     * The page's own state, read with calls that do not need the accessibility
+     * tree, so the message can say *why* rather than only that it failed. This is
+     * the diagnostic that turns "the tool is broken" into "this tab never
+     * finished loading".
+     */
+    const state = await page
+      .evaluate(() => ({ readyState: document.readyState, hasBody: document.body !== null }))
+      .catch(() => undefined);
+    const loading = state !== undefined && state.readyState !== "complete";
+    return {
+      text:
+        `PAGE UNREADABLE: this page could not be described. ${message}\n` +
+        (loading
+          ? "The document is still loading and has no body yet, which is what a stalled response leaves behind. " +
+            "Its renderer is alive, so you can still run a program on it: reload it with `await page.reload()` or close it and use another tab."
+          : "You can still run a program on this page, so try inspecting it from code rather than from a look."),
+      ir: undefined,
+      usedFallback: true,
+      fallbackReason: "collect-failed",
+      note: "SNAPSHOT FAILED: the page could not be read. Code you write still runs; the page is the problem, not the sandbox.",
+      elementCount: 0,
+      sectionCount: 0,
+    };
+  }
 
   return {
     text,

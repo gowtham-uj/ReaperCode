@@ -75,9 +75,18 @@ async function snapshotText(
   depth: number | undefined,
   boxes: boolean,
 ): Promise<string> {
+  /*
+   * Bounded, for the same reason `perceive` is: a page whose document never
+   * finished loading makes the snapshot wait forever, and an unbounded wait here
+   * costs the context default of thirty seconds on a read the model asked for.
+   * The scoped path is the one a model reaches for *because* a page is being
+   * difficult, so it is the one that must not hang.
+   */
+  const timeout = 15_000;
   if (typeof target.ariaSnapshotJSON === "function") {
     const json = await (target.ariaSnapshotJSON as (options: Record<string, unknown>) => Promise<unknown>)({
       mode: "ai",
+      timeout,
       ...(depth !== undefined ? { depth } : {}),
       ...(boxes ? { boxes: true } : {}),
     });
@@ -86,6 +95,7 @@ async function snapshotText(
   if (typeof target.ariaSnapshot === "function") {
     return await (target.ariaSnapshot as (options: Record<string, unknown>) => Promise<string>)({
       mode: "ai",
+      timeout,
       ...(depth !== undefined ? { depth } : {}),
     });
   }

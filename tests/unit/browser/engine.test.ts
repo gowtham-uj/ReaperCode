@@ -85,19 +85,32 @@ test("raw mode is labelled differently from the stub fallback", async () => {
   assert.match(result.note ?? "", /RAW/);
 });
 
-test("a page that is gone rejects rather than returning an empty view", async () => {
+test("a page that is gone is reported, not thrown, and never comes back empty", async () => {
   /*
-   * The one failure that must escape. An empty view reads to a model as a blank
-   * page, so the difference between "nothing to say" and "the page is gone" has
-   * to survive as a thrown error rather than as a view with nothing in it.
+   * This asserted a throw, and the throw is what deadlocked a live mission.
+   *
+   * The intent was right and is kept: an empty view reads to a model as a blank
+   * page, so "nothing to say" and "the page is gone" must not look alike. What
+   * changed is the mechanism. Throwing escaped the tool, and because the tool's
+   * look path has no try, no program ran, so the active page never changed, so
+   * every later call hit the same page and the model had no way out.
+   *
+   * The distinction survives as text instead: a result that says the page could
+   * not be read, names why, and states that code still runs. Asserted here as the
+   * two properties that matter, so a future change cannot quietly turn this back
+   * into either a throw or an empty page.
    */
   const gone = {
     ariaSnapshot: async () => {
       throw new Error("Target page, context or browser has been closed");
     },
+    evaluate: async () => { throw new Error("Target page, context or browser has been closed"); },
   };
 
-  await assert.rejects(() => perceive(gone as never), /has been closed/);
+  const result = await perceive(gone as never);
+  assert.match(result.text, /PAGE UNREADABLE/, "the model must be told, not handed a silent empty view");
+  assert.ok(result.text.trim().length > 30, "and told enough to act on");
+  assert.match(result.note ?? "", /could not be read/, "with the note naming it too");
 });
 
 test("the whole-page read uses the text form, not the JSON one", async () => {
@@ -131,4 +144,52 @@ test("the whole-page read uses the text form, not the JSON one", async () => {
 
   assert.equal(page.calls.length, 1, "the text form is the one called");
   assert.match((page as unknown as { calls: Array<{ mode?: string }> }).calls[0]?.mode ?? "", /^ai$/);
+});
+
+test("a page that cannot be snapshotted returns a readable result instead of throwing", async () => {
+  /*
+   * The deadlock this pins, measured on a live run: a page stuck in
+   * `readyState: "loading"` with no `<body>` (a response that stalled mid-stream)
+   * makes `ariaSnapshot` wait for a tree that will never exist. Every mode and
+   * every timeout hung, while `title()`, `evaluate()` and `locator()` all answered
+   * in milliseconds.
+   *
+   * Because `perceive` threw and the tool's look path had no try around it, the
+   * hang escaped the tool, so no program ran, so the active page never changed,
+   * so every later call hit the same page. The model was trapped for seventy calls
+   * and ~50 minutes, and its own transcript shows it working out correctly that
+   * the only repair was code it could never run.
+   *
+   * The file's own contract already said "nothing throws for a reason the page
+   * caused". This asserts it for the snapshot.
+   */
+  const wedged = {
+    ariaSnapshot: async () => { throw new Error("page.ariaSnapshot: Timeout 15000ms exceeded."); },
+    evaluate: async () => ({ readyState: "loading", hasBody: false }),
+  };
+  const result = await perceive(wedged as never);
+
+  assert.equal(result.usedFallback, true);
+  assert.match(result.text, /PAGE UNREADABLE/, "the model is told the page could not be read");
+  assert.match(result.text, /still loading/, "and why, read from the page without the accessibility tree");
+  assert.match(result.text, /page\.reload\(\)/, "with something it can do about it");
+  assert.doesNotMatch(result.text, /^\s*$/, "a failing read must never come back empty, which reads as a blank page");
+});
+
+test("the whole-page read is bounded, so a wedged page costs seconds not thirty", async () => {
+  /*
+   * The context default is 30s and the model paid it on every call while trapped.
+   * The bound is passed explicitly so a page that will never answer costs fifteen
+   * seconds per look rather than half a minute.
+   */
+  const calls: Array<{ timeout?: number }> = [];
+  const page = {
+    ariaSnapshot: async (options?: { timeout?: number }) => { calls.push(options ?? {}); return "- text"; },
+    evaluate: async () => ({ readyState: "complete", hasBody: true }),
+  };
+  await perceive(page as never);
+
+  assert.equal(calls.length, 1);
+  assert.ok((calls[0]!.timeout ?? 0) > 0, "an explicit timeout, or the context default applies");
+  assert.ok((calls[0]!.timeout ?? 0) <= 20_000, `bounded well below the 30s default, got ${calls[0]!.timeout}`);
 });

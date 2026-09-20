@@ -168,7 +168,25 @@ export async function settle(page: Page, options: SettleOptions = {}): Promise<{
   const pollMs = options.pollMs ?? SETTLE_POLL_MS;
   const started = Date.now();
 
-  let previous = await readOutline(page);
+  /*
+   * The first read is guarded too, and this line was the deadlock.
+   *
+   * The loop below already tolerated a read that fails mid-navigation, but this
+   * initial read sat outside that guard and outside every try in its caller. So a
+   * page that could not be described at all made `settle` throw before the loop
+   * was reached, which threw out of `step`, which threw out of the tool, which
+   * meant no program ran. The model's only repair was code, and every call
+   * settled the page before the code, so it had no way out.
+   *
+   * A page that cannot be read has not settled, and that is a fact to report
+   * rather than an error to raise: the caller renders the receipt either way.
+   */
+  let previous = "";
+  try {
+    previous = await readOutline(page);
+  } catch {
+    return { settled: false, outline: "", waitedMs: Date.now() - started };
+  }
   let stableSince = Date.now();
 
   while (Date.now() - started < timeoutMs) {
@@ -213,7 +231,14 @@ export async function settle(page: Page, options: SettleOptions = {}): Promise<{
  * compile and report the whole page as changed.
  */
 async function readOutline(page: Page): Promise<string> {
-  return page.ariaSnapshot({ mode: "ai" });
+  /*
+   * Bounded, because this is polled every 60ms while a page settles and a wedged
+   * page would otherwise spend thirty seconds on each poll. A poll that times out
+   * throws, and `settle` treats a failed read as "not settled yet", which is the
+   * correct reading: a page that cannot be described has not been observed to
+   * stop changing.
+   */
+  return page.ariaSnapshot({ mode: "ai", timeout: 5_000 });
 }
 
 /**
@@ -441,11 +466,27 @@ async function captureInto(
   observer: PageObserver,
 ): Promise<void> {
   if (options.capture) {
-    await options.capture(page);
+    /*
+     * The caller's capture can fail for a page-caused reason too, and the runtime
+     * is the caller here. A failed capture leaves the observer holding the last
+     * view, which is the honest state: the page could not be described, so there
+     * is nothing new to report about it.
+     */
+    await options.capture(page).catch(() => undefined);
     return;
   }
-  const outline = await page.ariaSnapshot({ mode: "ai" });
-  observer.capture({ url: page.url(), title: await page.title().catch(() => ""), snapshot: outline });
+  /*
+   * The fallback read is bounded and guarded for the same reason `settle` is: a
+   * page whose document never finished loading hangs the snapshot, and this line
+   * sat outside every try. Without a bound it inherits the context default of
+   * thirty seconds, which a model pays on every step against such a page.
+   */
+  const outline = await page.ariaSnapshot({ mode: "ai", timeout: 15_000 }).catch(() => "");
+  observer.capture({
+    url: page.url(),
+    title: await page.title().catch(() => ""),
+    snapshot: outline,
+  });
 }
 
 /**
