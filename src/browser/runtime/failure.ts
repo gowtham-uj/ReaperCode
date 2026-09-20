@@ -287,11 +287,26 @@ export function classifyFailure(
     };
   }
 
-  if (/download/.test(lower) && /(fail|error|cancel)/.test(lower)) {
+  /*
+   * A download that went wrong, including the case where the file arrived and
+   * could not be *copied*.
+   *
+   * "it could not be copied into this thread's vault" is our own sentence, and it
+   * names neither a failure nor an error nor a cancellation, so it reached the
+   * fallback and was reported as `UNKNOWN`. Measured: a live integration run
+   * failed the download test with `FAILURE: UNKNOWN` and a perfectly explicit
+   * message underneath it, which is the shape this classifier exists to remove.
+   * `ENOENT` and `copyfile` are named as well, because the underlying errno is
+   * what a raw Playwright error carries.
+   */
+  if (
+    (/download/.test(lower) && /(fail|error|cancel)/.test(lower)) ||
+    /could not be copied into this thread's vault|enoent.*copyfile|copyfile.*enoent/.test(lower)
+  ) {
     return {
       kind: "DOWNLOAD_FAILED",
       ...(target !== undefined ? { target } : {}),
-      diagnostic: "The download was triggered but did not produce a file.",
+      diagnostic: "The download was triggered but did not produce a file this thread could keep.",
       retryable: true,
       recommendedNext: "Use browser.download() so the wait is armed before the click, and retry once.",
     };

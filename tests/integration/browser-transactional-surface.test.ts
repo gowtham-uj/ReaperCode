@@ -51,6 +51,26 @@ async function runtime(): Promise<ThreadBrowserRuntime> {
 
 const metadata = { runId: "test", artifactDir: "/tmp", toolCallId: "call-tx" };
 
+/*
+ * The shared runtime is closed when the file is done, and without this the file
+ * hangs forever after passing.
+ *
+ * The runtime holds an open CDP socket to Steel, and node's test runner waits for
+ * the event loop to drain. So a file that passed every assertion sat until the
+ * outer timeout killed it, and the report was a truncated run rather than a
+ * green one. The runtime's own `release` documents the same trap from the other
+ * side: it leaked one socket per runtime until the handles were captured before
+ * being cleared.
+ *
+ * Registered here rather than in each test because the runtime is shared, and a
+ * test that closed it would take the browser out from under every test after it.
+ */
+test.after(async () => {
+  await shared?.close().catch(() => undefined);
+  shared = undefined;
+  await site?.close().catch(() => undefined);
+});
+
 /**
  * Open a fixture page and run a program against it, the way the tool does.
  *

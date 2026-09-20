@@ -49,6 +49,28 @@ async function use(path: string, code: string, extra: { expected_revision?: numb
   return executeBrowserUse(rt, { code, ...extra }, metadata);
 }
 
+/**
+ * The value a program returned, read out of the tool's output.
+ *
+ * The tool prints more after the returned value, and on purpose: the page and the
+ * tab list follow it, because the answer comes first and the state of the page is
+ * context for the next step. So the returned value is the text between `RETURNED:`
+ * and the first blank line, which is where the tool's own sections begin.
+ *
+ * Reading to the end of the output was correct only while the tab list happened to
+ * be suppressed, and that suppression was a bug: a model opening ten sites calls
+ * `browser.pages()` in every program, so the condition that guarded it never fired
+ * and the block printed on none of five programs. Removing the suppression is what
+ * exposed these three parses, which had been green against a tab list nobody saw.
+ */
+function returnedValue(output: string): string {
+  const marker = output.indexOf("RETURNED:");
+  assert.ok(marker !== -1, `the output carries no returned value: ${output.slice(0, 300)}`);
+  const after = output.slice(marker + "RETURNED:".length).trim();
+  const blank = after.indexOf("\n\n");
+  return (blank === -1 ? after : after.slice(0, blank)).trim();
+}
+
 test("a program runs against the page that is already open", { skip }, async () => {
   const result = await use("/basic", `await page.getByRole("button", { name: "Continue" }).click();`);
   assert.equal(result.outcome, "SUCCESS", result.output);
@@ -392,8 +414,8 @@ test("a program cannot enumerate another thread's contexts", { skip }, async () 
       { code: `page.context().browser().contexts().length`, observe: "none" } as never,
       metadata,
     );
-    const count = Number(counted.output.split("RETURNED:")[1]?.trim());
-    assert.equal(count, 1, "a program must see one context, its own, not every thread's");
+    const count = Number(returnedValue(counted.output));
+    assert.equal(count, 1, `a program must see one context, its own, not every thread's: ${counted.output.slice(-300)}`);
   } finally {
     await other.close();
   }
@@ -491,7 +513,7 @@ test("a program cannot reach the raw page through a locator or a frame", { skip 
    * read as a bare number, which is what the first version of this test did and
    * what broke when the returned value became structured.
    */
-  const returned = JSON.parse(result.output.split("RETURNED:")[1]!.trim()) as { contexts: unknown };
+  const returned = JSON.parse(returnedValue(result.output)) as { contexts: unknown };
   assert.equal(
     Number(returned.contexts),
     1,
@@ -770,7 +792,7 @@ test("a returned array handles async callbacks without breaking sync ones", { sk
   );
 
   assert.equal(result.outcome, "SUCCESS", result.output);
-  const value = JSON.parse(result.output.split("RETURNED:")[1]!.trim()) as {
+  const value = JSON.parse(returnedValue(result.output)) as {
     found: string | null; kept: number; syncMap: number | string;
   };
   assert.ok(value.found?.includes("/form"), `async find returned ${value.found}`);

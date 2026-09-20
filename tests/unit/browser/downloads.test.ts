@@ -198,3 +198,72 @@ test("a download lands where the sandbox can reach it", async () => {
   const files = await vault.list();
   assert.deepEqual(files.map((f) => f.name), ["invoice.txt"]);
 });
+
+test("a download whose artifact is gone is still stored, by streaming its bytes", async () => {
+  /*
+   * The failure that made this test exist, measured on a real run rather than
+   * imagined:
+   *
+   *   the browser downloaded "invoice.txt" but it could not be copied into this
+   *   thread's vault. download.saveAs: ENOENT: no such file or directory,
+   *   copyfile '/tmp/playwright-artifacts-5djaMp/a0ea05ee-...' -> '.../invoice.txt'
+   *
+   * All three `copyFile` retries from `download.path()` failed with the same
+   * ENOENT, because `path()` and `saveAs` name the same file and the browser had
+   * removed it between the event and the copy. The bytes were available the whole
+   * time over the CDP connection, which `createReadStream()` is the route to.
+   *
+   * The window this happens in is real: the download event fires when the
+   * download *starts*, so a page that navigates or closes right after the click
+   * can take the artifact with it, and the run that caught this had exactly that
+   * shape.
+   */
+  const vault = await vaultAt();
+  const { Readable } = await import("node:stream");
+  let streamed = 0;
+  const fake = {
+    suggestedFilename: () => "invoice.txt",
+    saveAs: async () => { throw new Error("ENOENT: no such file or directory, copyfile"); },
+    path: async () => "/tmp/playwright-artifacts-gone/a0ea05ee",
+    createReadStream: async () => {
+      streamed += 1;
+      return Readable.from([Buffer.from("invoice 4711: 66 bytes\n")]);
+    },
+    failure: async () => null,
+    url: () => "https://example.com/invoice",
+  };
+
+  const saved = await vault.accept(fake as never);
+  assert.equal(streamed, 1, "the bytes are streamed when the artifact path is gone");
+  assert.equal(saved.bytes, 23, "and the file lands with its real size");
+  const files = await vault.list();
+  assert.deepEqual(files.map((f) => f.name), ["invoice.txt"], "the vault holds the file");
+});
+
+test("a stream that fails leaves no partial file behind", async () => {
+  /*
+   * The other half of streaming: a stream can fail part-way, and a half-written
+   * file is worse than none, because the next step would upload it and the
+   * failure would look like the site rejecting a file that was never whole.
+   */
+  const vault = await vaultAt();
+  const { Readable } = await import("node:stream");
+  const fake = {
+    suggestedFilename: () => "invoice.txt",
+    saveAs: async () => { throw new Error("ENOENT: no such file or directory, copyfile"); },
+    path: async () => undefined,
+    createReadStream: async () => {
+      async function* failing() {
+        yield Buffer.from("partial");
+        throw new Error("the connection dropped mid-stream");
+      }
+      return Readable.from(failing());
+    },
+    failure: async () => null,
+    url: () => "https://example.com/invoice",
+  };
+
+  await assert.rejects(() => vault.accept(fake as never), /could not be copied/);
+  const names = await readdir(await vault.ensure());
+  assert.deepEqual(names, [], `a failed copy must not leave a file, got ${names.join(",")}`);
+});

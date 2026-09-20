@@ -99,3 +99,36 @@ test("a page that is gone rejects rather than returning an empty view", async ()
 
   await assert.rejects(() => perceive(gone as never), /has been closed/);
 });
+
+test("the whole-page read uses the text form, not the JSON one", async () => {
+  /*
+   * Pinned because switching it shipped once and the failure was invisible.
+   *
+   * Playwright 1.63 offers the same tree as text or as JSON, and the JSON form
+   * is the right one for a *scoped* read (`observe-ladder.ts`), where per-element
+   * geometry is what answers "why can I not click this". On the whole-page path
+   * it buys nothing and costs twice:
+   *
+   *   /basic        text 1378 chars, 24 refs  | json 1663 chars, 24 refs
+   *   /form-limits  text 1182 chars, 21 refs  | json 1416 chars, 21 refs
+   *
+   * Same refs, both addressing the same elements through
+   * `page.locator("aria-ref=e1")`, and 17 to 20 percent larger as JSON because
+   * every key is quoted and every key is repeated. On a real page that is tens of
+   * thousands of characters paid on every look.
+   *
+   * It also silently zeroed the stats. `statsOf` counts `[ref=...]` markers in
+   * the text, and the JSON form has none, so every page reported 0 refs and 0
+   * interactive elements. That does not read as a bug, it reads as an empty page,
+   * which is why it survived review and was caught by an integration test
+   * asserting the count.
+   */
+  const page = fakePage('- button "Continue" [ref=e1]');
+  Object.assign(page, {
+    ariaSnapshotJSON: async () => { throw new Error("the JSON form must not be used for a whole-page read"); },
+  });
+  await perceive(page as never);
+
+  assert.equal(page.calls.length, 1, "the text form is the one called");
+  assert.match((page as unknown as { calls: Array<{ mode?: string }> }).calls[0]?.mode ?? "", /^ai$/);
+});

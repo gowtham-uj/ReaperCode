@@ -20,7 +20,9 @@
  * one is the kind of loss that is discovered at the worst moment.
  */
 
-import { mkdir, copyFile, readdir, stat } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { mkdir, copyFile, readdir, rm, stat } from "node:fs/promises";
+import { pipeline } from "node:stream/promises";
 import { basename, join } from "node:path";
 import type { Download, Page } from "playwright";
 
@@ -157,18 +159,39 @@ export class DownloadVault {
       failures.push((first as Error).message.split("\n")[0] ?? "saveAs failed");
     }
 
+    /*
+     * The stream is tried before the paths are retried, and it is the attempt
+     * that actually survives the failure this exists for.
+     *
+     * `saveAs` and `download.path()` both name a file in the browser's temporary
+     * artifact directory, and when that file is gone both fail the same way:
+     * measured, `saveAs` reported ENOENT and all three `copyFile` retries from
+     * `path()` failed with it, so the file was lost while the browser insisted it
+     * had downloaded it. `createReadStream()` does not read that path at all. It
+     * asks the browser for the bytes over the CDP connection, which is the one
+     * route that still works after the artifact directory has been cleaned.
+     *
+     * Chosen ahead of the path retries because the common cause is the artifact
+     * being gone rather than late, and a retry against a path that will never
+     * exist again only spends the budget before reaching the route that works.
+     */
     if (failures.length > 0) {
-      /*
-       * A brief wait, because the artifact can lag the event: the file is
-       * written by the browser after the download is announced, and a copy that
-       * runs in that window fails on a file that is about to exist.
-       */
-      for (const delayMs of [50, 250, 750]) {
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-        const copied = await this.copyThroughPath(download, target);
-        if (copied) {
-          failures.length = 0;
-          break;
+      if (await this.copyThroughStream(download, target)) {
+        failures.length = 0;
+      } else {
+        /*
+         * A brief wait, because the artifact can also just lag the event: the
+         * file is written by the browser after the download is announced, and a
+         * copy that runs in that window fails on a file that is about to exist.
+         * Only reached when the stream failed too, which is the case where the
+         * timing explanation is the one still worth trying.
+         */
+        for (const delayMs of [50, 250, 750]) {
+          const copied = await this.copyThroughPath(download, target);
+          if (copied) {
+            failures.length = 0;
+            break;
+          }
         }
       }
     }
@@ -195,6 +218,40 @@ export class DownloadVault {
       return { name, path: target, bytes: info?.size ?? 0, ...(download.url() ? { url: download.url() } : {}) };
     }
     return { name, path: target, bytes: info?.size ?? 0, ...(download.url() ? { url: download.url() } : {}) };
+  }
+
+  /**
+   * Copy the artifact by streaming its bytes from the browser, not from disk.
+   *
+   * This is the attempt that survives the browser's temporary artifact file being
+   * removed, because it never opens that file. `download.createReadStream()`
+   * reads over the CDP connection the browser is already on, so a download whose
+   * artifact directory has been cleaned between the event and the copy still
+   * lands in the vault.
+   *
+   * Measured as the difference between a passing and a failing run of the same
+   * test: `saveAs` reported ENOENT and all three `copyFile` retries from
+   * `path()` failed with it, while the bytes were available the whole time.
+   *
+   * Returns whether the file was written. A stream that fails part-way leaves a
+   * partial file, which is removed rather than left to be mistaken for a whole
+   * one: `pipeline` destroys the write side on failure, and the unlink is what
+   * makes "the copy either completed or left nothing" true.
+   */
+  private async copyThroughStream(download: Download, target: string): Promise<boolean> {
+    let stream: NodeJS.ReadableStream;
+    try {
+      stream = await download.createReadStream();
+    } catch {
+      return false;
+    }
+    try {
+      await pipeline(stream as NodeJS.ReadableStream, createWriteStream(target));
+      return true;
+    } catch {
+      await rm(target, { force: true }).catch(() => undefined);
+      return false;
+    }
   }
 
   /**

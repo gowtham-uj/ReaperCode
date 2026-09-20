@@ -101,33 +101,37 @@ export interface PerceiveOptions {
  */
 export async function perceive(page: Page, options: PerceiveOptions = {}): Promise<PerceptionResult> {
   /*
-   * `ariaSnapshotJSON` when the installed Playwright has it, `ariaSnapshot`
-   * otherwise.
+   * The text form, and this was measured back after a change to the JSON one
+   * turned out to be a regression that reached a release candidate.
    *
-   * Same representation, two serialisations, and the JSON one is what Playwright
-   * 1.63 added for exactly this use: its `mode: "ai"` is the machine-oriented
-   * form and it carries element geometry alongside the tree. The geometry is the
-   * part worth having on the fallback path, because a zero-area element is
-   * invisible in the text form and obvious in the boxed one.
+   * Playwright 1.63 offers the same tree two ways, and the JSON form is the one
+   * the *scoped* read uses (`observe-ladder.ts`), where its per-element geometry
+   * is what answers "why can I not click this". This is the whole-page path, and
+   * there the geometry buys nothing while the serialisation actively costs:
    *
-   * The degradation is a real path and not a formality: this is the rung that
-   * has to work when everything cleverer has failed, so it cannot be the rung
-   * that needs a newer dependency.
+   *   /basic        text 1378 chars, 24 refs   |  json 1663 chars, 24 refs
+   *   /form-limits  text 1182 chars, 21 refs   |  json 1416 chars, 21 refs
+   *
+   * Same refs, both resolving through `page.locator("aria-ref=e1")`, and 17 to
+   * 20 percent larger as JSON because every key is quoted and repeated. On a real
+   * page that is tens of thousands of characters of punctuation, paid on every
+   * look, to carry boxes the model did not ask for.
+   *
+   * It also broke `statsOf`, which counts `[ref=...]` markers in the text: the
+   * JSON form has none, so `view.stats.refs` and `interactive` reported zero on
+   * every page. That is the failure mode worth remembering. A wrong number here
+   * does not read as an error, it reads as "this page has nothing on it", and it
+   * was caught by an integration test asserting the count rather than by anyone
+   * looking at a page.
+   *
+   * Depth is still not passed. See the note above: depth folds controls into their
+   * ancestor's accessible name, so a page that looks complete stops being
+   * actionable.
    */
-  const target = page as unknown as { ariaSnapshotJSON?: (options: Record<string, unknown>) => Promise<unknown> };
-  let text: string;
-  if (typeof target.ariaSnapshotJSON === "function") {
-    const json = await target.ariaSnapshotJSON({
-      mode: "ai",
-      ...(options.depth !== undefined ? { depth: options.depth } : {}),
-    });
-    text = typeof json === "string" ? json : JSON.stringify(json);
-  } else {
-    text = await page.ariaSnapshot({
-      mode: "ai",
-      ...(options.depth !== undefined ? { depth: options.depth } : {}),
-    });
-  }
+  const text = await page.ariaSnapshot({
+    mode: "ai",
+    ...(options.depth !== undefined ? { depth: options.depth } : {}),
+  });
 
   return {
     text,
