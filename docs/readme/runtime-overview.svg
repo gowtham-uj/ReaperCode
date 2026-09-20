@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="760" viewBox="0 0 1400 760">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1">
+      <stop offset="0" stop-color="#0b1020"/>
+      <stop offset="1" stop-color="#14152b"/>
+    </linearGradient>
+    <style>
+      .t{font-family:Inter,Segoe UI,Arial,sans-serif;fill:#eef2ff}
+      .m{font-family:Inter,Segoe UI,Arial,sans-serif;fill:#aab3cf}
+      .box{fill:#141b32;stroke:#5865f2;stroke-width:2}
+      .box2{fill:#101827;stroke:#2dd4bf;stroke-width:2}
+      .line{stroke:#7c83ff;stroke-width:3;fill:none;marker-end:url(#a)}
+      .line2{stroke:#38d9c5;stroke-width:3;fill:none;marker-end:url(#b)}
+    </style>
+    <marker id="a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#7c83ff"/></marker>
+    <marker id="b" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#38d9c5"/></marker>
+  </defs>
+  <rect width="1400" height="760" rx="28" fill="url(#bg)"/>
+  <text x="60" y="72" class="t" font-size="38" font-weight="700">ReaperCode runtime</text>
+  <text x="60" y="110" class="m" font-size="20">One model loop, with tools, context management, and persistent clients around it.</text>
+
+  <rect x="65" y="250" width="220" height="120" rx="18" class="box"/>
+  <text x="175" y="295" text-anchor="middle" class="t" font-size="23" font-weight="650">Task + workspace</text>
+  <text x="175" y="330" text-anchor="middle" class="m" font-size="17">repo, prompt, session</text>
+
+  <rect x="390" y="220" width="300" height="180" rx="20" class="box"/>
+  <text x="540" y="270" text-anchor="middle" class="t" font-size="26" font-weight="700">Runtime engine</text>
+  <text x="540" y="310" text-anchor="middle" class="m" font-size="18">build request</text>
+  <text x="540" y="340" text-anchor="middle" class="m" font-size="18">run tool calls</text>
+  <text x="540" y="370" text-anchor="middle" class="m" font-size="18">update history</text>
+
+  <rect x="820" y="145" width="245" height="105" rx="18" class="box2"/>
+  <text x="942" y="188" text-anchor="middle" class="t" font-size="22" font-weight="650">Model gateway</text>
+  <text x="942" y="219" text-anchor="middle" class="m" font-size="16">provider-normalized stream</text>
+
+  <rect x="820" y="290" width="245" height="105" rx="18" class="box2"/>
+  <text x="942" y="333" text-anchor="middle" class="t" font-size="22" font-weight="650">Tool scheduler</text>
+  <text x="942" y="364" text-anchor="middle" class="m" font-size="16">files, shell, search, eval</text>
+
+  <rect x="820" y="435" width="245" height="105" rx="18" class="box2"/>
+  <text x="942" y="478" text-anchor="middle" class="t" font-size="22" font-weight="650">Context hooks</text>
+  <text x="942" y="509" text-anchor="middle" class="m" font-size="16">prune, spill, compact, recover</text>
+
+  <rect x="1155" y="260" width="180" height="120" rx="18" class="box"/>
+  <text x="1245" y="305" text-anchor="middle" class="t" font-size="22" font-weight="650">Next turn</text>
+  <text x="1245" y="337" text-anchor="middle" class="m" font-size="16">or final answer</text>
+
+  <path d="M285 310 H390" class="line"/>
+  <path d="M690 270 C750 270 755 197 820 197" class="line2"/>
+  <path d="M690 310 H820" class="line2"/>
+  <path d="M690 350 C750 350 755 487 820 487" class="line2"/>
+  <path d="M1065 320 H1155" class="line"/>
+  <path d="M1245 380 C1245 650 545 650 545 400" class="line"/>
+
+  <rect x="360" y="540" width="350" height="100" rx="16" fill="#0d1427" stroke="#8b5cf6" stroke-width="2"/>
+  <text x="535" y="580" text-anchor="middle" class="t" font-size="21" font-weight="650">Code Mode</text>
+  <text x="535" y="611" text-anchor="middle" class="m" font-size="16">Node.js program calls built-in Reaper tools</text>
+
+  <rect x="790" y="585" width="460" height="95" rx="16" fill="#0d1427" stroke="#475569" stroke-width="2"/>
+  <text x="1020" y="622" text-anchor="middle" class="t" font-size="20" font-weight="650">CLI, web app, and JSON-RPC app server</text>
+  <text x="1020" y="652" text-anchor="middle" class="m" font-size="16">different clients, same runtime</text>
+</svg>
