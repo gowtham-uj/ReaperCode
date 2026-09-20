@@ -2,11 +2,126 @@
 
 ![Reaper](docs/screenshots/brand.png)
 
-Reaper is a coding agent you run from the terminal. Point it at a repo, give it a task, pick a model. It reads files, edits them, runs shell commands, and keeps going until it thinks it is done.
+ReaperCode is a coding agent for long software engineering tasks. Give it a repository and a task. It can inspect files, edit code, run commands, call tools, and keep working until the model returns a final answer.
 
-It is built for long jobs. When the conversation gets large, Reaper trims old tool output and file reads, then summarizes only if the context budget is actually blown. The system prompt stays put. That is the whole point of the project.
+You can run it from the CLI, use the React web app, or connect a client to the JSON-RPC app server.
 
-Reaper can run as a CLI or through its React web interface. It is experimental. Use it on a copy of a project, or in a git repo you can revert.
+Most of this project is the runtime around the model. ReaperCode tries to keep long sessions useful without stuffing every file read, command log, and tool schema back into the next request.
+
+It is experimental. Run it in a git repository or another workspace you can restore.
+
+## What ReaperCode does
+
+ReaperCode gives the model file tools, shell access, git tools, tool discovery, and an optional Node.js execution tool called Code Mode. It streams model output, reasoning, tool calls, and process output while a turn is running.
+
+Named sessions can be resumed later. App-server threads survive WebSocket disconnects and can replay recent events after a client reconnects.
+
+The web app adds conversations, diffs, approvals, process output, provider setup, skills, previews, and browser views on top of the same runtime.
+
+## Why the runtime is built this way
+
+### Long jobs create a context problem
+
+A coding agent can waste most of its context on old file reads and command output.
+
+ReaperCode runs cheaper cleanup passes before asking a model to summarize the conversation. It can drop stale tool output, replace an old file read after the same file is read again unchanged, move large command output to disk, and recover after a provider rejects an oversized request.
+
+One live test used a 94 MB log file. The agent finished in 10 tool calls. The largest tool result placed in the conversation was 2,194 characters. ReaperCode wrote the full command output to disk and gave the model the path.
+
+[Read about context management](#context-management)
+
+### Some tasks are easier as code than as many tool calls
+
+Code Mode gives the model a Node.js runtime through the `eval` tool. The model can write a small JavaScript program, call ReaperCode tools from that program, loop over results, and return only the value it needs.
+
+```js
+const { matches } = await tools.grep_search({
+  pattern: "TODO",
+  include: "**/*.ts"
+});
+
+const byFile = {};
+
+for (const match of matches) {
+  (byFile[match.path] ??= []).push(match.line);
+}
+
+Object.entries(byFile).map(([path, lines]) => ({
+  path,
+  count: lines.length
+}));
+```
+
+In this example, the per-match data stays inside the program. The model gets the grouped result instead of a separate conversation entry for each step.
+
+![Code Mode in the web transcript](docs/screenshots/code-mode-expanded.png)
+
+[Read about Code Mode](#code-mode)
+
+### Tool schemas also cost context
+
+ReaperCode keeps full schemas for eleven common tools in the model request, including `eval`. Nineteen less common built-in tools sit behind `search_tools`.
+
+Code Mode uses that built-in tool registry. Extension-registered tools are separate and are not currently exposed through Code Mode.
+
+[Read about the tool design](#tools-are-small-on-purpose)
+
+### The agent loop does not depend on one model provider
+
+The web app and app server read from a checked-in Models.dev snapshot. The current snapshot lists 213 providers and roughly 7,500 models. This build includes 29 Vercel AI SDK transport packages.
+
+`ProviderModelClient` hides provider-specific wire formats from the runtime. Authentication, request transforms, reasoning options, caching behavior, and tool-call formats stay behind that boundary.
+
+[Read about providers](#providers)
+
+## One turn through the runtime
+
+![ReaperCode runtime overview](docs/readme/runtime-overview.svg)
+
+At each loop boundary, ReaperCode sends the current conversation to the selected model, validates and runs tool calls, adds the results to history, and applies context cleanup if needed.
+
+Independent tool calls can run at the same time. Conflicting writes wait. File edits use a write-ahead log so an interrupted mutation can roll back.
+
+## Related projects
+
+ReaperCode is the agent runtime. The surrounding infrastructure lives in two other repositories.
+
+- [Themis](https://github.com/gowtham-uj/Themis) runs coding-agent evals, keeps the evidence from each run, judges individual runs, and looks for failures that repeat across a campaign.
+- [Reaper Dev Server](https://github.com/gowtham-uj/Reaper-Dev-Server) gives each project a durable Linux container with persistent terminal sessions, project files, scoped access, and authenticated port publishing.
+
+## Quick start
+
+Install the CLI from GitHub:
+
+```bash
+npm install -g git+https://github.com/gowtham-uj/ReaperCode.git
+```
+
+Set a provider credential. For the MiniMax example below:
+
+```bash
+export MINIMAX_API_KEY=your_key_here
+```
+
+Run it inside a repository:
+
+```bash
+reaper exec run \
+  --prompt "Find the authentication bug, fix it, and run the relevant tests" \
+  --provider minimax \
+  --model MiniMax-M3
+```
+
+Or build it from source:
+
+```bash
+git clone https://github.com/gowtham-uj/ReaperCode.git
+cd ReaperCode
+npm install
+npm run build
+```
+
+The rest of this README covers setup, the web app, the app server, providers, context management, Code Mode, and the runtime architecture.
 
 ## Install
 
@@ -296,7 +411,7 @@ Code Mode is a tool called `eval`. It hands the model a real Node.js runtime and
 lets it write a program instead of making one tool call at a time.
 
 ```js
-const { matches } = await tools.grep_search({ pattern: "TODO", include: "*.ts" });
+const { matches } = await tools.grep_search({ pattern: "TODO", include: "**/*.ts" });
 const byFile = {};
 for (const match of matches) (byFile[match.path] ??= []).push(match.line);
 Object.entries(byFile).map(([path, lines]) => ({ path, count: lines.length }));
@@ -460,7 +575,7 @@ Dumping whole files into the model is how long runs die. The default file tools 
 - `file_find` searches inside one file
 - `file_edit` replaces an exact range
 
-Ten tools carry a full schema on every call: `bash`, `file_view`, `file_edit`, `write_file`, `grep_search`, `list_directory`, `glob`, `git_status`, `git_diff`, and `search_tools`. The other nineteen ship as one line each — name and description — and are hidden behind `search_tools`, which is BM25 over the tool catalog. The model asks for a capability when it needs one instead of carrying every schema forever.
+Eleven tools carry a full schema on every call: `bash`, `file_view`, `file_edit`, `write_file`, `grep_search`, `list_directory`, `glob`, `git_status`, `git_diff`, `search_tools`, and `eval`. The other nineteen built-in tools ship as one line each — name and description — and are hidden behind `search_tools`, which is BM25 over the built-in tool catalog. The model asks for a capability when it needs one instead of carrying every schema forever.
 
 `search_tools` is in the core set because it is the escape hatch the other nineteen depend on. `delete_file` and `file_find` are not: deleting is rare and irreversible enough to deserve a discovery step, and `file_view` with an explicit range already covers what `file_find`'s viewport did. The full list is generated into `tools.md`.
 
