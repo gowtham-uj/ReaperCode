@@ -37,7 +37,7 @@ Code Mode gives the model a Node.js runtime through the `eval` tool. The model c
 ```js
 const { matches } = await tools.grep_search({
   pattern: "TODO",
-  include: "*.ts"
+  include: "**/*.ts"
 });
 
 const byFile = {};
@@ -60,9 +60,9 @@ In this example, the per-match data stays inside the program. The model gets the
 
 ### Tool schemas also cost context
 
-ReaperCode keeps full schemas for ten common tools in the model request. Nineteen less common tools sit behind `search_tools`.
+ReaperCode keeps full schemas for eleven common tools in the model request, including `eval`. Nineteen less common built-in tools sit behind `search_tools`.
 
-Code Mode uses the same tool registry. Extensions can add more tools without forcing every schema into every turn.
+Code Mode uses that built-in tool registry. Extension-registered tools are separate and are not currently exposed through Code Mode.
 
 [Read about the tool design](#tools-are-small-on-purpose)
 
@@ -114,6 +114,12 @@ Install the CLI from GitHub:
 
 ```bash
 npm install -g git+https://github.com/gowtham-uj/ReaperCode.git
+```
+
+Set a provider credential. For the MiniMax example below:
+
+```bash
+export MINIMAX_API_KEY=your_key_here
 ```
 
 Run it inside a repository:
@@ -424,7 +430,7 @@ Code Mode is a tool called `eval`. It hands the model a real Node.js runtime and
 lets it write a program instead of making one tool call at a time.
 
 ```js
-const { matches } = await tools.grep_search({ pattern: "TODO", include: "*.ts" });
+const { matches } = await tools.grep_search({ pattern: "TODO", include: "**/*.ts" });
 const byFile = {};
 for (const match of matches) (byFile[match.path] ??= []).push(match.line);
 Object.entries(byFile).map(([path, lines]) => ({ path, count: lines.length }));
@@ -588,7 +594,7 @@ Dumping whole files into the model is how long runs die. The default file tools 
 - `file_find` searches inside one file
 - `file_edit` replaces an exact range
 
-Ten tools carry a full schema on every call: `bash`, `file_view`, `file_edit`, `write_file`, `grep_search`, `list_directory`, `glob`, `git_status`, `git_diff`, and `search_tools`. The other nineteen ship as one line each — name and description — and are hidden behind `search_tools`, which is BM25 over the tool catalog. The model asks for a capability when it needs one instead of carrying every schema forever.
+Eleven tools carry a full schema on every call: `bash`, `file_view`, `file_edit`, `write_file`, `grep_search`, `list_directory`, `glob`, `git_status`, `git_diff`, `search_tools`, and `eval`. The other nineteen built-in tools ship as one line each — name and description — and are hidden behind `search_tools`, which is BM25 over the built-in tool catalog. The model asks for a capability when it needs one instead of carrying every schema forever.
 
 `search_tools` is in the core set because it is the escape hatch the other nineteen depend on. `delete_file` and `file_find` are not: deleting is rare and irreversible enough to deserve a discovery step, and `file_view` with an explicit range already covers what `file_find`'s viewport did. The full list is generated into `tools.md`.
 
