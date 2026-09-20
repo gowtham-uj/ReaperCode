@@ -1396,7 +1396,19 @@ export class ThreadBrowserRuntime {
   /** Attach the download handler to one page, once. */
   private watchDownload(page: Page): void {
     if (!this.downloads) return;
-    watchDownloads(page, this.downloads, this.downloadedFiles, (error) => {
+    /*
+     * Stored through the kit, not straight through the vault.
+     *
+     * A download this listener catches is one nobody armed, which is the case a
+     * program produces by clicking a link without wrapping it in `download()`.
+     * The vault copied the file and the ledger heard nothing, so the file was
+     * real and `artifactFromAction` refused it: the click that caused it was
+     * never recorded against it. The kit records the file against the action
+     * that was running, which is the provenance a benchmark checks, and it
+     * dedupes by stored path so the armed collector and this listener produce
+     * one event for one download.
+     */
+    watchDownloads(page, (download) => this.kit.adoptDownload(page, download), this.downloadedFiles, (error) => {
       /*
        * Kept so the next download call can report it.
        *

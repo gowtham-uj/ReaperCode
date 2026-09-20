@@ -728,7 +728,9 @@ what to do — retrying with a launch call will not help.
 - `await inspect(target, verb?)` — can this element be acted on, and if not, why
   and what to click instead. One cheap call before a click you are unsure of.
 - `await inspectForm(form?)` — every field's constraints and validity, so a
-  rejected value is explained rather than guessed at.
+  rejected value is explained rather than guessed at. When the form is valid and
+  a length limit exists, it also prints values to try, for the case where the
+  server refuses a value the page accepted.
 - `await waitForChange({...})` — wait for the page to change instead of for a
   number. The replacement for `waitForTimeout`.
 - `await download({trigger})` — arm, trigger, collect, in one call.
@@ -766,3 +768,9 @@ what to do — retrying with a launch call will not help.
 - **`RECOVERED:` in a receipt.** The page had stopped accepting input or had
   crashed, and its renderer has been replaced for you. Nothing was clicked and
   nothing was resubmitted. Retry your step on the fresh page.
+- **`SEEN BEFORE:` in a receipt.** The locator you just used worked on this site
+  earlier in this session and still resolves. The target is likely not the
+  problem, so do not rewrite it: look at what else the step needed.
+- **`CHANGED:` in a receipt.** The locator worked on this site before and does
+  not now. The page moved under it. Re-derive it from what the page shows rather
+  than reusing the expression that used to be right.

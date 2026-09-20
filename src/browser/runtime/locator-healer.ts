@@ -48,6 +48,17 @@ interface CacheEntry {
  * a locator that works on one site says nothing about another, and a shared
  * cache would leak one mission's shape into the next one's.
  */
+/**
+ * What is known about an ask that failed, from this thread's own history.
+ *
+ * `live` and `stale` are the two facts worth printing: they say whether the
+ * target is the problem, which is exactly the question a failed step raises and
+ * the model cannot answer without spending a step finding out.
+ */
+export type Recall =
+  | { state: "live"; selector: string; hits: number }
+  | { state: "stale"; selector: string; hits: number; lastWorkedAt: number };
+
 export class LocatorHealer {
   private readonly cache = new Map<string, CacheEntry>();
   private static readonly MAX_ENTRIES = 300;
@@ -85,35 +96,59 @@ export class LocatorHealer {
   }
 
   /**
-   * A cached locator for this intent, validated against the current page.
+   * What is remembered about this ask on this site, trialled against the page now.
    *
-   * The validation is the point. A cache that returns a locator without checking
-   * it is a cache that will eventually click something else, and the failure
-   * mode of a wrong click is much worse than the cost of a failed one. So the
-   * candidate is trialled, and a candidate that no longer matches is evicted
-   * rather than returned.
+   * The trial is the point. A cache that answers without checking is a cache that
+   * will eventually point at the wrong element, and a wrong click is a much worse
+   * failure than a failed one. So the remembered expression is re-resolved and
+   * inspected before anything is said about it.
+   *
+   * ## What the answer means, and why it is a fact rather than a locator
+   *
+   * The key is derived from the ask, so this cannot hand back a *different*
+   * locator for the same intent: a differently spelled ask is a miss, not a hit
+   * (see `intentOfExpression`). What it can say is which of two very different
+   * situations the model is in, and the model cannot tell them apart by itself:
+   *
+   *   "live"  the ask still resolves to an actionable element, so the target was
+   *           never the problem and re-deriving the locator is wasted work. This
+   *           is the measured waste: a step failed for a reason that had nothing
+   *           to do with the element, and the model rewrote the element anyway.
+   *   "stale" the ask resolved and was acted on here before, and does not now, so
+   *           the page changed under a locator that used to be right. That is a
+   *           different repair from "your selector was never correct".
+   *
+   * `undefined` means this ask has no history here, which is the one case where
+   * the model's locator is the prime suspect and re-deriving it is the right move.
    */
-  async recall(intent: string, url: string, page: Page): Promise<Locator | undefined> {
-    const entry = this.cache.get(this.key(intent, url));
+  async recall(intent: string, url: string, page: Page): Promise<Recall | undefined> {
+    const key = this.key(intent, url);
+    const entry = this.cache.get(key);
     if (entry === undefined) return undefined;
+
     const locator = page.locator(entry.selector).first();
     const inspection = await inspectLocator(page, locator).catch(() => undefined);
-    if (inspection === undefined || !inspection.actionable) {
-      this.cache.delete(this.key(intent, url));
-      return undefined;
+    if (inspection !== undefined && inspection.actionable) {
+      entry.hits += 1;
+      entry.at = Date.now();
+      return { state: "live", selector: entry.selector, hits: entry.hits };
     }
-    entry.hits += 1;
-    entry.at = Date.now();
-    return locator;
+
+    /*
+     * Remembered and no longer working. Evicted, because a stale entry that stays
+     * would be re-trialled on every later step for an answer that is now known,
+     * and the history it carries is delivered in this reply.
+     */
+    this.cache.delete(key);
+    return { state: "stale", selector: entry.selector, hits: entry.hits, lastWorkedAt: entry.at };
   }
 
   /**
    * The intent behind a locator, as a cache key.
    *
-   * A locator object does not expose its expression, so the intent is derived
-   * from what the caller knows: the role and name it asked for, or the text it
-   * looked for. When a caller cannot state an intent there is nothing to key on,
-   * and the answer is to skip the cache rather than to key on a guess.
+   * A locator object does not expose the expression it was built from, so the
+   * intent here is the *ask*: what the caller wrote, normalised. See
+   * `intentOfExpression` for why it cannot be the resolved role and name.
    */
   key(intent: string, url: string): string {
     return `${siteOf(url)}::${intent.trim().toLowerCase().slice(0, 200)}`;
@@ -127,6 +162,38 @@ export class LocatorHealer {
   clear(): void {
     this.cache.clear();
   }
+}
+
+/**
+ * The intent behind a locator expression, as a cache key.
+ *
+ * Normalised rather than raw, so the same ask written with different spacing or
+ * quote style is one entry: `getByRole("button", { name: "Register" })` and
+ * `getByRole("button",{name:'Register'})` key the same, which matters because a
+ * model re-writing a step rarely reproduces its own punctuation.
+ *
+ * ## What this cannot do, and why
+ *
+ * It cannot unify two genuinely different spellings of one intent, so
+ * `getByRole("button", { name: "Register" })` and `#register-btn` are two keys.
+ * The design note above calls for role-plus-name, and the obstacle is mechanical:
+ * a role and an accessible name come from a *resolved* element, and at recall
+ * time the locator is the thing that stopped resolving. There is nothing to read
+ * them from. So the key is derived from the ask, which is always available, and a
+ * differently spelled ask is a cache miss rather than a wrong hit. A miss costs
+ * the model one re-derivation; a wrong hit would cost it a click on the wrong
+ * element, and those are not the same size of mistake.
+ */
+export function intentOfExpression(expression: string): string {
+  return expression
+    .replace(/\s+/g, " ")
+    /* Quotes unified, since a model alternates between them freely. */
+    .replace(/'/g, '"')
+    /* Spaces around punctuation dropped, so `{ name: "x" }` and `{name:"x"}` agree. */
+    .replace(/\s*([{}(),:])\s*/g, "$1")
+    .trim()
+    .toLowerCase()
+    .slice(0, 200);
 }
 
 /**

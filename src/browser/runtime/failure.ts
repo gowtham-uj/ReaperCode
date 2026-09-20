@@ -188,6 +188,53 @@ export function classifyFailure(
   }
 
   /*
+   * A form the browser itself refused, and a form the server refused.
+   *
+   * Both were declared in the taxonomy and produced by nothing: `FORM_VALIDATION`
+   * and `SERVER_REJECTION` were named here, held in the recovery policy, and
+   * unreachable, so a rejected signup arrived as `UNKNOWN`. The distinction
+   * matters because the two want opposite responses. A browser-side refusal has a
+   * readable reason the page can be asked for, and the value can be fixed. A
+   * server-side one has no client-visible cause at all, which is the case
+   * `probeValues` exists for: `inspectForm()` prints the shapes a server policy
+   * usually accepts, so the model tries them rather than re-reading a form that
+   * is already valid.
+   *
+   * The browser's own sentence is checked first and the wording is specific:
+   * Playwright's validation message names the constraint ("Please fill out this
+   * field", "Please include an '@'"), which is why this is a match on that phrase
+   * rather than on the word "invalid" alone.
+   */
+  if (/please fill out this field|please include an? .|please (match|enter|select)|validity|constraint violation/.test(lower)) {
+    return {
+      kind: "FORM_VALIDATION",
+      ...(target !== undefined ? { target } : {}),
+      diagnostic: "The browser's own form validation refused this value, so the page never received the submission.",
+      retryable: true,
+      recommendedNext: "Call inspectForm() to read the field's constraints, then send a value that satisfies them.",
+    };
+  }
+
+  /*
+   * A rejection with no client-visible cause.
+   *
+   * Only reached when the browser's validation was clean, which is what makes it
+   * a server rejection rather than a value problem: the page accepted the input,
+   * sent it, and came back with one of these. The wording is deliberately broad
+   * because sites write their own, and a false positive here is cheaper than the
+   * alternative, which is the model re-reading a form that was never the problem.
+   */
+  if (/already (taken|exists|registered|in use)|username is|email is|not available|too many (attempts|requests)/.test(lower)) {
+    return {
+      kind: "SERVER_REJECTION",
+      ...(target !== undefined ? { target } : {}),
+      diagnostic: "The site rejected the value after the form was submitted, so the cause is not on the page.",
+      retryable: true,
+      recommendedNext: "This value is taken or refused. Call inspectForm() for a value the server is likely to accept rather than filling the same one again.",
+    };
+  }
+
+  /*
    * Zero area before the generic not-visible branch, and only when geometry was
    * supplied. Without a box this cannot be told from any other invisibility, and
    * guessing ZERO_AREA from the message alone would be wrong for a display:none

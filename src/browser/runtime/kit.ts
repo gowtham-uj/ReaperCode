@@ -19,15 +19,15 @@
  * runtime the only thing that holds a connection.
  */
 
-import type { Page } from "playwright";
+import type { Download, Page } from "playwright";
 
 import type { DownloadVault } from "../downloads.js";
 import { ArtifactManager, type Artifact } from "./artifact-manager.js";
 import { inspectLocator, type ActionInspection } from "./inspect.js";
 import { classifyFailure, type BrowserFailure } from "./failure.js";
-import { inspectForm, probeValues, type FieldDiagnostics } from "./form-diagnostics.js";
+import { inspectForm, type FieldDiagnostics } from "./form-diagnostics.js";
 import { HealthMonitor } from "./health-monitor.js";
-import { LocatorHealer, localContext } from "./locator-healer.js";
+import { intentOfExpression, LocatorHealer, localContext, type Recall } from "./locator-healer.js";
 import { MissionState } from "./mission-state.js";
 import { PageRegistry } from "./page-registry.js";
 import { RecoveryController } from "./recovery-controller.js";
@@ -196,13 +196,33 @@ export class BrowserRuntimeKit {
    * client-side read can see the reason. Three values, each tried once, and then
    * the model is told to spend its steps elsewhere rather than randomise.
    */
-  async alternatives(value: string): Promise<string[]> {
-    return probeValues(value);
-  }
-
   /** The local neighbourhood of a target, for rewriting a failed locator. */
   async context(page: Page, hint: { text?: string; role?: string; name?: string }): Promise<string> {
     return await localContext(page, hint);
+  }
+
+  /**
+   * Record a locator that worked, against what the model was trying to reach.
+   *
+   * Called after a success rather than before, because what is worth remembering
+   * is a locator that resolved *and* was acted on. A locator that merely resolves
+   * can be the wrong element, and caching that teaches the healer to click the
+   * wrong thing reliably.
+   */
+  rememberLocator(expression: string, url: string): void {
+    if (expression.trim().length === 0) return;
+    this.healer.remember(intentOfExpression(expression), expression, url);
+  }
+
+  /**
+   * What this thread remembers about an ask that just failed.
+   *
+   * Answered as a fact about the target rather than as a locator, because the
+   * useful thing is not the expression (the model has that: it wrote it) but
+   * whether the target is implicated at all. See `Recall`.
+   */
+  async recallLocator(expression: string, url: string, page: Page): Promise<Recall | undefined> {
+    return await this.healer.recall(intentOfExpression(expression), url, page);
   }
 
   /**
@@ -358,5 +378,23 @@ export class BrowserRuntimeKit {
   async collectDownload(token: string, actionId?: string): Promise<Artifact | undefined> {
     if (this.artifacts === undefined) return undefined;
     return await this.artifacts.collect(token, actionId !== undefined ? { actionId } : {});
+  }
+
+  /**
+   * Store a download that arrived on the page's own listener, not through an arm.
+   *
+   * The action is read here rather than passed in, because this is called from an
+   * event handler with no call stack of its own: by the time a download lands, the
+   * only record of what caused it is the action the runtime is currently running,
+   * and that is exactly what `artifactFromAction` needs to see.
+   *
+   * Returns undefined with no vault, which is a runtime built without a workspace.
+   * The caller keeps the file either way; what is lost without a vault is the
+   * place to put it, not the fact of the download.
+   */
+  async adoptDownload(page: Page, download: Download): Promise<Artifact | undefined> {
+    if (this.artifacts === undefined) return undefined;
+    const actionId = this.currentActionId();
+    return await this.artifacts.adopt(page, download, actionId);
   }
 }

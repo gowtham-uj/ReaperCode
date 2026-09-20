@@ -143,8 +143,21 @@ function shape(raw: Record<string, unknown>): FieldDiagnostics {
 export function probeValues(base: string): string[] {
   const clean = base.replace(/[^a-zA-Z0-9]/g, "") || "value";
   return [8, 16, 24].map((length) => {
-    const stem = clean.slice(0, Math.max(1, length - 4));
-    return `${stem}${String(length).padStart(4, "0").slice(-4)}`.slice(0, length);
+    const suffix = String(length).padStart(4, "0").slice(-4);
+    /*
+     * Padded to reach the target length, and this was wrong without it.
+     *
+     * The stem was sliced to `length - 4` and the suffix appended, which produced
+     * the intended length only when the base was long enough: `probeValues("username")`
+     * asked for 16 and returned 12, because an 8-character stem plus a 4-character
+     * suffix is 12 and the trailing `.slice(0, length)` cannot add characters. A
+     * value that is not the length it is named for is worse than no value, since
+     * the whole point is to satisfy a policy the server is checking.
+     */
+    const head = clean.slice(0, Math.max(1, length - 4));
+    return head.length + suffix.length >= length
+      ? `${head}${suffix}`.slice(0, length)
+      : `${head}${suffix}${"0".repeat(length - head.length - suffix.length)}`;
   });
 }
 
@@ -171,6 +184,32 @@ export function renderFormDiagnostics(result: { fields: FieldDiagnostics[]; inva
       if (field.valueLength > 0) lines.push(`      current value is ${field.valueLength} characters`);
     } else {
       lines.push(`  ${field.name} [${field.type}]${suffix} ok`);
+    }
+  }
+  /*
+   * A field that is valid but carries a length limit gets the values to try,
+   * right here rather than behind another call.
+   *
+   * The case this answers: `validity` is clean and the server still refuses,
+   * which a client cannot diagnose, so the model otherwise re-reads a form that
+   * was never the problem. The values are produced for the constrained fields
+   * specifically, because a length limit is the constraint a server refusal most
+   * often turns out to be about, and printing them beside the limit is where the
+   * model is already looking.
+   *
+   * `alternatives()` existed and produced these and nothing called it, so the
+   * capability was built, correct and unreachable. Surfaced here rather than as
+   * another call because a model that has just read the constraints should not
+   * have to know a second name to act on them.
+   */
+  const constrained = result.fields.filter(
+    (field) => field.maxLength !== undefined || field.minLength !== undefined,
+  );
+  if (result.invalid.length === 0 && constrained.length > 0) {
+    lines.push("  a server can still refuse a value this form calls valid; if it does, try these:");
+    for (const field of constrained.slice(0, 3)) {
+      const stem = field.name.replace(/[^a-zA-Z0-9]/g, "") || "value";
+      lines.push(`    ${field.name}: ${probeValues(stem).join(", ")}`);
     }
   }
   return lines.join("\n");

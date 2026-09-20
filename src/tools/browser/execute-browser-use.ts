@@ -1182,6 +1182,22 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
         ...(receipt.failure.recommendedNext !== undefined ? { recommendedNext: receipt.failure.recommendedNext } : {}),
       });
     }
+    /*
+     * A locator that worked is remembered, against the site it worked on.
+     *
+     * After the step rather than before, because what is worth remembering is a
+     * locator that resolved *and* was acted on. A locator that merely resolves
+     * can be the wrong element, and caching that is how a healer learns to click
+     * the wrong thing reliably.
+     *
+     * Only on a clean step. A program that failed may have reached its locator
+     * and been refused by it, and remembering that would teach the cache the one
+     * expression the next failure should distrust.
+     */
+    if ((receipt.outcome === "SUCCESS" || receipt.outcome === "NO_CHANGE") && stepPage !== undefined && !stepPage.isClosed()) {
+      const worked = lastLocatorCallIn(args.code);
+      if (worked !== undefined) runtime.kit.rememberLocator(worked, stepPage.url());
+    }
   } catch (error) {
     /*
      * A throw here is a throw from the *harness*, not from the model's program:
@@ -1320,6 +1336,50 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
     if (about !== undefined && !about.isClosed()) {
       const context = await runtime.kit.context(about, { text: receipt.failure.target }).catch(() => "");
       if (context.length > 0) lines.push("", context);
+    }
+  }
+
+  /*
+   * What this thread already knows about the locator that just failed.
+   *
+   * The question a failed step raises is "is my target wrong, or is something
+   * else wrong", and the model cannot answer it without spending a step. The
+   * cache can, when the same ask worked here before:
+   *
+   *   live   the ask still resolves to an actionable element, so the target is
+   *          not the problem and rewriting the locator is wasted work. Measured:
+   *          a step failed for an unrelated reason and the model re-derived an
+   *          element that had never been broken.
+   *   stale  it worked here and does not now, so the page moved under a locator
+   *          that used to be right. That is a different repair from "your
+   *          selector was never correct", and the model cannot tell them apart.
+   *
+   * Nothing is printed when there is no history, which is the one case where the
+   * locator itself is the prime suspect. Silence there is the correct answer
+   * rather than a gap.
+   *
+   * The locator is taken from the program's own source, the same way the
+   * neighbourhood lookup above does, so a locator built from a variable simply
+   * has no history and prints nothing.
+   */
+  if (receipt.failure !== undefined && isLocatorFailure(receipt.failure.kind)) {
+    const about = stepPage;
+    const asked = lastLocatorCallIn(args.code);
+    if (about !== undefined && !about.isClosed() && asked !== undefined) {
+      const recall = await runtime.kit.recallLocator(asked, about.url(), about).catch(() => undefined);
+      if (recall?.state === "live") {
+        lines.push(
+          "",
+          `SEEN BEFORE: \`${asked}\` resolved and was acted on this site before, and it still resolves to an actionable element now. ` +
+          "The target is probably not the problem: check whether the step failed for another reason before rewriting the locator.",
+        );
+      } else if (recall?.state === "stale") {
+        lines.push(
+          "",
+          `CHANGED: \`${asked}\` resolved and was acted on this site ${recall.hits} time(s) before, and it does not now. ` +
+          "The page has changed under a locator that used to be right, so re-derive it from what the page shows rather than from what you wrote last time.",
+        );
+      }
     }
   }
 

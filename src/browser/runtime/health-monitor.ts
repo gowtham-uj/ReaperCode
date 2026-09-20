@@ -58,7 +58,6 @@ const EMPTY: PageHealth = { crashed: false, closed: false, pageErrors: 0, failed
  */
 export class HealthMonitor {
   private readonly health = new Map<Page, PageHealth>();
-  private readonly listeners = new Set<(page: Page, health: PageHealth, reason: string) => void>();
 
   /**
    * Start watching one page.
@@ -74,7 +73,6 @@ export class HealthMonitor {
 
     page.on("crash", () => {
       this.update(page, (state) => ({ ...state, crashed: true }));
-      this.announce(page, "crash");
     });
     page.on("close", () => {
       this.update(page, (state) => ({ ...state, closed: true }));
@@ -111,16 +109,6 @@ export class HealthMonitor {
   }
 
   /**
-   * Whether a page needs the renderer replaced.
-   *
-   * Only a crash qualifies. A page with console errors is a page whose site has
-   * bugs, which is not a reason to replace a renderer and lose the session.
-   */
-  needsRecovery(page: Page): boolean {
-    return this.of(page).crashed;
-  }
-
-  /**
    * Clear the counters after a recovery.
    *
    * A recovered page is a new renderer, so its error counts describe the old
@@ -138,31 +126,8 @@ export class HealthMonitor {
     this.health.delete(page);
   }
 
-  /**
-   * Subscribe to health transitions worth acting on.
-   *
-   * Only crashes are announced, because a crash is the one event that changes
-   * what the runtime should do next. The rest are recorded and read on demand,
-   * which keeps this from being a second event bus competing with the page
-   * listeners the live pane uses.
-   */
-  onUnhealthy(listener: (page: Page, health: PageHealth, reason: string) => void): () => void {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
-  }
-
   private update(page: Page, change: (state: PageHealth) => PageHealth): void {
     this.health.set(page, change(this.of(page)));
-  }
-
-  private announce(page: Page, reason: string): void {
-    for (const listener of this.listeners) {
-      try {
-        listener(page, this.of(page), reason);
-      } catch {
-        /* A broken listener must not break the browser. */
-      }
-    }
   }
 }
 

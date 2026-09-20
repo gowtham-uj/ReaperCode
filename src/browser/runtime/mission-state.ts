@@ -159,17 +159,6 @@ export class MissionState {
   }
 
   /** One line per subtask, for the journal and for a report. */
-  renderSubtasks(): string {
-    if (this.subtasks.length === 0) return "";
-    return this.subtasks
-      .map((subtask) => {
-        const deps = subtask.requires.length > 0 ? ` (needs ${subtask.requires.join(", ")})` : "";
-        const note = subtask.note !== undefined ? ` : ${subtask.note}` : "";
-        return `  [${subtask.status}] ${subtask.title}${deps}${note}`;
-      })
-      .join("\n");
-  }
-
   /**
    * The state as the model reads it.
    *

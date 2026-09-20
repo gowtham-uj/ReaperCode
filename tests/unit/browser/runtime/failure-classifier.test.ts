@@ -101,3 +101,35 @@ test("the rendered failure is small, and names a next action", () => {
   assert.match(text, /NEXT: /);
   assert.doesNotMatch(text, /Call log/);
 });
+
+test("a form the browser refused is FORM_VALIDATION, not UNKNOWN", () => {
+  /*
+   * `FORM_VALIDATION` and `SERVER_REJECTION` were declared in the taxonomy, held
+   * in the recovery policy, and produced by nothing, so both arrived as UNKNOWN.
+   * A form the browser refused is the ordinary way a signup fails, and the two
+   * want opposite responses: a browser refusal has a readable reason the page can
+   * be asked for, a server refusal has no client-visible cause at all.
+   */
+  const browserRefusal = classifyFailure(new Error("Please fill out this field."));
+  assert.equal(browserRefusal.kind, "FORM_VALIDATION", JSON.stringify(browserRefusal));
+  assert.match(browserRefusal.recommendedNext ?? "", /inspectForm/, "and the model is told how to read the constraint");
+});
+
+test("a value the server refused after a clean form is SERVER_REJECTION", () => {
+  const taken = classifyFailure(new Error("That username is already taken."));
+  assert.equal(taken.kind, "SERVER_REJECTION", JSON.stringify(taken));
+  assert.equal(taken.retryable, true, "a different value is worth trying");
+  assert.match(taken.recommendedNext ?? "", /inspectForm/, "and the guidance names a call the model can actually make");
+});
+
+test("an ordinary error is not misread as a form refusal", () => {
+  /*
+   * The classifier runs before Playwright's own kinds, so a branch that is too
+   * broad would mislabel unrelated failures. "valid" appears in plenty of
+   * unrelated sentences, which is why the match is on the browser's own phrasing.
+   */
+  assert.equal(classifyFailure(new Error("Target page, context or browser has been closed")).kind, "PAGE_CLOSED");
+  const timeout = classifyFailure(new Error("locator.click: Timeout 30000ms exceeded."));
+  assert.notEqual(timeout.kind, "FORM_VALIDATION");
+  assert.notEqual(timeout.kind, "SERVER_REJECTION");
+});

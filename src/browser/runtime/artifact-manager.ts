@@ -187,7 +187,7 @@ export class ArtifactManager {
   }
 
   /** Store a download that arrived on the page's own listener, not through an arm. */
-  async adopt(page: Page, download: Download): Promise<Artifact> {
+  async adopt(page: Page, download: Download, actionId?: string): Promise<Artifact> {
     const stored = await this.vault.accept(download);
     /*
      * Adopted downloads count as announced: Playwright raised the event, this
@@ -195,23 +195,43 @@ export class ArtifactManager {
      * cares about is event-versus-file, not which code path noticed.
      */
     void page;
-    return await this.finish(stored, true, {});
+    return await this.finish(stored, true, actionId !== undefined ? { actionId } : {});
   }
 
   /** Hash what was stored, record it, and answer with the whole artifact. */
   private async finish(file: VaultFile, announced: boolean, options: CollectOptions): Promise<Artifact> {
     const sha256 = await hashOf(file.path).catch(() => "");
     const artifact: Artifact = { ...file, sha256, announced };
-    this.ledger?.record({
-      kind: "artifact.saved",
-      name: artifact.name,
-      path: artifact.path,
-      bytes: artifact.bytes,
-      announced,
-      ...(options.actionId !== undefined ? { triggeredBy: options.actionId } : {}),
-    });
+    /*
+     * One file, one ledger event, however many listeners reach it.
+     *
+     * Two code paths call this for the same download: the armed collector that
+     * `download()` uses, and the page-level watcher that keeps a download nobody
+     * armed. They are different listeners on the same event, so both fire, and
+     * without this both recorded `artifact.saved` for one file. The consequence
+     * was not a crash but a wrong number: the metrics counted two downloads where
+     * a program made one, and a benchmark reading them would over-report.
+     *
+     * Keyed on the stored path, which the vault has already made unique, so two
+     * genuine downloads of `invoice.pdf` are two events and one download seen
+     * twice is one.
+     */
+    if (!this.recorded.has(artifact.path)) {
+      this.recorded.add(artifact.path);
+      this.ledger?.record({
+        kind: "artifact.saved",
+        name: artifact.name,
+        path: artifact.path,
+        bytes: artifact.bytes,
+        announced,
+        ...(options.actionId !== undefined ? { triggeredBy: options.actionId } : {}),
+      });
+    }
     return artifact;
   }
+
+  /** Paths already recorded, so a second listener does not double-count a file. */
+  private readonly recorded = new Set<string>();
 
   /**
    * A file in the vault that no arm has accounted for.

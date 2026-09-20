@@ -331,18 +331,28 @@ function sanitize(name: string): string {
  * nobody listening is discarded by Playwright, which is the silent loss this
  * exists to prevent.
  *
+ * Takes a store function rather than the vault itself, and that indirection is
+ * what gives an unarmed download its provenance. Storing through the vault copied
+ * the file and told the ledger nothing, so a program that clicked a download link
+ * without wrapping it in `download()` got a real file that
+ * `artifactFromAction` then refused, because no ledger event named the click
+ * that produced it. The caller now routes this through the artifact manager,
+ * which records the file against the action that was running, and the two
+ * listeners dedupe on the stored path so one download is one event.
+ *
  * Returns the accumulated files, so a caller can report what a program produced
- * without a second lookup.
+ * without a second lookup. A store that answers `undefined` means the file was
+ * kept somewhere this list does not describe, which is a runtime with no vault;
+ * the download still happened and nothing is added.
  */
 export function watchDownloads(
   page: Page,
-  vault: DownloadVault,
+  store: (download: Download) => Promise<VaultFile | undefined>,
   collected: VaultFile[],
   onFailure?: (error: Error) => void,
 ): void {
   page.on("download", (download) => {
-    void vault
-      .accept(download)
+    void store(download)
       .then((file) => {
         /*
          * Pushed once, by path. Two listeners now reach the same file: this
@@ -352,7 +362,7 @@ export function watchDownloads(
          * them into one copy; this collapses them into one entry, so a program
          * that lists the vault does not see the same invoice twice.
          */
-        if (!collected.some((existing) => existing.path === file.path)) collected.push(file);
+        if (file !== undefined && !collected.some((existing) => existing.path === file.path)) collected.push(file);
       })
       /*
        * Reported rather than dropped, and this is half of the twenty-minute bug.
