@@ -692,9 +692,34 @@ async function handleRest(
 
   if (request.method !== "GET") return send(405, { error: "method_not_allowed" });
 
-  // `/healthz` answers before the thread check: it reports whether the gateway
-  // is up, which is true regardless of whether some thread id resolved.
-  if (url.pathname === "/healthz") return send(200, { ok: true });
+  /*
+   * `/healthz` answers before the thread check, because whether the gateway is
+   * up does not depend on any thread id resolving.
+   *
+   * It reports memory as well as liveness, and that is a correction rather than
+   * a flourish. The endpoint used to answer `{ok: true}` and nothing else, so
+   * "the app-server runs out of memory" was a claim with no way to check it:
+   * there is no memory telemetry anywhere in this codebase, and the only
+   * measurement available was RSS from `/proc`, which is the kernel's view of
+   * the whole process rather than the heap that would actually fail.
+   *
+   * These are V8's own numbers. `heapUsed` is what an out-of-memory kill would
+   * be about; `rss` is included because a heap can be small while the process
+   * holds a lot of native memory, and the two disagreeing is itself the finding.
+   * Cheap enough to answer on every poll, which the harness already does.
+   */
+  if (url.pathname === "/healthz") {
+    const memory = process.memoryUsage();
+    return send(200, {
+      ok: true,
+      uptimeSeconds: Math.round(process.uptime()),
+      memory: {
+        heapUsedMb: Math.round(memory.heapUsed / (1024 * 1024)),
+        heapTotalMb: Math.round(memory.heapTotal / (1024 * 1024)),
+        rssMb: Math.round(memory.rss / (1024 * 1024)),
+      },
+    });
+  }
   if (!workspaceRoot) return send(404, { error: "unknown_thread" });
 
   try {

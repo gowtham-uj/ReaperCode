@@ -56,6 +56,33 @@ test("events carry a monotonic sequence, so order survives identical timestamps"
   assert.ok(second.seq > first.seq);
 });
 
+test("the ledger does not grow without bound, and says when it trimmed", () => {
+  /*
+   * The log is append-only, which is what makes the metrics trustworthy, and
+   * append-only is also unbounded. A ledger is held per thread for the life of
+   * the thread, so a long-lived conversation with several missions in it appends
+   * indefinitely and keeps every event.
+   *
+   * The bound is a backstop rather than a working limit: ten thousand is about
+   * thirty times the largest run measured. What matters is that it exists and
+   * that a reader can tell when it fired, because a metric computed over a
+   * trimmed log is still a fold over what the ledger holds, and a number that
+   * looks exact and is not is the failure this whole class exists to prevent.
+   */
+  const ledger = new RunLedger();
+  for (let i = 0; i < 12_000; i++) {
+    ledger.record({ kind: "action.finished", actionId: `a${i}`, status: "success", durationMs: 1 });
+  }
+  assert.ok(ledger.events().length <= 10_000, `the log must stay bounded, got ${ledger.events().length}`);
+  assert.equal(ledger.truncated, true, "and a reader must be able to tell that it was trimmed");
+  /*
+   * The sequence keeps counting rather than restarting, so two events can never
+   * share a number and the trim is visible in the ids as well.
+   */
+  const last = ledger.events()[ledger.events().length - 1];
+  assert.ok(last !== undefined && last.seq > 10_000, "sequence numbers must keep counting across a trim");
+});
+
 test("a token line appears only when a call was recorded, never as a zero", () => {
   /*
    * The browser layer does not know what the model was sent: that is core's

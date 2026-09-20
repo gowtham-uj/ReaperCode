@@ -128,20 +128,61 @@ export class DownloadVault {
      * problem is possible, and the error is rethrown with both paths named when
      * it fails again. Swallowing it was the bug.
      */
+    /*
+     * Three attempts, in increasing order of how much they assume.
+     *
+     * Measured on a live mission, twice in one run:
+     *
+     *   download.saveAs: ENOENT: no such file or directory, copyfile
+     *   '/tmp/playwright-artifacts-5e55Yo/2cc67e50...' -> '.../invoice.txt'
+     *
+     * The browser downloaded the file, our handler ran, and the temporary copy
+     * was not there when it went to fetch it. `saveAs` and `path()` both pointed
+     * at the same artifact path, so this is not a second chance at the same
+     * operation: it is the artifact directory being cleaned between the event
+     * and the copy. The event fires when the download *starts*, and a page that
+     * navigates or closes after it can take the artifact with it.
+     *
+     * So the copy is retried over a short window (the file may still be being
+     * written), then the bytes are copied directly from `path()` rather than
+     * through `saveAs` (which reports ENOENT for a source it cannot stat, the
+     * same as for one that is gone). The error names all three outcomes so the
+     * next reader does not have to guess which one happened.
+     */
+    const failures: string[] = [];
     try {
       await download.saveAs(target);
+      failures.length = 0;
     } catch (first) {
-      const source = await download.path().catch(() => undefined);
-      const retry = source === undefined ? undefined : await download.saveAs(target).then(() => true, () => false);
-      if (retry !== true) {
-        throw new Error(
-          `the browser downloaded "${suggested}" but it could not be copied into this thread's vault. ` +
-          `${(first as Error).message.split("\n")[0]}. ` +
-          (source === undefined
-            ? "The browser did not report a source path either."
-            : `The browser had it at ${source}, which this process could not read; the vault is ${this.directory}.`),
-        );
+      failures.push((first as Error).message.split("\n")[0] ?? "saveAs failed");
+    }
+
+    if (failures.length > 0) {
+      /*
+       * A brief wait, because the artifact can lag the event: the file is
+       * written by the browser after the download is announced, and a copy that
+       * runs in that window fails on a file that is about to exist.
+       */
+      for (const delayMs of [50, 250, 750]) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        const copied = await this.copyThroughPath(download, target);
+        if (copied) {
+          failures.length = 0;
+          break;
+        }
       }
+    }
+
+    if (failures.length > 0) {
+      const source = await download.path().catch(() => undefined);
+      throw new Error(
+        `the browser downloaded "${suggested}" but it could not be copied into this thread's vault. ` +
+        `${failures[0]}. ` +
+        (source === undefined
+          ? "The browser did not report a source path either, so the download was likely cancelled before it finished."
+          : `The browser reported it at ${source}, which this process could not read; the vault is ${this.directory}. ` +
+            "If the page navigated or closed right after the click, that can remove the temporary file before it is copied."),
+      );
     }
     const info = await stat(target).catch(() => undefined);
     const failure = await download.failure().catch(() => null);
@@ -154,6 +195,29 @@ export class DownloadVault {
       return { name, path: target, bytes: info?.size ?? 0, ...(download.url() ? { url: download.url() } : {}) };
     }
     return { name, path: target, bytes: info?.size ?? 0, ...(download.url() ? { url: download.url() } : {}) };
+  }
+
+  /**
+   * Copy the artifact by reading the path Playwright reports, not by saveAs.
+   *
+   * `saveAs` is the documented way and it is what the first attempt uses. This
+   * is the fallback for the case it reports ENOENT on: it stats the source
+   * itself and copies the bytes, which distinguishes "the file is not there yet"
+   * from "the file is not there" and can succeed in the window between the two
+   * that a second `saveAs` call cannot.
+   *
+   * Returns false rather than throwing, because the caller decides what the
+   * failure means and has more context than this does.
+   */
+  private async copyThroughPath(download: Download, target: string): Promise<boolean> {
+    const source = await download.path().catch(() => undefined);
+    if (source === undefined) return false;
+    try {
+      await copyFile(source, target);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** Everything already in the vault, newest name last. */

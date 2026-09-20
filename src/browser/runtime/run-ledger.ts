@@ -164,6 +164,25 @@ export class RunLedger {
   private readonly log: LedgerEvent[] = [];
   private nextSeq = 1;
 
+  /**
+   * The most events one ledger keeps.
+   *
+   * The log is append-only, which is what makes the metrics trustworthy, and
+   * append-only is also unbounded: a mission of a hundred programs appends a few
+   * hundred events, but a long-lived thread with several missions in it appends
+   * indefinitely and holds every one. This is a per-thread object held for the
+   * life of the thread, so that is a leak with a name.
+   *
+   * Ten thousand is chosen to be far above any real run rather than near it. A
+   * hundred-program mission produces roughly three events each, so this is
+   * thirty times the largest run measured, and the trim is a backstop against a
+   * pathological thread rather than a working limit. When it does fire, the
+   * oldest events go: a metric that stops being exact after ten thousand events
+   * still describes the run, and losing the middle of a very long history is
+   * better than dying.
+   */
+  private static readonly MAX_EVENTS = 10_000;
+
   constructor(private readonly now: () => number = Date.now) {}
 
   /**
@@ -176,7 +195,34 @@ export class RunLedger {
   record(event: DistributiveOmit<LedgerEvent, "seq" | "at">): LedgerEvent {
     const full = { ...event, seq: this.nextSeq++, at: this.now() } as LedgerEvent;
     this.log.push(full);
+    /*
+     * Trimmed from the front, and `seq` keeps counting rather than resetting.
+     *
+     * A sequence that restarted would make two different events share a number,
+     * and the sequence is what the ledger uses to order events that landed in
+     * the same millisecond. The count only ever grows, so a reader can still tell
+     * that events were dropped and how many.
+     */
+    if (this.log.length > RunLedger.MAX_EVENTS) {
+      this.log.splice(0, this.log.length - RunLedger.MAX_EVENTS);
+      this.trimmed += 1;
+    }
     return full;
+  }
+
+  /**
+   * How many times the log has been trimmed.
+   *
+   * Reported rather than hidden. A metric computed over a trimmed log is still
+   * a fold over what the ledger holds, and a reader has to know when that is
+   * less than what happened, because the alternative is a number that looks
+   * exact and is not.
+   */
+  private trimmed = 0;
+
+  /** Whether any event has been dropped, so a caller can say so. */
+  get truncated(): boolean {
+    return this.trimmed > 0;
   }
 
   /** Every event, in order. */
