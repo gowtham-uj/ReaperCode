@@ -76,26 +76,7 @@ The web app and app server read from a checked-in Models.dev snapshot. The curre
 
 ## One turn through the runtime
 
-```text
-task + workspace
-       |
-       v
- runtime engine
-       |
-       +------ model gateway
-       |
-       +------ tool scheduler ---- files / shell / search / code
-       |
-       +------ context hooks ----- prune / spill / compact / recover
-       |
-       v
-tool results + conversation state
-       |
-       +------ next model turn
-       |
-       v
-final response when the model returns no more tool calls
-```
+![ReaperCode runtime overview](docs/readme/runtime-overview.svg)
 
 At each loop boundary, ReaperCode sends the current conversation to the selected model, validates and runs tool calls, adds the results to history, and applies context cleanup if needed.
 
