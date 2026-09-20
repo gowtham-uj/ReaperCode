@@ -369,6 +369,42 @@ export function classifyFailure(
     };
   }
 
+  /*
+   * The runtime's own two sentences, which were declared as kinds and produced by
+   * nothing.
+   *
+   * Both matched no branch, so each arrived as `UNKNOWN` even though the runtime
+   * wrote the message itself and knew exactly what it meant. `UNKNOWN` is not
+   * merely less specific here: the model reads the recommended next step from the
+   * kind, and "look at the page and try a different approach" is the wrong advice
+   * for a popup that never opened and for a renderer that stopped listening.
+   *
+   * Neither is retryable as a blind repeat, which is why the recovery policy holds
+   * both at `retry: false`: a second identical click does not make a popup appear,
+   * and the renderer case is answered by replacing the renderer rather than by
+   * running the program again. That replacement already runs for both, because
+   * `INPUT_CONSISTENT_FAILURES` includes `UNKNOWN`; what these branches add is the
+   * model being told what actually happened.
+   */
+  if (/no new page opened|no popup|popup did not open/.test(lower)) {
+    return {
+      kind: "POPUP_NOT_CREATED",
+      ...(target !== undefined ? { target } : {}),
+      diagnostic: "The trigger ran but no new page opened.",
+      retryable: false,
+      recommendedNext: "Check that the link really opens a new tab: if it opens in place, use page.goto() or click it directly.",
+    };
+  }
+  if (/stopped accepting input|did not receive the probe|renderer has stopped/.test(lower)) {
+    return {
+      kind: "RENDERER_UNRESPONSIVE",
+      ...(target !== undefined ? { target } : {}),
+      diagnostic: "The page is rendering and answering reads, but it is no longer delivering events.",
+      retryable: true,
+      recommendedNext: "The renderer needs replacing rather than the step repeating; the runtime does this for a page it detects as unresponsive.",
+    };
+  }
+
   return {
     kind: "UNKNOWN",
     ...(target !== undefined ? { target } : {}),

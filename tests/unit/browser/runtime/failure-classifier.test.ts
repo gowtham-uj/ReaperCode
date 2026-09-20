@@ -133,3 +133,37 @@ test("an ordinary error is not misread as a form refusal", () => {
   assert.notEqual(timeout.kind, "FORM_VALIDATION");
   assert.notEqual(timeout.kind, "SERVER_REJECTION");
 });
+
+test("a popup that never opened is POPUP_NOT_CREATED, not UNKNOWN", () => {
+  /*
+   * The runtime writes this sentence itself, and it matched no branch, so it
+   * arrived as UNKNOWN with the advice "look at the page and try a different
+   * approach". That is the wrong next step for a link that never opened a tab.
+   */
+  const r = classifyFailure(new Error(
+    "the trigger ran but no new page opened. If the link opens in the same tab, use page.goto() or click it directly; if the site fetches the page by script, it is not a popup.",
+  ));
+  assert.equal(r.kind, "POPUP_NOT_CREATED", JSON.stringify(r));
+  assert.equal(r.retryable, false, "a second identical click does not make a popup appear");
+  assert.match(r.recommendedNext ?? "", /opens in place|goto/i, "and the advice fits the cause");
+});
+
+test("a renderer that stopped delivering events is RENDERER_UNRESPONSIVE", () => {
+  const r = classifyFailure(new Error(
+    "the page did NOT receive the probe click, so its renderer has stopped accepting input. Clicks and typing will keep doing nothing on this page. Call recover(target) to replace the renderer, then retry.",
+  ));
+  assert.equal(r.kind, "RENDERER_UNRESPONSIVE", JSON.stringify(r));
+  assert.match(r.diagnostic, /events|input/i, "the mechanism is named");
+  assert.equal(r.retryable, true, "replacing the renderer is what fixes it, so the step is worth repeating after");
+});
+
+test("a probe that could not run is not misread as an unresponsive renderer", () => {
+  /*
+   * `probeInput` answers two different things with one shape: the click did not
+   * land, or the probe itself threw. Only the first means the renderer is broken,
+   * and replacing a renderer because a probe errored would lose the session for
+   * nothing.
+   */
+  const r = classifyFailure(new Error("the probe could not run: Target page, context or browser has been closed"));
+  assert.notEqual(r.kind, "RENDERER_UNRESPONSIVE");
+});

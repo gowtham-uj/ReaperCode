@@ -247,10 +247,6 @@ export class ArtifactManager {
     return nonEmpty[nonEmpty.length - 1];
   }
 
-  /** How many waits are armed and uncollected. Used by tests and diagnostics. */
-  armedCount(): number {
-    return this.armed.size;
-  }
 }
 
 /** sha256 of a file, read in one go. Agent downloads are small. */
