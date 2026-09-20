@@ -1280,6 +1280,35 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
   }
 
   /*
+   * A download that could not be copied gets the connection refreshed, and this
+   * is the one repair the runtime performs for a download.
+   *
+   * Measured: Steel is one browser shared by every client, and any other
+   * Playwright client attaching and disconnecting leaves the browser pointing at
+   * an artifact directory that client deleted, so every later download fails with
+   * ENOENT. A fresh connection restores it, and nothing else does:
+   *
+   *   healthy                     STORED
+   *   after a second client       REFUSED
+   *   setDownloadBehavior again   REFUSED
+   *   on a fresh connection       STORED
+   *
+   * The runtime does it rather than the model because the model cannot see the
+   * cause, and because asking it to reconnect by hand would mean re-running a
+   * program that may already have clicked a download link twice. Refreshing the
+   * connection runs nothing, so the retry stays the model's decision with a
+   * working browser underneath it.
+   *
+   * Only on the errno this is about. A download that was genuinely empty or
+   * cancelled has the same failing sentence in some paths, so the check is the
+   * artifact error specifically.
+   */
+  if (receipt.failure?.artifactLost === true) {
+    const note = await runtime.repairDownloads().catch(() => undefined);
+    if (note !== undefined) lines.push("", `DOWNLOAD PATH REFRESHED: ${note}`);
+  }
+
+  /*
    * A locator failure gets the neighbourhood, not the page.
    *
    * The model derived the locator that broke from the page it had, so handing it

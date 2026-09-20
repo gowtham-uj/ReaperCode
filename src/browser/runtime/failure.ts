@@ -78,6 +78,15 @@ export interface BrowserFailure {
   retryable: boolean;
   /** What to do instead, when repeating is not it. */
   recommendedNext?: string;
+  /**
+   * Set when the failure is a download whose artifact the browser had already
+   * removed, which a fresh connection repairs.
+   *
+   * A flag rather than a message match, because the caller that repairs this
+   * should not be parsing prose to find out, and the sentence above it is written
+   * for a model rather than for a program.
+   */
+  artifactLost?: boolean;
 }
 
 /**
@@ -353,7 +362,19 @@ export function classifyFailure(
     return {
       kind: "DOWNLOAD_FAILED",
       ...(target !== undefined ? { target } : {}),
-      diagnostic: "The download was triggered but did not produce a file this thread could keep.",
+      /*
+       * The two cases named separately, because the repair differs.
+       *
+       * A copy that could not find the browser's artifact file is the shared-browser
+       * case: another Playwright client re-pointed the download directory and then
+       * deleted it. The runtime answers that by refreshing the connection, and it
+       * needs to recognise it, so `artifactLost` carries the fact rather than the
+       * tool having to re-parse a sentence.
+       */
+      diagnostic: /could not be copied into this thread's vault|enoent.*copyfile|copyfile.*enoent/i.test(message)
+        ? "The browser downloaded the file but it could not be read from the browser's temporary directory, because another client sharing this browser replaced it."
+        : "The download was triggered but did not produce a file this thread could keep.",
+      artifactLost: /could not be copied into this thread's vault|enoent.*copyfile|copyfile.*enoent/i.test(message),
       retryable: true,
       recommendedNext: "Use browser.download() so the wait is armed before the click, and retry once.",
     };

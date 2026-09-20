@@ -896,6 +896,52 @@ export class ThreadBrowserRuntime {
   }
 
   /**
+   * Drop the CDP connection and attach again, so a broken download path works.
+   *
+   * ## The failure this answers, measured
+   *
+   * Steel is one browser shared by every client, and Playwright points a shared
+   * browser's downloads at the artifact directory of the connection that set the
+   * behaviour. When any other Playwright client attaches and then disconnects, it
+   * deletes that directory, and every download after it lands in a path that no
+   * longer exists:
+   *
+   *   healthy:                     STORED 66 bytes
+   *   after a second client:       REFUSED  ENOENT: no such file or directory
+   *   after re-asserting the path: REFUSED  (setDownloadBehavior does not help)
+   *   on a fresh connection:       STORED 66 bytes
+   *
+   * That is the mission's failure: eleven isolated downloads all stored 66 bytes,
+   * and the same code refused twice on a run where the harness injects a
+   * reconnect and the live pane, other threads and probes all share the browser.
+   *
+   * ## Why a reconnect is the repair
+   *
+   * A new connection gets a new artifact directory, which is the one thing
+   * measured to restore downloads. `setDownloadBehavior` was tried and does not
+   * work, in either spelling, and `enableDownloads` already documents that
+   * sending it is what broke downloads in the first place. So this does not
+   * attempt to configure anything: it throws the stale connection away and lets
+   * `attach` build a clean one.
+   *
+   * State is preserved deliberately. `resetHandles` clears the handles but the
+   * thread's pages, names, cookies and vault are all re-derived on the next
+   * attach, so the cost is one re-attach rather than a lost session. The model is
+   * told what happened so it can retry the step it was on.
+   */
+  async repairDownloads(): Promise<string> {
+    /*
+     * The connection is closed rather than merely forgotten, so Steel sees it go:
+     * a leaked socket would keep the stale behavior alive for whoever holds it.
+     */
+    const browser = this.browser;
+    this.resetHandles();
+    if (browser) await browser.close().catch(() => undefined);
+    this.downloadNote = undefined;
+    return "the connection to the browser was refreshed so downloads work again; retry the download";
+  }
+
+  /**
    * Record that this browser has just been used.
    *
    * Called from the two attach choke points and the read paths, which together

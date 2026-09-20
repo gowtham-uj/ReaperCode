@@ -121,6 +121,12 @@ export interface StepReceipt {
     retryable: boolean;
     recommendedNext?: string;
     target?: string;
+    /**
+     * Set when the browser downloaded a file and its temporary copy was already
+     * gone, which a fresh connection repairs. Carried as a flag so the tool can
+     * act on it without matching on the sentence written for a model.
+     */
+    artifactLost?: boolean;
   };
 }
 
@@ -334,12 +340,20 @@ export async function runStep(
         wholesale: changes.full,
         elapsedMs: Date.now() - started,
         note: `The action failed: ${(error as Error).message.split("\n")[0] ?? "unknown error"}. The page as it stands now is below.`,
+        /*
+         * Every field is listed, which is why `artifactLost` was dropped here the
+         * first time it was added: the classifier set it, the receipt rebuilt the
+         * failure from a hand-written list, and the tool saw undefined. The same
+         * shape as the other unwired things in this area, so the flag is carried
+         * explicitly and a test asserts the tool can see it.
+         */
         failure: {
           kind: failure.kind,
           diagnostic: failure.diagnostic,
           retryable: failure.retryable,
           ...(failure.recommendedNext !== undefined ? { recommendedNext: failure.recommendedNext } : {}),
           ...(failure.target !== undefined ? { target: failure.target } : {}),
+          ...(failure.artifactLost !== undefined ? { artifactLost: failure.artifactLost } : {}),
         },
       },
     };

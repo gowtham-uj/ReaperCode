@@ -8,6 +8,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 import { classifyFailure, renderFailure } from "../../../../src/browser/runtime/failure.js";
 
@@ -166,4 +167,55 @@ test("a probe that could not run is not misread as an unresponsive renderer", ()
    */
   const r = classifyFailure(new Error("the probe could not run: Target page, context or browser has been closed"));
   assert.notEqual(r.kind, "RENDERER_UNRESPONSIVE");
+});
+
+test("a download whose artifact the browser removed is flagged for repair", () => {
+  /*
+   * The shared-browser failure, measured: Steel is one browser for every client,
+   * and another Playwright client attaching and disconnecting leaves the browser
+   * pointing at an artifact directory that client deleted. Every download after
+   * it fails with ENOENT on a path that no longer exists, which a fresh
+   * connection repairs and `setDownloadBehavior` does not.
+   *
+   * The flag exists so the tool can act on it without matching prose written for
+   * a model, and so a genuinely empty or cancelled download is not repaired.
+   */
+  const lost = classifyFailure(new Error(
+    "the browser downloaded \"invoice.txt\" but it could not be copied into this thread's vault. " +
+    "download.saveAs: ENOENT: no such file or directory, copyfile '/tmp/playwright-artifacts-x/a' -> '/vault/invoice.txt'.",
+  ));
+  assert.equal(lost.kind, "DOWNLOAD_FAILED");
+  assert.equal(lost.artifactLost, true, "an artifact error is what the connection refresh answers");
+  assert.equal(lost.retryable, true);
+});
+
+test("a download that never produced a file is not flagged for repair", () => {
+  /*
+   * The distinction that matters: "no download arrived" is not a connection
+   * problem, and refreshing the connection for it would drop every handle for a
+   * step that was going to fail anyway.
+   */
+  const never = classifyFailure(new Error("the trigger ran but no download arrived."));
+  assert.equal(never.artifactLost, undefined, "nothing to repair when nothing downloaded");
+});
+
+test("the receipt carries artifactLost through to the tool", async () => {
+  /*
+   * The bug this pins, and it is the same shape as the others in this area: the
+   * classifier set the flag, and the receipt rebuilt the failure field by field
+   * from a hand-written list, so the tool saw `undefined` and never repaired
+   * anything. A field added to `BrowserFailure` and not to that list is invisible
+   * in exactly the way a method with no caller is.
+   *
+   * Checked in the source because the receipt is built inside `step`, which needs
+   * a live page. What can be asserted without one is the thing that broke: the
+   * receipt's failure object names every field of the classifier's.
+   */
+  const source = await readFile(new URL("../../../../src/browser/transaction.ts", import.meta.url), "utf8");
+  const at = source.indexOf("failure: {");
+  assert.ok(at !== -1, "the receipt builds its failure here");
+  const block = source.slice(at, at + 700);
+  for (const field of ["kind", "diagnostic", "retryable", "artifactLost"]) {
+    assert.match(block, new RegExp(field), `the receipt must carry \`${field}\`, or the classifier is writing to nothing`);
+  }
 });
