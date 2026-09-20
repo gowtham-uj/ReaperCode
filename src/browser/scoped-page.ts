@@ -59,7 +59,19 @@ import { isPageOwnedBy } from "./page-ownership.js";
  * a way that fails at the call site rather than here. The proxy forwards
  * everything and intervenes on exactly the four accessors that widen.
  */
-export function scopePage(page: Page, threadId: string): Page {
+/**
+ * @param onContextCreated
+ *   Threaded through to `scopeBrowser`, because the door a program actually
+ *   reaches `newContext()` by is `page.context().browser()`.
+ *
+ *   This is the second time this exact shape has cost something. The callback was
+ *   wired into `scopedHandles` first, and a live probe showed the leak still
+ *   open: the program's `page` root is scoped here, in the tool, with its own
+ *   call, and the browser a program gets from that root never saw the callback.
+ *   Measured: contexts went 1 -> 2 and `tracked: 0`, which is what a fix wired to
+ *   the wrong door looks like.
+ */
+export function scopePage(page: Page, threadId: string, onContextCreated?: (context: BrowserContext) => void): Page {
   return new Proxy(page, {
     get(target, property, receiver) {
       if (property === "context") {
@@ -69,7 +81,7 @@ export function scopePage(page: Page, threadId: string): Page {
          * It is wrapped anyway so that `page.context().browser()` cannot walk
          * back up to the shared browser.
          */
-        return () => scopeContext(target.context(), threadId);
+        return () => scopeContext(target.context(), threadId, onContextCreated);
       }
       /*
        * The escape hatches that hand back an unscoped object, closed by
@@ -158,10 +170,10 @@ export function scopePage(page: Page, threadId: string): Page {
  * to be called and chained; only the two that produce a page or frame are
  * intercepted.
  */
-export function scopeLocator(locator: Locator, threadId: string): Locator {
+export function scopeLocator(locator: Locator, threadId: string, onContextCreated?: (context: BrowserContext) => void): Locator {
   return new Proxy(locator, {
     get(target, property, receiver) {
-      if (property === "page") return () => scopePage(target.page(), threadId);
+      if (property === "page") return () => scopePage(target.page(), threadId, onContextCreated);
       if (property === "frameLocator") {
         return (...args: unknown[]) => scopeLocator(
           (target.frameLocator as (...a: unknown[]) => unknown).apply(target, args) as Locator, threadId,
@@ -191,11 +203,11 @@ export function scopeLocator(locator: Locator, threadId: string): Locator {
  * page before this existed, from a sandboxed program, which is the whole
  * boundary gone in one ordinary call.
  */
-export function scopeFrame(frame: Frame, threadId: string): Frame {
+export function scopeFrame(frame: Frame, threadId: string, onContextCreated?: (context: BrowserContext) => void): Frame {
   return new Proxy(frame, {
     get(target, property, receiver) {
-      if (property === "page") return () => scopePage(target.page(), threadId);
-      if (property === "childFrames") return () => target.childFrames().map((child) => scopeFrame(child, threadId));
+      if (property === "page") return () => scopePage(target.page(), threadId, onContextCreated);
+      if (property === "childFrames") return () => target.childFrames().map((child) => scopeFrame(child, threadId, onContextCreated));
       if (property === "locator") {
         return (...args: unknown[]) => scopeLocator(
           (target.locator as (...a: unknown[]) => unknown).apply(target, args) as Locator, threadId,
@@ -233,7 +245,11 @@ function ownerTargetId(page: Page): string {
   return typeof recorded === "string" ? recorded : "";
 }
 
-export function scopeContext(context: BrowserContext, threadId: string): BrowserContext {
+export function scopeContext(
+  context: BrowserContext,
+  threadId: string,
+  onContextCreated?: (context: BrowserContext) => void,
+): BrowserContext {
   return new Proxy(context, {
     get(target, property, receiver) {
       if (property === "browser") {
@@ -242,7 +258,7 @@ export function scopeContext(context: BrowserContext, threadId: string): Browser
          * `page.context().browser().contexts()` and every other context is
          * reachable, which is exactly the attack.
          */
-        return () => scopeBrowser(target.browser()!, target, threadId);
+        return () => scopeBrowser(target.browser()!, target, threadId, onContextCreated);
       }
       if (property === "pages") {
         /*
@@ -261,7 +277,7 @@ export function scopeContext(context: BrowserContext, threadId: string): Browser
          */
         return () => target.pages()
           .filter((page) => isPageOwnedBy(ownerTargetId(page), threadId))
-          .map((page) => scopePage(page, threadId));
+          .map((page) => scopePage(page, threadId, onContextCreated));
       }
       /*
        * `newCDPSession` is refused here, not only on the page.
@@ -326,7 +342,26 @@ export function scopeContext(context: BrowserContext, threadId: string): Browser
  * legitimate reason to want a clean context and the runtime already gives it a
  * per-thread one. What it cannot do is enumerate contexts it did not make.
  */
-export function scopeBrowser(browser: Browser, own: BrowserContext, threadId: string): Browser {
+/**
+ * @param onContextCreated
+ *   Called with every context a program creates, so the runtime can close them.
+ *
+ *   `browser.newContext()` is allowed here, and it should be: a program that
+ *   wants an isolated context has a legitimate reason. What was missing is that
+ *   nothing ever closed one. The runtime tracks its own context and closes it on
+ *   release; a context a *program* made was scoped correctly and then leaked
+ *   whole, holding its cookies, its storage and its renderer for the life of the
+ *   browser.
+ *
+ *   Reported rather than closed here, because this module has no idea when the
+ *   thread is finished with it. The runtime does.
+ */
+export function scopeBrowser(
+  browser: Browser,
+  own: BrowserContext,
+  threadId: string,
+  onContextCreated?: (context: BrowserContext) => void,
+): Browser {
   return new Proxy(browser, {
     get(target, property, receiver) {
       if (property === "contexts") return () => [scopeContext(own, threadId)];
@@ -345,8 +380,21 @@ export function scopeBrowser(browser: Browser, own: BrowserContext, threadId: st
         };
       }
       if (property === "newContext") {
-        // A new context this thread made is this thread's, so it is scoped too.
-        return (options?: Parameters<Browser["newContext"]>[0]) => target.newContext(options).then((created) => scopeContext(created, threadId));
+        /*
+         * A new context this thread made is this thread's, so it is scoped too,
+         * and now reported so the runtime can close it.
+         *
+         * The report happens before the proxy is built, so the runtime holds the
+         * real object. Handing it the scoped proxy would mean the runtime closes
+         * through a guard written for programs, which is the wrong door: the
+         * guard exists to stop a *program* reaching past its thread, and the
+         * runtime is the thing that owns the thread.
+         */
+        return (options?: Parameters<Browser["newContext"]>[0]) =>
+          target.newContext(options).then((created) => {
+            onContextCreated?.(created);
+            return scopeContext(created, threadId, onContextCreated);
+          });
       }
       /*
        * `newPage` creates a page in the default context, which is not this

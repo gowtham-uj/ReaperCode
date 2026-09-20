@@ -298,7 +298,29 @@ export class BrowserFacade {
    * bug, and there is exactly one door.
    */
   private scoped(page: Page): Page {
-    return scopePage(page, this.runtime.threadId);
+    /*
+     * Through the runtime, so context tracking comes with it.
+     *
+     * This is the door that mattered and the third time this fix was wired
+     * somewhere else: the program's `page` resolves through `currentPage()` here,
+     * not through the object `BrowserProgramHost` was constructed with, so a
+     * callback on the constructor's page never ran. Measured each time rather
+     * than assumed, because the code read as fixed twice while the leak stayed
+     * open (contexts 1 -> 2, `tracked: 0`).
+     *
+     * Delegating rather than repeating the call is the point: there is now one
+     * place that scopes a page for a program, and it cannot be forgotten at a
+     * fourth call site.
+     *
+     * The fallback is for the tests, which build the facade over a stub runtime
+     * with no such method, and it is honest rather than a silence: a runtime that
+     * cannot track contexts is a runtime that has none to track, and a stub is
+     * exactly that.
+     */
+    const scopedWithTracking = (this.runtime as { scopeForProgram?: (page: Page) => Page }).scopeForProgram;
+    return scopedWithTracking === undefined
+      ? scopePage(page, this.runtime.threadId)
+      : scopedWithTracking.call(this.runtime, page);
   }
 
   /** Open a page in this thread's own context, optionally naming it. */

@@ -2102,8 +2102,48 @@ export class ThreadBrowserRuntime {
     if (!page || !context) throw new Error("the browser is not attached");
     const browser = page.context().browser();
     if (!browser) throw new Error("the page has no browser");
-    return { page: scopePage(page, this.threadId), browser: scopeBrowser(browser, context, this.threadId) };
+    return {
+      page: this.scopeForProgram(page),
+      browser: scopeBrowser(browser, context, this.threadId, this.trackProgramContext),
+    };
   }
+
+  /**
+   * Scope a page for a program, with context tracking attached.
+   *
+   * The one door a program's page comes through, so the tracking cannot be
+   * forgotten at a call site. It *was* forgotten: the callback was wired into
+   * `scopedHandles` and the tool builds its own scoped page for the program's
+   * `page` root, so a probe measured the leak still open (contexts 1 -> 2,
+   * `tracked: 0`) while the code read as fixed.
+   *
+   * Public because that is the same page the tool needs, and routing it through
+   * the runtime is what makes "every scoped page reports its contexts" a property
+   * of the runtime rather than of remembering.
+   */
+  scopeForProgram(page: Page): Page {
+    return scopePage(page, this.threadId, this.trackProgramContext);
+  }
+
+  /** Bound so it can be passed to the scoping functions without losing `this`. */
+  private readonly trackProgramContext = (created: BrowserContext): void => {
+    this.programContexts.add(created);
+  };
+
+  /**
+   * Contexts a program created through `browser.newContext()`.
+   *
+   * These are scoped correctly and were never closed. The runtime closes its own
+   * context on release, and a context a program made was not the runtime's, so
+   * nothing took responsibility for it: it held its cookies, its storage and its
+   * renderer for the life of the browser, and a thread that made one per step
+   * accumulated them silently.
+   *
+   * Tracked rather than refused, because isolating work in a context is a
+   * legitimate thing for a program to want. Closed at release with the rest of
+   * the thread's state, which is the same moment the runtime's own context goes.
+   */
+  private readonly programContexts = new Set<BrowserContext>();
 
   /**
    * The outline the observer is holding, without acknowledging it.
@@ -3447,6 +3487,23 @@ export class ThreadBrowserRuntime {
      * id is what identifies a page and `resetHandles` is what forgets it.
      */
     await this.closeOwnedPages().catch(() => undefined);
+
+    /*
+     * And the contexts a program made, which nothing used to close.
+     *
+     * Unlike `this.context`, these are genuinely this thread's and nothing
+     * else's: a program asked for one, and no other thread can reach it. So
+     * closing them here is safe in the way that closing the shared default
+     * context was not, which is the distinction the comment above is about.
+     *
+     * Best effort per context. One that refuses to close must not stop the
+     * others, and must not stop the detach below: the thread is being released
+     * either way, and a stuck context is a smaller problem than a stuck release.
+     */
+    for (const created of this.programContexts) {
+      await created.close().catch(() => undefined);
+    }
+    this.programContexts.clear();
 
     this.resetHandles();
 

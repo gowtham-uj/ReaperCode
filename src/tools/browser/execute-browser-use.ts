@@ -1118,7 +1118,7 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
      * here rather than somewhere downstream, because every call the program
      * makes starts from this object.
      */
-    const programHost = new BrowserProgramHost(runtime, scopePage(active.page, runtime.threadId), observe);
+    const programHost = new BrowserProgramHost(runtime, runtime.scopeForProgram(active.page), observe);
     hostRef = programHost;
     const stepped = await runtime.step(
       async () => {
@@ -1420,16 +1420,31 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
    */
   const producedValue = result !== undefined;
   /*
-   * One rule: send the page unless the step both succeeded and answered itself.
+   * One rule: send the page unless the program answered the question itself.
    *
    * Every other case wants the page. A failure is where the model is most likely
-   * to guess; a NO_CHANGE is a step that did nothing; a wholesale change means
-   * the receipt has no usable diff. The single case that does not want it is a
-   * program that ran cleanly, changed little enough that the receipt describes
-   * it, and returned a value of its own, because then the answer is already in
-   * the receipt and the tree is a second answer to a question nobody asked.
+   * to guess, and a NO_CHANGE is a step that did nothing.
+   *
+   * ## The `wholesale` clause, and why it was wrong
+   *
+   * This used to read `SUCCESS && !wholesale && producedValue`, so a step whose
+   * page changed wholesale got the whole tree *even when the program returned a
+   * value*. The reasoning was that a wholesale change leaves the receipt with no
+   * usable diff, so the model needs the page instead.
+   *
+   * It does not, and the measurement is unambiguous. A navigation is always
+   * wholesale, so every navigation dumped the page whether or not the program
+   * had already answered. Across one 66-program mission: **17 of 67 results were
+   * full page dumps totalling 408,424 characters, 57% of all tool output**, and
+   * 51 of them carried a `RETURNED:` value the model had asked for. The single
+   * largest was 49,476 characters of WebDriverUniversity's navigation, returned
+   * by a program that had already said what it wanted.
+   *
+   * The receipt still names the URL transition, so a model that navigated and
+   * did not return anything still learns where it landed. What it no longer gets
+   * is a tree it did not ask for.
    */
-  const answeredItself = receipt.outcome === "SUCCESS" && !receipt.wholesale && producedValue;
+  const answeredItself = receipt.outcome === "SUCCESS" && producedValue;
   const shouldObserve =
     observe === "full" || observe === "changes" || (observe === "auto" && !answeredItself);
   if (shouldObserve && !runtime.observer.isPageGone()) {
