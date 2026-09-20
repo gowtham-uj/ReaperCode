@@ -267,3 +267,63 @@ test("a stream that fails leaves no partial file behind", async () => {
   const names = await readdir(await vault.ensure());
   assert.deepEqual(names, [], `a failed copy must not leave a file, got ${names.join(",")}`);
 });
+
+test("a stream that delivers no bytes is a failed copy, not an empty file", async () => {
+  /*
+   * The regression this pins shipped, and it was found in a mission rather than
+   * by a test: two runs downloaded the same invoice three times each and the
+   * vault held three 0-byte files, every one of them reported as a successful
+   * download. The model then spent tool calls on `ls` and `wc -c` trying to work
+   * out why the site was serving nothing. The site was serving 66 bytes.
+   *
+   * The fallback is reached when the browser's temporary artifact has been
+   * cleaned, and against the real endpoint it behaves like this:
+   *
+   *   saveAs:            REJECTED  download.saveAs: ENOENT: no such file ...
+   *   createReadStream:  RESOLVED  streamed=0 bytes
+   *
+   * So the stream resolves and delivers nothing, and `pipeline` reports success.
+   * Trusting that turned a loud failure into a silent one. A zero-byte result from
+   * a copy that is already recovering from a failed `saveAs` is evidence the
+   * source is gone, so it must fail here and let the caller report it.
+   */
+  const vault = await vaultAt();
+  const { Readable } = await import("node:stream");
+  const fake = {
+    suggestedFilename: () => "invoice.txt",
+    saveAs: async () => { throw new Error("ENOENT: no such file or directory, copyfile"); },
+    path: async () => undefined,
+    createReadStream: async () => Readable.from([]),
+    failure: async () => null,
+    url: () => "https://example.com/invoice",
+  };
+
+  await assert.rejects(
+    () => vault.accept(fake as never),
+    /could not be copied/,
+    "an empty stream must not be stored as a successful download",
+  );
+  const names = await readdir(await vault.ensure());
+  assert.deepEqual(names, [], `no file may be left behind, got ${names.join(",")}`);
+});
+
+test("a real stream of the right size still succeeds", async () => {
+  /*
+   * The other side of the same check, so requiring bytes cannot regress the case
+   * the fallback was added for. A stream that carries the file is stored.
+   */
+  const vault = await vaultAt();
+  const { Readable } = await import("node:stream");
+  const fake = {
+    suggestedFilename: () => "invoice.txt",
+    saveAs: async () => { throw new Error("ENOENT: no such file or directory, copyfile"); },
+    path: async () => undefined,
+    createReadStream: async () => Readable.from([Buffer.from("Hi Playwright Agent, Your total purchase amount is 2400. Thank you")]),
+    failure: async () => null,
+    url: () => "https://example.com/invoice",
+  };
+
+  const saved = await vault.accept(fake as never);
+  assert.equal(saved.bytes, 66, "the bytes the browser had must be stored");
+  assert.deepEqual((await vault.list()).map((f) => f.name), ["invoice.txt"]);
+});

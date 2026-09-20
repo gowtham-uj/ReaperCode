@@ -160,20 +160,22 @@ export class DownloadVault {
     }
 
     /*
-     * The stream is tried before the paths are retried, and it is the attempt
-     * that actually survives the failure this exists for.
+     * The stream is tried before the paths are retried, and it must produce bytes
+     * to count.
      *
      * `saveAs` and `download.path()` both name a file in the browser's temporary
      * artifact directory, and when that file is gone both fail the same way:
      * measured, `saveAs` reported ENOENT and all three `copyFile` retries from
-     * `path()` failed with it, so the file was lost while the browser insisted it
-     * had downloaded it. `createReadStream()` does not read that path at all. It
-     * asks the browser for the bytes over the CDP connection, which is the one
-     * route that still works after the artifact directory has been cleaned.
+     * `path()` failed with it. The stream was added as the route that does not
+     * need that file, and it does not deliver either: measured with the artifact
+     * removed, it resolves with nothing and `pipeline` succeeds. That is why it
+     * now checks the byte count (see `copyThroughStream`), because a stream that
+     * writes nothing here is evidence the source is gone, not evidence of an
+     * empty download.
      *
-     * Chosen ahead of the path retries because the common cause is the artifact
-     * being gone rather than late, and a retry against a path that will never
-     * exist again only spends the budget before reaching the route that works.
+     * Ahead of the path retries so the cheap check happens once, and the retries
+     * remain for the case they were written for: the artifact lagging the event
+     * rather than being gone.
      */
     if (failures.length > 0) {
       if (await this.copyThroughStream(download, target)) {
@@ -221,22 +223,36 @@ export class DownloadVault {
   }
 
   /**
-   * Copy the artifact by streaming its bytes from the browser, not from disk.
+   * Copy the artifact by streaming its bytes, and refuse to call an empty stream
+   * a copy.
    *
-   * This is the attempt that survives the browser's temporary artifact file being
-   * removed, because it never opens that file. `download.createReadStream()`
-   * reads over the CDP connection the browser is already on, so a download whose
-   * artifact directory has been cleaned between the event and the copy still
-   * lands in the vault.
+   * ## This attempt was added to recover a failure it does not recover
    *
-   * Measured as the difference between a passing and a failing run of the same
-   * test: `saveAs` reported ENOENT and all three `copyFile` retries from
-   * `path()` failed with it, while the bytes were available the whole time.
+   * It was written for the case `saveAs` reports ENOENT on: the browser's
+   * temporary artifact directory has been cleaned between the download event and
+   * the copy, so the file is gone from disk. The idea was that
+   * `createReadStream()` reads over the CDP connection and does not need that
+   * file. Measured against the real endpoint, with the artifact removed exactly
+   * as the failure describes:
    *
-   * Returns whether the file was written. A stream that fails part-way leaves a
-   * partial file, which is removed rather than left to be mistaken for a whole
-   * one: `pipeline` destroys the write side on failure, and the unlink is what
-   * makes "the copy either completed or left nothing" true.
+   *   saveAs:            REJECTED  download.saveAs: ENOENT: no such file ...
+   *   createReadStream:  RESOLVED  streamed=0 bytes
+   *
+   * The stream resolves, delivers nothing, and `pipeline` succeeds. So the bytes
+   * were never coming over CDP: the source is that same artifact. Worse than
+   * useless, the successful-looking pipeline turned the loud failure into a
+   * silent one. Two missions downloaded the same invoice three times each and the
+   * vault held three 0-byte files, reported as successful downloads, which the
+   * model then spent tool calls investigating with `ls` and `wc -c`.
+   *
+   * The version before it threw, the model retried, and a later copy landed the
+   * real 66 bytes. That is the behaviour worth keeping, so this requires bytes: a
+   * zero-byte result is a failed copy, the empty file is removed, and the caller
+   * falls through to the error that names what happened.
+   *
+   * The one case this would misjudge is a genuinely empty file that also failed
+   * `saveAs`, which is rare and lands in the safe direction: the model is told the
+   * copy did not produce content rather than being handed a file that looks real.
    */
   private async copyThroughStream(download: Download, target: string): Promise<boolean> {
     let stream: NodeJS.ReadableStream;
@@ -247,11 +263,14 @@ export class DownloadVault {
     }
     try {
       await pipeline(stream as NodeJS.ReadableStream, createWriteStream(target));
-      return true;
     } catch {
       await rm(target, { force: true }).catch(() => undefined);
       return false;
     }
+    const written = await stat(target).catch(() => undefined);
+    if ((written?.size ?? 0) > 0) return true;
+    await rm(target, { force: true }).catch(() => undefined);
+    return false;
   }
 
   /**
