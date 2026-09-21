@@ -1979,6 +1979,54 @@ export class ThreadBrowserRuntime {
 
   /** Close a page, and forget it so a name is not left pointing at a corpse. */
   async closePage(page: Page): Promise<void> {
+    /*
+     * The last page a thread owns is not closed, and this is the fix for a loop
+     * the model ran until it gave up.
+     *
+     * A thread with no page cannot be asked to do anything, so `resolveActivePage`
+     * opens one the moment none exists. Closing the last page therefore *creates*
+     * a page, and a program that closes everything it owns can never finish: it
+     * closes the replacement, which spawns another, and the count it is watching
+     * never reaches zero. Measured, on a loop of "close every page I own" against
+     * the real tool:
+     *
+     *   pass 1: before=7 closed=6 after=2
+     *   pass 2: before=2 closed=1 after=2
+     *   pass 3: before=2 closed=1 after=2
+     *
+     * Every pass after the first closes one page and ends with the same two, and
+     * the model reading that reported the browser as "spawning about:blank pages"
+     * and burned calls probing a mechanism that was doing what it was built to do.
+     *
+     * Refused rather than allowed-and-explained, because allowing it makes the
+     * invariant unreachable and the explanation arrives only after the model has
+     * already counted the new page as another thing to close. A refusal ends the
+     * loop at its first step and says why.
+     */
+    /*
+     * Identity by target id, not by object.
+     *
+     * The page a program passes here came through the sandbox, so it is a scoped
+     * proxy rather than the object the context holds: `candidate === page` is false
+     * for the page being closed, and the first version of this check therefore
+     * refused to fire and the loop continued. The target id is stamped on every
+     * page `describePages` hands out and the proxy forwards it, so it identifies
+     * the same tab on both sides of the wall.
+     */
+    const closingId = await targetIdOf(page).catch(() => undefined);
+    const remaining: Page[] = [];
+    for (const candidate of this.context?.pages() ?? []) {
+      if (candidate.isClosed()) continue;
+      if (closingId !== undefined && (await targetIdOf(candidate).catch(() => undefined)) === closingId) continue;
+      if (await this.owns(candidate)) remaining.push(candidate);
+    }
+    if (remaining.length === 0 && !page.isClosed()) {
+      throw new Error(
+        "that is the only page this thread has, and it is not closed. A thread with no page cannot run a program, " +
+        "so one is always kept open and closing this one would immediately open another. " +
+        "Close the tabs you opened and leave one running, or open a new tab first if you want to replace it.",
+      );
+    }
     for (const [name, entry] of this.named) {
       if (entry.page === page) this.named.delete(name);
     }
