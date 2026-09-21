@@ -457,8 +457,20 @@ code, pre, [data-diff], [data-read], [data-terminal] { font-family: var(--ds-fon
 }
 .markdown pre code { font-family: var(--ds-font-family-code); font-size: 12.5px; line-height: 1.6; }
 /*
- * Tables get a scroll container rather than wrapping, because a wrapped cell
- * makes a column comparison unreadable, which is the only reason to use a table.
+ * Tables: appearance here, overflow in the utilities.
+ *
+ * `overflow-x: auto` used to sit on the rule below as a safety net, and it never
+ * did anything. Streamdown wraps its tables in a scroller with Tailwind classes
+ * (`.markdown .overflow-x-auto`, specificity 0,2,0) that beat this rule (0,1,1),
+ * and the utilities are imported after this file. So the net was already
+ * overridden before it could matter, and when the utilities failed to emit for a
+ * separate reason the table had `max-height: 300px` from Streamdown's inline
+ * style with `overflow: visible`, and painted over the text below it.
+ *
+ * The dead declaration is gone rather than left as reassurance. What clips a tall
+ * table is Streamdown's own scroller, and `postcss.config.js` is where its
+ * utilities are made, so there is one place that owns this and it is the place
+ * that decides whether the scroller works.
  */
 .markdown table {
   display: block;
@@ -466,7 +478,6 @@ code, pre, [data-diff], [data-read], [data-terminal] { font-family: var(--ds-fon
   max-width: 100%;
   margin: 0 0 10px;
   border-collapse: collapse;
-  overflow-x: auto;
   font-size: 13px;
 }
 .markdown th, .markdown td {
