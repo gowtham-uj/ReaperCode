@@ -78,7 +78,15 @@ const PROBES: Probe[] = [
   { name: "uitesting-dynamic-id", url: "http://uitestingplayground.com/dynamicid", what: "a button whose id changes",
     code: `await page.getByRole("button", { name: /button with dynamic id/i }).click(); return { ok: true };` },
   { name: "uitesting-client-side-delay", url: "http://uitestingplayground.com/clientdelay", what: "delayed render",
-    code: `await page.getByRole("button", { name: /button triggering client side delay/i }).click({ timeout: 15000 }); const el = page.locator(".bg-success"); await el.waitFor({ timeout: 30000 }); return { t: (await el.textContent()).trim() };` },
+    /*
+     * The button reads "Button Triggering Client Side Logic", not "Delay", which is
+     * what made this probe fail: the name regex was the probe author's guess and the
+     * locator timed out on a page that was fine. Read from the page's own markup.
+     *
+     * The wait is the point of the probe: the result is computed after a few seconds
+     * of in-page work, so this exercises waiting for content rather than sleeping.
+     */
+    code: `await page.locator("#ajaxButton").click({ timeout: 15000 }); const el = page.locator("#content"); await el.waitFor({ timeout: 40000 }); return { t: (await el.textContent()).trim().slice(0, 80) };` },
   { name: "uitesting-progress-bar", url: "http://uitestingplayground.com/progressbar", what: "poll async state",
     code: `await page.getByRole("button", { name: /start/i }).click(); await page.waitForTimeout(1200); const v = await page.locator("#progressBar").textContent(); return { v };` },
   { name: "w3schools", url: "https://www.w3schools.com/html/html_forms.asp", what: "ad-heavy content site",
