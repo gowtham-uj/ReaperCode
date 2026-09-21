@@ -224,7 +224,8 @@ export class RemotePageHost {
       }
       return await (current as (...given: unknown[]) => unknown).apply(
         undefined,
-        reviveArguments(step.args, step.method).map((arg) => this.resolve(arg)),
+        /* A root is the host's own function, so there is no element to pass. */
+        reviveArguments(step.args, step.method, false).map((arg) => this.resolve(arg)),
       );
     }
 
@@ -271,7 +272,22 @@ export class RemotePageHost {
      * them, and Playwright itself sends a function to the browser as source, so
      * rebuilding it here is the same mechanism rather than a new one.
      */
-    const args = reviveArguments(step.args, step.method).map((arg) => this.resolve(arg));
+    /*
+     * Whether this object hands an element to its functions.
+     *
+     * A positive test rather than a negative one, and a test caught why: the first
+     * version asked "does it lack `goto`", which is true of every stub and every
+     * object that is not a page. A Locator has `count` and `first`, and a JSHandle
+     * has `jsonValue`, so requiring one of those says what this actually is
+     * instead of guessing from what it is not.
+     *
+     * Only this group passes an element as the function's first argument, which a
+     * source string can never receive. `page.evaluate` keeps the string form.
+     */
+    const looksLikeLocator =
+      typeof target["count"] === "function" || typeof target["jsonValue"] === "function" || typeof target["first"] === "function";
+    const onElementTarget = typeof target[step.method] === "function" && looksLikeLocator;
+    const args = reviveArguments(step.args, step.method, onElementTarget).map((arg) => this.resolve(arg));
     return await (member as (...given: unknown[]) => unknown).apply(current, args);
   }
 
@@ -444,6 +460,52 @@ const FUNCTION_MARKER = "__reaperFunctionSource";
 /** Methods whose string argument is called by Playwright rather than evaluated as an expression. */
 const SELF_INVOKING_METHODS: ReadonlySet<string> = new Set(["waitForFunction", "waitForSelector"]);
 
+/**
+ * Methods where Playwright calls the function *with* the element as its first
+ * argument, which a source string can never receive.
+ *
+ * `locator.evaluate((el) => ...)` and its relatives are the shape this exists for.
+ * Measured against the live browser for every spelling, with no bridge involved:
+ *
+ *   locator.evaluate("(el) => el.textContent")           -> undefined
+ *   locator.evaluate("el => el.textContent")             -> undefined
+ *   locator.evaluate("((el) => el.textContent)()")       -> TypeError: el is undefined
+ *   locator.evaluateAll("(els) => els.length")           -> undefined
+ *   locator.evaluate((el) => el.textContent)             -> "hello"
+ *
+ * A string is evaluated as an expression and never called, so no string can reach
+ * the element, and the invocation wrapper the general path uses calls it with no
+ * arguments. Only a real function works, which is why these get one built for
+ * them rather than a string.
+ */
+const ELEMENT_PASSING_METHODS: ReadonlySet<string> = new Set(["evaluate", "evaluateAll", "evaluateHandle", "evaluateAllHandle"]);
+
+/**
+ * A real function carrying the program's source, built without compiling it here.
+ *
+ * The body throws, and `toString` is overridden to the source. Playwright
+ * serialises a function by its source and compiles it in the browser, so the
+ * override is what travels and the throwing body is never reached: the host
+ * compiles and runs nothing of the model's, which is the boundary this file
+ * exists to hold.
+ *
+ * The obvious alternative, `new Function("return (" + source + ")")`, is
+ * injectable: a source like `0), stolen(), (() => 0` closes the wrapper and runs
+ * on the host. That is why this carries a string instead of assembling code.
+ *
+ * `page.evaluate` keeps the string form. It works there (that is what
+ * `SELF_INVOKING_METHODS` and the invoke wrapper are about), and it is the path
+ * with the longest history in this bridge, so only the element-passing methods
+ * change.
+ */
+function carrySource(source: string): (...args: unknown[]) => unknown {
+  const carrier = function (): never {
+    throw new Error("this function is a source carrier and must never be called on the host");
+  };
+  Object.defineProperty(carrier, "toString", { value: () => source, configurable: true });
+  return carrier as unknown as (...args: unknown[]) => unknown;
+}
+
 /** The source a marker carries, or undefined when the value is not a marker. */
 function readFunctionMarker(value: unknown): { invoked: boolean; source: string } | undefined {
   if (!value || typeof value !== "object") return undefined;
@@ -477,12 +539,28 @@ function readRegExpMarker(value: unknown): RegExp | undefined {
   }
 }
 
-function reviveArguments(args: unknown[], method: string): unknown[] {
+/**
+ * @param onLocator
+ *   True when the call is being made on a Locator or Frame rather than a Page,
+ *   which is what decides whether `evaluate` receives an element. Both expose a
+ *   method with that name and only the locator one passes the element, so the
+ *   name alone cannot tell them apart: `page.evaluate(fn)` works with a string
+ *   and would break if it were given a carrier, while `locator.evaluate(fn)`
+ *   works only with a carrier.
+ */
+function reviveArguments(args: unknown[], method: string, onLocator: boolean): unknown[] {
   return args.map((arg) => {
     const asRegExp = readRegExpMarker(arg);
     if (asRegExp !== undefined) return asRegExp;
     const marker = readFunctionMarker(arg);
     if (marker === undefined) return reviveArgument(arg);
+    /*
+     * A locator's evaluate hands the element to the function, which a string
+     * cannot receive at all. Measured: every string spelling returns undefined or
+     * throws "el is undefined", while a real function works. So these get a
+     * carrier rather than a string.
+     */
+    if (onLocator && ELEMENT_PASSING_METHODS.has(method)) return carrySource(marker.source);
     /*
      * Playwright calls the string for these, so it stays a function; everywhere
      * else the string is an expression and a function in it does nothing, so the

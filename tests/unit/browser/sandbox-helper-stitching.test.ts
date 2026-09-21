@@ -74,3 +74,49 @@ test("a tx body receives the transaction's page, and nothing else", () => {
   assert.match(source, /const value = await body\(\{ page: bodyPage \}\);/);
   assert.doesNotMatch(source, /await body\(\{ page: bodyPage, browser: browser/);
 });
+
+test("a locator function argument is carried as a real function, not a string", async () => {
+  /*
+   * `locator.evaluate((el) => ...)` never receives the element through this
+   * bridge, and the model lost a step to it on a live run:
+   *
+   *   locator.evaluate: TypeError: Cannot read properties of undefined
+   *   (reading 'textContent')
+   *
+   * Measured against the live browser with no bridge involved, no string can
+   * reach it: a bare arrow is evaluated as an expression and never called, and
+   * the invoke wrapper calls it with no arguments. Only a real function works,
+   * which is what `carrySource` builds: a function whose body throws and whose
+   * `toString` is the source, so Playwright serialises the source and compiles it
+   * in the browser while the host compiles nothing.
+   *
+   * Checked in the source because observing this needs a live page. The two
+   * properties that matter are the ones asserted: the element-passing methods get
+   * a carrier, and the carrier is not built by assembling code.
+   */
+  const source = await readFile(new URL("../../../src/browser/remote-page.ts", import.meta.url), "utf8");
+  assert.match(source, /carrySource\(marker\.source\)/, "an element-passing call must get a real function");
+  assert.match(source, /Object\.defineProperty\(carrier, "toString"/, "carried by a toString override, which compiles nothing");
+  /*
+   * Asserted against the code, not the prose: the comment above explains why
+   * `new Function` was rejected and naming it there is the point of the comment.
+   * A check on the whole file matches its own explanation, which is a test failing
+   * for the right reason about the wrong thing.
+   */
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.doesNotMatch(code, /new Function\(/, "and must not assemble code: a source can close the wrapper and run on the host");
+
+  /*
+   * And `page.evaluate` keeps the string form, which works there. Sending it a
+   * carrier would change the path with the longest history in this bridge for no
+   * gain, so the discriminator is asserted too.
+   */
+  /*
+   * The discriminator is positive, not negative, and a test caught why: asking
+   * "does it lack goto" is true of every stub and every non-page object, which
+   * sent `page.evaluate` a carrier and broke three tests about the string form.
+   * Requiring a Locator-only method says what the object is.
+   */
+  assert.match(source, /looksLikeLocator/, "locator-ness is decided by a positive test");
+  assert.match(source, /typeof target\["count"\] === "function"/, "a Locator has count");
+});
