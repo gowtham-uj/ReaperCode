@@ -94,3 +94,38 @@ test("the page watcher stores through the kit, so provenance cannot be skipped",
     "storing straight through the vault is the bug: it copies the file and tells the ledger nothing",
   );
 });
+
+test("the download repair defers to the next attach instead of tearing down mid-step", async () => {
+  /*
+   * The repair closed the connection eagerly at first, and that broke a step: the
+   * running step's page was detached, so the receipt's own page block reported the
+   * page as unreadable and a later check about where the page is found nothing. A
+   * failed download is already a failed step; wrecking the rest of the receipt is
+   * the repair doing more damage than the fault.
+   *
+   * Checked in the source because the behaviour needs a live browser to observe.
+   * What can be asserted without one is the shape that makes it safe: the flag is
+   * set, and the connection is dropped in `ensureReady` rather than here.
+   */
+  const runtime = await readFile(new URL("../../../../src/browser/thread-runtime.ts", import.meta.url), "utf8");
+  const at = runtime.indexOf("async repairDownloads()");
+  assert.ok(at !== -1, "the repair must exist");
+  const body = runtime.slice(at, at + 1200);
+  assert.match(body, /downloadsNeedFreshConnection = true/, "it must mark the connection stale");
+  assert.doesNotMatch(body, /browser\.close\(\)/, "and must NOT close the connection while the step is running");
+
+  /*
+   * Both halves of the deferred drop, and the second one was a bug of its own.
+   *
+   * `resetHandles` clears the reference without closing it, which leaks a live
+   * socket to Steel. Node's test runner waits for the event loop to drain, so a
+   * suite that passed every assertion then hung with no failing test to look at:
+   * measured, the transactional file passed all twenty-two tests and never
+   * exited. The repair therefore has to close the old connection, and close it at
+   * the start of the next call rather than inside the failing step.
+   */
+  const attach = runtime.slice(runtime.indexOf("if (this.downloadsNeedFreshConnection)"));
+  const block = attach.slice(0, attach.indexOf("if (!this.browser"));
+  assert.match(block, /this\.resetHandles\(\)/, "the next attach drops the stale handles");
+  assert.match(block, /stale\.close\(\)/, "and closes the connection, or the socket leaks and the suite hangs");
+});

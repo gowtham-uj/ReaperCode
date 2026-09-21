@@ -173,6 +173,23 @@ export async function perceive(page: Page, options: PerceiveOptions = {}): Promi
   } catch (error) {
     const message = (error as Error).message.split("\n")[0] ?? "the snapshot failed";
     /*
+     * A page that is *gone* is not a page that cannot be described, and the two
+     * must not be merged.
+     *
+     * This distinction is load-bearing and a test caught it: the tool has specific
+     * handling for a closed page (it opens a replacement and says where, which is
+     * Steel's own model of a session), and that handling lives on the throw. The
+     * first version of this catch swallowed the closed case too, so the tool never
+     * reached its own branch and the model was told "unreadable" about a page that
+     * no longer existed.
+     *
+     * The deadlock was the *other* case: a page that exists and answers reads, but
+     * whose snapshot never returns. That case must not throw, because throwing
+     * escapes the tool before any program runs. A closed page throws, as it always
+     * did, and the caller's existing branch handles it.
+     */
+    if (/has been closed|Target closed|context or browser has been closed/i.test(message)) throw error;
+    /*
      * The page's own state, read with calls that do not need the accessibility
      * tree, so the message can say *why* rather than only that it failed. This is
      * the diagnostic that turns "the tool is broken" into "this tab never

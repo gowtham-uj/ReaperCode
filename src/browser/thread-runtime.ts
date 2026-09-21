@@ -585,6 +585,31 @@ export class ThreadBrowserRuntime {
       // is worse than a fresh one, because it looks alive and fails on use.
       this.resetHandles();
     }
+    /*
+     * A download asked for a fresh connection, and this is the safe moment: the
+     * previous step has finished and nothing is mid-flight on the old one.
+     */
+    /*
+     * A download asked for a fresh connection, and this is the safe moment: the
+     * previous step has finished and nothing is mid-flight on the old one.
+     *
+     * The old connection is closed rather than merely forgotten, and that is the
+     * same trap `release` documents: clearing the reference without closing it
+     * leaks a live socket to Steel, and because node's test runner waits for the
+     * event loop to drain, a suite that passed every assertion hangs with no
+     * failing test to look at. Measured: the transactional file passed all
+     * twenty-two tests and then never exited.
+     *
+     * Deferring the close to here rather than doing it inside the failing step is
+     * what keeps the step's page intact, so both halves are needed: close it, and
+     * close it at the start of the next call.
+     */
+    if (this.downloadsNeedFreshConnection) {
+      this.downloadsNeedFreshConnection = false;
+      const stale = this.browser;
+      this.resetHandles();
+      if (stale) await stale.close().catch(() => undefined);
+    }
     if (!this.browser || !this.context) {
       if (!this.connecting) this.connecting = this.attach().finally(() => { this.connecting = undefined; });
       await this.connecting;
@@ -931,14 +956,23 @@ export class ThreadBrowserRuntime {
    */
   async repairDownloads(): Promise<string> {
     /*
-     * The connection is closed rather than merely forgotten, so Steel sees it go:
-     * a leaked socket would keep the stale behavior alive for whoever holds it.
+     * Lazy, and that is not an optimisation: closing the connection here is what
+     * broke a step.
+     *
+     * Dropping it eagerly means the running step's page is detached mid-flight, so
+     * the receipt's own page block reported the page as unreadable and a later
+     * assertion about where the page is found nothing. A download that failed is
+     * already a step that failed; wrecking the rest of the receipt as well is the
+     * repair doing more damage than the fault.
+     *
+     * So the connection is marked stale and dropped on the next attach, which is
+     * the next call. The model retries the download a moment later, `ensureReady`
+     * sees the flag, builds a fresh connection, and the retry has a working
+     * artifact directory. Nothing else in the failing step is disturbed.
      */
-    const browser = this.browser;
-    this.resetHandles();
-    if (browser) await browser.close().catch(() => undefined);
+    this.downloadsNeedFreshConnection = true;
     this.downloadNote = undefined;
-    return "the connection to the browser was refreshed so downloads work again; retry the download";
+    return "the browser connection will be refreshed before the next step, so downloads work again; retry the download";
   }
 
   /**
@@ -1438,6 +1472,16 @@ export class ThreadBrowserRuntime {
 
   /** Every file this thread has downloaded, for a caller that wants to report them. */
   readonly downloadedFiles: VaultFile[] = [];
+
+  /**
+   * Set when a download failed because the shared browser's artifact directory
+   * went away, so the next attach should build a fresh connection.
+   *
+   * Deferred rather than applied immediately so the step that failed keeps its
+   * page: dropping the connection inside that step detached it, and the receipt's
+   * page block then reported the page as unreadable. See `repairDownloads`.
+   */
+  private downloadsNeedFreshConnection = false;
 
   /** Attach the download handler to one page, once. */
   private watchDownload(page: Page): void {
@@ -2060,8 +2104,23 @@ export class ThreadBrowserRuntime {
     if (!this.pageWasAutoCreated) return undefined;
     this.pageWasAutoCreated = false;
     const count = this.context?.pages().filter((page) => !page.isClosed()).length ?? 0;
+    /*
+     * Where the page is, not only that one exists.
+     *
+     * The sentence said a blank page had been opened without saying what it was
+     * on, so a model told to continue had to spend a look finding out. Its own
+     * integration test asked for exactly this and had been red since the wording
+     * moved, which is what a check failing for the right reason looks like: the
+     * property it names is real and the message did not carry it.
+     *
+     * Read from the live page rather than assumed: this is called after the
+     * replacement exists, so the URL is a fact. A blank page reports `about:blank`,
+     * which is the honest answer and tells the model it is starting from nothing.
+     */
+    const current = this.active ?? this.context?.pages().find((page) => !page.isClosed());
+    const url = current?.url() ?? "about:blank";
     return (
-      `This thread had no pages left, so a blank page was opened to keep it usable. ` +
+      `This thread had no pages left, so a blank page was opened to keep it usable; it is at ${url}. ` +
       `A thread with no page cannot run a program, which is why one always exists. ` +
       `The browser now holds ${count} page(s); a closed page stays closed unless you open another.`
     );

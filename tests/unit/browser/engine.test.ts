@@ -85,20 +85,19 @@ test("raw mode is labelled differently from the stub fallback", async () => {
   assert.match(result.note ?? "", /RAW/);
 });
 
-test("a page that is gone is reported, not thrown, and never comes back empty", async () => {
+test("a page that is gone still throws, so the caller's own handling runs", async () => {
   /*
-   * This asserted a throw, and the throw is what deadlocked a live mission.
+   * A closed page and a page that cannot be described are different conditions,
+   * and merging them broke a test that had nothing to do with either.
    *
-   * The intent was right and is kept: an empty view reads to a model as a blank
-   * page, so "nothing to say" and "the page is gone" must not look alike. What
-   * changed is the mechanism. Throwing escaped the tool, and because the tool's
-   * look path has no try, no program ran, so the active page never changed, so
-   * every later call hit the same page and the model had no way out.
+   * The tool has specific handling for a closed page: it opens a replacement and
+   * says where, which is Steel's own model of a session. That handling lives on the
+   * throw. The first version of the unreadable-page catch swallowed this case too,
+   * so the tool never reached its branch and the model was told "unreadable" about
+   * a page that no longer existed.
    *
-   * The distinction survives as text instead: a result that says the page could
-   * not be read, names why, and states that code still runs. Asserted here as the
-   * two properties that matter, so a future change cannot quietly turn this back
-   * into either a throw or an empty page.
+   * The deadlock was the other case: a page that exists and answers reads, whose
+   * snapshot never returns. That one must not throw. This one must.
    */
   const gone = {
     ariaSnapshot: async () => {
@@ -107,10 +106,7 @@ test("a page that is gone is reported, not thrown, and never comes back empty", 
     evaluate: async () => { throw new Error("Target page, context or browser has been closed"); },
   };
 
-  const result = await perceive(gone as never);
-  assert.match(result.text, /PAGE UNREADABLE/, "the model must be told, not handed a silent empty view");
-  assert.ok(result.text.trim().length > 30, "and told enough to act on");
-  assert.match(result.note ?? "", /could not be read/, "with the note naming it too");
+  await assert.rejects(() => perceive(gone as never), /has been closed/);
 });
 
 test("the whole-page read uses the text form, not the JSON one", async () => {
