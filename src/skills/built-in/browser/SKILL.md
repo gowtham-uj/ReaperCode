@@ -713,6 +713,14 @@ code:
 The distinction is page versus browser, and it matters: end a tab when you are
 done with it, but do not end the browser.
 
+**One tab always stays open, and closing it is refused.** A thread with no page
+could not run a program at all, so the runtime opens one the moment none exists.
+That means closing your last tab would immediately create another, and a program
+that closes every tab it owns can never reach zero: it closes the replacement and
+gets a new one, which reads as the browser spawning blank tabs. `closePage` refuses
+that last close and says so. If you want to be rid of the tab you are on, open the
+one you want first and then close the old one.
+
 Use the browser you have. If it is not reachable, the error names the cause and
 what to do — retrying with a launch call will not help.
 
