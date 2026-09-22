@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="620" viewBox="0 0 1400 620">
+  <defs>
+    <style>
+      .bg{fill:#000}
+      .box{fill:#050505;stroke:#3f3f46;stroke-width:1.5}
+      .boxA{fill:#050505;stroke:#8b5cf6;stroke-width:1.5}
+      .t{font-family:Inter,Segoe UI,Arial,sans-serif;fill:#f4f4f5}
+      .m{font-family:Inter,Segoe UI,Arial,sans-serif;fill:#a1a1aa}
+      .line{stroke:#52525b;stroke-width:2;fill:none;marker-end:url(#arrow)}
+      .lineA{stroke:#8b5cf6;stroke-width:2;fill:none;marker-end:url(#arrowA)}
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0 0 L0 6 L9 3 z" fill="#52525b"/></marker>
+    <marker id="arrowA" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0 0 L0 6 L9 3 z" fill="#8b5cf6"/></marker>
+  </defs>
+  <rect width="1400" height="620" class="bg"/>
+  <text x="60" y="70" class="t" font-size="34" font-weight="700">ReaperCode runtime</text>
+  <text x="60" y="106" class="m" font-size="18">One agent loop. Tools, provider routing, context cleanup, and persistent clients around it.</text>
+
+  <rect x="70" y="235" width="205" height="100" rx="10" class="box"/>
+  <text x="172" y="276" text-anchor="middle" class="t" font-size="21" font-weight="600">Task + workspace</text>
+  <text x="172" y="307" text-anchor="middle" class="m" font-size="15">repo, prompt, session</text>
+
+  <rect x="365" y="205" width="260" height="160" rx="10" class="boxA"/>
+  <text x="495" y="250" text-anchor="middle" class="t" font-size="24" font-weight="650">Runtime engine</text>
+  <text x="495" y="287" text-anchor="middle" class="m" font-size="16">build request</text>
+  <text x="495" y="315" text-anchor="middle" class="m" font-size="16">run validated tools</text>
+  <text x="495" y="343" text-anchor="middle" class="m" font-size="16">update history</text>
+
+  <rect x="760" y="150" width="250" height="90" rx="10" class="box"/>
+  <text x="885" y="188" text-anchor="middle" class="t" font-size="20" font-weight="600">Model gateway</text>
+  <text x="885" y="216" text-anchor="middle" class="m" font-size="14">normalized provider stream</text>
+
+  <rect x="760" y="265" width="250" height="90" rx="10" class="box"/>
+  <text x="885" y="303" text-anchor="middle" class="t" font-size="20" font-weight="600">Tool scheduler</text>
+  <text x="885" y="331" text-anchor="middle" class="m" font-size="14">files, shell, search, eval</text>
+
+  <rect x="760" y="380" width="250" height="90" rx="10" class="box"/>
+  <text x="885" y="418" text-anchor="middle" class="t" font-size="20" font-weight="600">Context hooks</text>
+  <text x="885" y="446" text-anchor="middle" class="m" font-size="14">prune, spill, compact, recover</text>
+
+  <rect x="1120" y="245" width="205" height="110" rx="10" class="box"/>
+  <text x="1222" y="287" text-anchor="middle" class="t" font-size="20" font-weight="600">Next turn</text>
+  <text x="1222" y="316" text-anchor="middle" class="m" font-size="14">or final answer</text>
+
+  <path d="M275 285 H365" class="lineA"/>
+  <path d="M625 250 C680 250 700 195 760 195" class="line"/>
+  <path d="M625 285 H760" class="line"/>
+  <path d="M625 325 C685 325 700 425 760 425" class="line"/>
+  <path d="M1010 310 H1120" class="lineA"/>
+  <path d="M1222 355 C1222 545 495 545 495 365" class="line"/>
+
+  <text x="70" y="560" class="m" font-size="15">CLI, web app, and JSON-RPC app server all use the same runtime.</text>
+</svg>
