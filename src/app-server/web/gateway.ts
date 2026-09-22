@@ -157,6 +157,37 @@ const OWNERSHIP_REQUIRED_METHODS = new Set([
  *     Host;
  *   - anything else is a page this server did not serve.
  */
+/**
+ * Whether a request looks like it came from a proxied preview document.
+ *
+ * The origin rule above cannot see this case, and the reason is the mechanism
+ * rather than an oversight: the preview proxy serves an arbitrary loopback dev
+ * server's document *on this gateway's own origin*, so a relative
+ * `fetch("/api/file?...")` from that document is same-origin by construction and
+ * carries no `Origin` header at all. A dev server the agent previewed could read
+ * the browser's cookie jar through a route the origin rule had already passed.
+ *
+ * Two browser-set headers identify it, and either is enough:
+ *
+ *   - `Sec-Fetch-Site: same-origin` with a `Referer` whose path is under
+ *     `/preview/` is a same-origin subresource request from a preview document;
+ *   - a `Referer` under `/preview/` at all, for browsers that set Referer and
+ *     not Sec-Fetch-Site.
+ *
+ * Only the paths the gateway itself mounts under `/preview/` match, so the UI's
+ * own documents under `/` are unaffected. A non-browser client sets neither
+ * header, which is the same "already inside loopback" case the origin rule
+ * trusts.
+ */
+export function looksLikePreviewOrigin(referer: string | undefined): boolean {
+  if (referer === undefined || referer === "") return false;
+  try {
+    return new URL(referer).pathname.startsWith("/preview/");
+  } catch {
+    return false;
+  }
+}
+
 export function originAllowed(origin: string | undefined, requestHost: string | undefined): boolean {
   if (origin === undefined || origin === "") return true;
   try {
@@ -278,6 +309,22 @@ export async function startBrowserGateway(options: BrowserGatewayOptions): Promi
     // `handleRest` would mean its GET-only guard rejected a preview form
     // submission.
     const url = request.url ?? "/";
+    /*
+     * A preview document is a page this server did serve, but not one that may
+     * reach the API.
+     *
+     * `proxyPreview` puts an arbitrary dev server's document on this origin, and
+     * a same-origin `fetch("/api/...")` from it carries no Origin header, so the
+     * rule above waves it through. That is how a dev server the agent started
+     * could read the browser's cookie jar. The check is scoped to the API surface
+     * rather than to every route, because a preview document legitimately loads
+     * its own subresources under `/preview/`, and those carry the same referrer.
+     */
+    if (url.startsWith("/api/") && looksLikePreviewOrigin(request.headers.referer)) {
+      response.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" });
+      response.end(JSON.stringify({ error: "preview_not_allowed" }));
+      return;
+    }
     /*
      * The ports this proxy must never forward to, computed once per request
      * from the configured endpoints rather than read from a constant. See

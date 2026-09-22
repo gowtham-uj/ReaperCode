@@ -83,3 +83,32 @@ test("it warns again at six, so a long loop is not silently tolerated", () => {
   for (let i = 0; i < 6; i++) seen.push(rt.noteStepOutcome(PROGRAM, "NO_CHANGE"));
   assert.equal(seen.filter((entry) => entry !== undefined).length, 2, "warns at the third and again at the sixth, not every time");
 });
+
+test("it keeps warning past eight, instead of going silent on the ninth", () => {
+  /*
+   * The bug this pins: the repetition count came from a buffer of the last eight
+   * steps, so it stopped at eight, the every-third gate fired at three and six
+   * and then never again, and the detector went permanently quiet.
+   *
+   * Eight identical attempts is when a model is *most* stuck, so silence there is
+   * backwards. The buffer still finds a cycle, but the warning is driven by the
+   * unbounded run of identical outcomes, so it fires at nine, twelve and every
+   * third attempt after that.
+   */
+  const rt = runtime();
+  const warnings: Array<string | undefined> = [];
+  for (let i = 0; i < 12; i++) warnings.push(rt.noteStepOutcome(PROGRAM, "NO_CHANGE"));
+  const spoken = warnings.filter((entry) => entry !== undefined) as string[];
+  assert.equal(spoken.length, 4, "the third, sixth, ninth and twelfth attempts warn");
+  assert.match(spoken[3]!, /12th time/, "and the count keeps climbing rather than sticking at six");
+  const quietTail = warnings.slice(7).filter((entry) => entry === undefined).length;
+  assert.ok(quietTail < 5, "the tail is not silent");
+});
+
+test("the count is the number of attempts, not the size of the buffer", () => {
+  const rt = runtime();
+  let last: string | undefined;
+  for (let i = 0; i < 9; i++) last = rt.noteStepOutcome(PROGRAM, "NO_CHANGE");
+  assert.ok(last !== undefined, "the ninth attempt still warns");
+  assert.match(last!, /9th time/);
+});

@@ -327,6 +327,27 @@ export class RemotePageHost {
   }
 
   /**
+   * Make one wire argument real, for a helper that does not go through `call`.
+   *
+   * Two steps, because a marker can be either shape and a helper needs both.
+   * `reviveArgument` rebuilds the values that cannot cross IPC as data (a
+   * RegExp, and the function guard that refuses one), and `resolve` swaps a
+   * handle for the live object it names.
+   *
+   * The observation helpers used to call `resolve` alone, which was correct
+   * until a helper took a pattern. `expect(page).toHaveURL(/example\.com/)`
+   * reached the host as `{ __reaperRegExp, source, flags }` and the assertion
+   * compared the URL against "[object Object]", which cannot match: the model
+   * wrote the idiomatic Playwright call and was told the page was wrong.
+   *
+   * One entry point rather than two calls at each site, so a helper and a method
+   * call cannot disagree about what a marker means.
+   */
+  helperResolve(value: unknown): unknown {
+    return this.resolve(reviveArgument(value));
+  }
+
+  /**
    * Replace a handle marker with the live object it names.
    *
    * Public because the observation helpers need it and do not go through

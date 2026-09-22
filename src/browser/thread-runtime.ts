@@ -425,6 +425,19 @@ export class ThreadBrowserRuntime {
   private lastActivityAt = Date.now();
 
   /**
+   * The instant this runtime object was built.
+   *
+   * Read by the download collector as the floor for a vault read. The vault is
+   * per thread and on disk and outlives this object; `downloadedFiles` is per
+   * object and starts empty. The idle reaper drops a runtime and the next use
+   * builds a new one, so a fresh runtime over a vault full of this thread's
+   * earlier files is the normal case after a ten-minute gap, and the floor that
+   * keeps that history out of a download answer has to be this object's start
+   * rather than the process's. See `collectUnannounced`.
+   */
+  readonly startedAt = Date.now();
+
+  /**
    * The last thing the health sweep did, if it closed a wedged page.
    *
    * Surfaced on the next tool result rather than logged and forgotten. A page
@@ -820,7 +833,23 @@ export class ThreadBrowserRuntime {
           this.named.set(name, { name, page, openedAt: Date.now() });
           this.kit.registerPage(name, page, { creationType: "popup", parent: opener });
         }
-        page.once("close", () => this.notifyPagesChanged());
+        /*
+         * A closed page is forgotten, not only announced.
+         *
+         * `kit.forgetPage` is the one reclaimer of the page registry and the health
+         * map, and the one writer of a `page.closed` ledger event, and nothing
+         * called it: this listener only told the pane to redraw. So both maps grew
+         * for the life of the thread, holding raw Page objects and their listeners
+         * for pages that no longer existed.
+         *
+         * Here rather than in `closePage`, because a page the *site* closes (a
+         * popup that closes itself, a target the browser reaps) is the common case
+         * and does not go through that method.
+         */
+        page.once("close", () => {
+          this.kit.forgetPage(page);
+          this.notifyPagesChanged();
+        });
         this.notifyPagesChanged();
       })();
     });
@@ -881,7 +910,18 @@ export class ThreadBrowserRuntime {
      */
     for (const entry of this.named.values()) {
       if (entry.page.isClosed()) continue;
-      this.kit.registerPage(entry.name, entry.page, { creationType: "restored" });
+      /*
+       * `reconnect`, because this is the one path that knows the name is coming
+       * back to the same page rather than to a new one. The distinction is the
+       * fix for a false-provenance bug: `register` used to hand any newcomer the
+       * record of a closed page with the same name, id and `openedBy` included,
+       * so a fresh tab was recorded as a popup a click had opened. Here the page
+       * is the same tab under a new `Page` object, so the id must survive. A
+       * second attach without a reconnect (the connection dropped but the
+       * objects did not) finds the page already registered and returns its
+       * entry before this flag is read.
+       */
+      this.kit.registerPage(entry.name, entry.page, { creationType: "restored", reconnect: true });
     }
 
     /*
@@ -2082,12 +2122,28 @@ export class ThreadBrowserRuntime {
    * context grew" from an observation into a measurement, and it is one line
    * here against an afternoon of reading a trace.
    */
-  private async perceive(target: Page): Promise<PerceptionResult> {
+  private async perceive(target: Page, depth?: number | undefined): Promise<PerceptionResult> {
     const perceived = await perceive(target, {
       context: {
         ...(this.observer.step !== undefined ? { step: this.observer.step } : {}),
         ...(this.observer.goal !== undefined ? { goal: this.observer.goal } : {}),
       },
+      /*
+       * Depth is forwarded, which it was not.
+       *
+       * The cut notice the model reads names `view({ depth })` as one of the two
+       * ways to see more of a trimmed view. The region branch above passed it and
+       * the whole-page branch did not, so the remedy the tool's own message
+       * offered did nothing on the path most looks take.
+       *
+       * `engine.perceive` documents why the whole page is the default: a depth
+       * cut folds controls into their ancestor's name, so past a certain level
+       * the nav links stop being individually addressable. That is the right
+       * default and it is still the default here. This only forwards a depth the
+       * caller asked for, which is a caller who has been told about the tradeoff
+       * in the same message.
+       */
+      ...(depth !== undefined ? { depth } : {}),
     });
     this.lastWasFallback = perceived.usedFallback;
     /*
@@ -2235,7 +2291,7 @@ export class ThreadBrowserRuntime {
       return { ...this.observer.view(note), url: page.url() };
     }
 
-    const perceived = await this.perceive(page);
+    const perceived = await this.perceive(page, options.depth);
     this.observer.capture({
       url: page.url(),
       title: await page.title().catch(() => ""),
@@ -2367,10 +2423,14 @@ export class ThreadBrowserRuntime {
     };
     page.on("framenavigated", onNavigated);
     context.on("page", onPage);
-    this.handoffListeners = () => {
+    /*
+     * Pushed, not assigned. See `handoffListeners` for why a second takeover
+     * must not drop the first pair on the floor.
+     */
+    this.handoffListeners.push(() => {
       page.off("framenavigated", onNavigated);
       context.off("page", onPage);
-    };
+    });
     const lease = this.control.takeControl(this.threadId);
     return { generation: lease.generation, startedAt: lease.since };
   }
@@ -2441,8 +2501,7 @@ export class ThreadBrowserRuntime {
       changes,
     };
     this.handoff = undefined;
-    this.handoffListeners?.();
-    this.handoffListeners = undefined;
+    this.disposeHandoffListeners();
     return { generation: lease.generation, summary };
   }
 
@@ -2450,8 +2509,35 @@ export class ThreadBrowserRuntime {
   private handoff:
     | { startedAt: number; startedUrl: string; startedTitle: string; startedTabs: number; navigations: string[] }
     | undefined;
-  /** Detaches the handoff listeners. Held so a return removes exactly what a take added. */
-  private handoffListeners: (() => void) | undefined;
+  /**
+   * Detachers for the handoff listeners, one entry per `beginHumanControl`.
+   *
+   * A list, not a single closure. A second takeover while the human already has
+   * control is a real sequence rather than a hypothetical: the pane's button is
+   * behind a poll, so a double press or a reconnect sends `take` twice. Assigning
+   * the closure to one field overwrote the earlier one, and the first
+   * `page.on("framenavigated")` plus `context.on("page")` pair then stayed
+   * attached for the life of the runtime: the same navigation was recorded twice
+   * and nothing could ever detach them. Each entry closes over its own page and
+   * context, so a reconnect between two takeovers is covered too.
+   */
+  private handoffListeners: Array<() => void> = [];
+
+  /**
+   * Detach every handoff listener, and make a repeat call a no-op.
+   *
+   * Idempotent by draining the list, because two callers can run for one
+   * handoff: the end of the handoff, and `release` when the runtime is torn down
+   * while the human still holds control. Draining is what makes the second call
+   * cheap rather than a second delivery, and it drops the closure's reference to
+   * the page and the context, which is the part that would otherwise keep them
+   * alive after the browser is gone.
+   */
+  private disposeHandoffListeners(): void {
+    const detachers = this.handoffListeners;
+    this.handoffListeners = [];
+    for (const detach of detachers) detach();
+  }
 
   /** Whether a human currently owns this thread's browser. */
   humanHasControl(): boolean {
@@ -2917,8 +3003,37 @@ export class ThreadBrowserRuntime {
    * database that failed to open is the difference between a thread that is
    * signed in and one that will fail a login wall on its next action, and the
    * agent is told which it is.
+   *
+   * Written on every attach and read by `takeIndexedDbRestoreNote`. It was
+   * written and read by nothing, which made a failed restore indistinguishable
+   * from one that never ran: the attach reported success either way, and the
+   * only way to find out was to hit the login wall.
    */
   private indexedDbRestoreNotes: string[] = [];
+
+  /**
+   * Take the IndexedDB restore note, if the last attach could not put everything
+   * back.
+   *
+   * Read once and cleared, for the same reason the health and page notes are: a
+   * sentence that repeats on every step stops being read. The attach is what
+   * produces it, so the step after a reconnect is the one where it is worth
+   * saying, and that is also the step where a missing database shows up as a
+   * logged-out page.
+   *
+   * Joined into one sentence rather than returned as a list, because most
+   * restores succeed for most origins and the reader wants the failures, not a
+   * report of which origins happened to have a page open.
+   */
+  takeIndexedDbRestoreNote(): string | undefined {
+    if (this.indexedDbRestoreNotes.length === 0) return undefined;
+    const notes = this.indexedDbRestoreNotes;
+    this.indexedDbRestoreNotes = [];
+    return (
+      `IndexedDB could not be fully restored on attach, so a page may be signed out: ${notes.join("; ")}. ` +
+      `IndexedDB is restored only onto a page already open on the same origin, so opening a tab on that site and reattaching is what retries it.`
+    );
+  }
 
   /**
    * The settings in force, for a program that asks.
@@ -3170,6 +3285,22 @@ export class ThreadBrowserRuntime {
    * changed and what to change, rather than only reporting the count, because
    * "you have done this three times" is a fact and "nothing about the page has
    * changed between them" is the reason to act differently.
+   *
+   * Two counts, because one of them cannot answer both questions:
+   *
+   * `repeats` is how many times this program and outcome appear in the last eight
+   * steps, which catches a cycle that alternates between two programs. It is a
+   * count inside a bounded window, so it saturates at eight.
+   *
+   * `streak` is how many consecutive steps this exact program and outcome have
+   * produced, counted without bound. The window count is what the warning fired
+   * on for a while, and that is the bug this half fixes: with the buffer at
+   * eight, `repeats` stopped growing at eight, the every-third gate fired at
+   * three and six and then never again, and the detector went permanently silent
+   * on the ninth identical attempt. A model stuck in a loop is exactly who the
+   * warning exists for, and eight identical attempts is when it is most stuck, so
+   * the count that drives the warning has to keep climbing. It is one number
+   * rather than a history, so a loop that never ends costs nothing to track.
    */
   noteStepOutcome(code: string, outcome: string): string | undefined {
     const fingerprint = code.replace(/\s+/g, " ").trim();
@@ -3179,19 +3310,52 @@ export class ThreadBrowserRuntime {
     const repeats = this.recentSteps.filter(
       (entry) => entry.fingerprint === fingerprint && entry.outcome === outcome,
     ).length;
-    if (repeats < 3) return undefined;
+    const key = fingerprint + " " + outcome;
+    this.streak = this.streak.key === key ? { key, count: this.streak.count + 1 } : { key, count: 1 };
+    const streak = this.streak.count;
+    /*
+     * The warning is due when either count reaches a multiple of three, and the
+     * larger of them is what it reports.
+     *
+     * Two counts because they answer different questions and each has a gap the
+     * other fills. `repeats` counts matches inside the eight-step window, which
+     * is what catches an alternating cycle (A, B, A, B) that never builds a
+     * streak of its own. `streak` counts consecutive identical steps without
+     * bound, which is what keeps firing once the window is saturated.
+     *
+     * They are not the same number and they are not interchangeable. A history
+     * of A, A, B, A, A, A gives `repeats = 5` and `streak = 3`: the reported
+     * attempt number comes from the window count while the actual consecutive run
+     * is shorter. That is the honest reading of "the same program has produced
+     * this outcome five times in the last eight", which is what the sentence
+     * says.
+     *
+     * The alternating case is still only caught while the cycle fits the window:
+     * a two-program cycle warns at the fifth and sixth steps and then goes quiet,
+     * because the window then holds four of each and four is not a multiple of
+     * three. Widening that is a separate change and is not claimed here.
+     */
+    if (repeats < 3 && streak < 3) return undefined;
+    if (repeats % 3 !== 0 && streak % 3 !== 0) return undefined;
+    const shown = Math.max(repeats, streak);
     /*
      * Only warn on the third and then every third, so the sentence stays a
      * signal rather than becoming a line the model scrolls past.
      */
-    if (repeats % 3 !== 0) return undefined;
     return (
-      `LOOP: this is the ${repeats}${ordinalSuffix(repeats)} time the same program has produced ${outcome} on this page. ` +
+      `LOOP: this is the ${shown}${ordinalSuffix(shown)} time the same program has produced ${outcome} on this page. ` +
       `Retrying it unchanged will keep producing it. Change something: a different locator, ` +
       `\`probeInput()\` to check whether the page is still accepting input, \`recover()\` if it is not, ` +
       `or a different route to the goal.`
     );
   }
+
+  /**
+   * The current run of identical program-and-outcome steps, and what they were.
+   *
+   * See `noteStepOutcome` for why this exists alongside the eight-step window.
+   */
+  private streak: { key: string; count: number } = { key: "", count: 0 };
 
   /**
    * Whether this page is hearing input at all.
@@ -3670,6 +3834,17 @@ export class ThreadBrowserRuntime {
     }
     this.programContexts.clear();
 
+    /*
+     * Handoff listeners go with the handles they were attached to.
+     *
+     * A runtime can be retired or closed while the human still has control, and
+     * the detach closures hold the page and the context. Leaving them attached
+     * after `resetHandles` cleared both would keep those objects alive for the
+     * life of the runtime and leave listeners running against a browser this
+     * runtime no longer drives.
+     */
+    this.disposeHandoffListeners();
+
     this.resetHandles();
 
     /*
@@ -3830,10 +4005,49 @@ function isPage(value: unknown): value is Page {
  * locator can snapshot itself and cannot navigate. Checked in that order because
  * a Page also has `ariaSnapshot`, so the page test has to run first.
  */
-function isLocator(value: unknown): value is import("playwright").Locator {
+export function isLocator(value: unknown): value is import("playwright").Locator {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Record<string, unknown>;
   return typeof candidate["ariaSnapshot"] === "function" && typeof candidate["goto"] !== "function";
+}
+
+/**
+ * A program's `view` argument, as `PageViewOptions`.
+ *
+ * The program-facing `view` accepts three shapes and they arrive here as one
+ * value, because the sandbox sends whatever the program passed:
+ *
+ *   view()                          the whole active page
+ *   view(page.getByRole("main"))    a region, by locator
+ *   view(cartTab)                   another tab
+ *   view({ selector, depth })       the options object
+ *
+ * The options object is the one that did not work. The sandbox forwards its
+ * arguments verbatim, so `view({ selector: "main" })` arrived as `{ selector }`
+ * and was treated as a *page*: `options.page` became the object, nothing
+ * recognised it, and the read fell back to the whole page. The cut notice the
+ * model reads names `view({ selector })` and `view({ depth })` as the two
+ * remedies for a trimmed view, so a program following the tool's own advice paid
+ * for the full page and never learned why.
+ *
+ * A Page and a Locator both have `ariaSnapshot`, so the plain-object branch is
+ * safe: anything with that method is treated as a target, and anything without
+ * is read as options.
+ */
+export function viewOptionsOf(target: unknown): PageViewOptions {
+  if (target === undefined || target === null) return {};
+  if (typeof target !== "object") return {};
+  const candidate = target as Record<string, unknown>;
+  /* A Page or a Locator is a target to read, not a bag of options. */
+  if (typeof candidate["ariaSnapshot"] === "function" || typeof candidate["goto"] === "function") {
+    return { page: target };
+  }
+  const options: PageViewOptions = {};
+  if (typeof candidate["selector"] === "string") options.selector = candidate["selector"];
+  if (typeof candidate["depth"] === "number") options.depth = candidate["depth"];
+  if (typeof candidate["maxChars"] === "number") options.maxChars = candidate["maxChars"];
+  if (candidate["page"] !== undefined) options.page = candidate["page"];
+  return options;
 }
 
 /** How long a single browser program may run before it is cut off. */

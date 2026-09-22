@@ -34,6 +34,19 @@ export interface VaultFile {
   path: string;
   /** Size in bytes, so a caller can tell an empty stub from a real file. */
   bytes: number;
+  /**
+   * When the file landed here, from the stored file's own mtime.
+   *
+   * A copy is made when the download is accepted, not when the browser started
+   * it, and `copyFile` does not carry the source's timestamps over, so this is
+   * the moment the vault got the bytes. That is the fact a caller needs to tell
+   * a file from this session apart from one a previous run left behind: the
+   * directory is per thread and outlives the runtime that filled it.
+   *
+   * Zero when the file could not be statted, which reads as "older than
+   * anything", the safe direction for every caller that compares it.
+   */
+  mtimeMs: number;
   /** The URL it was downloaded from, when Playwright reported one. */
   url?: string;
 }
@@ -210,6 +223,21 @@ export class DownloadVault {
       );
     }
     const info = await stat(target).catch(() => undefined);
+    /*
+     * `mtimeMs` comes from the copy that just landed, not from the browser's
+     * download. `copyFile` does not preserve the source's timestamps, so this is
+     * the moment the vault got the bytes, which is what a caller comparing
+     * against a session start needs to know. A file that could not be statted at
+     * all reads as zero, older than any marker, so it is never attributed to a
+     * session that began after it.
+     */
+    const stored: VaultFile = {
+      name,
+      path: target,
+      bytes: info?.size ?? 0,
+      mtimeMs: info?.mtimeMs ?? 0,
+      ...(download.url() ? { url: download.url() } : {}),
+    };
     const failure = await download.failure().catch(() => null);
     if (failure !== null) {
       /*
@@ -217,9 +245,9 @@ export class DownloadVault {
        * rather than as an error: the caller can decide, and a partial file is
        * sometimes exactly what a site offers.
        */
-      return { name, path: target, bytes: info?.size ?? 0, ...(download.url() ? { url: download.url() } : {}) };
+      return stored;
     }
-    return { name, path: target, bytes: info?.size ?? 0, ...(download.url() ? { url: download.url() } : {}) };
+    return stored;
   }
 
   /**
@@ -304,7 +332,7 @@ export class DownloadVault {
     for (const name of names) {
       const path = join(this.directory, name);
       const info = await stat(path).catch(() => undefined);
-      if (info?.isFile()) out.push({ name, path, bytes: info.size });
+      if (info?.isFile()) out.push({ name, path, bytes: info.size, mtimeMs: info.mtimeMs });
     }
     return out;
   }
@@ -364,12 +392,31 @@ function sanitize(name: string): string {
  * kept somewhere this list does not describe, which is a runtime with no vault;
  * the download still happened and nothing is added.
  */
+/**
+ * Pages this module has already wired, so a second call is a no-op.
+ *
+ * `watchDownloads` is called from two paths that meet on one page: the thread's
+ * own attach, and the popup path, which wires the page a click opened. A popup
+ * is also a page in the thread's context, so a page that is adopted as a popup
+ * and then read through the page list was wired twice, and one download fired
+ * two handlers: two copies in the vault under two names, two `artifact.saved`
+ * events, and a program that listed the vault saw the same invoice twice.
+ *
+ * A `WeakSet` rather than a flag on the Page, because the Page is Playwright's
+ * object and there is no place to put one that survives a reconnect cleanly; a
+ * reconnect gives a new Page object, which is exactly when the wiring should run
+ * again.
+ */
+const WATCHED = new WeakSet<Page>();
+
 export function watchDownloads(
   page: Page,
   store: (download: Download) => Promise<VaultFile | undefined>,
   collected: VaultFile[],
   onFailure?: (error: Error) => void,
 ): void {
+  if (WATCHED.has(page)) return;
+  WATCHED.add(page);
   page.on("download", (download) => {
     void store(download)
       .then((file) => {
@@ -419,11 +466,58 @@ export function watchDownloads(
  * person would recognise. It is kept under that name rather than renamed: the
  * path is what an upload needs, and inventing a friendlier name would be a guess
  * about which file it is.
+ *
+ * Bounded by `since`, which is the fix for the second version of this bug. The
+ * vault is per thread and on disk, so it survives a restart: after one, the set
+ * of files `collected` does not know about is the thread's whole download
+ * history, and this function answered with all of it. `downloadAfter` then took
+ * the last entry as the result of a click that produced nothing, so a receipt
+ * claimed a download that never happened. Measured: a page whose
+ * `waitForEvent("download")` rejected still produced an artifact, attributed to
+ * the click.
+ *
+ * The marker is a wall-clock instant supplied by the caller rather than a
+ * "not in `collected`" test, because the two answer different questions. A file
+ * older than `since` was written by some earlier run and cannot be the result of
+ * anything this session did, so it is not collected, and the caller reports that
+ * no download arrived. A file the browser really wrote without announcing it is
+ * still found, because the race this exists for happens now: the copy lands
+ * after `since` like any other.
+ *
+ * One caveat worth stating rather than papering over: a file copied into the
+ * vault by a *concurrent* thread would also be newer than `since`. The vault is
+ * per thread, so that requires two runtimes to share a downloads directory,
+ * which the layout in `thread-runtime` does not produce.
  */
-export async function collectUnannounced(vault: DownloadVault, collected: VaultFile[]): Promise<VaultFile[]> {
+export async function collectUnannounced(
+  vault: DownloadVault,
+  collected: VaultFile[],
+  since: number,
+): Promise<VaultFile[]> {
   const known = new Set(collected.map((file) => file.path));
   const found = await vault.list().catch(() => [] as VaultFile[]);
-  const fresh = found.filter((file) => !known.has(file.path) && file.bytes > 0);
+  const fresh = found.filter((file) => !known.has(file.path) && file.bytes > 0 && file.mtimeMs > since);
   for (const file of fresh) collected.push(file);
   return fresh;
+}
+
+/**
+ * The instant a runtime started look at, for `collectUnannounced`.
+ *
+ * Process start, and it is the WRONG floor on its own. Kept only as the outer
+ * bound; the caller passes the runtime's own construction time instead. The
+ * reason is the reap: the vault is per thread and on disk, and it outlives the
+ * runtime object, while `downloadedFiles` is per runtime and starts empty. The
+ * idle reaper deletes a runtime and the next use builds a new one, so a fresh
+ * runtime holds an empty list over a vault that still has everything the thread
+ * downloaded earlier in the same process. Process start does not bound that, and
+ * a click that produced nothing would adopt the last of that history, which is
+ * exactly the receipt this bound exists to prevent.
+ *
+ * Read from `process.uptime()` rather than captured at module load, because a
+ * test that backdates a file relative to the module's own load time cannot
+ * express that, and because the process is what actually started.
+ */
+export function runtimeSessionStart(): number {
+  return Date.now() - process.uptime() * 1000;
 }

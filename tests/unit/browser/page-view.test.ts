@@ -248,3 +248,28 @@ test("every observation is marked as untrusted page content", () => {
   assert.equal(view.contentMeta.source, "browser-page");
   assert.equal(view.contentMeta.url, "https://evil.example", "provenance survives the boundary");
 });
+
+test("the state signature tracks the page, not the number of looks", () => {
+  /*
+   * The reader that keeps a refusal tied to the page.
+   *
+   * The observation counter cannot answer "has the page moved", because it moves
+   * on every look. A refusal keyed on it was released by the model glancing at
+   * the page, which is the one thing a model in a loop does between attempts. The
+   * signature is the URL plus the outline's size, so a look leaves it alone and a
+   * real change moves it.
+   */
+  const observer = new PageObserver();
+  observer.capture({ url: "https://x/jobs", title: "Jobs", snapshot: JOBS_PAGE });
+  const before = observer.stateSignature();
+  observer.view();
+  observer.view();
+  assert.equal(observer.stateSignature(), before, "reading the page twice is not a change to it");
+
+  observer.capture({ url: "https://x/jobs", title: "Jobs", snapshot: `${JOBS_PAGE}\n- paragraph [ref=e99]: An error appeared` });
+  assert.notEqual(observer.stateSignature(), before, "content that appeared moves the signature");
+
+  observer.capture({ url: "https://x/job/2", title: "Job", snapshot: JOB_PAGE });
+  const movedUrl = observer.stateSignature();
+  assert.match(movedUrl, /^https:\/\/x\/job\/2#/, "and so does a navigation");
+});

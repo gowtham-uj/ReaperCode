@@ -90,6 +90,63 @@ test("the same action at a different revision is a different attempt", async () 
   assert.equal(ran, true);
 });
 
+test("the refusal is keyed on page state, so looking at the page does not release it", async () => {
+  /*
+   * The hole this pins, and it is the one that mattered most.
+   *
+   * The refusal used to be keyed on the observation counter, which increments
+   * every time the model looks. So the loop it exists to stop went like this:
+   * run the failing program, look at the page, run it again. The look moved the
+   * counter, the second attempt had a fresh fingerprint, and it ran. A model that
+   * retries after looking is exactly the model in a loop, and it was never
+   * refused.
+   *
+   * The state is the URL plus a content signature, and neither moves for a look.
+   */
+  const controller = healthy();
+  const failing = async () => {
+    throw new Error("locator.click: Timeout 4000ms exceeded.\nCall log:\n  - waiting for locator('button')");
+  };
+  await controller.attempt(failing, { page: {}, actionKey: "click button", state: "https://x/#10:400" });
+
+  /* The model looks at the page: the revision moves, the page does not change. */
+  let ran = false;
+  const second = await controller.attempt(
+    async () => {
+      ran = true;
+      return "ok";
+    },
+    { page: {}, actionKey: "click button", state: "https://x/#10:400", revision: 99 },
+  );
+  assert.equal(ran, false, "a look is not progress, so the same program must not run again");
+  assert.equal(second.attempts, 0);
+  assert.ok(second.blocked !== undefined);
+});
+
+test("a page whose state actually changed is a different attempt", async () => {
+  /*
+   * The other direction, and it must keep working: a genuinely different state
+   * means the element may have arrived, so refusing would overrule a correct
+   * retry. The signature moves when the content does.
+   */
+  const controller = healthy();
+  await controller.attempt(
+    async () => {
+      throw new Error("locator.click: Timeout 4000ms exceeded.\nCall log:\n  - waiting for locator('button')");
+    },
+    { page: {}, actionKey: "click button", state: "https://x/#10:400" },
+  );
+  let ran = false;
+  await controller.attempt(
+    async () => {
+      ran = true;
+      return "ok";
+    },
+    { page: {}, actionKey: "click button", state: "https://x/#12:437" },
+  );
+  assert.equal(ran, true, "the page changed, so the retry is legitimate");
+});
+
 test("a retryable failure is not remembered, because a correct retry may work later", async () => {
   const controller = healthy();
   await controller.attempt(

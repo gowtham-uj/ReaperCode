@@ -37,6 +37,11 @@
  * refused the second time it is asked for rather than the fifth. That check is
  * what turns "the model is looping" from a thing an observer notices into a
  * thing the runtime reports.
+ *
+ * The page state is the URL plus a signature of the content, not an observation
+ * counter. The counter was the first key and it was wrong: an observation moves
+ * the counter and not the page, so the refusal was released by the model looking,
+ * which is the one thing a model in a loop does between attempts.
  */
 
 import { classifyFailure, type BrowserFailure, type BrowserFailureKind } from "./failure.js";
@@ -60,11 +65,18 @@ export interface AttemptOptions {
   /**
    * What the page looked like when the action was decided.
    *
-   * The revision is what makes a fingerprint a statement about a page state
-   * rather than about a program. Two identical clicks at two different revisions
-   * are two different attempts and the second may legitimately work; the same
-   * click at the same revision has already been tried and failed.
+   * Either of these makes a fingerprint a statement about a page state rather
+   * than about a program, which is what lets the same call after a real change be
+   * a different attempt.
+   *
+   * `state` is the URL plus a signature of the content, and it is preferred.
+   * `revision` is an observation counter, and it is a poor key: it moves every
+   * time the model looks, so two identical attempts separated by a look got two
+   * fingerprints and the second was allowed even though the page had not changed.
+   * It is kept for a caller that has only a counter, and `attempt` falls back to
+   * it when no state is given.
    */
+  state?: string | undefined;
   revision?: number | undefined;
   /** The action's source or a stable description of it, for the fingerprint. */
   actionKey: string;
@@ -120,9 +132,23 @@ const RETRY_POLICY: Record<BrowserFailureKind, { retry: boolean; recover: boolea
   UNKNOWN: { retry: false, recover: false, probe: false },
 };
 
-/** The identity of one attempt: the page state and the program. */
-function fingerprintOf(actionKey: string, revision: number): string {
-  return `r${revision}::${actionKey.slice(0, 300)}`;
+/**
+ * The identity of one attempt: the page state and the program.
+ *
+ * `state` is the URL plus a signature of the page content, and it is preferred
+ * wherever a caller has one. What it replaces is an observation counter, and the
+ * difference was a real hole: `revision` increments on every look at the page, so
+ * a model that glanced at the page between two identical attempts was handed a
+ * fresh fingerprint and ran the same failing program again. Looking is not
+ * progress, and a key that says it is turns the refusal into something a loop
+ * can shed by doing the one thing a stuck model does constantly.
+ *
+ * The action key is still in the fingerprint, so the same program against a
+ * genuinely new state is allowed and a different program against the same state
+ * is a different attempt.
+ */
+function fingerprintOf(actionKey: string, state: string): string {
+  return `${state}::${actionKey.slice(0, 300)}`;
 }
 
 export class RecoveryController {
@@ -248,13 +274,12 @@ export class RecoveryController {
   /**
    * The identity of one attempt.
    *
-   * Page revision plus the action. Deliberately not the page's URL, because a
-   * single-page app changes the URL without changing the state the model acted
-   * against, and not the timestamp, because the same call a minute later is the
-   * same call.
+   * The page state plus the action, preferring the state string and falling back
+   * to the revision for a caller that has only that. Deliberately not the
+   * timestamp, because the same call a minute later is the same call.
    */
   private fingerprint(options: AttemptOptions): string {
-    return fingerprintOf(options.actionKey, options.revision ?? 0);
+    return fingerprintOf(options.actionKey, options.state ?? `r${options.revision ?? 0}`);
   }
 
   /**
@@ -266,13 +291,13 @@ export class RecoveryController {
    * program may have submitted something, but refusing to run the same failing
    * thing again is both safe and the thing that stops the loop.
    */
-  previousFailure(actionKey: string, revision: number): BrowserFailure | undefined {
-    return this.failed.get(fingerprintOf(actionKey, revision));
+  previousFailure(actionKey: string, state: string): BrowserFailure | undefined {
+    return this.failed.get(fingerprintOf(actionKey, state));
   }
 
   /** Remember a failure against its fingerprint, for `previousFailure`. */
-  remember(actionKey: string, revision: number, failure: BrowserFailure): void {
-    this.store(fingerprintOf(actionKey, revision), failure);
+  remember(actionKey: string, state: string, failure: BrowserFailure): void {
+    this.store(fingerprintOf(actionKey, state), failure);
   }
 
   /**

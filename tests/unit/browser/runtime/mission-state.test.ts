@@ -129,6 +129,40 @@ test("the rendered state does not grow with the size of the plan", () => {
   assert.match(largeText, /\+95 more/, "and the ready list must say how much it is not showing");
 });
 
+test("the moving-subtask list is capped too, and states its total", () => {
+  /*
+   * The axis that was still unbounded after the first pass.
+   *
+   * `SUBTASKS:` listed every subtask that was not pending, and a live plan has
+   * many: the measured mission that made this class bounded had fourteen moving
+   * at once, and a plan that keeps declaring work keeps that list growing. Every
+   * line is re-sent with every later model call, so it is the same arithmetic the
+   * facts and the ready list already obey.
+   *
+   * The three assertions are the shape: a hundred moving subtasks must not render
+   * a hundred lines, the cap must be visible, and the total must be stated so the
+   * capped list does not read as the whole list.
+   */
+  const small = new MissionState();
+  for (let i = 0; i < 10; i++) {
+    small.declareSubtask(`task-${i}`);
+    small.setSubtask(`task-${i}`, "done");
+  }
+  const large = new MissionState();
+  for (let i = 0; i < 100; i++) {
+    large.declareSubtask(`task-${i}`);
+    large.setSubtask(`task-${i}`, "running");
+  }
+  const smallText = small.render();
+  const largeText = large.render();
+  assert.ok(
+    largeText.length <= smallText.length * 11,
+    `ten times the moving subtasks must not be ten times the block: ${smallText.length} for 10, ${largeText.length} for 100`,
+  );
+  assert.match(largeText, /SUBTASKS \(last \d+ of 100\)/, "the cap is stated, so it cannot read as the whole list");
+  assert.ok(largeText.split("\n").length < 60, "and the list is a fixed size, not the plan's");
+});
+
 test("the state does not grow without bound as facts accumulate", () => {
   /*
    * The same rule for facts. A mission reads values for an hour, and the block
@@ -139,4 +173,32 @@ test("the state does not grow without bound as facts accumulate", () => {
   const text = state.render();
   assert.match(text, /last \d+ of 60/, "the cap must be visible as a cap");
   assert.ok(text.length < 1_500, `the fact list must stay bounded, got ${text.length} chars`);
+});
+
+test("a subtask declared with its status keeps its dependencies", () => {
+  /*
+   * The documented one-call spelling, and the bug was that the second argument
+   * was dropped.
+   *
+   * `state.subtask("register account", "pending", ["collect versions"])` goes
+   * through `setSubtask`, which called `declareSubtask(title)` with no
+   * requirements. `ready()` folds over those edges, so the subtask was reported
+   * ready before its prerequisite, from the skill's own example. The failure is
+   * not a missing field, it is a wrong answer to "what should I do now".
+   */
+  const state = new MissionState();
+  state.declareSubtask("collect versions");
+  state.setSubtask("register account", "pending", undefined, ["collect versions"]);
+  assert.deepEqual(state.ready().map((s) => s.title), ["collect versions"], "the dependent task must not be ready yet");
+  state.setSubtask("collect versions", "verified");
+  assert.deepEqual(state.ready().map((s) => s.title), ["register account"]);
+});
+
+test("a later status change does not erase dependencies already recorded", () => {
+  /* Merged rather than replaced, so a bare status update keeps the plan. */
+  const state = new MissionState();
+  state.declareSubtask("a");
+  state.declareSubtask("b", ["a"]);
+  state.setSubtask("b", "running");
+  assert.equal(state.ready().some((s) => s.title === "b"), false, "b still waits on a");
 });

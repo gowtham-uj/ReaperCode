@@ -22,6 +22,35 @@ import { z } from "zod";
 const ID_REGEX = /^[a-z][a-z0-9-]{0,63}$/;
 const MAX_SOURCE_BYTES = 64 * 1024;
 
+/**
+ * The matcher, with each field saying what it matches.
+ *
+ * The fields were bare `z.string().optional()` entries, so the only description
+ * of a `path_glob` was its name. A hook author reads this schema and the tool
+ * description and nothing else, and the difference between a glob that gates a
+ * call and one that silently never fires is exactly the semantics this records.
+ * `describe` reaches the model: `toJSONSchema` in `agent-tools.ts` renders the
+ * string into the wire schema.
+ */
+export const HookMatcherSchema = z
+  .object({
+    path_glob: z
+      .string()
+      .optional()
+      .describe(
+        "Glob for the file the call touches, matched against the call's path argument. `*` matches within one path segment and `**` crosses segments and may match none, so `**/secrets/*.txt` matches both `secrets/token.txt` and `config/secrets/token.txt`. A pattern is compared against the path as written, as an absolute path, and relative to the workspace root, so `blocked.txt` gates a call that names the absolute path and the reverse.",
+      ),
+    tool_name: z
+      .string()
+      .optional()
+      .describe("Tool this hook applies to, e.g. `bash` or `write_file`. A call to any other tool does not run the handler."),
+    cmd_pattern: z
+      .string()
+      .optional()
+      .describe("JavaScript regular expression tested against the command of a `bash` call, e.g. `rm\\s+-rf`. A call whose command does not match does not run the handler."),
+  })
+  .describe("Which calls this hook applies to. Fields are ANDed: every field set must match. An unset matcher applies to every call on the event.");
+
 const HOOK_EVENTS = [
   "SessionStart",
   "SessionEnd",
@@ -49,18 +78,30 @@ export const CreateHookArgsSchema = z
     id: z.string().regex(ID_REGEX, "id must match kebab-case"),
     event: z.enum(HOOK_EVENTS),
     description: z.string().min(1).max(240),
-    matcher: z
-      .object({
-        path_glob: z.string().optional(),
-        tool_name: z.string().optional(),
-        cmd_pattern: z.string().optional(),
-      })
-      .optional(),
-    /** JS handler body. Compiled and registered by `create`. */
-    source: z.string().min(1).max(MAX_SOURCE_BYTES),
+    matcher: HookMatcherSchema.optional(),
+    /**
+     * JS handler body. Compiled and registered by `create`.
+     *
+     * The contract is stated here because this is what the model reads before
+     * writing a hook. `return { allow: false, reason }` blocks, a bare
+     * `return false` blocks, and `{ allow: true, message }` advises; only
+     * `enforce: true` makes a refusal mean anything.
+     */
+    source: z
+      .string()
+      .min(1)
+      .max(MAX_SOURCE_BYTES)
+      .describe(
+        "Handler body, compiled with `new Function(event)`. The event carries `{ name, payload, blockable }`. Return `{ allow: false, reason }` to block, or a bare `false` to block with a message naming this hook, or `{ allow: true, message }` to allow and show advice on the tool result; `note` is accepted as a synonym for `message`. Only an `enforce: true` hook can block.",
+      ),
     timeout_ms: z.number().int().positive().max(30000).optional(),
     /** false = observe-only (default), true = blockable. */
-    enforce: z.boolean().default(false),
+    enforce: z
+      .boolean()
+      .default(false)
+      .describe(
+        "Whether this hook may block a call. false (the default) is observe-only: a returned `allow: false` is dropped and only `message`/`note` reaches the model. true lets `{ allow: false, reason }` and a bare `return false` stop the call.",
+      ),
     scope: z.enum(["project", "user"]).default("project"),
   })
   .strict();
@@ -87,13 +128,7 @@ export const UpdateHookArgsSchema = z
     description: z.string().min(1).max(240).optional(),
     event: z.enum(HOOK_EVENTS).optional(),
     source: z.string().min(1).max(MAX_SOURCE_BYTES).optional(),
-    matcher: z
-      .object({
-        path_glob: z.string().optional(),
-        tool_name: z.string().optional(),
-        cmd_pattern: z.string().optional(),
-      })
-      .optional(),
+    matcher: HookMatcherSchema.optional(),
     timeout_ms: z.number().int().positive().max(30000).optional(),
     enforce: z.boolean().optional(),
   })

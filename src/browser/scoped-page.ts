@@ -71,9 +71,65 @@ import { isPageOwnedBy } from "./page-ownership.js";
  *   Measured: contexts went 1 -> 2 and `tracked: 0`, which is what a fix wired to
  *   the wrong door looks like.
  */
+/**
+ * Names that lead out of a proxy and back to the raw object, refused everywhere.
+ *
+ * Every wrapper in this file is a `get` trap that special-cases a handful of
+ * named properties and forwards the rest to the real object. That forwarding is
+ * the entire design, and it is also the one hole none of the named checks can
+ * close, because `constructor` is not a missing name: it is *every* name at once.
+ *
+ *     const raw = page.constructor.prototype.context.call(page);
+ *     await raw.browser().contexts().flatMap((c) => c.pages());   // every thread
+ *
+ * The real prototype method is called with the proxy as `this`, and because the
+ * trap forwards the internal `_context` field, the call succeeds and returns the
+ * unscoped `BrowserContext`. Reproduced from inside the sandbox.
+ *
+ * So the three names that reach the prototype chain are answered with a refusal
+ * rather than forwarded. Nothing a browsing program does needs any of them: a
+ * Page, a Locator, a Frame, a Context and a Browser are all meant to be called,
+ * not introspected. Returning a function that throws, rather than throwing
+ * outright, keeps `typeof page.constructor` honest for code that only checks.
+ */
+function refusePrototypeAccess(property: string | symbol): (() => never) | undefined {
+  if (property === "constructor" || property === "__proto__" || property === "prototype") {
+    return () => {
+      throw new Error(
+        `${String(property)} reaches the prototype chain, which would hand back an unscoped object and with it every thread's pages. ` +
+        "It is refused at every level of the browser surface.",
+      );
+    };
+  }
+  return undefined;
+}
+
+/**
+ * The traps that close the rest of the prototype route.
+ *
+ * The `get` refusal above handles `page.constructor`. It does not handle
+ * `Object.getPrototypeOf(page)`, which goes through a *different* proxy trap and
+ * returns the real `Page.prototype`; from there `Page.prototype.context.call(page)`
+ * works, because the `get` trap still forwards the internal `_context` field the
+ * real method reads.
+ *
+ * So a scoped object reports `Object.prototype` as its prototype. The proxy
+ * invariants allow this because the targets are ordinary extensible objects, and
+ * nothing legitimate depends on the answer: `instanceof` is not used on these
+ * anywhere in the runtime, and a program that calls `Object.getPrototypeOf` on
+ * its page is not doing something a browsing task needs.
+ */
+const PROTOTYPE_TRAP = {
+  getPrototypeOf: (): object => Object.prototype,
+  setPrototypeOf: (): boolean => false,
+};
+
 export function scopePage(page: Page, threadId: string, onContextCreated?: (context: BrowserContext) => void): Page {
   return new Proxy(page, {
+    ...PROTOTYPE_TRAP,
     get(target, property, receiver) {
+      const refused = refusePrototypeAccess(property);
+      if (refused !== undefined) return refused;
       if (property === "context") {
         /*
          * The page's own context, scoped. `context()` on a page cannot widen:
@@ -172,7 +228,10 @@ export function scopePage(page: Page, threadId: string, onContextCreated?: (cont
  */
 export function scopeLocator(locator: Locator, threadId: string, onContextCreated?: (context: BrowserContext) => void): Locator {
   return new Proxy(locator, {
+    ...PROTOTYPE_TRAP,
     get(target, property, receiver) {
+      const refused = refusePrototypeAccess(property);
+      if (refused !== undefined) return refused;
       if (property === "page") return () => scopePage(target.page(), threadId, onContextCreated);
       if (property === "frameLocator") {
         return (...args: unknown[]) => scopeLocator(
@@ -205,7 +264,10 @@ export function scopeLocator(locator: Locator, threadId: string, onContextCreate
  */
 export function scopeFrame(frame: Frame, threadId: string, onContextCreated?: (context: BrowserContext) => void): Frame {
   return new Proxy(frame, {
+    ...PROTOTYPE_TRAP,
     get(target, property, receiver) {
+      const refused = refusePrototypeAccess(property);
+      if (refused !== undefined) return refused;
       if (property === "page") return () => scopePage(target.page(), threadId, onContextCreated);
       if (property === "childFrames") return () => target.childFrames().map((child) => scopeFrame(child, threadId, onContextCreated));
       if (property === "locator") {
@@ -251,7 +313,10 @@ export function scopeContext(
   onContextCreated?: (context: BrowserContext) => void,
 ): BrowserContext {
   return new Proxy(context, {
+    ...PROTOTYPE_TRAP,
     get(target, property, receiver) {
+      const refused = refusePrototypeAccess(property);
+      if (refused !== undefined) return refused;
       if (property === "browser") {
         /*
          * A browser from this context, scoped. Without this the chain is
@@ -278,6 +343,31 @@ export function scopeContext(
         return () => target.pages()
           .filter((page) => isPageOwnedBy(ownerTargetId(page), threadId))
           .map((page) => scopePage(page, threadId, onContextCreated));
+      }
+      /*
+       * `newPage` is scoped, and this was a real hole.
+       *
+       * The browser-level `newPage` was refused, and that refusal was taken to
+       * cover this one. It did not: a context's `newPage` is a different method on
+       * a different object, so `page.context().newPage()` fell through to
+       * `Reflect.get` and returned a real, unscoped Page. From that page the whole
+       * chain is open again, because it is the raw object: `context()`,
+       * `browser().contexts()`, another thread's tabs.
+       *
+       * Reproduced with a stub, no browser needed: the proxy answered with the real
+       * Page object identity.
+       *
+       * Scoped rather than refused, because a fresh page in one's own context is a
+       * legitimate thing for a program to want, and the scoping is what makes it
+       * safe. `newPage` here creates it in the context the program already has,
+       * which is this thread's.
+       */
+      if (property === "newPage") {
+        return () =>
+          target.newPage().then((created) => {
+            onContextCreated?.(target);
+            return scopePage(created, threadId, onContextCreated);
+          });
       }
       /*
        * `newCDPSession` is refused here, not only on the page.
@@ -363,7 +453,10 @@ export function scopeBrowser(
   onContextCreated?: (context: BrowserContext) => void,
 ): Browser {
   return new Proxy(browser, {
+    ...PROTOTYPE_TRAP,
     get(target, property, receiver) {
+      const refused = refusePrototypeAccess(property);
+      if (refused !== undefined) return refused;
       if (property === "contexts") return () => [scopeContext(own, threadId)];
       if (property === "context") {
         return (...args: unknown[]) => {
@@ -430,6 +523,31 @@ export function scopeBrowser(
           );
         };
       }
+      /*
+       * `newBrowserCDPSession` is refused, and it was the widest hole of the three.
+       *
+       * A CDP session opened at the browser level is not merely browser-wide, it is
+       * the instrument for driving every target in the shared Chrome: it answers
+       * `Target.getTargets` with every tab and can attach to any of them. The page
+       * and context forms were refused from the start; this one was not written
+       * because it did not exist in the Playwright version the guard was built
+       * against, and a member added later is exactly what a hand-written list of
+       * refusals misses.
+       *
+       * Reproduced with a stub: the proxy answered with the real session object.
+       *
+       * Refused rather than scoped, for the same reason as the other two: there is
+       * no scoped form of a browser-level protocol connection, and every legitimate
+       * need has a first-class Playwright call.
+       */
+      if (property === "newBrowserCDPSession") {
+        return () => {
+          throw new Error(
+            "browser.newBrowserCDPSession() opens a protocol connection to the whole browser, which this thread does not own. " +
+            "Use the Playwright methods for what you need instead: `context.addCookies`/`context.cookies`, `page.setExtraHTTPHeaders`, or `page.route` for network interception.",
+          );
+        };
+      }
       const value = Reflect.get(target, property, receiver) as unknown;
       return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
     },
@@ -437,12 +555,53 @@ export function scopeBrowser(
 }
 
 /**
- * The page and browser a program is handed, both scoped to one thread.
+ * The names a program may read off the browser facade, and nothing else.
  *
- * Returned together because they must agree: handing a scoped browser and a raw
- * page would leave the page's context chain open, and the other way round would
- * make the browser's `contexts()` disagree with the page it was given.
+ * The facade is a plain class handed to the sandbox as an ordinary object, and
+ * `RemotePageHost` reads *any* property name off an object a program holds. So
+ * every field on it is reachable by name, and `#` fields only fix the ones that
+ * exist today: a field added in six months is a hole the day it is written.
+ *
+ * This is the durable half of the fix. The list is the facade's documented
+ * surface, spelled out, and anything not on it is refused. `#runtime` and the
+ * other private fields would also be refused, but they never arrive here
+ * because a `#` field has no name to read.
+ *
+ * The list is deliberately the method names and no state: `initial`, `onRepin`
+ * and any future field are unreachable, and a program that asks for one gets an
+ * error that names the surface rather than a raw object.
  */
-export function scopeToThread(page: Page, threadId: string): { page: Page; browser: Browser } {
-  return { page: scopePage(page, threadId), browser: scopeBrowser(page.context().browser()!, page.context(), threadId) };
+const FACADE_SURFACE = new Set([
+  "newPage",
+  "pages",
+  "setActive",
+  "page",
+  "usePage",
+  "closePage",
+  "current",
+  "save",
+]);
+
+export function scopeFacade<T extends object>(facade: T): T {
+  return new Proxy(facade, {
+    ...PROTOTYPE_TRAP,
+    get(target, property, receiver) {
+      const refused = refusePrototypeAccess(property);
+      if (refused !== undefined) return refused;
+      if (typeof property === "symbol") return Reflect.get(target, property, receiver) as unknown;
+      if (!FACADE_SURFACE.has(property)) {
+        return () => {
+          throw new Error(
+            `browser.${property} is not part of the browser surface. ` +
+            `Available: ${[...FACADE_SURFACE].join(", ")}.`,
+          );
+        };
+      }
+      const value = Reflect.get(target, property, receiver) as unknown;
+      return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+    has(target, property) {
+      return typeof property === "string" && FACADE_SURFACE.has(property);
+    },
+  }) as T;
 }

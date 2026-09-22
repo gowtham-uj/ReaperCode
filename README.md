@@ -106,9 +106,9 @@ confinement it does not have.
 
 ### What it looks like
 
-A new thread opens on the composer, with the workspace and settings for that thread one click away. Threads live in the sidebar; each one keeps its own workspace and its own transcript.
+A new thread opens on the composer, with the model picker and that thread's settings one click away. Threads live in the sidebar; each one keeps its own workspace and its own transcript.
 
-![The empty state, with the composer and the thread-scoped controls](docs/screenshots/ui-empty-state.png)
+![A new thread on the composer, with the model picker and thread settings](docs/screenshots/ui-landing.png)
 
 Send a message and the agent works in the transcript. Tool calls are grouped into a step card titled with what the step is doing, and each call is one row: what it was, what it ran on, and how long it took. The row that is still running is filled, so you can find it without reading.
 
@@ -141,6 +141,10 @@ Three themes ship, all dark. `Reaper` is the default and takes its palette from 
 7. **When context fills, Reaper trims first.** Old tool output and file reads are dropped before anything is summarized, and the system prompt is left alone. The context meter shows what is actually being used.
 
 The transcript is the primary surface, and it is built to be read rather than skimmed: activity clusters collapse, raw payloads stay behind a disclosure, and a jump-to-latest control appears when you scroll away from a running turn.
+
+Answers render as markdown: headings, lists, tables and fenced code with a language label, all themed to match the transcript rather than dropped in as a slab of monospace.
+
+![An answer rendered as markdown, with a heading, bullets and a labelled code block](docs/screenshots/markdown-answer.png)
 
 ### UI source credit
 
@@ -278,12 +282,156 @@ node bin/reaper exec run --prompt "..." \
 
 ## What it can do
 
-On every turn the model gets file and shell tools: look at a file, search, edit a range, write or delete a file, list a directory, grep, and run bash. Extra tools exist behind `search_tools`, including git checkpoints. Browser and desktop-control tools exist but stay off unless you turn them on. The model can also write and run a program instead of making calls one at a time. See [Code Mode](#code-mode).
+On every turn the model gets file and shell tools: look at a file, search, edit a range, write or delete a file, list a directory, grep, and run bash. Extra tools exist behind `search_tools`, including git checkpoints. The browser tool stays off unless you turn it on. The model can also write and run a program instead of making calls one at a time. See [Code Mode](#code-mode), and [Driving a browser](#driving-a-browser) for the `browser_use` surface.
 
 It will install packages, run tests, and change your working tree. That is the product. Keep git clean enough that you can undo it.
 
 Long runs stay inside a 270,000-token context budget. How that works is
 [below](#context-management).
+
+## Driving a browser
+
+`browser_use` runs a Playwright program against a browser that is already open,
+on the page it is already on. The model writes real Playwright, not a wrapper
+DSL and not a click-by-coordinates tool. It gets the page and a receipt back.
+
+```js
+const r = await tx({ name: "sign in" }, async ({ page }) => {
+  await page.getByLabel("Email").fill(email);
+  await page.getByLabel("Password").fill(password);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  return { url: await page.url() };
+});
+```
+
+That is the shape the skill teaches, and it exists because the obvious
+alternative is worse. A tool per action multiplies calls, adds a schema to every
+prompt, and still cannot express a loop. A model that knows Playwright can write
+what it needs in one call, including the parts no tool designer anticipated.
+
+### What comes back
+
+Not the page. A receipt: what happened, what changed, and where the page is now.
+
+```
+OUTCOME: SUCCESS
+REV 21 -> 22
+elapsed 1180ms
+
+REV 22
+URL: https://example.com/dashboard
+Added:
+  + heading "Welcome back"
+  212 more lines not shown.
+
+TX a7 SUCCESS "sign in"
+```
+
+The page itself is attached only when the receipt does not already answer the
+question, which is roughly when a step failed or the page changed wholesale. On a
+66-program run that rule removed 408,424 characters of tool output, 57% of the
+total, with no loss of information: the step had already returned the value the
+model asked for.
+
+### The parts that are not Playwright
+
+The runtime adds the things a model keeps rebuilding by hand, and each exists
+because a real run did the work badly:
+
+| call | what it removes |
+|---|---|
+| `tx({name}, body)` | the receipt, so a step's diff and timing come back with its value |
+| `inspect(target)` | a 30-second timeout on an element that was never clickable, with the reason and the child that is |
+| `inspectForm()` | guessing a value a form will reject, and trying lengths blind when a server refuses |
+| `waitForChange({...})` | `waitForTimeout`, which is a guess that reads as a decision |
+| `download({trigger})` | arming the wait after the click, which misses the event |
+| `expectPopup(page, trigger)` | a tab opened with `newPage` where the task wanted a click to open it |
+| `state.get()/fact()/subtask()` | a long task's notes surviving context trimming |
+| `metrics()` | asking what the run has cost so far |
+
+`expect` is the one that is Playwright-shaped and is not Playwright's. `@playwright/test`'s assertion library is not a dependency, and its matchers take their timeout from a test runner this has none of, so the four assertions a browsing program actually writes are bound directly: `toBeVisible`, `toHaveText`, `toContainText`, `toHaveURL`. A pass returns its evidence and a failure throws, because `await expect(locator).toBeVisible()` discards the return value and an assertion that only reported in a result would be a no-op indistinguishable from a pass. They retry until the budget runs out rather than sampling once, which is the point of an assertion.
+
+`browser.download()` is the one worth reading in the source. Playwright wants the
+wait armed before the click and the file copied after, and a program cannot hold
+that state across two calls because the sandbox drops function arguments. So the
+host keeps the armed wait and the program supplies only the trigger:
+
+```js
+const file = await download({
+  trigger: async (page) => { await page.getByRole("link", { name: "Download Invoice" }).click(); },
+});
+// { name, path, bytes, sha256 }
+```
+
+The path is inside the thread's workspace, which is the only directory both the
+runtime and the model can read. Nothing about the browser's own temporary
+directory is exposed, because a model told about two paths eventually uses the
+wrong one.
+
+### Persistence
+
+Threads share one browser, and a thread's pages, cookies and logins survive a
+finished turn, a reconnect, and a server restart. The runtime records which CDP
+target belongs to which thread, so a page that comes back keeps its name and its
+id rather than being adopted by whoever attaches first.
+
+Two things it does not do. It does not silently retry a program that failed,
+because re-running a step that already submitted a form is worse than reporting
+it. And it does not let a program close its last page: a thread with no page
+cannot be asked to do anything, so the runtime would immediately open another,
+and a "close everything" loop would never terminate. That close is refused and
+says so.
+
+The model's own closing report from a browser run, after it closed the tabs it
+opened. It counted thirteen, saw the browser recreate a baseline tab, and stopped
+there rather than closing in a loop. Cookies and logins are untouched by a page
+close, which is why the session survives the cleanup.
+
+![The model's closing report after a close-all, with the tabs it closed and the baseline tab it could not](docs/screenshots/ui-browser-mission.png)
+
+### What the sandbox holds
+
+A program's page is a proxy. `page.context().browser().contexts()` returns this
+thread's context and nothing else, because every thread attaches to the same
+Chrome and the raw objects are shared. Every accessor that hands back an object
+(`locator().page()`, `mainFrame()`, `frames()`, `context()`, `browser()`) is
+wrapped, so the chain cannot widen at any hop. The four that have no scoped form
+are refused with a message naming the safe alternative: `newCDPSession` on a page
+and on a context, `newBrowserCDPSession` on a browser, and `newPage` on a context.
+Each of those returns a raw object, and every one was reached from a real sandbox
+before it was refused.
+
+A red-team pass then found the route no list of names closes. A `get` trap that
+forwards unnamed properties still answers `page.constructor`, and the real
+prototype method runs with the proxy as `this`, because the trap forwards the
+internal field the method reads. `Object.getPrototypeOf(page)` went through a
+different trap and had the same result. Both are refused now: the names that
+reach the prototype chain throw, and a scoped object reports `Object.prototype`
+as its prototype. The browser facade a program is handed is a plain class, so
+every field on it was readable by name, including the raw page and the runtime
+behind it; it is wrapped in an allowlist of its documented methods, which closes
+the class rather than today's fields.
+
+The honest guarantee is narrower than "cannot escape" and stronger than "stops
+mistakes": every documented and idiomatic accessor returns a scoped object, the
+prototype route is closed, and the remaining ways around it are the ones a
+same-process guard cannot close by construction. This is JavaScript in one
+process; one browser process per thread is the fix nobody has priced, and until
+then a script that goes looking is the threat model this does not claim to stop.
+
+### Every site, not just the simple ones
+
+The [real-sites suite](tests/integration/browser-real-sites.test.ts) drives live
+pages, not fixtures: news sites with lazy-loaded content, a page whose controls
+are reachable only after scrolling, a form that validates server-side, a download
+that lands in the vault. It is the case that catches what a synthetic page cannot,
+because a real page is slower, changes under you, and answers a click with a
+redirect.
+
+The tool surface is the same against all of them: `page` is the real scoped
+Playwright Page, so anything Playwright does, a program does. What is added is the
+receipt, the provenance record, and the handful of calls a model keeps rebuilding
+by hand. The sandbox is what makes it safe to let a program hold a live page.
 
 ## Context management
 
@@ -488,6 +636,13 @@ underneath:
 
 While it runs, output streams into the block live rather than showing a spinner,
 so a loop over sixty files is visible as it happens.
+
+![A Code Mode block mid-run, with the tool calls around it](docs/screenshots/code-mode-running.png)
+
+A finished block shows the script it ran and the value that came back, so a
+transcript of forty turns still reads as a conversation rather than a log.
+
+![A finished Code Mode block: the script, its result, and the timing](docs/screenshots/code-mode-block.png)
 
 ### The `codemode` skill
 

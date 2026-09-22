@@ -151,3 +151,87 @@ test("view() with a locator scopes to that region", { skip }, async () => {
     "and must not contain the sibling paragraph, which is what proves it was scoped rather than whole",
   );
 });
+
+test("expect(page).toHaveURL(/regex/) receives a real RegExp, not a marker object", { skip }, async () => {
+  /*
+   * The observation helpers do not go through `RemotePageHost.call`, so they had
+   * its handle resolution but not its value revival. That was invisible while
+   * every helper took numbers and strings, and it broke the moment a helper took
+   * a pattern: the sandbox encodes a RegExp as `{ __reaperRegExp, source, flags }`,
+   * so the host compared the page's URL against the string "[object Object]",
+   * which can never match. Measured live: the idiomatic
+   * `expect(page).toHaveURL(/example\.com/)` failed with "expected page ... to
+   * have URL [object Object]".
+   *
+   * Regex rather than a literal string, because the string form is an exact
+   * comparison and would pass through the wire unchanged; the RegExp is the
+   * shape that has to be rebuilt.
+   */
+  const result = await use(`
+    await page.goto('https://example.com/', { waitUntil: 'domcontentloaded' });
+    await expect(page).toHaveURL(/example\\.com/);
+    return 'regex url matched';
+  `);
+  assert.doesNotMatch(result.output, /\[object Object\]/, "the marker must not reach the comparison");
+  assert.match(result.output, /regex url matched/, result.output);
+});
+
+test("a failing expect throws inside the program and is catchable", { skip }, async () => {
+  /*
+   * The load-bearing half of the assertion contract: `await expect(x).toBeVisible()`
+   * discards the return value, so a failure that only lived in the result would
+   * be a no-op indistinguishable from a pass. Throwing is what makes the call
+   * mean something, and a program must be able to catch it to decide what to do.
+   */
+  const result = await use(`
+    await page.goto('https://example.com/', { waitUntil: 'domcontentloaded' });
+    try {
+      await expect(page.locator('h1')).toHaveText('This text is not on the page', { timeoutMs: 300 });
+      return 'WRONG: the assertion passed';
+    } catch (e) {
+      return { name: e.name, mentionsExpectation: /to have text/.test(e.message) };
+    }
+  `);
+  assert.match(result.output, /"name":"ExpectError"/, result.output);
+  assert.match(result.output, /"mentionsExpectation":true/, result.output);
+});
+
+test("an assertion the browser does not implement is refused with the list", { skip }, async () => {
+  /*
+   * `expect(x).toHaveCount(3)` on a plain object of four closures gave
+   * `TypeError: expect(...).toHaveCount is not a function`, which names
+   * JavaScript rather than the browser surface, and `.not` gave "Cannot read
+   * properties of undefined". Both read as the model's own mistake for what is a
+   * documented boundary. The host documents a message listing the supported
+   * assertions, but the host never receives an unknown name: the sandbox answers
+   * the property. So the refusal is a Proxy, and it says the same list.
+   */
+  const result = await use(`
+    const seen = [];
+    try { await expect(page).toHaveCount(3); } catch (e) { seen.push(e.message); }
+    try { await expect(page).not.toBeVisible(); } catch (e) { seen.push(e.message); }
+    return seen;
+  `);
+  assert.match(result.output, /toHaveCount is not an assertion/, result.output);
+  assert.match(result.output, /toBeVisible, toHaveText, toContainText, toHaveURL/, "the list must be in the message");
+  assert.match(result.output, /negation is not implemented/, "and `.not` says what is missing rather than throwing a TypeError about undefined");
+});
+
+test("a timeout passed as timeoutMs is honoured, not silently ignored", { skip }, async () => {
+  /*
+   * The sandbox forwards the options object untouched, so whichever key the
+   * model wrote arrives. Only `timeout` was read, so `{ timeoutMs: 250 }` got the
+   * 5-second assertion budget and the program waited twenty times longer than it
+   * asked for, with nothing to say so. Measured by elapsed time, because that is
+   * the only thing that distinguishes an honoured budget from an ignored one.
+   */
+  const started = Date.now();
+  const result = await use(`
+    await page.goto('https://example.com/', { waitUntil: 'domcontentloaded' });
+    try { await expect(page.locator('h1')).toHaveText('not on this page', { timeoutMs: 250 }); return 'NO THROW'; }
+    catch (e) { return { attempts: /after (\\d+)/.exec(e.message)?.[1] }; }
+  `);
+  const elapsed = Date.now() - started;
+  assert.doesNotMatch(result.output, /NO THROW/, result.output);
+  assert.ok(elapsed < 3_000, `a 250ms budget must not take ${elapsed}ms, which is the 5s default`);
+});

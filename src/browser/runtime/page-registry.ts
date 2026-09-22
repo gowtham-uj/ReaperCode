@@ -102,11 +102,17 @@ export class PageRegistry {
    * registered from three places (the runtime opening one, the restore path, the
    * popup listener) and two ids for one tab would make `browser.page("p3")`
    * depend on which path ran last.
+   *
+   * `reconnect` tells the one caller that is putting a page back after a lost
+   * connection, so a name that comes back is allowed to take its id with it. See
+   * the note on the transfer below: without it a new page reusing an old name
+   * inherits the old page's provenance, which is a false claim about how it came
+   * to exist.
    */
   register(
     name: string,
     page: Page,
-    options: { creationType?: CreationType; parent?: Page; openedBy?: string } = {},
+    options: { creationType?: CreationType; parent?: Page; openedBy?: string; reconnect?: boolean } = {},
   ): RegistryEntry {
     for (const entry of this.byName.values()) {
       if (entry.page === page) {
@@ -131,7 +137,7 @@ export class PageRegistry {
       }
     }
     /*
-     * A name that comes back gets its old id back.
+     * A name that comes back is only the same page when the caller says so.
      *
      * This is the reconnect case, and it was a real failure before it was a rule.
      * A reconnect replaces every `Page` object: the runtime re-attaches, the old
@@ -150,9 +156,25 @@ export class PageRegistry {
      * Matched by name rather than by URL, because the name is the identity the
      * model chose and a restore can land on a different URL (a form that
      * redirected, a page that remembered where it was).
+     *
+     * `reconnect` is required, and that is the fix rather than a formality. The
+     * transfer used to fire whenever a name matched, so a new page that reused
+     * the name of a closed one took over the old record: same id, and the old
+     * `openedBy` and `parentId` left in place. A fresh tab was then recorded as
+     * "this was a popup opened by a152", which is a claim about how a page came
+     * to exist that no click made, and recording that claim truthfully is the
+     * whole point of this file. A benchmark that asks "did a click open this"
+     * would have been answered yes.
+     *
+     * The entry cannot tell the two cases apart on its own. In a reconnect the
+     * old `Page` object is closed because the connection that owned it is gone,
+     * and in the reuse case it is closed too, because the tab is gone and the
+     * entry outlived it (a page adopted from a previous attach has no close
+     * listener, so nothing calls `forget`). Both are a closed page under a name
+     * that came back, so only the caller knows which it is.
      */
     const stale = this.byName.get(name);
-    if (stale !== undefined) {
+    if (stale !== undefined && options.reconnect === true) {
       this.byId.delete(stale.id);
       stale.page = page;
       stale.openedAt = Date.now();
@@ -160,6 +182,24 @@ export class PageRegistry {
       this.byId.set(stale.id, stale);
       return stale;
     }
+
+    /*
+     * A name in use by a page that is gone, which is not a reconnect: the old
+     * record goes with the page that left it.
+     *
+     * Left in place it would keep the id, the `openedBy` and the `parentId` of a
+     * page that no longer exists, so the newcomer would answer to an id the model
+     * tied to a different tab and inherit a claim about a click that never opened
+     * it. Dropping it by id rather than leaving it also stops a later `forget` of
+     * the old page from deleting the new entry, by name, out from under the page
+     * that is using it.
+     *
+     * Only when the old page is closed. A live page that shares a name still owns
+     * its id: an id is a handle to a tab that exists, and deleting it would make
+     * `browser.page("p1")` fail for a tab that is open.
+     */
+    const superseded = this.byName.get(name);
+    if (superseded !== undefined && superseded.page.isClosed()) this.forget(superseded.page);
 
     this.counter += 1;
     const parentId = options.parent !== undefined ? this.idOf(options.parent) : undefined;

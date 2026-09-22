@@ -105,22 +105,49 @@ export interface VerificationOutcome {
 export function checkRequirement(requirement: Requirement, input: VerificationInput): RequirementResult {
   switch (requirement.kind) {
     case "url": {
+      /*
+       * An empty pattern is refused, and this was the verifier's own hole.
+       *
+       * `matchPattern` is an `includes`, so `pattern: ""` matched every string:
+       * a run that did nothing answered `finish: [{kind:"url", pattern:""}]` and
+       * got `VERIFIED: all 1 requirements are met.` on `about:blank`. The same
+       * held for `text` with `value: ""` and `artifact` with `name: ""`. The file
+       * whose whole docblock is "a model that says 'mission complete' has said
+       * nothing the runtime can check" was satisfied by one empty character.
+       *
+       * A requirement with nothing to match is not a weak requirement, it is not
+       * a requirement: it cannot fail, so passing it says nothing. It is refused
+       * here rather than at the schema, because the schema is also what a stored
+       * plan is read through and a stored empty pattern must fail the same way.
+       */
+      const pattern = requirement.pattern.trim();
+      if (pattern.length === 0) {
+        return { requirement, passed: false, detail: "this requirement has no URL pattern, so it cannot be checked; give the pattern you actually expect" };
+      }
       const url = input.url ?? "";
-      const passed = matchPattern(url, requirement.pattern);
-      return { requirement, passed, detail: passed ? `${url} matches ${requirement.pattern}` : `the page is at ${url || "(unknown)"}, which does not match ${requirement.pattern}` };
+      const passed = matchPattern(url, pattern);
+      return { requirement, passed, detail: passed ? `${url} matches ${pattern}` : `the page is at ${url || "(unknown)"}, which does not match ${pattern}` };
     }
     case "text": {
+      const value = requirement.value.trim();
+      if (value.length === 0) {
+        return { requirement, passed: false, detail: "this requirement has no text to look for, so it cannot be checked; give the text you actually expect" };
+      }
       const outline = input.outline ?? "";
-      const passed = outline.includes(requirement.value);
-      return { requirement, passed, detail: passed ? `the page contains "${requirement.value}"` : `the page does not contain "${requirement.value}"` };
+      const passed = outline.includes(value);
+      return { requirement, passed, detail: passed ? `the page contains "${value}"` : `the page does not contain "${value}"` };
     }
     case "artifact": {
+      const name = requirement.name.trim();
+      if (name.length === 0) {
+        return { requirement, passed: false, detail: "this requirement names no file, so it cannot be checked; name the file you actually expect" };
+      }
       const artifacts = input.ledger.of("artifact.saved");
-      const found = artifacts.find((artifact) => artifact.name.includes(requirement.name));
+      const found = artifacts.find((artifact) => artifact.name.includes(name));
       return {
         requirement,
         passed: found !== undefined,
-        detail: found !== undefined ? `${found.name} is saved at ${found.path} (${found.bytes} bytes)` : `no saved file matches "${requirement.name}"`,
+        detail: found !== undefined ? `${found.name} is saved at ${found.path} (${found.bytes} bytes)` : `no saved file matches "${name}"`,
       };
     }
     case "artifactFromAction": {

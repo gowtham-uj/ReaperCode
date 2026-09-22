@@ -139,12 +139,32 @@ class CdpSocket {
       resolve(message.error ? { error: message.error.message ?? "CDP error" } : { result: message.result });
     });
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`no CDP socket within ${timeoutMs}ms`)), timeoutMs);
-      socket.addEventListener("open", () => { clearTimeout(timer); resolve(); });
-      socket.addEventListener("error", () => {
+      /*
+       * One failure path, which closes the socket, and both arms go through it.
+       *
+       * They did not, and the leak was total: the timeout rejected and left the
+       * socket open, and the error handler did the same, while only the success
+       * path returns the object that owns `close()`. So a socket that failed to
+       * upgrade was unreachable and stayed open for the process's life, holding a
+       * TCP connection and a WebSocket object that no longer existed.
+       *
+       * This is the path that runs when Steel is wedged, which is the state it
+       * exists for, so it is the path that runs most in the case that matters:
+       * every failed recovery leaked one more socket, and the recovery loop
+       * retries.
+       *
+       * Measured before this: a net server that accepts TCP and never answers the
+       * upgrade, then one call, left `socket.destroyed === false` on the server
+       * side while the function had already returned a timeout.
+       */
+      const fail = (message: string): void => {
         clearTimeout(timer);
-        reject(new Error("the CDP socket refused the connection"));
-      });
+        try { socket.close(); } catch { /* already gone, which is the point */ }
+        reject(new Error(message));
+      };
+      const timer = setTimeout(() => fail(`no CDP socket within ${timeoutMs}ms`), timeoutMs);
+      socket.addEventListener("open", () => { clearTimeout(timer); resolve(); });
+      socket.addEventListener("error", () => fail("the CDP socket refused the connection"));
     });
     return self;
   }

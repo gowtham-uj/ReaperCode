@@ -74,8 +74,27 @@ export class HealthMonitor {
     page.on("crash", () => {
       this.update(page, (state) => ({ ...state, crashed: true }));
     });
+    /*
+     * A closed page is removed, not just flagged.
+     *
+     * `health` is a strong Map keyed by the Page object, and `watch` binds five
+     * handlers per page and adds one entry. Flagging `closed` and keeping the
+     * entry meant every page a runtime had ever watched stayed retained with its
+     * five listeners for the life of the process: a long-lived thread leaks one
+     * raw Page per page it ever opened, per reconnect. Those Pages still carry
+     * live CDP-backed state, so they are not small.
+     *
+     * `forget` already existed for exactly this and its own doc says "when it is
+     * closed for good"; nothing called it from here. The flag is set first, so a
+     * reader that races the close still sees `closed: true` rather than a page
+     * that vanished from the map with no explanation.
+     *
+     * The listeners themselves are not removable, because Playwright's `on` has no
+     * matching off for these and the emitter dies with the Page object. Dropping
+     * the reference is what lets it die.
+     */
     page.on("close", () => {
-      this.update(page, (state) => ({ ...state, closed: true }));
+      this.forget(page);
     });
     page.on("pageerror", (error) => {
       this.update(page, (state) => ({

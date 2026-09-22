@@ -67,8 +67,6 @@ export interface CollectOptions {
 interface Armed {
   page: Page;
   pending: Promise<Download>;
-  /** Set when the collect timed out or the trigger failed, so the wait can be dropped. */
-  settled: boolean;
   /**
    * The vault's contents when the wait was armed.
    *
@@ -86,6 +84,20 @@ interface Armed {
    * notification it may not have received.
    */
   known: Set<string>;
+  /**
+   * The wall-clock instant the wait was armed, checked against each file's
+   * mtime.
+   *
+   * This is the staleness floor, and `Date.now()` rather than `performance.now()`
+   * on purpose: the comparison is against an mtime from the filesystem, so the
+   * two have to be the same kind of clock. A monotonic timestamp would make every
+   * file look old and silently remove the fallback this exists to provide.
+   *
+   * The arm is the right floor rather than the runtime's construction, because
+   * `known` already covers everything the vault held at that moment and the
+   * question here is only about what appeared afterwards. A file older than the
+   * trigger cannot have been caused by it.
+   */
   armedAt: number;
 }
 
@@ -124,10 +136,15 @@ export class ArtifactManager {
      */
     const known = new Set((await this.vault.list().catch(() => [])).map((file) => file.path));
     const pending = page.waitForEvent("download", { timeout: timeoutMs });
-    const record: Armed = { page, pending, settled: false, known, armedAt: Date.now() };
-    pending.catch(() => {
-      record.settled = true;
-    });
+    const record: Armed = { page, pending, known, armedAt: Date.now() };
+    /*
+     * The rejection is absorbed here, not recorded. A wait nobody collects would
+     * otherwise raise an unhandled rejection, which node turns into a warning
+     * that names neither the page nor the download; there is nothing else to do
+     * with it, because `collect` is where the outcome is read and it awaits the
+     * same promise itself.
+     */
+    pending.catch(() => undefined);
     this.armed.set(token, record);
     if (this.armed.size > ArtifactManager.MAX_ARMED) {
       const oldest = this.armed.keys().next();
@@ -144,6 +161,10 @@ export class ArtifactManager {
    * `setDownloadBehavior` can end up with a file on disk and no event. In that
    * case this still answers with the file, because the model asked for a
    * download and a download happened.
+   *
+   * Answering `undefined` is a real outcome, not a failure: the caller reports
+   * that no download arrived and the ledger records nothing, which is what a
+   * click that produced no file should say.
    */
   async collect(token: string, options: CollectOptions = {}): Promise<Artifact | undefined> {
     const record = this.armed.get(token);
@@ -161,25 +182,48 @@ export class ArtifactManager {
        */
       announced = undefined;
     }
-    record.settled = true;
 
     if (announced === undefined) {
       /*
-       * No event. The vault decides, and a file that arrived since the wait was
-       * armed counts as announced.
+       * No event. The vault decides, and only a file this arm can have caused
+       * counts.
        *
-       * `announced` means "this trigger produced this file", which is the claim
-       * provenance rests on, and the runtime is in a position to know that
-       * without Playwright's notification: it recorded what the vault held
-       * before the trigger ran and what it holds after. A dropped event is a
-       * fact about the CDP race, not about whether the download happened, and
-       * treating the two as one made a real download look like a file that
-       * happened to be lying around.
+       * The runtime is in a position to know that without Playwright's
+       * notification: it recorded what the vault held before the trigger ran and
+       * what it holds after. A dropped event is a fact about the CDP race, not
+       * about whether the download happened, and treating the two as one made a
+       * real download look like a file that happened to be lying around.
+       *
+       * The old version took the last entry of the directory with no filter and
+       * no sort, so a wait whose event never fired, including one that timed
+       * out, answered with whatever the thread had downloaded last. Measured: a
+       * page whose `waitForEvent("download")` rejected still produced an
+       * artifact with `triggeredBy` set, so `artifactFromAction` passed for a
+       * click that downloaded nothing.
+       *
+       * A file that clears those checks is not in `known` by construction, so it
+       * is a file this arm did not see before the trigger ran, and the ledger
+       * records it against the action the way the dropped-event race requires.
+       * The alternative, marking a file found by listing the directory as
+       * unannounced, was rejected: `announced` is what the ledger and
+       * `artifactFromAction` read to mean "this action caused this file", and
+       * clearing it would turn a real download whose event was lost into an
+       * unattributed one, which is the measured flake `Armed.known` exists to
+       * stop. What has to be excluded is a file from outside this arm's window,
+       * and that is what the filter above does.
        */
-      const found = await this.newestUnclaimed();
+      const found = await this.newestUnclaimed(record);
       if (found === undefined) return undefined;
-      const causedByThisArm = !record.known.has(found.path);
-      return await this.finish(found, causedByThisArm, options);
+      /*
+       * `true`, and the reason is not obvious from here.
+       *
+       * This used to be `!record.known.has(found.path)`, which was a tautology:
+       * `newestUnclaimed` already excludes everything in `known`, so the test
+       * could only ever be true. It read as a check and was not one. What
+       * actually keeps the file attributable is the mtime floor in
+       * `newestUnclaimed`, which is what the comment above describes.
+       */
+      return await this.finish(found, true, options);
     }
 
     const stored = await this.vault.accept(announced);
@@ -234,17 +278,42 @@ export class ArtifactManager {
   private readonly recorded = new Set<string>();
 
   /**
-   * A file in the vault that no arm has accounted for.
+   * A file in the vault that this arm can have caused, if the vault holds
+   * exactly one.
    *
-   * The newest, because the download just triggered is the one that appeared
-   * last. Deliberately conservative: it only answers when exactly one unclaimed
-   * file is newer than the arm started, so it cannot mistake an older file for
-   * the one this call produced.
+   * A file counts only when it landed after the wait was armed, is not empty,
+   * and is not one the arm already saw and recorded in `known`.
+   *
+   * Exactly one, and that limit is the point. With two candidates there is no
+   * fact in this process that says which the trigger caused, and guessing would
+   * put the wrong file, or a file from an earlier click, into the ledger under
+   * this action's name. Answering `undefined` sends the caller to "no download
+   * arrived", which is honest about what is known and is what a receipt should
+   * say rather than naming a file that may belong to something else.
+   *
+   * The consequence for two arms outstanding at once is worth stating because an
+   * earlier version of this comment claimed the opposite. Two arms, two files:
+   * each arm's candidate set is both files, so both answer `undefined`. This is
+   * not a regression against the version that took the last file unconditionally
+   * (that was the bug), but it is a real behaviour and it is not "the first takes
+   * the earliest and the second takes the next". The program-side `download()`
+   * helper arms, triggers and collects strictly in sequence, so reaching it needs
+   * a program holding two arms at once.
+   *
+   * The mtime comparison is a strict `>` against a wall-clock arm time, so on a
+   * filesystem with one-second mtime granularity a file copied in the same
+   * second as the arm compares equal and is refused. That is the safe direction:
+   * it reports "no download arrived" rather than naming a file that may be
+   * earlier. The vaults here are on tmpfs and ext4, where the granularity is
+   * nanoseconds, so it does not bite in practice.
    */
-  private async newestUnclaimed(): Promise<VaultFile | undefined> {
+  private async newestUnclaimed(record: Armed): Promise<VaultFile | undefined> {
     const files = await this.vault.list().catch(() => [] as VaultFile[]);
-    const nonEmpty = files.filter((file) => file.bytes > 0);
-    return nonEmpty[nonEmpty.length - 1];
+    const candidates = files
+      .filter((file) => file.bytes > 0 && file.mtimeMs > record.armedAt && !record.known.has(file.path))
+      .sort((a, b) => a.mtimeMs - b.mtimeMs);
+    if (candidates.length !== 1) return undefined;
+    return candidates[0];
   }
 
 }

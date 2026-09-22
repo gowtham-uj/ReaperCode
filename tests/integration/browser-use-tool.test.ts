@@ -366,6 +366,40 @@ test("scoping a look to a locator reads only that region", { skip }, async () =>
   assert.doesNotMatch(returned, /\/react/, "and the navigation outside it must not");
 });
 
+test("the documented view({ selector }) form scopes the read too", { skip }, async () => {
+  /*
+   * The other half of the same bug, and the one the tool's own message offers.
+   *
+   * When a view is trimmed, the notice tells the model to use `view({ selector })`
+   * for one region or `view({ depth })` for more levels. Both are advice the model
+   * is meant to act on. The sandbox forwards a program's arguments verbatim, so
+   * `view({ selector: "nav" })` arrived at the host as a plain object, the wrapper
+   * turned it into `{ page: { selector: "nav" } }`, nothing recognised the "page",
+   * and the read fell back to the whole page: a program following the tool's own
+   * remedy paid for the full page and had no way to tell it had been ignored.
+   *
+   * Asserted on content, for the same reason as the locator test above: the
+   * receipt carries the whole-page diff, so the assertion is anchored after
+   * RETURNED rather than to the output as a whole.
+   */
+  const rt = await runtime();
+  const { page } = await rt.ensureReady();
+  await page.goto(`${site!.origin}/basic`, { waitUntil: "domcontentloaded" });
+  await rt.view();
+
+  const scoped = await executeBrowserUse(
+    rt,
+    { code: `return await view({ selector: "form" })`, observe: "none" } as never,
+    metadata,
+  );
+  assert.equal(scoped.outcome, "SUCCESS", scoped.output);
+  assert.match(scoped.output, /Scope: selector: form/, "the receipt must say what was scoped to");
+
+  const returned = scoped.output.slice(scoped.output.indexOf("RETURNED:"));
+  assert.match(returned, /Continue/, "the form's own contents must be there");
+  assert.doesNotMatch(returned, /\/react/, "and the navigation outside it must not");
+});
+
 test("scoping by a role that does not exist fails loudly", { skip }, async () => {
   /*
    * A bare `<form>` has no ARIA `form` role, so `getByRole("form")` matches

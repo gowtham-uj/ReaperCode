@@ -293,6 +293,33 @@ export class PageObserver {
   }
 
   /**
+   * The page's identity: where it is, plus a signature of what is on it.
+   *
+   * For anything that needs to know whether the page has moved since an earlier
+   * answer. The revision cannot answer that, and treating it as if it could was a
+   * bug: a revision counts observations, so two identical attempts separated by a
+   * look at the page got two different revisions and the second was allowed,
+   * even though the page was in exactly the state that failed the first time.
+   *
+   * The URL and two numbers rather than the outline, because the outline is up to
+   * 30,000 characters on a fallback and this goes in a Map key. `lines` moves
+   * when content is added or removed and `chars` when any of it changes length, so
+   * a row that appeared or an error that was rendered moves the signature while
+   * re-reading the same page does not.
+   *
+   * What it cannot see is a value changed in place with no line added and no line
+   * length changed: a counter that ticked from 12 to 15 on a page whose text is
+   * otherwise identical. That is a real limit and it errs toward keeping a refusal
+   * for a page that has only just moved, which is the safe direction. Hashing the
+   * outline would see it and is the change to make if that ever bites, at the cost
+   * of reading up to 30,000 characters on every step to key a Map.
+   */
+  stateSignature(): string {
+    const stats = this.stats ?? countOutline(this.current ?? "", this.wasTrimmed);
+    return `${this.lastUrl ?? ""}#${stats.lines}:${stats.chars}`;
+  }
+
+  /**
    * Record the page's current outline, pruned.
    *
    * Pruning happens here rather than at each call site so every observation

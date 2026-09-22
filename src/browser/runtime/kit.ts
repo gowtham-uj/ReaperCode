@@ -32,7 +32,7 @@ import { MissionState } from "./mission-state.js";
 import { PageRegistry } from "./page-registry.js";
 import { RecoveryController } from "./recovery-controller.js";
 import { RunLedger } from "./run-ledger.js";
-import { findFixedSleeps } from "./wait-policy.js";
+import { findFixedSleeps, renderSleepWarnings } from "./wait-policy.js";
 import type { Requirement } from "./verifier.js";
 import { verify, type VerificationOutcome, type VerificationInput } from "./verifier.js";
 
@@ -121,7 +121,6 @@ export class BrowserRuntimeKit {
     durationMs: number;
     failureKind?: string | undefined;
     pageId?: string | undefined;
-    retryOf?: string | undefined;
   }): void {
     this.registry.setCurrentAction(undefined);
     if (this.activeActionId === input.actionId) this.activeActionId = undefined;
@@ -132,19 +131,43 @@ export class BrowserRuntimeKit {
       durationMs: input.durationMs,
       ...(input.failureKind !== undefined ? { failureKind: input.failureKind } : {}),
       ...(input.pageId !== undefined ? { pageId: input.pageId } : {}),
-      ...(input.retryOf !== undefined ? { retryOf: input.retryOf } : {}),
     });
   }
 
-  /** Register a page and record how it came to exist. */
-  registerPage(name: string, page: Page, options: { parent?: Page | undefined; creationType?: "popup" | "newPage" | "restored" | "recovery" | undefined } = {}): string {
-    const before = this.registry.entries().length;
+  /**
+   * Register a page and record how it came to exist.
+   *
+   * `reconnect` is passed through for the one caller that is restoring a page
+   * after a lost connection, where the name coming back refers to the same tab
+   * under a new `Page` object and the id has to survive. Everywhere else a name
+   * that comes back belongs to a page that is gone, and the registry gives the
+   * newcomer a fresh id and a fresh provenance record.
+   */
+  registerPage(
+    name: string,
+    page: Page,
+    options: { parent?: Page | undefined; creationType?: "popup" | "newPage" | "restored" | "recovery" | undefined; reconnect?: boolean | undefined } = {},
+  ): string {
+    /*
+     * Tracked by id rather than by size, so a page that takes over the name of a
+     * closed one is still recorded as created.
+     *
+     * The size test missed it: superseding a dead entry removes one and adds one,
+     * so the count is unchanged and no `page.created` event was written. That is
+     * the event the popup check reads (a `popup` with an `openedBy`), so a genuine
+     * click-opened page would have been invisible to the verifier whenever it
+     * reused the name of one that had closed. The id answers the same question
+     * without that hole: a new record is a new id, and a rebind or a transfer
+     * keeps the id it already had.
+     */
+    const before = new Set(this.registry.entries().map((each) => each.id));
     const entry = this.registry.register(name, page, {
       ...(options.parent !== undefined ? { parent: options.parent } : {}),
       ...(options.creationType !== undefined ? { creationType: options.creationType } : {}),
+      ...(options.reconnect !== undefined ? { reconnect: options.reconnect } : {}),
     });
     this.health.watch(page);
-    if (this.registry.entries().length > before) {
+    if (!before.has(entry.id)) {
       this.ledger.record({
         kind: "page.created",
         pageId: entry.id,
@@ -285,17 +308,19 @@ export class BrowserRuntimeKit {
    * failure was transient, with nothing ever telling the model the previous
    * twelve had been the same call on the same page in the same state.
    *
-   * The comparison is by program and page revision, so a genuinely different
-   * attempt, or the same attempt after the page moved, is a different action and
-   * is allowed.
+   * The comparison is by program and page state, not by the observation counter,
+   * so a genuinely different attempt, or the same attempt after the page itself
+   * moved, is a different action and is allowed, while taking another look at the
+   * same page does not release the refusal. See `stateSignature` for what the
+   * state is and why the counter was the wrong key.
    */
-  refusesRepeat(actionKey: string, revision: number): BrowserFailure | undefined {
-    return this.recovery.previousFailure(actionKey, revision);
+  refusesRepeat(actionKey: string, state: string): BrowserFailure | undefined {
+    return this.recovery.previousFailure(actionKey, state);
   }
 
   /** Remember that this program failed this way, for `refusesRepeat`. */
-  rememberFailure(actionKey: string, revision: number, failure: BrowserFailure): void {
-    this.recovery.remember(actionKey, revision, failure);
+  rememberFailure(actionKey: string, state: string, failure: BrowserFailure): void {
+    this.recovery.remember(actionKey, state, failure);
   }
 
   /**
@@ -304,10 +329,15 @@ export class BrowserRuntimeKit {
    * Called with the program's source so the warnings are about the code the
    * model wrote. Returns the rendered block, or an empty string, so the caller
    * can append it without a branch.
+   *
+   * Rendered by `renderSleepWarnings` rather than formatted here, and that is the
+   * fix for a message nobody saw: the renderer existed, was tested by nothing,
+   * and was called by nothing, so the single header that says how many sleeps a
+   * program contains was never printed. This method had its own one-line-per-wait
+   * format instead, which said the same thing without the count.
    */
-  sleepWarnings(code: string): string[] {
-    const warnings = findFixedSleeps(code);
-    return warnings.map((warning) => `${warning.call} sleeps ${warning.ms ?? "?"}ms; instead ${warning.instead}`);
+  sleepWarnings(code: string): string {
+    return renderSleepWarnings(findFixedSleeps(code));
   }
 
   /** Record that the model looked at the page. */
@@ -337,19 +367,51 @@ export class BrowserRuntimeKit {
   async check(requirements: Requirement[], page?: Page | undefined): Promise<VerificationOutcome> {
     const url = page !== undefined && !page.isClosed() ? page.url() : undefined;
     const outline = page !== undefined && !page.isClosed() ? await this.deps.outline(page).catch(() => "") : undefined;
-    const verifiedSubtasks = new Set(this.mission.subtasks.filter((subtask) => subtask.status === "verified").map((subtask) => subtask.title));
     const facts = new Map<string, string>();
     for (const [name, fact] of this.mission.facts) facts.set(name, fact.value);
     for (const [name, fact] of this.mission.derived) facts.set(name, fact.value);
 
-    const input: VerificationInput = {
+    const build = (): VerificationInput => ({
       ledger: this.ledger,
       ...(url !== undefined ? { url } : {}),
       ...(outline !== undefined ? { outline } : {}),
       facts,
-      verifiedSubtasks,
-    };
-    const outcome = verify(requirements, input);
+      verifiedSubtasks: new Set(this.mission.subtasks.filter((subtask) => subtask.status === "verified").map((subtask) => subtask.title)),
+    });
+
+    /*
+     * Subtask requirements are decided by everything else passing, and this
+     * closed a loop that could never close.
+     *
+     * `verified` was a status nothing wrote: a program may set pending, running,
+     * blocked, done or failed, and the runtime is the only thing that may set
+     * `verified`, and it never did. So a `subtask` requirement read a set that
+     * was structurally empty and answered "has not been verified" forever, which
+     * the skill documents as "record it as done and the runtime decides". The
+     * model did the documented thing and was refused permanently.
+     *
+     * The runtime's decision is the only evidence it actually has: the concrete
+     * requirements. If every checkable requirement passes, the work the subtask
+     * names is done by the mission's own verified evidence, and the subtask is
+     * promoted. A mission whose *only* requirement is a subtask has nothing to
+     * check, so it stays unverified, which is the honest answer rather than a
+     * claim-based pass.
+     *
+     * Run twice at most: the first pass decides whether there is evidence, the
+     * second reports with the promotions applied.
+     */
+    const concrete = requirements.filter((requirement) => requirement.kind !== "subtask");
+    const first = verify(requirements, build());
+    if (!first.passed && concrete.length > 0) {
+      const withoutSubtasks = verify(concrete, build());
+      if (withoutSubtasks.passed) {
+        const named = new Set(requirements.filter((r) => r.kind === "subtask").map((r) => (r as { title: string }).title));
+        for (const subtask of this.mission.subtasks) {
+          if (named.has(subtask.title) && subtask.status === "done") this.mission.setSubtask(subtask.title, "verified");
+        }
+      }
+    }
+    const outcome = verify(requirements, build());
     if (outcome.passed) {
       this.ledger.record({ kind: "mission.verified", requirements: requirements.map((requirement) => requirement.kind) });
     } else {

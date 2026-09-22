@@ -1074,6 +1074,15 @@ export class ToolExecutor {
       args: parsedCall.args,
     });
 
+    /*
+     * Advice a PreToolUse observer attached to this call.
+     *
+     * Declared outside the try so the failure path can read it: an observer
+     * speaks before the call, and a call that then fails is where its sentence
+     * matters most. Scoped to the try block it was unreachable from the catch,
+     * which is why the hint only ever appeared on success.
+     */
+    let preHookMessage: string | undefined;
     try {
       // V4: sandbox/role governance gate (runs BEFORE the classifier so
       // sandbox modes and sub-agent role profiles are enforced, not just
@@ -1120,7 +1129,6 @@ export class ToolExecutor {
       // engine's own exception is non-blocking (preserved historical
       // policy) but an actual negative decision is a hard block.
       const hooks = this.options.hooks;
-      let preHookMessage: string | undefined;
       if (hooks) {
         try {
           const preHookResult = await hooks.emit({
@@ -1288,6 +1296,15 @@ export class ToolExecutor {
                 : "tool_error",
           message: errorMessage,
         },
+        /*
+         * The pre-call advice rides along on a failed call too.
+         *
+         * An observer hook speaks *before* the call, and the call it spoke about
+         * is the one that just failed — the moment its sentence is most worth
+         * reading. Carrying it on the success path only meant the advice was
+         * dropped in exactly the case it was written for.
+         */
+        ...(preHookMessage ? { hint: preHookMessage } : {}),
       };
 
       await this.writeToolCallTrail({

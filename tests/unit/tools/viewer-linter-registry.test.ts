@@ -76,6 +76,38 @@ test("no linter for the requested extension returns permissive-pass verdict", as
   });
 });
 
+/**
+ * A file with no extension must be named, not interpolated as a blank.
+ *
+ * `file_edit` derives the extension with `path.extname`, which is the empty
+ * string for a file with no suffix. The fallback verdict used that value
+ * directly, so the model was told `language: ""` and "no linter manifest entry
+ * for ; falling back to permissive pass": a sentence that reads as truncated
+ * because the word after "for" was nothing at all. The verdict was still a
+ * pass; only its words were wrong, which is why this asserts on the text.
+ */
+test("a file with no extension names the case instead of interpolating a blank", async () => {
+  await withWorkspace(async (workspaceRoot) => {
+    const reg = new LinterRegistry();
+    const r = await reg.dispatch({
+      workspaceRoot,
+      absPath: path.join(workspaceRoot, "Makefile"),
+      content: "all:\n\techo hi\n",
+      extension: "",
+      timeoutMs: 1_000,
+    });
+    assert.equal(r.verdict.ok, true);
+    assert.equal(r.verdict.source, "fallback_permissive");
+    assert.notEqual(r.verdict.language, "", "the language must not be an empty string");
+    assert.match(
+      r.verdict.message ?? "",
+      /no extension/,
+      `the message must say what was missing, got: ${JSON.stringify(r.verdict.message)}`,
+    );
+    assert.doesNotMatch(r.verdict.message ?? "", /entry for ;/);
+  });
+});
+
 test("matchExtension returns the right entry from a hand-written manifest", async () => {
   await withWorkspace(async (workspaceRoot) => {
     const manifestPath = path.join(workspaceRoot, ".reaper", "linters", "manifest.json");

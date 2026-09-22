@@ -36,6 +36,17 @@
 const FACTS_SHOWN = 12;
 const READY_SHOWN = 5;
 const FAILURES_SHOWN = 5;
+/**
+ * How many moving subtasks are listed before the rest become a count.
+ *
+ * The block rides on every observation, so its size is multiplied by the turns
+ * left. `moving` had no bound at all: a plan with two hundred subtasks in
+ * progress rendered two hundred lines on every step for the rest of the run,
+ * which is the cost this whole class exists to avoid. Bounded from the end, for
+ * the same reason the facts are: the subtask that just changed state is the one
+ * a decision turns on, and the tail is where that is.
+ */
+const SUBTASKS_SHOWN = 24;
 
 /** One thing the mission has established, and what established it. */
 export interface Fact {
@@ -131,9 +142,25 @@ export class MissionState {
     return created;
   }
 
-  setSubtask(title: string, status: SubtaskStatus, note?: string): void {
-    const subtask = this.declareSubtask(title);
+  setSubtask(title: string, status: SubtaskStatus, note?: string, requires?: string[]): void {
+    const subtask = this.declareSubtask(title, requires ?? []);
     subtask.status = status;
+    /*
+     * Dependencies are recorded here too, and dropping them was a real bug.
+     *
+     * The documented spelling declares and sets status in one call
+     * (`state.subtask("register account", "pending", ["collect versions"])`),
+     * and `setSubtask` called `declareSubtask(title)` with no second argument, so
+     * `requires` was silently lost. The consequence was not a missing field but a
+     * wrong answer: `ready()` folds over the dependency edges, so a subtask with
+     * prerequisites came back in `READY NOW` before them, from the documented
+     * example. Merged rather than replaced, so a later call that omits
+     * `requires` does not erase what the declaration recorded.
+     */
+    if (requires !== undefined && requires.length > 0) {
+      const merged = new Set([...subtask.requires, ...requires]);
+      subtask.requires = [...merged];
+    }
     if (note !== undefined) subtask.note = note;
     else delete subtask.note;
   }
@@ -211,11 +238,13 @@ export class MissionState {
      */
     const moving = this.subtasks.filter((subtask) => subtask.status !== "pending");
     if (moving.length > 0) {
-      const lines = moving.map((subtask) => {
+      const shown = moving.slice(-SUBTASKS_SHOWN);
+      const lines = shown.map((subtask) => {
         const note = subtask.note !== undefined ? ` : ${subtask.note}` : "";
         return `  [${subtask.status}] ${subtask.title}${note}`;
       });
-      sections.push(`SUBTASKS:\n${lines.join("\n")}`);
+      const older = moving.length - shown.length;
+      sections.push(`SUBTASKS${older > 0 ? ` (last ${shown.length} of ${moving.length})` : ""}:\n${lines.join("\n")}`);
     }
     /*
      * The counts, and only when there is a plan to count.

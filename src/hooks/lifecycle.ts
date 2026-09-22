@@ -24,7 +24,7 @@
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 
 import type { HookEventName } from "../extensions/types.js";
 import { isProjectTrustedSync } from "../resources/project-trust.js";
@@ -460,27 +460,45 @@ export class HookLifecycle {
 
   private wrapHandler(r: HookRecord, handler: CompiledHookHandler): HookRunnerHandler {
     return (env) => {
-      // Apply matcher if present.
-      if (r.matcher && !matcherAllows(r.matcher, env)) {
+      // Apply matcher if present. The workspace root is what makes a relative
+      // argument and an absolute glob name the same file; see `pathForms`.
+      if (r.matcher && !matcherAllows(r.matcher, env, this.opts.workspaceRoot)) {
         return { allow: true };
       }
       // Apply enforce semantics.
       const out = handler({ name: env.event as string, payload: env.payload, blockable: env.blockable });
-      if (!r.enforce) {
-        // observe-only: ignore allow: false but pass through message.
-        if (out && typeof (out as { then?: unknown }).then === "function") {
-          return (out as Promise<{ allow: boolean; message?: string; reason?: string }>).then((r) => ({
-            allow: true,
-            ...(r.message ? { message: r.message } : {}),
-          }));
-        }
-        const sync = out as { allow: boolean; message?: string; reason?: string };
-        return { allow: true, ...(sync.message ? { message: sync.message } : {}) };
+      if (out && typeof (out as { then?: unknown }).then === "function") {
+        return (out as Promise<{ allow: boolean; message?: string; reason?: string }>).then((resolved) =>
+          this.applyEnforce(r, resolved),
+        );
       }
-      return out;
+      return this.applyEnforce(r, out as { allow: boolean; message?: string; reason?: string });
     };
   }
 
+  /**
+   * What an enforcing hook's answer means, and what a non-enforcing one's means.
+   *
+   * `enforce: false` is observe-only: the handler's `allow: false` is dropped and
+   * only its words survive, because a hook that cannot block should not be able
+   * to end a call it was never trusted to end. `enforce: true` is taken as
+   * written, and a refusal that carries no words gets a sentence naming the hook
+   * that made it. "blocked by hook" reaches the model, and the model has no way
+   * to tell which of its hooks refused or what to change; the hook id is the one
+   * fact that makes the message actionable.
+   */
+  private applyEnforce(
+    r: HookRecord,
+    out: { allow: boolean; message?: string; reason?: string } | undefined,
+  ): { allow: boolean; message?: string; reason?: string } {
+    const value = out ?? { allow: true };
+    if (!r.enforce) {
+      return { allow: true, ...(value.message ? { message: value.message } : {}) };
+    }
+    if (value.allow !== false) return value;
+    if (value.reason || value.message) return value;
+    return { ...value, reason: `hook "${r.id}" denied this call` };
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -499,7 +517,37 @@ function clampTimeout(ms: number): number {
 }
 
 /**
- * The value a matcher reads, wherever the envelope happens to carry it.
+ * The argument bag of a tool-call envelope, however it arrived.
+ *
+ * The executor nests the call's arguments under `args` as an object, which is
+ * the shape every test of the ordinary path uses. Two other shapes reach this
+ * function and both used to be invisible to a matcher. An extension that emits
+ * its own `PreToolUse` on the bus chooses its own payload shape, and the
+ * codebase already treats a string-encoded argument bag as a real thing to
+ * expect: `normalizeToolCall` parses `arguments` when a provider sends it as a
+ * JSON string. A matcher that only reads an object `args` silently skips both,
+ * and "the hook never fired" is indistinguishable from "the hook allowed it".
+ */
+function argObject(payload: Record<string, unknown>): Record<string, unknown> | undefined {
+  const args = payload.args;
+  if (args && typeof args === "object" && !Array.isArray(args)) {
+    return args as Record<string, unknown>;
+  }
+  if (typeof args === "string" && args.trim().startsWith("{")) {
+    try {
+      const parsed: unknown = JSON.parse(args);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // A non-JSON string argument is not an argument bag; it is a value.
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Every string value the payload carries for one of `keys`.
  *
  * The tool-call envelope reports the tool under `toolName` and its arguments
  * under `args`, so a path lives at `payload.args.path`, not at `payload.path`.
@@ -508,43 +556,110 @@ function clampTimeout(ms: number): number {
  * absent, `matcherAllows` returned false on every call, and the hook silently
  * never fired. Nested first, then top level, so a payload that flattens its
  * fields (the extension bus does) still matches.
+ *
+ * All matches are returned rather than the first, because one tool call can name
+ * more than one place. A `grep_search` carries `path` and `include`, and a hook
+ * written against either one means "this call touches this file"; picking just
+ * the first key would make the other spelling silently inert.
  */
-function payloadValue(payload: Record<string, unknown>, ...keys: string[]): string | undefined {
-  const args = payload.args;
+function payloadValues(payload: Record<string, unknown>, keys: readonly string[]): string[] {
+  const out: string[] = [];
+  const args = argObject(payload);
   for (const key of keys) {
-    if (args && typeof args === "object") {
-      const nested = (args as Record<string, unknown>)[key];
-      if (typeof nested === "string") return nested;
-    }
+    const nested = args?.[key];
+    if (typeof nested === "string") out.push(nested);
+    const direct = payload[key];
+    if (typeof direct === "string") out.push(direct);
+  }
+  return out;
+}
+
+/** The tool this call runs, wherever the envelope happens to spell it. */
+function toolNameOf(payload: Record<string, unknown>): string | undefined {
+  for (const key of ["toolName", "tool_name", "tool"]) {
+    const nested = argObject(payload)?.[key];
+    if (typeof nested === "string") return nested;
     const direct = payload[key];
     if (typeof direct === "string") return direct;
   }
   return undefined;
 }
 
+/**
+ * The spellings of one path: as written, absolute, and relative to the root.
+ *
+ * A `path_glob` matcher is compared against the argument the model wrote, and
+ * the model writes whatever it likes. `write_file({path: "config.txt"})` and
+ * `write_file({path: "/workspace/config.txt"})` are the same write, so a hook
+ * that names the file one way has to gate the call that names it the other way.
+ * The same asymmetry ran between globs and arguments: a leading `**` glob did
+ * not match the bare `config.txt`, because the star-star form required a
+ * directory separator before it, and an absolute glob never matched a relative
+ * argument at all.
+ *
+ * Resolving and relativizing against the workspace root produces the forms that
+ * make those pairs equal. The relative form is only offered when it stays inside
+ * the root: `../secrets/x` relative to a workspace is not the path the hook
+ * meant, and offering it would let a call outside the root satisfy a glob
+ * written for a file inside it.
+ */
+function pathForms(value: string, workspaceRoot: string | undefined): string[] {
+  const out = new Set<string>();
+  const add = (candidate: string): void => {
+    const normalized = candidate.replace(/\\/g, "/").replace(/^\.\//, "");
+    if (normalized) out.add(normalized);
+  };
+  add(value);
+  if (workspaceRoot) {
+    const resolved = resolve(workspaceRoot, value);
+    add(resolved);
+    const relativeToRoot = relative(workspaceRoot, resolved);
+    if (relativeToRoot && !relativeToRoot.startsWith("..") && !isAbsolute(relativeToRoot)) {
+      add(relativeToRoot);
+    }
+  }
+  return [...out];
+}
+
 function matcherAllows(
   m: HookMatcher,
   env: { event: string; payload: Record<string, unknown>; blockable: boolean },
+  workspaceRoot?: string,
 ): boolean {
   if (m.tool_name) {
-    const toolName = typeof env.payload.toolName === "string" ? env.payload.toolName : "";
-    if (toolName !== m.tool_name) return false;
+    // `tool_name` is the key this matcher's own schema uses, so a payload that
+    // carries it is the natural pairing. Reading only `toolName` made such a
+    // hook inert.
+    if (toolNameOf(env.payload) !== m.tool_name) return false;
   }
   if (m.path_glob) {
-    // Every field a file tool might name its target in. `read_file` and
-    // `write_file` use `path`, the patch tools use `file_path`, and the search
+    // Every field a file tool might name its target in. `write_file` and
+    // `read_file` use `path`, the patch tools use `file_path`, and the search
     // tools use `include` or a bare `path`; matching any of them is what "the
     // path this call touches" means to the person writing the matcher.
-    const p = payloadValue(env.payload, "path", "file_path", "target", "filename");
-    if (!p) return false;
-    if (!globMatch(m.path_glob, p)) return false;
+    const values = payloadValues(env.payload, [
+      "path",
+      "file_path",
+      "filePath",
+      "filename",
+      "file",
+      "target",
+      "target_path",
+      "targetPath",
+      "include",
+      "dir",
+      "directory",
+    ]);
+    if (values.length === 0) return false;
+    const forms = values.flatMap((value) => pathForms(value, workspaceRoot));
+    if (!forms.some((form) => globMatch(m.path_glob!, form))) return false;
   }
   if (m.cmd_pattern) {
-    const cmd = payloadValue(env.payload, "cmd", "command");
+    const values = payloadValues(env.payload, ["cmd", "command", "script", "shell_command", "command_line"]);
+    if (values.length === 0) return false;
     let re: RegExp;
     try { re = new RegExp(m.cmd_pattern); } catch { return false; }
-    if (cmd === undefined) return false;
-    if (!re.test(cmd)) return false;
+    if (!values.some((value) => re.test(value))) return false;
   }
   return true;
 }
@@ -572,10 +687,25 @@ function globMatch(glob: string, candidate: string): boolean {
   for (let i = 0; i < glob.length; i += 1) {
     const ch = glob[i]!;
     if (ch === "*") {
-      // `**` crosses directory separators, a lone `*` stays within one segment.
+      /*
+       * `**` crosses directory separators, a lone `*` stays within one segment.
+       *
+       * `**` also matches no directory at all, so a glob of star-star, slash,
+       * then `secrets/token.txt` matches the bare `secrets/token.txt`. The first
+       * version translated that prefix to `.*` plus a required separator, so the
+       * same glob matched `config/secrets/token.txt` and skipped
+       * `secrets/token.txt`, and the hook's coverage depended on how deep the
+       * model happened to write the path. The optional-group form is the
+       * directory prefix that may be absent.
+       */
       if (glob[i + 1] === "*") {
-        out += ".*";
-        i += 1;
+        if (glob[i + 2] === "/") {
+          out += "(?:.*/)?";
+          i += 2;
+        } else {
+          out += ".*";
+          i += 1;
+        }
       } else {
         out += "[^/]*";
       }

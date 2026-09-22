@@ -43,8 +43,19 @@
 import type { Page } from "playwright";
 
 import { RemotePageHost, type CallResult } from "./remote-page.js";
-import { scopePage } from "./scoped-page.js";
+import { scopeFacade, scopePage } from "./scoped-page.js";
 import type { ThreadBrowserRuntime } from "./thread-runtime.js";
+
+/** Whether a value the host produced is a Playwright Page, by shape. */
+function isPageLike(value: unknown): value is Page {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    typeof (value as { context?: unknown }).context === "function" &&
+    typeof (value as { waitForEvent?: unknown }).waitForEvent === "function" &&
+    typeof (value as { goto?: unknown }).goto === "function"
+  );
+}
 
 /** The observation helpers, which are not Playwright calls. */
 export interface ObserveSurface {
@@ -202,6 +213,17 @@ export interface ControlSurface {
    */
   waitForChange: (options: Record<string, unknown>) => Promise<unknown>;
 
+  /**
+   * Playwright's assertion, so the documented call is not a `ReferenceError`.
+   *
+   * `expect(locator).toBeVisible()` is the idiomatic way to wait for a condition
+   * and both the skill and the wait policy told a model to write it, while the
+   * sandbox bound no such name. The call is a named assertion rather than an
+   * object, because the host answers one round trip and the sandbox is where the
+   * `expect(x).toBeY()` shape is stitched together.
+   */
+  expect: (assertion: string, target: unknown, expected?: unknown, options?: Record<string, unknown>) => Promise<unknown>;
+
   /** Start listening for a download, before the trigger runs. */
   armDownload: (timeoutMs?: number) => Promise<unknown>;
 
@@ -264,8 +286,46 @@ export interface ControlReport {
  * a few steps later.
  */
 export class BrowserFacade {
+  /*
+   * `#runtime` rather than `private readonly runtime`, and the difference is the
+   * whole point.
+   *
+   * TypeScript's `private` is erased at runtime: `private readonly runtime` is a
+   * plain own property, and this class is handed to a sandboxed program as an
+   * ordinary object so its methods can be called. So `browser.runtime` read the
+   * ThreadBrowserRuntime out of the facade, and from there the model could reach
+   * the router's own bookkeeping: the context, the handles, the app-server's
+   * dependencies behind it.
+   *
+   * A `#` field is not a property at all. It is enforced by the language, it does
+   * not appear in `Object.keys`, `JSON.stringify` or `Reflect.ownKeys`, and no
+   * string can name it. Reproduced by reading `browser.runtime` off the root a
+   * program is given.
+   *
+   * Every internal use becomes `this.#runtime`, which is the same call.
+   */
+  readonly #runtime: ThreadBrowserRuntime;
+
+  /**
+   * Every internal field is `#`, and that is the finding rather than a style.
+   *
+   * The same argument as `#runtime` applies to all of them, because the facade
+   * is handed to a sandboxed program as an ordinary object and `RemotePageHost`
+   * reads *any* property name off it. `initial` was `private readonly` and held
+   * the raw, unscoped `Page`: `browser.initial.context().browser().contexts()`
+   * returned one merged context holding every thread's tabs, so a program could
+   * list and drive another thread's page by URL. `onRepin` was readable the same
+   * way, and it is a function the program could call with an arbitrary object.
+   *
+   * Neither is reachable by name now, because a `#` field is not a property. The
+   * facade is also wrapped in a name allowlist before it crosses (see
+   * `scopeFacade`), so a field added here later cannot reopen the same door.
+   */
+  readonly #initial: Page | undefined;
+  readonly #onRepin: ((page: Page) => void) | undefined;
+
   constructor(
-    private readonly runtime: ThreadBrowserRuntime,
+    runtime: ThreadBrowserRuntime,
     /**
      * Called when the program itself changes the active page.
      *
@@ -274,13 +334,12 @@ export class BrowserFacade {
      * silently redirected a running program mid-step: a listener armed on one
      * page, a click that landed on another, and a counter that read zero.
      */
-    private readonly onRepin?: (page: Page) => void,
+    onRepin?: (page: Page) => void,
   ) {
-    this.initial = runtime.activePage;
+    this.#runtime = runtime;
+    this.#initial = runtime.activePage;
+    this.#onRepin = onRepin;
   }
-
-  /** The page that was active when this facade was made, as a fallback. */
-  private readonly initial: Page | undefined;
 
   /*
    * Every page this hands out is SCOPED, and that is not a detail.
@@ -317,10 +376,10 @@ export class BrowserFacade {
      * cannot track contexts is a runtime that has none to track, and a stub is
      * exactly that.
      */
-    const scopedWithTracking = (this.runtime as { scopeForProgram?: (page: Page) => Page }).scopeForProgram;
+    const scopedWithTracking = (this.#runtime as { scopeForProgram?: (page: Page) => Page }).scopeForProgram;
     return scopedWithTracking === undefined
-      ? scopePage(page, this.runtime.threadId)
-      : scopedWithTracking.call(this.runtime, page);
+      ? scopePage(page, this.#runtime.threadId)
+      : scopedWithTracking.call(this.#runtime, page);
   }
 
   /** Open a page in this thread's own context, optionally naming it. */
@@ -330,8 +389,8 @@ export class BrowserFacade {
      * contract is that `page` is the active page, so a program that has just
      * opened one means the new one by `page`.
      */
-    const page = this.scoped(await this.runtime.newPage(name));
-    this.onRepin?.(page);
+    const page = this.scoped(await this.#runtime.newPage(name));
+    this.#onRepin?.(page);
     return page;
   }
 
@@ -356,7 +415,7 @@ export class BrowserFacade {
    * serialized into the transcript.
    */
   async pages(): Promise<Page[]> {
-    return this.runtime.describePages();
+    return this.#runtime.describePages();
   }
 
   /**
@@ -371,8 +430,8 @@ export class BrowserFacade {
    * that reaches for any of them is right rather than nearly right.
    */
   async setActive(selector: string | number | Page): Promise<Page> {
-    const page = this.scoped(await this.runtime.setActive(selector));
-    this.onRepin?.(page);
+    const page = this.scoped(await this.#runtime.setActive(selector));
+    this.#onRepin?.(page);
     return page;
   }
 
@@ -388,12 +447,12 @@ export class BrowserFacade {
 
   /** Close a page and forget it, so a name is not left pointing at a corpse. */
   async closePage(page: Page): Promise<void> {
-    await this.runtime.closePage(page);
+    await this.#runtime.closePage(page);
   }
 
   /** The page a bare `page` currently means. */
   async current(): Promise<Page> {
-    return this.scoped((await this.runtime.ensureReady()).page);
+    return this.scoped((await this.#runtime.ensureReady()).page);
   }
 
   /**
@@ -408,13 +467,13 @@ export class BrowserFacade {
    * guard is applied to whatever page is active at that moment.
    */
   currentPage(): Page | undefined {
-    const active = this.runtime.activePage ?? this.initial;
+    const active = this.#runtime.activePage ?? this.#initial;
     return active === undefined ? undefined : this.scoped(active);
   }
 
   /** Write this thread's cookies now, mid-program. */
   async save(): Promise<void> {
-    await this.runtime.save();
+    await this.#runtime.save();
   }
 }
 
@@ -484,7 +543,16 @@ export class BrowserProgramHost {
      * that is.
      */
     this.inner = new RemotePageHost(() => (pinned ??= facade.currentPage() ?? page), {
-      browser: facade,
+      /*
+       * The scoped facade, not the raw one.
+       *
+       * The raw facade is an ordinary class instance, so every own property on
+       * it was readable by name from inside the sandbox: `browser.initial` handed
+       * back the raw unscoped Page, and `browser.runtime` handed back the whole
+       * runtime. `#` fields close the two that exist today; the allowlist closes
+       * the class, including whatever is added next.
+       */
+      browser: scopeFacade(facade),
       /*
        * `pages` roots at the *method*, not at the facade.
        *
@@ -514,7 +582,33 @@ export class BrowserProgramHost {
    * a real error rather than a handle that resolves to nothing.
    */
   intern(value: unknown): number | undefined {
-    return this.inner.intern(value);
+    /*
+     * A page is scoped on the way in, and this was a real escape.
+     *
+     * `expectPopup` interns a Playwright Page the host received from
+     * `waitForEvent("popup")`, and this stored it raw. Every later call the
+     * program makes on that handle is replayed against the stored object, so the
+     * documented popup helper handed back a page whose `context().browser()
+     * .contexts()` listed every thread's tabs. The isolation tests passed because
+     * they started from `page`, and this is a different door.
+     *
+     * Scoping here rather than at the call site, because this is the one place an
+     * object the *host* produced enters the handle table, and there is exactly
+     * one such caller today. The check is on the object's shape rather than on
+     * the caller's intent, so a second caller added later is covered.
+     */
+    return this.inner.intern(isPageLike(value) ? this.scopeHostPage(value) : value);
+  }
+
+  /**
+   * A host-produced page, scoped to this thread.
+   *
+   * Through the runtime when it can, so context tracking comes with it, and
+   * through `scopePage` otherwise, which is what the tests' stub runtime needs.
+   */
+  private scopeHostPage(page: Page): Page {
+    const scopedWithTracking = (this.runtime as { scopeForProgram?: (page: Page) => Page }).scopeForProgram;
+    return scopedWithTracking === undefined ? scopePage(page, this.runtime.threadId) : scopedWithTracking.call(this.runtime, page);
   }
 
   /**
@@ -541,7 +635,25 @@ export class BrowserProgramHost {
    * exists to prevent and is silent: the call succeeds and returns too much.
    */
   private resolveArgs(args: unknown[]): unknown[] {
-    return args.map((arg) => this.inner.resolve(arg));
+    return args.map((arg) => {
+      /*
+       * A RegExp marker is revived here too, and the omission was a real bug.
+       *
+       * The observation helpers do not go through `RemotePageHost.call`, so they
+       * do not get its `reviveArguments`. That was fine while every helper took
+       * numbers and strings, and it stopped being fine the moment a helper took
+       * a pattern: the sandbox encodes a RegExp as `{ __reaperRegExp, source,
+       * flags }`, so `expect(page).toHaveURL(/example\.com/)` reached the host as
+       * a plain object and the assertion compared the URL against the string
+       * "[object Object]", which can never match. Measured live: the call failed
+       * with "expected page ... to have URL [object Object]".
+       *
+       * `helperResolve` is the host's own revive-then-resolve, exposed for
+       * exactly this: one implementation of "make a wire argument real", so a
+       * helper and a method call cannot disagree about what a marker means.
+       */
+      return this.inner.helperResolve(arg);
+    });
   }
 
   /** One `view`, `viewChanges` or `screenshot` call from inside the sandbox. */
@@ -650,6 +762,16 @@ export class BrowserProgramHost {
           return { kind: "value", value: await this.observe.control.inspectForm(args[0]) };
         case "waitForChange":
           return { kind: "value", value: await this.observe.control.waitForChange(asRecord(args[0])) };
+        case "expect":
+          return {
+            kind: "value",
+            value: await this.observe.control.expect(
+              String(args[0] ?? ""),
+              args[1],
+              args[2],
+              asRecord(args[3]),
+            ),
+          };
         case "armDownload":
           return { kind: "value", value: await this.observe.control.armDownload(args[0] as number | undefined) };
         case "collectDownload":

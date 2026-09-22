@@ -20,7 +20,7 @@
  *       status: "success",
  *       action: "submit registration",
  *       page: { id: "p5", urlBefore: "...", urlAfter: "..." },
- *       change: { changed: true, navigated: false, popupOpened: false, downloadStarted: false },
+ *       change: { changed: true, navigated: false, popupOpened: false, pageClosed: false },
  *       result: { heading: "Welcome" },
  *       timing: { totalMs: 842 }
  *     }
@@ -58,7 +58,6 @@ export interface TransactionChange {
   navigated: boolean;
   urlChanged: boolean;
   popupOpened: boolean;
-  downloadStarted: boolean;
   pageClosed: boolean;
   /** Number of console errors raised during the transaction. */
   consoleErrors: number;
@@ -119,7 +118,6 @@ export function renderTransaction(receipt: BrowserReceipt): string {
   const flags = [
     changed.navigated ? "navigated" : undefined,
     changed.popupOpened ? "popup opened" : undefined,
-    changed.downloadStarted ? "download started" : undefined,
     changed.pageClosed ? "page closed" : undefined,
     changed.consoleErrors > 0 ? `${changed.consoleErrors} console errors` : undefined,
     changed.failedRequests > 0 ? `${changed.failedRequests} failed requests` : undefined,
@@ -236,7 +234,6 @@ export function diffPages(
     navigated: options.urlBefore !== options.urlAfter,
     urlChanged: anyUrlMoved || options.urlBefore !== options.urlAfter,
     popupOpened,
-    downloadStarted: false,
     pageClosed,
     consoleErrors: options.consoleErrors ?? 0,
     failedRequests: options.failedRequests ?? 0,
@@ -251,9 +248,4 @@ export function isUsable(page: Page | undefined): page is Page {
   } catch {
     return false;
   }
-}
-
-/** Fill `downloadStarted` in after the artifact manager has collected. */
-export function withDownload(change: TransactionChange, started: boolean): TransactionChange {
-  return started ? { ...change, changed: true, downloadStarted: true } : change;
 }

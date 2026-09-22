@@ -17,7 +17,7 @@ import path from "node:path";
 
 import type { Page } from "playwright";
 
-import type { ThreadBrowserRuntime } from "../../browser/thread-runtime.js";
+import { viewOptionsOf, type ThreadBrowserRuntime } from "../../browser/thread-runtime.js";
 import { BrowserControlPausedError, BrowserLeaseStaleError } from "../../browser/control-lease.js";
 import { renderReceipt, type StepReceipt } from "../../browser/transaction.js";
 import { renderTransaction } from "../../browser/runtime/transaction.js";
@@ -27,9 +27,11 @@ import { verifyStep } from "../../browser/verify.js";
 import { looksBlocked } from "../../browser/user-agents.js";
 import { scopePage } from "../../browser/scoped-page.js";
 import { BROWSER_PROGRAM_PARAMS } from "../../browser/remote-page-source.js";
-import { collectUnannounced } from "../../browser/downloads.js";
+import { collectUnannounced, runtimeSessionStart } from "../../browser/downloads.js";
 import { transactionalSurface } from "../../browser/runtime/control-extras.js";
 import { inspectProgram, renderPolicyReport } from "../../browser/runtime/policy-guard.js";
+import { EXPECT_ASSERTIONS, runExpectation, type ExpectAssertion } from "../../browser/runtime/expect.js";
+import { resolveBudget } from "../../browser/runtime/wait-policy.js";
 import { renderVerification } from "../../browser/runtime/verifier.js";
 import { renderInspection } from "../../browser/runtime/inspect.js";
 import { classifyFailure, renderFailure } from "../../browser/runtime/failure.js";
@@ -552,7 +554,17 @@ function unquote(literal: string): string {
 
 function observeSurface(runtime: ThreadBrowserRuntime, intern: (value: unknown) => number | undefined): ObserveSurface {
   return {
-    view: async (target?: Page) => (await runtime.view(target ? { page: target } : {})).text,
+    /*
+     * `viewOptionsOf`, so the documented `view({ selector })` form works.
+     *
+     * This wrapped a bare target in `{ page: target }`, which is right for a Page
+     * or a Locator and wrong for the options object the cut notice tells the
+     * model to use: `view({ selector: "main" })` became `{ page: { selector } }`,
+     * nothing recognised the page, and the read fell back to the whole page. A
+     * program following the tool's own remedy paid for the full page and had no
+     * way to tell.
+     */
+    view: async (target?: unknown) => (await runtime.view(viewOptionsOf(target))).text,
     viewChanges: () => runtime.viewChanges().text,
     screenshot: async (target?: Page) => {
       const page = target ?? (await runtime.ensureReady()).page;
@@ -699,6 +711,43 @@ function controlSurface(runtime: ThreadBrowserRuntime, intern: (value: unknown) 
     recover: async (target?: unknown) => await runtime.recover(target as never),
     probeInput: async (target?: unknown) => await runtime.probeInput(target as never),
     /*
+     * The assertion the skill and the wait policy both told the model to write.
+     *
+     * The budget is resolved from the wait policy's own table rather than passed
+     * in, because the whole point of that table is that one place decides how
+     * long a postcondition check gets, and an assertion is exactly an
+     * `assertion`. A program that names its own budget gets that one instead,
+     * resolved through the same `resolveBudget` the rest of the surface uses, so
+     * `{ timeout: "slow" }` means the same thing here as anywhere else.
+     *
+     * The target is whatever the program passed: a locator, a page, or a handle
+     * to either. It arrives already revived, because an observation call's
+     * arguments go through `RemotePageHost.resolve` before they get here.
+     */
+    expect: async (assertion, target, expected, options) => {
+      const named = assertion as ExpectAssertion;
+      if (!EXPECT_ASSERTIONS.has(named)) {
+        throw new Error(
+          `expect(...).${assertion} is not an assertion this browser implements. ` +
+            `The ones it does: ${[...EXPECT_ASSERTIONS].join(", ")}.`,
+        );
+      }
+      /*
+       * Both spellings of the budget, and reading only one was a silent drop.
+       *
+       * `{ timeout: 300 }` and `{ timeoutMs: 300 }` are the same request to a
+       * reader, and the sandbox passes the options object through untouched, so
+       * whichever key the model wrote arrived. Only `timeout` was read, so a
+       * program that wrote `timeoutMs` got the 5-second default and never knew:
+       * measured by the browser-helper-arguments test, whose own `{ timeoutMs:
+       * 300 }` was ignored and simply took longer to fail.
+       */
+      const requested = options?.["timeout"] ?? options?.["timeoutMs"];
+      const timeoutMs = resolveBudget(requested, "assertion");
+      const pattern = expected instanceof RegExp ? expected : expected === undefined ? undefined : String(expected);
+      return await runExpectation(named, target, pattern, { timeoutMs });
+    },
+    /*
      * The transactional half, which needs a live page, the registry and the
      * ledger together.
      *
@@ -739,6 +788,21 @@ function controlSurface(runtime: ThreadBrowserRuntime, intern: (value: unknown) 
        */
       const page = (await runtime.ensureReady()).page;
       const before = runtime.downloadedFiles.length;
+      /*
+       * The session marker for the vault read below, taken once here rather than
+       * inside the function that uses it: a marker read at the moment of the
+       * check would move with the clock and adopt any file that happened to land
+       * while the step was running, which is the bug it exists to stop.
+       *
+       * It is the runtime's own start, not the process's. The vault is per thread
+       * and on disk and outlives the runtime object, while `downloadedFiles` is
+       * per runtime and starts empty, so the idle reaper rebuilds a runtime that
+       * holds an empty list over a vault still full of this thread's earlier
+       * downloads. Process start does not bound that, and a click that produced
+       * nothing would adopt the last of that history. The runtime's construction
+       * is the floor the comment below already claims.
+       */
+      const sessionStart = Math.max(runtimeSessionStart(), runtime.startedAt);
       /*
        * The argument is validated BEFORE the wait is armed, and the wait carries
        * its own handler from the moment it exists. Both halves are the fix for a
@@ -816,8 +880,15 @@ function controlSurface(runtime: ThreadBrowserRuntime, intern: (value: unknown) 
        *
        * Reading the directory is the fix because the file's presence is the fact
        * that matters, and it is observable without the event.
+       *
+       * The read is bounded by the instant this runtime reached the browser,
+       * which is what keeps the directory's history out of the answer. The vault
+       * is per thread and on disk, so after a restart every file the thread ever
+       * downloaded is unknown to `downloadedFiles`, and an unbounded read handed
+       * the whole history back and `downloadAfter` reported the last of it as the
+       * result of a click that produced nothing.
        */
-      const unannounced = await collectUnannounced(runtime.downloadVault, runtime.downloadedFiles).catch(() => []);
+      const unannounced = await collectUnannounced(runtime.downloadVault, runtime.downloadedFiles, sessionStart).catch(() => []);
       void unannounced;
       let file = runtime.downloadedFiles[runtime.downloadedFiles.length - 1];
       if (file === undefined) {
@@ -936,6 +1007,7 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
      */
     const health = runtime.takeHealthNote();
     const created = runtime.takePageCreationNote();
+    const restore = runtime.takeIndexedDbRestoreNote();
     /*
      * The thread's pages, with the handles that address them.
      *
@@ -958,6 +1030,7 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
         (listing.length > 0 ? `\n\n${listing}` : "") +
         (flows.length > 0 ? `\n\n${flows.join("\n")}` : "") +
         (health !== undefined ? `\n\nBROWSER: ${health}` : "") +
+        (restore !== undefined ? `\n\nSTORAGE: ${restore}` : "") +
         (created !== undefined ? `\n\nPAGES: ${created}` : ""),
       outcome: "SUCCESS",
       rev: runtime.observer.revision,
@@ -996,8 +1069,15 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
    * Checked after the policy and before the compile, so a refused program costs
    * nothing to reject. A genuinely different program, or the same program after
    * the page moved, is a different fingerprint and runs normally.
+   *
+   * Keyed on the page's own state rather than on the observation counter, and
+   * that is the second half of the fix. The counter increments every time the
+   * model looks at the page, so keying on it meant a look released the refusal
+   * and the same failing program ran again: a model that glances at the page and
+   * retries, which is exactly what a model in a loop does, was never refused.
+   * The signature does not move for a look, only for the page itself changing.
    */
-  const repeat = runtime.kit.refusesRepeat(args.code, runtime.observer.revision);
+  const repeat = runtime.kit.refusesRepeat(args.code, runtime.observer.stateSignature());
   if (repeat !== undefined) {
     return {
       output:
@@ -1169,13 +1249,18 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
       ...(receipt.failure !== undefined ? { failureKind: receipt.failure.kind } : {}),
     });
     /*
-     * A structural failure is remembered against the program and the revision,
+     * A structural failure is remembered against the program and the page state,
      * so the next identical attempt is refused. Only the kinds repeating cannot
      * fix: a timeout or a detached element may genuinely work next time, and
      * refusing those would be the runtime overruling a correct retry.
+     *
+     * Recorded after the step's own capture, so the signature is the state the
+     * step left behind. That is the state an identical retry would run against,
+     * and it is read here and at `refusesRepeat` above through the same accessor,
+     * so the two cannot disagree about which state was tried.
      */
     if (receipt.failure !== undefined && !receipt.failure.retryable) {
-      runtime.kit.rememberFailure(args.code, runtime.observer.revision, {
+      runtime.kit.rememberFailure(args.code, runtime.observer.stateSignature(), {
         kind: receipt.failure.kind as never,
         diagnostic: receipt.failure.diagnostic,
         retryable: false,
@@ -1421,7 +1506,8 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
    * build error would cost it a turn and it would reach for an evaluated sleep
    * next, which is the same guess behind a worse door.
    */
-  for (const warning of runtime.kit.sleepWarnings(args.code)) lines.push("", `SLOW: ${warning}`);
+  const sleeps = runtime.kit.sleepWarnings(args.code);
+  if (sleeps.length > 0) lines.push("", sleeps);
 
   /*
    * The mission's memory, when the program has recorded anything.
@@ -1742,6 +1828,14 @@ export async function executeBrowserUse(runtime: ThreadBrowserRuntime, args: Bro
   if (health !== undefined) lines.push("", `BROWSER: ${health}`);
   const created = runtime.takePageCreationNote();
   if (created !== undefined) lines.push("", `PAGES: ${created}`);
+  /*
+   * The IndexedDB restore note, drained here as well as on the view path. It is
+   * produced by an attach, and an attach can be reached by a program as easily as
+   * by a look, so both paths carry it or the step that reconnected is the step
+   * that stays silent about a database it could not put back.
+   */
+  const restore = runtime.takeIndexedDbRestoreNote();
+  if (restore !== undefined) lines.push("", `STORAGE: ${restore}`);
   /*
    * The loop warning, recorded here because this is the first place the outcome
    * is known. The runtime keeps the history across steps and answers with a

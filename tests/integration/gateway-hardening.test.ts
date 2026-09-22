@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { startAppServer } from "../../src/app-server/server.js";
-import { originAllowed } from "../../src/app-server/web/gateway.js";
+import { looksLikePreviewOrigin, originAllowed } from "../../src/app-server/web/gateway.js";
 import { parsePreviewPath } from "../../src/app-server/web/preview.js";
 import { createTempWorkspace } from "../fixtures/workspace.js";
 import WebSocket from "ws";
@@ -209,6 +209,85 @@ test("a mutating call on an unattached thread is refused", async () => {
     } finally {
       a.close();
     }
+  } finally {
+    await server.stop();
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("the preview marker identifies a proxied document and nothing else", () => {
+  /*
+   * The origin rule cannot see a proxied preview, and the reason is mechanical:
+   * the proxy serves an arbitrary dev server's document on the gateway's own
+   * origin, so a relative fetch from it is same-origin and carries no Origin
+   * header at all. The path the proxy mounts under is the only marker.
+   */
+  assert.equal(looksLikePreviewOrigin(undefined), false, "a non-browser client sets no referer");
+  assert.equal(looksLikePreviewOrigin(""), false);
+  assert.equal(looksLikePreviewOrigin("http://127.0.0.1:4180/"), false, "the UI's own document is not a preview");
+  assert.equal(looksLikePreviewOrigin("http://127.0.0.1:4180/settings/providers"), false);
+  assert.equal(looksLikePreviewOrigin("http://127.0.0.1:4180/preview/5273/"), true, "a preview document is");
+  assert.equal(looksLikePreviewOrigin("http://127.0.0.1:4180/preview/5273/index.html"), true);
+  assert.equal(looksLikePreviewOrigin("not a url"), false, "a malformed referer is not one of ours");
+});
+
+test("the .reaper state directory is not served, and a preview cannot reach the API", async () => {
+  const workspaceRoot = await createTempWorkspace();
+  const server = await startAppServer({ workspaceRoot, listen: "ws://127.0.0.1:0", web: { host: "127.0.0.1", port: 0 } });
+  const base = server.web!.url;
+  try {
+    /*
+     * The cookie jar and the session journal live under the workspace's own
+     * `.reaper`, and the file routes served them by name. A logged-in session in
+     * cleartext behind no barrier is the finding; this is the assertion that the
+     * door is shut both by listing and by name.
+     */
+    mkdirSync(join(workspaceRoot, ".reaper", "browser"), { recursive: true });
+    writeFileSync(join(workspaceRoot, ".reaper", "browser", "t.json"), JSON.stringify({ cookies: [{ name: "session", value: "CANARY" }] }));
+
+    const byName = await fetch(`${base}/api/file?path=.reaper/browser/t.json`);
+    assert.equal(byName.status, 403, "the state directory must not be readable by name");
+
+    const listing = await fetch(`${base}/api/files?path=.`);
+    const body = (await listing.json()) as { entries: Array<{ name: string }> };
+    assert.equal(body.entries.some((entry) => entry.name === ".reaper"), false, "nor listed");
+
+    /*
+     * A preview document reaches the API with no Origin and a `/preview/`
+     * referer, which is exactly the request the origin rule cannot refuse.
+     */
+    const viaPreview = await fetch(`${base}/api/files?path=.`, { headers: { Referer: `${base}/preview/5273/` } });
+    assert.equal(viaPreview.status, 403, "a proxied preview must not read the API");
+  } finally {
+    await server.stop();
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("an upload cannot recreate what the listing hides, nor drop a code-loading path", async () => {
+  const workspaceRoot = await createTempWorkspace();
+  const server = await startAppServer({ workspaceRoot, listen: "ws://127.0.0.1:0", web: { host: "127.0.0.1", port: 0 } });
+  const base = server.web!.url;
+  try {
+    /*
+     * Two refusals on one route. The `.reaper` path would let a client write a
+     * cookie jar it is not allowed to read; the `hooks` path is the guard the
+     * tool surface already enforces, which this route walked past.
+     */
+    const jar = await fetch(`${base}/api/upload?path=.reaper/browser/evil.json`, {
+      method: "POST",
+      headers: { Origin: `http://127.0.0.1:4180` },
+      body: "{}",
+    });
+    assert.equal(jar.status, 403, "an upload must not write into the state directory");
+
+    const hook = await fetch(`${base}/api/upload?path=.reaper/hooks/evil.json`, {
+      method: "POST",
+      headers: { Origin: `http://127.0.0.1:4180` },
+      body: "{}",
+    });
+    assert.equal(hook.status, 403, "nor drop a hook the tool path would refuse");
+    assert.equal(existsSync(join(workspaceRoot, ".reaper", "hooks", "evil.json")), false, "and nothing landed");
   } finally {
     await server.stop();
     rmSync(workspaceRoot, { recursive: true, force: true });

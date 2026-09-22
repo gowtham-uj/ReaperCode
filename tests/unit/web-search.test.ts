@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { webSearchTool } from "../../src/tools/read/web-search.js";
+import { WebSearchArgsSchema } from "../../src/tools/types.js";
 
 test("web search scrapes ten requested results and synthesizes repair candidates", async () => {
   const searchHtml = Array.from({ length: 10 }, (_, index) => {
@@ -91,4 +92,39 @@ test("an empty search reports which backends were consulted", async () => {
   assert.equal(result.results.length, 0);
   assert.ok(result.notes && result.notes.length > 0, "an empty result must explain itself");
   assert.match(result.notes.join("\n"), /duckduckgo/);
+});
+
+/**
+ * Every engine the schema accepts is one a backend implements.
+ *
+ * This is a drift guard, not a regression guard, and the distinction is worth
+ * stating because an earlier version of this comment overstated it. `brave` is
+ * not, and never was, in the accepted enum: the schema has always offered
+ * `duckduckgo`, `mimo`, `serper` and `auto`. The bug was never "brave is
+ * accepted and ignored" but "the engine argument is accepted and the result
+ * hardcodes `mimo`", and that is pinned by the test above, which fails against
+ * the pre-fix source.
+ *
+ * What this pins is the property that let the bug hide: the schema and the
+ * reported union have to name the same set. A future `brave` added to one and
+ * not the other fails here rather than in a user's silent fallback.
+ */
+test("every engine the schema accepts is one the result can report", async () => {
+  const accepted = ["duckduckgo", "mimo", "serper"];
+  for (const engine of accepted) {
+    assert.equal(WebSearchArgsSchema.safeParse({ query: "q", engine }).success, true, `${engine} must be accepted`);
+  }
+  /* `auto` is a choice about strategy, not a backend, so it is not reportable. */
+  assert.equal(WebSearchArgsSchema.safeParse({ query: "q", engine: "auto" }).success, true);
+  assert.equal(WebSearchArgsSchema.safeParse({ query: "q", engine: "brave" }).success, false, "an unimplemented backend must not be accepted");
+
+  const fetchImpl = async (url: string) =>
+    url.includes("duckduckgo.com")
+      ? textResponse(`<a class="result__a" href="https://example.com/x">X</a>`)
+      : textResponse("<html><body>body</body></html>");
+  const result = await webSearchTool({ query: "q", engine: "duckduckgo", maxResults: 10 }, { fetchImpl });
+  assert.ok(
+    accepted.includes(result.engine),
+    `the reported engine must be an implemented backend, got: ${result.engine}`,
+  );
 });

@@ -8,13 +8,29 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, readdir } from "node:fs/promises";
+import { mkdtemp, writeFile, readdir, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { collectUnannounced, DownloadVault } from "../../../src/browser/downloads.js";
 
 const vaultAt = async (): Promise<DownloadVault> => new DownloadVault(await mkdtemp(join(tmpdir(), "vault-")));
+
+/** A session marker that just began, for the tests where the file is this run's. */
+const startedJustNow = (): number => Date.now() - 1000;
+
+/**
+ * Push a file's mtime into the past, so it stands in for one an earlier run left.
+ *
+ * `utimes` sets access and modification time on the file itself. `copyFile` does
+ * not carry timestamps over, which is why the vault's copy lands with the mtime
+ * of the copy rather than the download, and why a test can place a file in a
+ * session other than this one.
+ */
+const backdate = async (path: string, byMs: number): Promise<void> => {
+  const when = (Date.now() - byMs) / 1000;
+  await utimes(path, when, when);
+};
 
 test("a path is resolved inside the vault and nowhere else", async () => {
   const vault = await vaultAt();
@@ -124,12 +140,41 @@ test("a file the browser wrote without announcing it is still found", async () =
   await writeFile(join(dir, "guid-named-file"), "invoice bytes");
 
   const collected: Array<{ name: string; path: string; bytes: number }> = [];
-  const found = await collectUnannounced(vault as never, collected as never);
+  /* The file was written a moment ago, so it is inside this session. */
+  const found = await collectUnannounced(vault as never, collected as never, startedJustNow());
 
   assert.equal(found.length, 1, "an unannounced file is found");
   assert.equal(found[0]!.name, "guid-named-file");
   assert.equal(found[0]!.bytes, 13);
   assert.equal(collected.length, 1, "and is added to the caller's collection");
+});
+
+test("a file from a previous run is not adopted as this session's download", async () => {
+  /*
+   * The receipt this bug made lie.
+   *
+   * The vault is per thread and on disk, so it outlives the runtime: after a
+   * restart, everything the thread ever downloaded is unknown to `collected`.
+   * The unbounded version adopted all of it, and `downloadAfter` then read the
+   * last entry as the result of the click, so a page whose
+   * `waitForEvent("download")` rejected still produced an artifact attributed to
+   * the click.
+   *
+   * Measured shape, worth pinning exactly: a file with the bytes of a real
+   * earlier download, present before this session started, and a read that
+   * must report that nothing arrived.
+   */
+  const vault = await vaultAt();
+  const dir = await vault.ensure();
+  const stale = join(dir, "invoice-from-yesterday.txt");
+  await writeFile(stale, "invoice bytes");
+  await backdate(stale, 60_000);
+
+  const collected: Array<{ name: string; path: string; bytes: number }> = [];
+  const found = await collectUnannounced(vault as never, collected as never, Date.now());
+
+  assert.deepEqual(found, [], "a file older than this session is not this session's download");
+  assert.equal(collected.length, 0, "and must not be added to the caller's collection");
 });
 
 test("collecting twice does not double-count a file", async () => {
@@ -144,8 +189,9 @@ test("collecting twice does not double-count a file", async () => {
   await writeFile(join(dir, "once.pdf"), "x");
 
   const collected: Array<{ name: string; path: string; bytes: number }> = [];
-  await collectUnannounced(vault as never, collected as never);
-  const second = await collectUnannounced(vault as never, collected as never);
+  const since = startedJustNow();
+  await collectUnannounced(vault as never, collected as never, since);
+  const second = await collectUnannounced(vault as never, collected as never, since);
 
   assert.equal(second.length, 0, "the second pass finds nothing new");
   assert.equal(collected.length, 1, "and the collection still holds one entry");
@@ -162,7 +208,7 @@ test("an empty file is not collected as a download", async () => {
   await writeFile(join(dir, "empty.pdf"), "");
 
   const collected: Array<{ name: string; path: string; bytes: number }> = [];
-  const found = await collectUnannounced(vault as never, collected as never);
+  const found = await collectUnannounced(vault as never, collected as never, startedJustNow());
   assert.equal(found.length, 0, "a zero-byte file is not a finished download");
 });
 
@@ -326,4 +372,37 @@ test("a real stream of the right size still succeeds", async () => {
   const saved = await vault.accept(fake as never);
   assert.equal(saved.bytes, 66, "the bytes the browser had must be stored");
   assert.deepEqual((await vault.list()).map((f) => f.name), ["invoice.txt"]);
+});
+
+test("a runtime rebuilt over a full vault does not adopt the earlier history", async () => {
+  /*
+   * The reap case, which the process-start floor did not cover.
+   *
+   * The vault is per thread and on disk and outlives the runtime object;
+   * `downloadedFiles` is per runtime and starts empty. The idle reaper drops a
+   * runtime after ten minutes and the next use builds a new one, so a fresh
+   * runtime over a vault still holding this thread's earlier downloads is the
+   * normal case rather than an exotic one. A floor of process start does not
+   * bound that: the file was written by this process, minutes ago, by a runtime
+   * that no longer exists.
+   *
+   * The floor the tool passes is `max(processStart, runtime.startedAt)`, so this
+   * pins the second half: a file that is newer than module load but older than
+   * the runtime must not be adopted. The file here is written now (newer than
+   * any process-start reading) and the current runtime is a `Date.now()` taken
+   * after it, which is the shape of "the file was there when this runtime
+   * started".
+   */
+  const vault = await vaultAt();
+  const dir = await vault.ensure();
+  const earlier = join(dir, "invoice-from-turn-1.txt");
+  await writeFile(earlier, "earlier bytes");
+
+  /* The runtime was built after that file landed, which is the reap. */
+  const runtimeStartedAt = Date.now() + 5;
+  const collected: Array<{ name: string; path: string; bytes: number }> = [];
+  const found = await collectUnannounced(vault as never, collected as never, runtimeStartedAt);
+
+  assert.deepEqual(found, [], "a file from before this runtime started is not this runtime's download");
+  assert.equal(collected.length, 0);
 });

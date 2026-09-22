@@ -17,6 +17,7 @@ import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { assertNotCodeLoadingPath } from "../../policy/code-loading-paths.js";
 import { ensureGitRepo } from "../../workspace/git.js";
 
 /** `execFile`, not `exec` — arguments are argv elements, so a path containing
@@ -25,6 +26,26 @@ const run = promisify(execFile);
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const IGNORED_DIRS = new Set([".git", "node_modules", "dist", "build", ".next", "coverage"]);
+
+/**
+ * Directories beneath the workspace that the HTTP file routes must never serve.
+ *
+ * `.reaper` is the state directory, and what lives in it is not project source: a
+ * thread's browser cookie jar and localStorage (`storageState`, written from
+ * `context.storageState()`), its `indexeddb.json`, its saved Playwright scripts,
+ * its pastes, and the app-server's own thread records. The jar is a live session
+ * token for every site the thread logged into.
+ *
+ * Adding it to the listing filter was not enough, and the gate is on the path
+ * rather than on the directory entry: `resolveInsideRoot` refuses any request
+ * whose path contains one of these as a segment, so the routes cannot be reached
+ * by naming the file directly either.
+ *
+ * Reproduced before this existed: `/api/file?path=.reaper/browser/<id>.json`
+ * returned a jar in cleartext, and listing `.reaper/browser` enumerated every
+ * thread's.
+ */
+const UNSERVABLE_DIRS = new Set([".reaper", ...IGNORED_DIRS]);
 
 export class PathEscapeError extends Error {
   constructor(requested: string) {
@@ -74,6 +95,20 @@ export function resolveInsideRoot(root: string, requested: string): string {
    */
   if (candidate.includes("\0")) throw new PathEscapeError(requested);
 
+  /*
+   * A state directory is refused by path, not only by listing.
+   *
+   * Hiding `.reaper` from the directory listing left it readable by name, which is
+   * the same bug in a different door: `/api/file?path=.reaper/browser/<id>.json`
+   * served a live cookie jar. The check is on every segment, so a path that nests
+   * one (`src/.reaper/x`) is refused too, and it happens before any filesystem
+   * call.
+   */
+  const segments = path.relative(absoluteRoot, candidate).split(path.sep);
+  if (segments.some((segment) => UNSERVABLE_DIRS.has(segment))) {
+    throw new PathEscapeError(requested);
+  }
+
   const real = realpathSyncOrUndefined(candidate);
   if (real !== undefined && !isInside(absoluteRoot, real)) throw new PathEscapeError(requested);
   return candidate;
@@ -113,7 +148,7 @@ export async function listDirectory(root: string, requested: string): Promise<Tr
   const target = resolveInsideRoot(root, requested || ".");
   const entries = await readdir(target, { withFileTypes: true });
   return entries
-    .filter((entry) => !(entry.isDirectory() && IGNORED_DIRS.has(entry.name)))
+    .filter((entry) => !UNSERVABLE_DIRS.has(entry.name))
     .filter((entry) => entry.isDirectory() || entry.isFile())
     .map((entry) => ({
       name: entry.name,
@@ -259,6 +294,21 @@ export async function writeWorkspaceUpload(
   }
   const existing = lstatSyncOrUndefined(target);
   if (existing?.isSymbolicLink()) throw new PathEscapeError(input.path);
+  /*
+   * The code-loading guard the tool path enforces, applied here too.
+   *
+   * `hooks`, `extensions`, `extensions-builtin`, `skills` and `linters` load and
+   * execute code from the workspace, and `assertNotCodeLoadingPath` exists so the
+   * agent cannot drop a new one into an already-trusted workspace without the
+   * approval-gated `hook_manager` or `extension_manager`. Every tool write calls
+   * it; this route did not, so `POST /api/upload?path=.reaper/hooks/evil.json`
+   * landed bytes the tool path would have refused. Verified before this existed.
+   *
+   * Checked after the walk above and before the write, so it is the same
+   * resolved path the tool path would have seen rather than a second spelling of
+   * it.
+   */
+  assertNotCodeLoadingPath(path.resolve(root), target);
   await mkdir(parent, { recursive: true });
   /*
    * Re-checked after the create, because the create is what could have followed

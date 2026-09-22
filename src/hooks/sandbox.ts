@@ -34,7 +34,8 @@ export interface CompiledHookHandler {
    * The author may return a bare boolean or `{allow, message?, reason?}`; the
    * compiler's own wrapper normalizes both to the object form, so what a caller
    * of this type sees is always the object. That normalization is why a
-   * `return false` handler blocks instead of silently passing.
+   * `return false` handler blocks instead of silently passing, and why a handler
+   * that writes its advice under `note` still reaches the model as `message`.
    */
   (event: { name: string; payload: Record<string, unknown>; blockable: boolean }):
     | { allow: boolean; message?: string; reason?: string }
@@ -123,30 +124,43 @@ export function compileHookSource(source: string, opts: CompileOptions = {}): Co
 }
 
 function capResult(
-  result: { allow: boolean; message?: string; reason?: string } | boolean | undefined,
+  result: unknown,
   maxOutput: number,
 ): { allow: boolean; message?: string; reason?: string } {
   /*
    * `return false` is a block, and so is `return true` an allow.
    *
    * The documented contract is `{ allow: false }`, but a handler that returns a
-   * bare boolean is the natural reading of "its result decides the outcome",
-   * and it used to be a silent no-op: `capResult` saw a non-object, answered
-   * `{ allow: true }`, and an enforcing hook that meant to block let the call
-   * through with no error anywhere. Accepting the boolean is the honest fix;
-   * the alternative is a hook that appears to work and does nothing.
+   * bare boolean is the natural reading of "its result decides the outcome".
+   * Accepting the boolean is the honest fix; the alternative is a hook that
+   * appears to work and does nothing.
    */
   if (typeof result === "boolean") return { allow: result };
   if (!result || typeof result !== "object") {
     return { allow: true };
   }
-  const allow = typeof result.allow === "boolean" ? result.allow : true;
-  const message = capString(result.message, maxOutput);
-  const reason = capString(result.reason, maxOutput);
+  const raw = result as Record<string, unknown>;
+  const allow = typeof raw.allow === "boolean" ? raw.allow : true;
+  /*
+   * `message` is what the runtime carries and what the executor shows as the
+   * tool result's hint, so a handler that says `note` has written advice nothing
+   * reads. Both spellings mean the same thing to the person writing the hook,
+   * and only one of them reached the model, so the other is folded into it here
+   * rather than left as a field that silently does nothing.
+   */
+  const message = capString(firstString(raw.message, raw.note, raw.advice), maxOutput);
+  const reason = capString(raw.reason, maxOutput);
   const out: { allow: boolean; message?: string; reason?: string } = { allow };
   if (message !== undefined) out.message = message;
   if (reason !== undefined) out.reason = reason;
   return out;
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string") return value;
+  }
+  return undefined;
 }
 
 function capString(s: unknown, max: number): string | undefined {

@@ -1032,6 +1032,66 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
     return popup;
   }
 
+  /*
+   * The assertions, in the shape Playwright writes them.
+   *
+   * The skill and the wait policy both told a model to write
+   * \`expect(locator).toBeVisible()\`, and this scope had no \`expect\` at all:
+   * \`typeof expect\` inside a program was "undefined", so the documented call
+   * was a \`ReferenceError\` that read as the model's own mistake. It then fell
+   * back to a fixed sleep, which is the behaviour the wait policy exists to
+   * remove.
+   *
+   * The shape is stitched here rather than on the host because the host can only
+   * take one call: \`expect(x)\` and \`.toBeVisible()\` are two expressions to the
+   * program and one round trip to the bridge. So \`expect\` captures its target and
+   * each assertion closes over it, which is also what makes the playwright-shaped
+   * \`await expect(locator).toHaveText("x")\` cost exactly one call.
+   *
+   * The argument is encoded by \`callHelper\`, so a locator arrives at the host as
+   * a live Locator rather than as a proxy node, which is the same fix the view
+   * helper needed and for the same reason.
+   */
+  function assertion(name, target, expected, options) {
+    return callHelper('expect', [name, target, expected, options]);
+  }
+
+  /*
+   * The four assertions, and a refusal for every other name.
+   *
+   * Plain closures were enough until the host's doc comment promised a message
+   * listing the supported assertions, which the host cannot deliver for a name
+   * it never receives: a program writing \`expect(page).toHaveCount(3)\` got
+   * \`TypeError: expect(...).toHaveCount is not a function\`, which names
+   * JavaScript rather than the browser surface, and \`.not\` gave "Cannot read
+   * properties of undefined". Both read as the model's own mistake for what is a
+   * documented boundary.
+   *
+   * A Proxy answers every name, so an unsupported one is refused with the list
+   * the host documents, which is the shape a model can act on. The list is
+   * spelled here rather than derived, because the sandbox cannot import from the
+   * host, and it is the same four the host checks against.
+   */
+  const EXPECT_NAMES = ['toBeVisible', 'toHaveText', 'toContainText', 'toHaveURL'];
+
+  function expect(target) {
+    const implemented = {
+      toBeVisible: (options) => assertion('toBeVisible', target, undefined, options),
+      toHaveText: (expected, options) => assertion('toHaveText', target, expected, options),
+      toContainText: (expected, options) => assertion('toContainText', target, expected, options),
+      toHaveURL: (expected, options) => assertion('toHaveURL', target, expected, options),
+    };
+    return new Proxy(implemented, {
+      get(known, name) {
+        if (typeof name !== 'string' || name in known) return known[name];
+        const shown = name === 'not'
+          ? 'negation is not implemented'
+          : name + ' is not an assertion this browser implements';
+        throw new TypeError('expect(...).' + name + ': ' + shown + '. The ones it does: ' + EXPECT_NAMES.join(', ') + '.');
+      },
+    });
+  }
+
   /**
    * The mission's state, as calls rather than as an object.
    *
@@ -1098,6 +1158,7 @@ function buildRemoteBrowser(__pageCall, __pageRoot, __pageView) {
     inspect,
     inspectForm,
     waitForChange,
+    expect,
     expectPopup,
     state,
     metrics,
@@ -1140,5 +1201,12 @@ export const BROWSER_PROGRAM_PARAMS = [
    * zero-width delete button. `waitForChange` replaces the fixed sleep.
    * `expectPopup` gets a popup's provenance right by construction.
    */
-  "tx", "inspect", "inspectForm", "waitForChange", "expectPopup", "state", "metrics",
+  /*
+   * `expect` is the Playwright assertion, and it is on this list for the reason
+   * the rest of it exists: it was in the documentation and in neither the
+   * sandbox's surface nor its bound names, so a model that wrote the documented
+   * `expect(locator).toBeVisible()` got "expect is not defined" instead of a
+   * wait. See runtime/expect.ts for what it answers.
+   */
+  "tx", "inspect", "inspectForm", "waitForChange", "expect", "expectPopup", "state", "metrics",
 ] as const;

@@ -98,6 +98,10 @@ test("a page that comes back after a reconnect keeps its id", () => {
    * A handle that moves under its holder is worse than no handle: the model
    * either fails (this case) or, if the counter had wrapped, would act on a
    * different tab while every number it was shown looked right.
+   *
+   * The transfer is requested, not guessed. Only the restore path knows this is
+   * the same tab under a new object; the registry cannot tell that from a new
+   * page reusing the name, because in both cases the old page is closed.
    */
   const registry = new PageRegistry();
   const before = fakePage();
@@ -106,11 +110,56 @@ test("a page that comes back after a reconnect keeps its id", () => {
 
   /* The reconnect: same name, new object, old one closed. */
   const replacement = fakePage();
-  const after = registry.register("parabank", replacement);
+  const after = registry.register("parabank", replacement, { reconnect: true });
   assert.equal(after.id, "p1", "the id must survive, or the model is holding a dead handle");
   assert.equal(after.page, replacement, "and the entry must point at the live page");
   assert.equal(registry.find("p1")?.page, replacement, "so an id lookup finds the new object");
   assert.equal(registry.find("parabank")?.page, replacement, "and so does a name lookup");
+});
+
+test("a new page that reuses a closed page's name does not inherit its provenance", () => {
+  /*
+   * The false provenance this pins, and it is the kind the registry exists to
+   * prevent.
+   *
+   * A page is closed and a program reopens under the same name. The registry used
+   * to carry the old entry over on a name match, which handed the new page the
+   * old id, the old `openedBy` and the old `parentId`: a fresh tab recorded as
+   * "this was a popup opened by a152". No click opened it. A benchmark asking
+   * "did a click open this" would have been answered yes, and the model was
+   * shown an id for a tab it had never seen.
+   */
+  const registry = new PageRegistry();
+  const parent = fakePage();
+  registry.register("main", parent, { creationType: "newPage" });
+  registry.setCurrentAction("a152");
+  const closed = registry.register("tab", fakePage(true), { parent });
+  assert.equal(closed.creationType, "popup");
+  assert.equal(closed.openedBy, "a152");
+
+  /* The name is reused by a different page, after the action that opened the old one. */
+  registry.setCurrentAction(undefined);
+  const fresh = registry.register("tab", fakePage());
+  assert.equal(fresh.id, "p3", "the newcomer gets the next id, not the closed page's");
+  assert.equal(fresh.creationType, "newPage", "and it is not claimed as a popup");
+  assert.equal(fresh.openedBy, undefined, "which no action opened");
+  assert.equal(fresh.parentId, undefined);
+  assert.equal(registry.find("main")?.id, "p1", "and the other tab is untouched");
+  assert.equal(registry.find("tab")?.id, "p3", "and the name resolves to the new page");
+});
+
+test("the id the closed page had does not resolve to the new page", () => {
+  /*
+   * The other half of the inheritance: the id. Left in `byId`, `p2` would answer
+   * a lookup with a page that is no longer the one the model saw under that id.
+   */
+  const registry = new PageRegistry();
+  const gone = fakePage(true);
+  registry.register("one", fakePage());
+  const closed = registry.register("two", gone);
+  const fresh = registry.register("two", fakePage());
+  assert.equal(registry.find(closed.id)?.id, undefined, "the old id is not a handle to the new page");
+  assert.equal(registry.find(fresh.id)?.page, fresh.page);
 });
 
 test("a new page after a reconnect does not steal an old id", () => {
@@ -118,10 +167,13 @@ test("a new page after a reconnect does not steal an old id", () => {
    * The other half, and the reason the counter never resets. A page that is
    * genuinely new must get a genuinely new id, so an id the model remembers can
    * never resolve to a tab it has never seen.
+   *
+   * The second registration is a reconnect, which is what the runtime does when
+   * it re-adopts a restored tab. It is the only case that keeps the id.
    */
   const registry = new PageRegistry();
   registry.register("parabank", fakePage());
-  registry.register("parabank", fakePage());
+  registry.register("parabank", fakePage(), { reconnect: true });
   const fresh = registry.register("newcomer", fakePage());
   assert.equal(fresh.id, "p2", "the newcomer gets the next id, not one that was in use");
   assert.equal(registry.find("p1")?.name, "parabank");

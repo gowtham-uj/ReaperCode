@@ -385,6 +385,20 @@ export class ThreadBrowsers {
    * other threads are still using it.
    */
   async closeThread(threadId: string): Promise<void> {
+    /*
+     * The lease goes with the thread, and this is the delete path rather than
+     * `closeThread`'s name: `deleteThread` calls this, and a thread that comes
+     * back cannot come back with an id it had before.
+     *
+     * Dropped unconditionally and before the runtime is looked up, because the
+     * after-a-restart case below has no runtime and still needs the lease gone.
+     * A lease nobody removes is not merely stale state: the registry is keyed by
+     * thread id, and the browser tool refuses every action while the owner is
+     * `human`, so deleting a thread the user had taken control of and then
+     * reusing that id would leave an agent unable to run anything, with no
+     * takeover in progress to explain why.
+     */
+    this.control.forget(threadId);
     const runtime = this.runtimes.get(threadId);
     this.runtimes.delete(threadId);
     if (runtime !== undefined) {

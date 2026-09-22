@@ -51,7 +51,6 @@ interface OpenTransaction {
 interface ArmedWait {
   /** Set for a popup: the page the popup is expected on. */
   page?: Page;
-  settled: boolean;
   /** Resolves to the thing that arrived, or undefined. */
   promise: Promise<unknown>;
 }
@@ -362,10 +361,13 @@ export function transactionalSurface(runtime: ThreadBrowserRuntime, intern: (val
       const page = (target as Page | undefined) ?? (await runtime.ensureReady()).page;
       const token = `p${++counter}`;
       const promise = page.waitForEvent("popup", { timeout: typeof timeoutMs === "number" ? timeoutMs : 15_000 });
-      const record: ArmedWait = { page, settled: false, promise };
-      promise.catch(() => {
-        record.settled = true;
-      });
+      const record: ArmedWait = { page, promise };
+      /*
+       * Absorbed, not recorded. A wait nobody collects would otherwise raise an
+       * unhandled rejection naming nothing useful. The token is deleted by the
+       * collect that reads the outcome, so there is no state left to keep.
+       */
+      promise.catch(() => undefined);
       armed.set(token, record);
       return { token };
     },
@@ -448,8 +450,16 @@ export function transactionalSurface(runtime: ThreadBrowserRuntime, intern: (val
         if (!known.includes(status)) {
           throw new Error(`"${status}" is not a subtask status. Use one of: ${known.join(", ")}.`);
         }
-        kit.mission.setSubtask(title, status as never);
-        return { subtask: title, status };
+        /*
+         * `requires` is forwarded, which it was not.
+         *
+         * The documented example declares and sets status in one call and passes
+         * dependencies with it. They were dropped here, so a subtask with
+         * prerequisites appeared in `READY NOW` before them: `ready()` folds over
+         * the dependency edges, and there were none to fold.
+         */
+        kit.mission.setSubtask(title, status as never, undefined, requires);
+        return { subtask: title, status, requires: requires ?? [] };
       },
       ready: async (): Promise<Record<string, unknown>> => ({
         ready: kit.mission.ready().map((subtask) => subtask.title),

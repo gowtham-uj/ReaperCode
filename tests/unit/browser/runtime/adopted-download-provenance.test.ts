@@ -24,6 +24,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
+import { utimes } from "node:fs/promises";
 
 import { ArtifactManager } from "../../../../src/browser/runtime/artifact-manager.js";
 import { DownloadVault } from "../../../../src/browser/downloads.js";
@@ -73,6 +74,118 @@ test("one download reached by two listeners is one ledger event", async () => {
 
   assert.equal(first.path, second.path, "both listeners get the same stored file");
   assert.equal(ledger.downloadsFromActions().length, 1, "one download is one event, not two");
+});
+
+/** A page whose download wait rejects, the way a timeout does. */
+function pageThatNeverAnnounces(): { waitForEvent: () => Promise<never> } {
+  return {
+    waitForEvent: () =>
+      Promise.reject(new Error('page.waitForEvent: Timeout 30000ms exceeded while waiting for event "download"')),
+  };
+}
+
+test("a wait whose event never fired does not adopt an earlier download", async () => {
+  /*
+   * The receipt this bug made lie, and the auditor reproduced it directly.
+   *
+   * `newestUnclaimed` took the last entry of the vault directory with no
+   * staleness filter and no sort, so when the armed wait rejected, `collect`
+   * answered with whatever the thread had downloaded last and `finish` recorded
+   * it against the action. A page whose `waitForEvent("download")` rejected
+   * produced an artifact with `triggeredBy` set, so `artifactFromAction` passed
+   * for a click that downloaded nothing.
+   *
+   * A stale file is exactly the shape: one download from an earlier step sits in
+   * the vault, the next click produces nothing, and the old file is handed back
+   * as the new one's result. The event here rejects, which is the arm timing out.
+   *
+   * Two stale files are used because there are two ways to be stale, and only
+   * checking the first would leave the mtime filter untested. One was in the
+   * vault before the arm, so `known` excludes it. The other lands while the arm
+   * is outstanding with an older timestamp, which is what the mtime comparison
+   * is for: the vault is inside the workspace, so a program can write into it,
+   * and `cp -p` keeps the source's timestamp rather than stamping the copy.
+   */
+  const dir = await mkdtemp(join(tmpdir(), "stale-arm-"));
+  const vault = new DownloadVault(dir);
+  await vault.ensure();
+  const stale = join(dir, "invoice-from-an-earlier-step.txt");
+  await writeFile(stale, "invoice bytes");
+  /* Older than anything this manager can have caused. */
+  const when = (Date.now() - 60_000) / 1000;
+  await utimes(stale, when, when);
+
+  const ledger = new RunLedger();
+  const manager = new ArtifactManager(vault, ledger);
+
+  const token = await manager.arm(pageThatNeverAnnounces() as never);
+  const planted = join(dir, "planted-during-the-arm.txt");
+  await writeFile(planted, "not from this action");
+  const earlier = (Date.now() - 30_000) / 1000;
+  await utimes(planted, earlier, earlier);
+
+  const artifact = await manager.collect(token, { actionId: "a7" });
+
+  assert.equal(artifact, undefined, "no file arrived, so no artifact may be claimed");
+  assert.equal((await vault.list()).length, 2, "both files are still in the vault, they are just not this action's");
+  assert.equal(ledger.downloadsFromActions().length, 0, "and the ledger must record nothing");
+  assert.equal(ledger.events().length, 0, "not even an unattributed artifact event");
+});
+
+test("a file that lands after the arm is still collected, and the stale one is not", async () => {
+  /*
+   * The other half, so requiring provenance cannot delete the fallback this
+   * class exists for. The dropped-event race is real: the file lands without
+   * Playwright announcing it, and answering "no download arrived" there is the
+   * twenty-minute bug coming back.
+   *
+   * The distinction is time, and only time. Two files are in the vault: one from
+   * before this manager existed, one that appeared after the arm. The second is
+   * the only candidate, so it is returned, and the first is left alone.
+   *
+   * `announced` stays true for the file that is returned, which is the
+   * deliberate choice discussed in `collect`: it means "this action caused this
+   * file", and the mtime filter above is what makes that claim safe. Asserting
+   * it here so a later change to it has to be a decision rather than a slip.
+   */
+  const dir = await mkdtemp(join(tmpdir(), "fresh-arm-"));
+  const vault = new DownloadVault(dir);
+  await vault.ensure();
+  const stale = join(dir, "old.txt");
+  await writeFile(stale, "old bytes");
+  const then = (Date.now() - 60_000) / 1000;
+  await utimes(stale, then, then);
+
+  const ledger = new RunLedger();
+  const manager = new ArtifactManager(vault, ledger);
+
+  let reject: ((error: Error) => void) | undefined;
+  const page = {
+    waitForEvent: () =>
+      new Promise<never>((_resolve, rejectWait) => {
+        reject = rejectWait;
+      }),
+  };
+  const token = await manager.arm(page as never);
+  /*
+   * The browser wrote the file and told nobody, which is the race. The wait is
+   * long on purpose: the comparison is in milliseconds but the filesystem's
+   * mtime granularity is not guaranteed to be, and a test that depends on it
+   * would fail on a machine with one-second timestamps rather than here.
+   */
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  const fresh = join(dir, "guid-named-file");
+  await writeFile(fresh, "invoice bytes");
+  reject?.(new Error("no event"));
+
+  const artifact = await manager.collect(token, { actionId: "a9" });
+
+  assert.equal(artifact?.path, fresh, "the file that appeared after the arm is the one the action produced");
+  assert.equal(artifact?.announced, true, "a file this arm alone can have caused is attributed to the action");
+  const recorded = ledger.downloadsFromActions();
+  assert.equal(recorded.length, 1, "the download is recorded once, for the file the trigger produced");
+  assert.equal(recorded[0]!.name, "guid-named-file", "and the stale file is not it");
+  assert.equal(recorded[0]!.triggeredBy, "a9");
 });
 
 test("the page watcher stores through the kit, so provenance cannot be skipped", async () => {

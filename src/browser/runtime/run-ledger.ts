@@ -57,7 +57,6 @@ export interface ActionFinished extends BaseEvent {
   durationMs: number;
   pageId?: string;
   /** The action this one retried, when it was a retry. */
-  retryOf?: string;
 }
 
 export interface PageCreated extends BaseEvent {
@@ -143,7 +142,6 @@ export interface LedgerMetrics {
   failedCalls: number;
   recoveredCalls: number;
   timeoutFailures: number;
-  retries: number;
   recoveries: number;
   popups: number;
   pagesCreated: number;
@@ -276,7 +274,6 @@ export class RunLedger {
       failedCalls: finished.filter((event) => event.status === "failed").length,
       recoveredCalls: finished.filter((event) => event.status === "recovered").length,
       timeoutFailures,
-      retries: finished.filter((event) => event.retryOf !== undefined).length,
       recoveries: this.of("recovery.performed").length,
       popups: this.popupsFromActions().length,
       pagesCreated: this.of("page.created").length,
@@ -301,9 +298,19 @@ export class RunLedger {
       .join(", ");
     const lines = [
       `CALLS: ${m.browserCalls} (${m.successfulCalls} ok, ${m.failedCalls} failed, ${m.recoveredCalls} recovered)`,
-      `RETRIES: ${m.retries}   RECOVERIES: ${m.recoveries}   TIMEOUTS: ${m.timeoutFailures}`,
+      `RECOVERIES: ${m.recoveries}   TIMEOUTS: ${m.timeoutFailures}`,
       `PAGES: ${m.pagesCreated} created (${m.popups} from a click), ${m.pagesClosed} closed`,
       `ARTIFACTS: ${m.downloads} (${m.downloadBytes} bytes)`,
+      /*
+       * A trimmed log says so, and the accessor was written and never read.
+       *
+       * The ledger drops the oldest events past its budget, and the doc on
+       * `truncated` says a reader has to know when a fold is over less than what
+       * happened. Nothing read it, so a long run printed a tidy summary of a
+       * partial log with no hint that anything was missing. Printed here, which
+       * is the one place a reader sees a fold as a single answer.
+       */
+      ...(this.truncated ? [`NOTE: ${this.trimmed} early events were dropped from this log, so the counts above are lower bounds.`] : []),
       `OBSERVATIONS: ${m.observations} (${m.observationChars} chars)`,
       /*
        * Token counts, printed only when something recorded one.
