@@ -122,3 +122,45 @@ test("a thread in a user-chosen workspace is listed even when the path is absent
   const ids = (await m.listThreads()).map((entry) => entry.threadId);
   assert.equal(ids.includes(thread.threadId), true, "a user-chosen workspace is never hidden by a missing path");
 });
+
+test("a thread the list hides cannot be resumed either", async () => {
+  /*
+   * The two disagreed, and the disagreement was the visible bug.
+   *
+   * `listThreads` filtered out a thread whose app-managed workspace was gone,
+   * while `thread/resume` on the same id succeeded. The client remembers the id
+   * of the last thread you opened, so on the next load it resumed it and rendered
+   * it in the main area: an empty sidebar beside an open conversation whose every
+   * command failed, because the directory its sandbox was built from no longer
+   * existed. Reported exactly that way.
+   *
+   * Asserted as an agreement rather than as two separate behaviours, because the
+   * property that matters is that the two answers match. Either one changing
+   * alone is the bug.
+   */
+  const dataRoot = await mkdtemp(join(tmpdir(), "zombie-resume-"));
+  const m = new ReaperThreadManager({ dataRoot });
+  const managed = join(homedir(), ".reaper", "workspaces", `zombie-resume-${process.pid}-${Date.now().toString(36)}`);
+  const dead = await m.startThread({ title: "gone", workspaceRoot: managed });
+  assert.equal(await exists(managed), false, "the fixture is the state: a record whose workspace was never made");
+
+  const listed = (await m.listThreads()).map((entry) => entry.threadId);
+  assert.equal(listed.includes(dead.threadId), false, "the list hides it");
+
+  await assert.rejects(
+    () => m.resumeThread(dead.threadId),
+    /not found/,
+    "and resume must refuse it with the same answer, or a remembered id restores a dead thread",
+  );
+});
+
+test("a live thread still resumes, so the guard is not a blanket refusal", async () => {
+  /* The other direction, so the fix cannot pass by refusing everything. */
+  const dataRoot = await mkdtemp(join(tmpdir(), "zombie-live-"));
+  const m = new ReaperThreadManager({ dataRoot });
+  const present = join(dataRoot, "present");
+  await mkdir(present, { recursive: true });
+  const thread = await m.startThread({ title: "fine", workspaceRoot: present });
+  const resumed = await m.resumeThread(thread.threadId);
+  assert.equal(resumed.threadId, thread.threadId);
+});

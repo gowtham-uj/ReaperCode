@@ -163,6 +163,26 @@ export class ReaperThreadManager {
     if (live) return live;
     const loaded = await this.store.load(threadId);
     if (!loaded) throw new ThreadManagerError("thread_not_found", `Thread ${threadId} was not found`);
+    /*
+     * A thread whose workspace is gone is not resumable, and this is the same
+     * condition `listThreads` filters on.
+     *
+     * The two disagreed, and the disagreement was visible: the sidebar hid a
+     * thread whose app-managed workspace had been deleted, while `thread/resume`
+     * on the same id succeeded. A client that remembered the id from a previous
+     * visit restored it on load and rendered it in the main area, so the user saw
+     * an empty thread list next to an open conversation that could not run
+     * anything: every command fails, because the directory its sandbox was built
+     * from no longer exists.
+     *
+     * Checked here rather than in the handler, so every caller gets the same
+     * answer. `listThreads` reporting a thread dead and `resumeThread` reviving
+     * it is the kind of split a second caller cannot be expected to know about.
+     */
+    if (!(await this.workspaceIsUsable(loaded.workspaceRoot))) {
+      this.threads.delete(threadId);
+      throw new ThreadManagerError("thread_not_found", `Thread ${threadId} was not found`);
+    }
 
     const metadata = loaded.status === "running"
       ? await this.store.save({
@@ -277,20 +297,32 @@ export class ReaperThreadManager {
      */
     const alive: ThreadMetadata[] = [];
     for (const metadata of byId.values()) {
-      const root = metadata.workspaceRoot;
-      if (root === undefined || root.length === 0) {
-        alive.push(metadata);
-        continue;
-      }
-      if (!isAppManagedWorkspace(root)) {
-        alive.push(metadata);
-        continue;
-      }
-      const present = await stat(root).then(() => true).catch(() => false);
-      if (present) alive.push(metadata);
+      if (await this.workspaceIsUsable(metadata.workspaceRoot)) alive.push(metadata);
       else this.threads.delete(metadata.threadId);
     }
     return alive.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  /**
+   * Whether a thread's workspace still exists, for the threads we would miss.
+   *
+   * Shared by `listThreads` and `resumeThread` because they must agree: a thread
+   * the list hides has to be one that cannot be resumed, or a client that
+   * remembered the id restores a conversation the sidebar says is gone. The two
+   * did disagree, and the symptom was an empty list beside an open thread whose
+   * every action failed.
+   *
+   * The scope is the safety property, not an optimization. Only a path under the
+   * app's own workspaces root is checked, because an app-managed path is one we
+   * created and would have kept: its absence means the thread is genuinely gone.
+   * A workspace the user chose is always considered usable, however it looks
+   * from here, because hiding somebody's conversation over a missing mount or a
+   * renamed checkout is worse than showing a row that needs one more attempt.
+   */
+  private async workspaceIsUsable(workspaceRoot: string | undefined): Promise<boolean> {
+    if (workspaceRoot === undefined || workspaceRoot.length === 0) return true;
+    if (!isAppManagedWorkspace(workspaceRoot)) return true;
+    return await stat(workspaceRoot).then(() => true).catch(() => false);
   }
 
   async readThread(threadId: string): Promise<ThreadReadResult> {
